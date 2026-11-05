@@ -166,12 +166,16 @@ _DEFAULTS: dict[str, Any] = {
     },
     "recall": {
         # Extra intake roots scanned recursively alongside the wiki. Paths
-        # are resolved relative to ``knowledge_root``. The default points
-        # at the agent-auto-memory intake tree so that raw memories
-        # written via ``remember`` (and per-scope agent-written notes)
-        # show up in recall without separate plumbing. Set to an empty
-        # list to restrict recall to the compiled wiki only.
-        "extra_intake_roots": ["raw/auto-memory"],
+        # are resolved relative to ``knowledge_root``. ``raw/auto-memory``
+        # is the agent-auto-memory intake tree (per-scope agent-written
+        # notes); ``raw/claude-session`` is where the ``remember`` MCP
+        # tool itself writes (issue athenaeum#2313) -- without it, a fact
+        # saved via ``remember`` returned nothing from `recall` until the
+        # next compile. Both show up in recall, labelled ``[uncompiled]``
+        # and ranked below the compiled wiki, without separate plumbing.
+        # Set to an empty list to restrict recall to the compiled wiki
+        # only.
+        "extra_intake_roots": ["raw/auto-memory", "raw/claude-session"],
     },
     # NOTE (issue athenaeum#231): only seed a key here when this dict is its single
     # source of truth. Keys whose defaults live next to their consumer code

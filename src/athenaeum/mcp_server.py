@@ -1221,6 +1221,62 @@ def _reorder_hits_by_supersession(
     return current + superseded
 
 
+def _is_uncompiled_display_prefix(display_prefix: str) -> bool:
+    """True when *display_prefix* names a raw-intake (pre-compile) hit.
+
+    Issue athenaeum#2313 (AC5): a hit resolved from one of
+    ``recall.extra_intake_roots`` (today ``raw/auto-memory`` and
+    ``raw/claude-session``) has not been through the librarian at all —
+    unlike a compiled ``wiki/`` page, or an off-corpus hit (issue athenaeum#984),
+    which is federated from a DIFFERENT corpus, not raw intake. Decided purely
+    from :func:`_resolve_hit_path`'s ``display_prefix`` string, which already
+    disambiguates all three shapes — no frontmatter read needed.
+    """
+    return not (
+        display_prefix.startswith("wiki/")
+        or display_prefix.startswith(_OFF_CORPUS_HIT_PREFIX)
+    )
+
+
+def _reorder_hits_uncompiled_last(
+    hits: list[tuple[str, str, float]],
+    *,
+    wiki_root: Path,
+    extra_roots: list[Path],
+    off_corpus_root: Path | None = None,
+) -> list[tuple[str, str, float]]:
+    """Stable-partition *hits* so an uncompiled raw-intake hit sorts after
+    every compiled wiki hit, without changing relative order within either
+    group (issue athenaeum#2313, AC5).
+
+    Same "deprioritizes, does not filter" contract as
+    :func:`_reorder_hits_by_currency` / :func:`_reorder_hits_by_supersession`
+    above — a raw-intake hit that would have appeared still appears (so it
+    can be rendered with its ``[uncompiled]`` marker); it is simply no longer
+    guaranteed to rank above a compiled wiki page. Unlike those two reorders,
+    this needs no frontmatter read: whether a hit is "uncompiled" is decided
+    entirely by which root its indexed filename resolves to, never by the
+    content of the page itself.
+
+    Called unconditionally — NOT gated on ``history`` like the two reorders
+    above. "An uncompiled note ranks below the compiled wiki" is a
+    correctness property of what the hit IS (has it been through the
+    librarian at all), not a staleness judgment that an explicit historical
+    query would want left unapplied.
+    """
+    compiled: list[tuple[str, str, float]] = []
+    uncompiled: list[tuple[str, str, float]] = []
+    for hit in hits:
+        _, display_prefix = _resolve_hit_path(
+            hit[0], wiki_root, extra_roots, off_corpus_root=off_corpus_root
+        )
+        if _is_uncompiled_display_prefix(display_prefix):
+            uncompiled.append(hit)
+        else:
+            compiled.append(hit)
+    return compiled + uncompiled
+
+
 def _excluded_block_for_hit(
     page_path: Path | None,
     fm: dict[str, object],
@@ -1800,9 +1856,9 @@ def _recall_via_backend(
     # have reordered — while the untouched tail (``hits[top_k:]``, never
     # rendered in relative order, only counted+typed by the cap below) needs
     # no reordering at all.
+    _reorder_head = hits[:top_k]
+    _reorder_tail = hits[top_k:]
     if not history:
-        _reorder_head = hits[:top_k]
-        _reorder_tail = hits[top_k:]
         _reorder_head = _reorder_hits_by_currency(
             _reorder_head,
             wiki_root=wiki_root,
@@ -1815,7 +1871,16 @@ def _recall_via_backend(
             extra_roots=extra_roots,
             off_corpus_root=off_corpus_root,
         )
-        hits = _reorder_head + _reorder_tail
+    # Issue athenaeum#2313 (AC5): unlike the two reorders above, this one runs
+    # unconditionally — see _reorder_hits_uncompiled_last's docstring for why
+    # `history` does not gate it.
+    _reorder_head = _reorder_hits_uncompiled_last(
+        _reorder_head,
+        wiki_root=wiki_root,
+        extra_roots=extra_roots,
+        off_corpus_root=off_corpus_root,
+    )
+    hits = _reorder_head + _reorder_tail
 
     # Issue athenaeum#1783: the ONE relevance-bounded cap, applied AFTER the
     # reorders above (so the KEPT order below is exactly what those
@@ -2027,8 +2092,16 @@ def _recall_via_backend(
         # page carries a `claimed_scope`).
         relation = scope_relation(fm, session_scope)
         scope_block = f"**Scope:** {relation}\n" if relation is not None else ""
+        # Issue athenaeum#2313 (AC5): a raw-intake hit (any
+        # `recall.extra_intake_roots` entry) has not been through the
+        # librarian — mark it so a reader can tell it apart from a compiled
+        # wiki page at a glance, the same way `_reorder_hits_uncompiled_last`
+        # above already ranks it below one.
+        uncompiled_marker = (
+            " [uncompiled]" if _is_uncompiled_display_prefix(display_prefix) else ""
+        )
         block = (
-            f"{display_name} (score: {score:.1f})\n"
+            f"{display_name} (score: {score:.1f}){uncompiled_marker}\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n"
             f"**Uid:** {uid}\n"
@@ -2259,6 +2332,82 @@ def _recall_via_backend(
     if _access_line:
         result = f"{result}\n\n{_access_line}"
     return result
+
+
+def _refresh_extra_root_index(
+    search_backend: str,
+    *,
+    wiki_root: Path,
+    cache_dir: Path,
+    config: dict[str, object] | None,
+) -> None:
+    """Incrementally refresh *search_backend*'s persisted index after a
+    ``remember`` write (issue athenaeum#2313, AC2).
+
+    FTS5/vector only scan ``recall.extra_intake_roots`` at ``build_index``
+    time (:func:`athenaeum.search._scan_all_entries`), never inside
+    ``query()`` — so without this, a note `remember`'d and then `recall`'d in
+    the SAME session would be invisible until the next explicit reindex or
+    compile, which is exactly the confusion this issue exists to fix for a
+    brand-new install. The refresh is incremental (one new file, diffed
+    against the stored manifest), so it costs one file read/hash, not a
+    corpus rescan.
+
+    **`full_rehash_max_age_days=math.inf` (athenaeum#2321 review finding 2).**
+    ``build_index(incremental=True)`` is not UNCONDITIONALLY one-file-cheap:
+    ``athenaeum.search``'s issue athenaeum#373 self-healing backstop
+    (``_full_rehash_due``) forces a full re-read-and-rehash of every file,
+    inside an otherwise-incremental build, once the manifest's
+    ``last_full_rehash_at`` is older than ``full_rehash_max_age_days`` (7 by
+    default). Left at the default, an interactive `remember` call would
+    periodically inherit that full-corpus cost synchronously inside the MCP
+    tool call — a latency cliff on a large store, and squarely NOT what "one
+    file read/hash" promises. Passing ``math.inf`` here makes the age check
+    (`(now - last_rehash) > (full_rehash_max_age_days * 86400.0)`) always
+    false, so THIS call can only ever take the real one-file incremental
+    path; it still forces a full build on a schema mismatch or a genuinely
+    absent manifest (the necessary first-ever build, cheap on the small
+    corpus that scenario implies) — ``_full_rehash_due`` treats either as
+    unconditionally stale regardless of the age bound passed in, and this
+    call does not try to suppress that. The periodic age-based rehash itself
+    is NOT skipped globally — it still runs on an explicit `athenaeum
+    reindex` / compile, which keeps the DEFAULT ``full_rehash_max_age_days``
+    and is where that cost belongs.
+
+    Re-resolves ``recall.extra_intake_roots`` FRESH from *config* rather than
+    trusting a caller's possibly server-startup-resolved list
+    (``athenaeum._cmd_serve`` resolves it once per long-running process) —
+    the directory ``remember_write`` just wrote into may not have existed
+    yet at that earlier resolution, which would otherwise silently exclude
+    it from this refresh even though the file is right there on disk.
+
+    A no-op for ``keyword`` (no persisted index to refresh — it rescans on
+    every query, and it never scans extra roots from that scan at all, a
+    separate, pre-existing gap this issue does not take on) and for any other
+    unrecognized backend name. Never raises: an index-refresh failure must
+    not turn a successful `remember` into an error — the same "must never
+    fail over telemetry" posture this module already applies to push-metrics
+    instrumentation, just above.
+    """
+    if search_backend not in ("fts5", "vector"):
+        return
+    try:
+        import math
+
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.search import get_backend
+
+        extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
+        get_backend(search_backend).build_index(
+            wiki_root,
+            cache_dir,
+            extra_roots=extra_roots,
+            incremental=True,
+            full_rehash_max_age_days=math.inf,
+            config=config,
+        )
+    except Exception:  # a refresh failure must not fail `remember`
+        log.debug("remember: post-write index refresh failed", exc_info=True)
 
 
 def remember_write(
@@ -2938,13 +3087,35 @@ def create_server(
         history: bool = False,
         type: str | None = None,
     ) -> str:
+        # Issue athenaeum#2313 (athenaeum#2321 review finding 1): re-resolve
+        # `recall.extra_intake_roots` FRESH from *config* on every call,
+        # the same way `_refresh_extra_root_index` already does for
+        # `remember`'s write side -- rather than trusting this closure's
+        # `extra_roots`, resolved ONCE at server startup
+        # (`athenaeum._cmd_serve` calls `resolve_extra_intake_roots` before
+        # `create_server`). A PRE-EXISTING install upgrading to this version
+        # has no `raw/claude-session` directory until its first `remember`
+        # call creates one; if that happens after this server already
+        # started, the startup-resolved list permanently excludes it for
+        # the rest of this server's life. Without this, a hit from that
+        # root would come back from the (correctly, freshly refreshed)
+        # index but fail `_resolve_hit_path`'s root-name match here, so it
+        # would render with an empty body instead of the note's real
+        # content -- the first-remember-then-recall confusion this issue
+        # exists to remove, just displaced from new to pre-existing
+        # installs. Cheap: a `stat` per configured root, never a corpus
+        # scan — `resolve_extra_intake_roots` reads the already-loaded
+        # *config* dict, not the YAML file again.
+        from athenaeum.config import resolve_extra_intake_roots
+
+        live_extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
         return recall_search(
             wiki_root,
             query,
             top_k,
             search_backend=search_backend,
             cache_dir=cache_dir,
-            extra_roots=extra_roots,
+            extra_roots=live_extra_roots,
             caller_audience=caller_audience,
             config=config,
             with_pii=with_pii,
@@ -3191,10 +3362,22 @@ def create_server(
 
         Returns:
             Confirmation message with the file path.
+
+        Issue athenaeum#2313 (AC2): on success, when the configured search
+        backend is ``fts5`` or ``vector``, this also refreshes that backend's
+        persisted index (incrementally — one new file, diffed against the
+        stored manifest) so the note is searchable via ``recall`` in THIS
+        SAME session, before any compile has run. Without it, a note saved
+        here would be invisible to `recall` until the next explicit reindex
+        or compile, since both indexed backends otherwise only scan
+        ``recall.extra_intake_roots`` at ``build_index`` time. No LLM call is
+        made by this refresh. The ``keyword`` backend has no persisted index
+        to refresh — and never scans extra roots from its own ``query`` at
+        all, a separate, pre-existing gap this issue does not take on.
         """
         if is_disabled("capture", cache_dir=cache_dir):
             return _KILL_SWITCH_MSG
-        return remember_write(
+        result = remember_write(
             raw_root,
             content,
             source,
@@ -3204,6 +3387,14 @@ def create_server(
             bucket=bucket,
             valid_until=valid_until,
         )
+        if result.startswith("Saved to") and cache_dir is not None:
+            _refresh_extra_root_index(
+                search_backend,
+                wiki_root=wiki_root,
+                cache_dir=cache_dir,
+                config=config,
+            )
+        return result
 
     @mcp.tool()
     def list_pending_questions(offset: int = 0, limit: int | None = None) -> dict:

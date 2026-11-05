@@ -387,9 +387,9 @@ _CURATED: dict[str, dict[str, str]] = {
         "yaml_path": "`recall.extra_intake_roots`",
         "env_var": "—",
         "cli_flag": "—",
-        "default": "`[]` (yaml default is `[\"raw/auto-memory\"]`; relative entries resolve "
-        "against `knowledge_root` and entries that aren't real directories are dropped "
-        "with a warning)",
+        "default": "`[]` (yaml default is `[\"raw/auto-memory\", \"raw/claude-session\"]`; "
+        "relative entries resolve against `knowledge_root` and entries that aren't real "
+        "directories are dropped with a warning)",
         "precedence": "`athenaeum.yaml` > code default",
     },
     "resolve_authority_manifest_path": {
