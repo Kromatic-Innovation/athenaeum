@@ -152,7 +152,7 @@ requests==2.34.2
 rich-rst==2.1.0
 rich==15.0.0
 rpds-py==2026.6.3
-ruff==0.16.9
+ruff==0.17.3
 SecretStorage==3.5.0
 shellingham==1.5.4
 six==1.17.0
