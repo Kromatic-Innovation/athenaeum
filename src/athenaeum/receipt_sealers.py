@@ -383,6 +383,19 @@ class OnePasswordServiceAccountKeyProvider:
 
     def _op_read(self, reference: str) -> bytes:
         """``op read <reference>`` -> field bytes. Raises :class:`KeyUnavailable`."""
+        if not reference.strip():
+            # Issue athenaeum#2205: no shipped default names a vault or an
+            # item any more, so "signing is on but no reference is set" is
+            # now reachable. Report it as UNAVAILABLE rather than raising a
+            # config error: unavailable is already the documented
+            # degradation (intake appends unsealed lines and logs one
+            # warning), while a hard error would turn switching the knob on
+            # before writing the reference into a failed nightly.
+            raise KeyUnavailable(
+                "no receipt signing key reference is configured; set "
+                "librarian.receipt_signing.op_reference to an op:// "
+                "reference for the signing key"
+            )
         env = self._environ()
         token = env.get(OP_SERVICE_ACCOUNT_TOKEN_ENV, "").strip()
         if not token:

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -131,6 +132,15 @@ def _write_fake_op(tmp_path: Path, fetched_key: str) -> Path:
     return bin_dir
 
 
+#: Synthetic `op://` references the hook is pointed at under test. Issue
+#: athenaeum#2205 removed the shipped defaults, so a test that wants the
+#: `op` source must now name a reference itself — `hook_env` sets these two
+#: so the pre-existing op tests keep their shape, and the athenaeum#2205
+#: tests that assert "no config means no subprocess" pop them.
+TEST_OP_ANTHROPIC_REF = "op://Test Vault/Anthropic API Key/credential"
+TEST_OP_JEV_REF = "op://Test Vault/Jev Key/credential"
+
+
 def _write_fake_op_table(
     tmp_path: Path, *, jev_present: bool, jev_key: str = "synthetic-jev-key-from-op"
 ) -> Path:
@@ -140,9 +150,9 @@ def _write_fake_op_table(
     regardless of which 1Password path it was asked for, which can't tell
     the ANTHROPIC_API_KEY fetch apart from the JEV_API_KEY fetch or
     simulate one succeeding while the other's 1Password item is missing.
-    This stub matches the exact default `op://` paths the hook falls back
-    to (pinning `ATHENAEUM_OP_JEV_KEY_PATH`'s default in the process) and
-    exits non-zero with nothing on stdout for any other path, mirroring
+    This stub matches the exact references `hook_env` points the hook at
+    (:data:`TEST_OP_ANTHROPIC_REF` / :data:`TEST_OP_JEV_REF`) and exits
+    non-zero with nothing on stdout for any other path, mirroring
     `op read`'s behaviour against a missing item.
     """
     bin_dir = tmp_path / "fake-op-table-bin"
@@ -156,9 +166,9 @@ def _write_fake_op_table(
     op_stub.write_text(
         "#!/usr/bin/env bash\n"
         'case "$2" in\n'
-        '  "op://Agent Tools/Anthropic API Key/credential")\n'
+        f'  {shlex.quote(TEST_OP_ANTHROPIC_REF)})\n'
         "    echo synthetic-anthropic-key-from-op ;;\n"
-        '  "op://Agent Tools/Jev Athenaeum Key/credential")\n'
+        f'  {shlex.quote(TEST_OP_JEV_REF)})\n'
         f"{jev_branch}"
         "  *)\n"
         '    echo "unknown item" >&2; exit 1 ;;\n'
@@ -406,6 +416,14 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         # exercise the extractor branch itself override this with their
         # own stub.
         "ATHENAEUM_CLI": str(tmp_path / "no-such-athenaeum-binary"),
+        # athenaeum#2205: the hook ships no default `op://` references any
+        # more, so the `op` source has to be named to be reachable at all.
+        # Set here rather than in each test so the pre-existing
+        # athenaeum#2056/#2193 op tests keep asserting what they always
+        # did; `TestCredentialSources2205` pops these to exercise the
+        # nothing-configured path.
+        "ATHENAEUM_OP_KEY_PATH": TEST_OP_ANTHROPIC_REF,
+        "ATHENAEUM_OP_JEV_KEY_PATH": TEST_OP_JEV_REF,
     }
     return env
 
@@ -857,9 +875,11 @@ class TestSessionStartRecall:
         """athenaeum#2056 AC1: with `op` signed in (and, per athenaeum#2193's
         gate, OP_SERVICE_ACCOUNT_TOKEN set so the fetch is attempted at all),
         config.env ends up with both an ANTHROPIC_API_KEY line and a
-        JEV_API_KEY line, each fetched from its own default 1Password path.
-        Pins `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
-        Athenaeum Key/credential` via the stub's exact-path match."""
+        JEV_API_KEY line, each fetched from its OWN `op://` reference --
+        the stub matches each reference exactly, so a fetch that used the
+        wrong one for a given credential would get nothing. Issue
+        athenaeum#2205 removed the shipped defaults; `hook_env` names both
+        references (`TEST_OP_ANTHROPIC_REF` / `TEST_OP_JEV_REF`)."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -4894,3 +4914,483 @@ class TestKillSwitchHooks:
 
         # bash 4.0+ case folding (`${v,,}` / `${v^^}`) must not reappear.
         assert ",,}" not in reference and "^^}" not in reference
+
+
+class TestCredentialSources2205:
+    """No secret manager is assumed; a generic command is one of two sources.
+
+    Issue athenaeum#2205. The hook used to ship two `op://` references
+    naming one operator's vault and items, which meant an install with
+    `OP_SERVICE_ACCOUNT_TOKEN` set but no such vault burned the `op`
+    timeout on every miss. These tests pin the five cases the issue asks
+    for: no defaults, command success, command timeout, command failure,
+    and an explicit `op` reference still working.
+
+    Every test here drives the background job itself
+    (`--run-background-build` under `ATHENAEUM_TEST_NO_AUTOFORK=1`) rather
+    than racing the hook's own detached fork, exactly as the
+    athenaeum#2204 tests above do: the credential fetch lives in that job.
+    """
+
+    @staticmethod
+    def _env_without_op_refs(hook_env: dict[str, str]) -> dict[str, str]:
+        """`hook_env` minus the two `op://` references it names by default.
+
+        That is the shape a fresh install has after athenaeum#2205: no
+        command, no reference, nothing configured.
+        """
+        env = dict(hook_env)
+        env.pop("ATHENAEUM_OP_KEY_PATH", None)
+        env.pop("ATHENAEUM_OP_JEV_KEY_PATH", None)
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+        return env
+
+    @staticmethod
+    def _run_hook_and_background(env: dict[str, str]) -> None:
+        for argv in ([str(SESSION_START)], [str(SESSION_START), "--run-background-build"]):
+            result = subprocess.run(
+                ["bash", *argv],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert result.returncode == 0, f"{argv}: stderr: {result.stderr}"
+
+    @staticmethod
+    def _config_env(env: dict[str, str]) -> Path:
+        return Path(env["ATHENAEUM_CACHE_DIR"]) / "config.env"
+
+    def test_ac1_no_shipped_default_op_reference_in_the_hook(self) -> None:
+        """AC1: `op://` strings naming a vault are gone from the hook's
+        shipped defaults.
+
+        Asserted over the SOURCE, not a run: a default is a literal, and a
+        behavioural test can only prove the default was not reached on the
+        one path it drove.
+
+        What counts as naming a vault is an `op://` followed by a real
+        first path segment — so the `op://<vault>/<item>/credential`
+        placeholder the hook's own documentation shows is allowed (the
+        segment starts with `<`), and so is prose that mentions the scheme
+        without a reference (`op read op://...`, which has no path
+        separator after it).
+        """
+        concrete_ref = re.compile(r"op://[^<\s][^/]*/")
+        concrete_refs = [
+            line for line in SESSION_START.read_text().splitlines() if concrete_ref.search(line)
+        ]
+        assert concrete_refs == [], (
+            "session-start-recall.sh still names a specific 1Password "
+            f"vault/item: {concrete_refs}"
+        )
+
+    def test_ac4_nothing_configured_spawns_no_credential_subprocess(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC4: with no credential config and no cached key, no `op`
+        process is spawned and no timeout is spent.
+
+        `OP_SERVICE_ACCOUNT_TOKEN` IS set here and a (sentinel) `op` IS on
+        PATH, so athenaeum#2193's own gate is wide open — the ONLY thing
+        stopping a fetch is that no reference and no command name a source.
+        That is precisely the install the issue describes, where each read
+        used to burn the `op` timeout against a vault the operator does not
+        have.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = self._env_without_op_refs(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        _assert_op_is_sentinel(env, tmp_path)
+
+        self._run_hook_and_background(env)
+
+        assert sentinel_op_invocations(tmp_path) == [], (
+            "no credential source is configured, so nothing may shell out "
+            f"to `op`: {sentinel_op_invocations(tmp_path)}"
+        )
+        assert "ANTHROPIC_API_KEY=" not in self._config_env(env).read_text()
+
+    def test_ac5_command_source_fetches_caches_and_does_not_rerun(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC5: the command runs once, its stdout is cached in
+        `config.env`, and it does not rerun while the cached value exists.
+
+        The stub command appends to a counter file on every invocation, so
+        "ran at most once" is measured rather than inferred. A second
+        session-start + background pass is what would reveal a re-fetch.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        counter = tmp_path / "key-command-invocations"
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = (
+            f"echo ran >> {shlex.quote(str(counter))}; echo synthetic-key-from-command"
+        )
+        _assert_op_is_sentinel(env, tmp_path)
+
+        self._run_hook_and_background(env)
+
+        body = self._config_env(env).read_text()
+        assert body.splitlines().count("ANTHROPIC_API_KEY=synthetic-key-from-command") == 1
+        assert counter.read_text().count("ran") == 1
+
+        # A later session finds the value cached and must not re-run it.
+        self._run_hook_and_background(env)
+        assert counter.read_text().count("ran") == 1, (
+            "the command re-ran over a cached value; `ATHENAEUM_CRED_REFRESH=1` "
+            "is the only thing that may force that"
+        )
+        assert sentinel_op_invocations(tmp_path) == [], (
+            "a command source must never shell out to `op`"
+        )
+
+    def test_cred_refresh_forces_a_second_command_run(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """`ATHENAEUM_CRED_REFRESH=1` re-fetches over a cached line.
+
+        The generic name for `ATHENAEUM_OP_REFRESH`, which an install that
+        already set the old one keeps using (see
+        :meth:`test_ac8_legacy_op_refresh_name_still_works`).
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        counter = tmp_path / "key-command-invocations"
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = (
+            f"echo ran >> {shlex.quote(str(counter))}; echo synthetic-key-from-command"
+        )
+        self._run_hook_and_background(env)
+        assert counter.read_text().count("ran") == 1
+
+        env["ATHENAEUM_CRED_REFRESH"] = "1"
+        self._run_hook_and_background(env)
+        assert counter.read_text().count("ran") == 2
+
+        lines = self._config_env(env).read_text().splitlines()
+        assert lines.count("ANTHROPIC_API_KEY=synthetic-key-from-command") == 1, (
+            "a refresh must REPLACE the cached line, not append a second one"
+        )
+
+    def test_ac8_legacy_op_refresh_name_still_works(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC8: an install that set `ATHENAEUM_OP_REFRESH` keeps working."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        counter = tmp_path / "key-command-invocations"
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = (
+            f"echo ran >> {shlex.quote(str(counter))}; echo synthetic-key-from-command"
+        )
+        self._run_hook_and_background(env)
+        assert counter.read_text().count("ran") == 1
+
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+        self._run_hook_and_background(env)
+        assert counter.read_text().count("ran") == 2
+
+    def test_ac6_command_failure_records_a_degradation(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC6: a failing command is reported as a degradation, and the
+        hook still exits clean."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = "echo 'no such item' >&2; exit 1"
+
+        self._run_hook_and_background(env)
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        cache_dir = Path(env["ATHENAEUM_CACHE_DIR"])
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "credential_fetch_failed", latest
+        assert latest["hook"] == "session-start"
+        assert "ANTHROPIC_API_KEY" in str(latest["detail"])
+        assert "ANTHROPIC_API_KEY=" not in self._config_env(env).read_text()
+
+    def test_ac6_command_empty_output_records_a_degradation(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC6: a command that SUCCEEDS but prints nothing is a
+        degradation too — caching an empty value would read as "a key is
+        configured" everywhere downstream."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = "true"
+
+        self._run_hook_and_background(env)
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        latest = read_latest_degradation(Path(env["ATHENAEUM_CACHE_DIR"]))
+        assert latest is not None
+        assert latest["event"] == "credential_fetch_failed", latest
+        assert "ANTHROPIC_API_KEY=" not in self._config_env(env).read_text()
+
+    def test_ac6_command_timeout_is_bounded_and_recorded(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC6: a hanging command is killed at
+        `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` and recorded.
+
+        The marker file is touched only AFTER the sleep returns, so its
+        continued absence proves the child was actually killed rather than
+        merely orphaned and left to finish unobserved — the same
+        discrimination `_write_sleeping_op` makes for the `op` source.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        marker = tmp_path / "slow-command-finished"
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS"] = "1"
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = (
+            f"sleep 30; touch {shlex.quote(str(marker))}; echo never-read"
+        )
+
+        started = time.monotonic()
+        self._run_hook_and_background(env)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 25, (
+            f"the credential command was not bounded: {elapsed:.1f}s elapsed "
+            "for a 1-second budget"
+        )
+        assert not marker.exists(), "the timed-out command was left running"
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        latest = read_latest_degradation(Path(env["ATHENAEUM_CACHE_DIR"]))
+        assert latest is not None
+        assert latest["event"] == "credential_fetch_failed", latest
+        body = self._config_env(env).read_text()
+        assert "never-read" not in body
+        assert "ANTHROPIC_API_KEY=" not in body
+
+    def test_ac7_value_never_reaches_the_log_or_the_status_file(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC7: the credential never appears in logs or status output.
+
+        `rebuild.log` is written by the background job and
+        `hook_degradation.jsonl` is what `athenaeum status` reports, so
+        both are scanned. The failing-command case is checked in the same
+        test because that is where a store's own stderr — which can quote
+        the value it was asked about — would otherwise be surfaced.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        secret = "sk-ant-synthetic-never-log-me"
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = f"echo {shlex.quote(secret)}"
+        env["ATHENAEUM_JEV_KEY_COMMAND"] = (
+            f"echo {shlex.quote(secret)}-jev >&2; exit 1"
+        )
+
+        self._run_hook_and_background(env)
+
+        cache_dir = Path(env["ATHENAEUM_CACHE_DIR"])
+        assert f"ANTHROPIC_API_KEY={secret}" in self._config_env(env).read_text()
+        for name in ("rebuild.log", "hook_degradation.jsonl"):
+            path = cache_dir / name
+            if path.exists():
+                assert secret not in path.read_text(), f"{name} leaked the credential"
+
+    def test_ac8_an_explicit_op_reference_still_fetches(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC8: an install that set `ATHENAEUM_OP_KEY_PATH` keeps working.
+
+        `hook_env` already names both references, so this is the
+        pre-athenaeum#2205 configuration verbatim — what changed is that
+        the reference is now the only way in, not an override of a shipped
+        default.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        fake_op_dir = _write_fake_op_table(tmp_path, jev_present=True)
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+
+        self._run_hook_and_background(env)
+
+        lines = self._config_env(env).read_text().splitlines()
+        assert lines.count("ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op") == 1
+        assert lines.count("JEV_API_KEY=synthetic-jev-key-from-op") == 1
+
+    def test_a_command_takes_precedence_over_an_op_reference(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """With both configured the command wins, and `op` is never run.
+
+        Documented precedence, pinned here because the alternative — `op`
+        winning — would make the generic knob unreachable for exactly the
+        operator migrating off the old configuration.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = "echo synthetic-key-from-command"
+        env["ATHENAEUM_JEV_KEY_COMMAND"] = "echo synthetic-jev-from-command"
+        _assert_op_is_sentinel(env, tmp_path)
+
+        self._run_hook_and_background(env)
+
+        lines = self._config_env(env).read_text().splitlines()
+        assert lines.count("ANTHROPIC_API_KEY=synthetic-key-from-command") == 1
+        assert lines.count("JEV_API_KEY=synthetic-jev-from-command") == 1
+        assert sentinel_op_invocations(tmp_path) == []
+
+    def test_a_pipeline_works_because_the_command_runs_through_a_shell(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """A pipeline is the documented shape (`pass show x | head -1`).
+
+        Pinned because running the command exec-style instead would make
+        every multi-line secret store need a wrapper script, which is the
+        reason the shell was chosen in the first place.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = self._env_without_op_refs(hook_env)
+        env["ATHENAEUM_ANTHROPIC_KEY_COMMAND"] = (
+            "printf 'synthetic-key-line\\nnotes about the item\\n' | head -1"
+        )
+
+        self._run_hook_and_background(env)
+
+        lines = self._config_env(env).read_text().splitlines()
+        assert lines.count("ANTHROPIC_API_KEY=synthetic-key-line") == 1
+        assert "notes about the item" not in "\n".join(lines)
+
+
+class TestShippedLaunchAgentExample2232:
+    """`examples/claude-code/` ships the plist its README points at.
+
+    Issue athenaeum#2232 item 2: the README's "Option C: launchd plist on
+    macOS" told the reader to "see docs/ for a template" and no such
+    template existed. The fix ships one; these tests are what stops it from
+    silently rotting into another dangling pointer.
+    """
+
+    PLIST = HOOKS_DIR / "com.athenaeum.run.plist"
+
+    def test_the_readme_option_c_link_resolves(self) -> None:
+        body = (HOOKS_DIR / "README.md").read_text()
+        assert "see docs/ for a template" not in body, (
+            "the Option C pointer is back, and `docs/` still has no template"
+        )
+        assert "(com.athenaeum.run.plist)" in body
+        assert self.PLIST.is_file()
+
+    def test_the_plist_is_well_formed(self) -> None:
+        """Parsed, not merely present.
+
+        `examples/codex/com.athenaeum.codex-context.plist` is the reason
+        this is asserted rather than assumed: a `--flag` written inside an
+        XML comment makes a plist unparseable (`--` is not legal in an XML
+        comment), which no presence check would catch.
+        """
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            parsed = plistlib.load(handle)
+        assert parsed["Label"] == "com.athenaeum.run"
+        assert parsed["ProgramArguments"][1] == "run"
+        assert "StartCalendarInterval" in parsed
+
+    def test_the_plist_carries_the_environment_the_job_needs(self) -> None:
+        """`athenaeum run` does not read `config.env`, so the key has to be
+        in the job's own environment or the compile exits 1. The two `OP_*`
+        suppression flags are required alongside it because a background
+        launchd job cannot answer a 1Password prompt."""
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            env = plistlib.load(handle)["EnvironmentVariables"]
+        assert "ANTHROPIC_API_KEY" in env
+        assert env["OP_LOAD_DESKTOP_APP_SETTINGS"] == "false"
+        assert env["OP_BIOMETRIC_UNLOCK_ENABLED"] == "false"
+
+    def test_the_plist_holds_no_real_value(self) -> None:
+        """Every operator-specific field is a REPLACE_ME placeholder.
+
+        The same discipline the Codex example uses, and the reason the
+        shipped file can carry an `ANTHROPIC_API_KEY` key at all.
+        """
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            parsed = plistlib.load(handle)
+        assert parsed["EnvironmentVariables"]["ANTHROPIC_API_KEY"] == "REPLACE_ME"
+        for argument in parsed["ProgramArguments"]:
+            if argument.startswith("/"):
+                assert "REPLACE_ME" in argument, argument
+
+
+class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
+    """The documented `SEARCH_BACKEND` default matches the code.
+
+    Issue athenaeum#2232 item 1: the hooks default to `vector` and the docs
+    said `fts5`, which is the CLI flags' default. Asserted against the live
+    defaults so the docs cannot drift back, and so a future change to
+    either default fails here rather than in a reader's install.
+    """
+
+    def test_the_hooks_and_the_yaml_resolver_default_to_vector(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert _DEFAULTS["search_backend"] == "vector"
+        for hook in (SESSION_START, REBUILD_INDEX):
+            assert "${SEARCH_BACKEND:-vector}" in hook.read_text() or (
+                'SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"' in hook.read_text()
+            ), f"{hook.name} no longer defaults SEARCH_BACKEND to vector"
+
+    def test_the_two_cli_flags_default_to_fts5(self) -> None:
+        """Read through `parse_args`, not the parser's internals.
+
+        An argparse default read off `_actions` can be right while the flag
+        resolves to something else (a parser-level `set_defaults`, a
+        subparser override); parsing an argv with the flag omitted is the
+        same path a real invocation takes.
+        """
+        from athenaeum.cli import build_parser
+
+        parser = build_parser()
+        assert parser.parse_args(["context", "a prompt"]).backend == "fts5"
+        assert (
+            parser.parse_args(["codex-context", "--seed", "a topic"]).backend == "fts5"
+        )
+
+    def test_neither_doc_still_claims_a_single_fts5_default(self) -> None:
+        readme = (HOOKS_DIR / "README.md").read_text()
+        environment = (
+            Path(__file__).parent.parent / "docs" / "reference" / "environment.md"
+        ).read_text()
+        assert "from `athenaeum.yaml` (`fts5`)" not in readme
+        assert "`fts5` (default) or `vector`" not in readme
+        # The per-entry-point table is what replaced the single claim.
+        assert "differs by entry point" in environment
+        assert "`athenaeum context --backend`" in environment
