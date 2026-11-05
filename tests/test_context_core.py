@@ -155,6 +155,27 @@ def test_no_hook_specific_output_in_core_source() -> None:
 _DELTA_BUDGET_MS = 50.0
 
 
+def _time_subprocess(script: Path) -> float:
+    """Wall-clock one subprocess run of *script*, in milliseconds.
+
+    Shared by :func:`test_fts5_path_wall_clock_budget` and (issue
+    athenaeum#2313) :func:`test_fts5_path_wall_clock_budget_with_large_raw_tree`
+    — both pair this against the SAME import-only baseline, so a shared
+    helper rather than two copies keeps the measurement identical.
+    """
+    t0 = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin"},
+        timeout=30,
+    )
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    assert result.returncode == 0, result.stderr
+    return elapsed_ms
+
+
 def test_fts5_path_wall_clock_budget(tmp_path: Path) -> None:
     """Counter-example that must fail: an implementation that re-spawns a
     query per result rather than selecting description in the same query
@@ -170,19 +191,6 @@ def test_fts5_path_wall_clock_budget(tmp_path: Path) -> None:
         f"cache_dir=Path({str(tmp_path)!r}), use_llm=False)\n"
     )
 
-    def _time_subprocess(script: Path) -> float:
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [sys.executable, str(script)],
-            capture_output=True,
-            text=True,
-            env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin"},
-            timeout=30,
-        )
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        assert result.returncode == 0, result.stderr
-        return elapsed_ms
-
     deltas = []
     for _ in range(5):
         baseline_ms = _time_subprocess(baseline_script)
@@ -195,6 +203,71 @@ def test_fts5_path_wall_clock_budget(tmp_path: Path) -> None:
         f"against a {MIN_PAGES}-page index. The overall {BUDGET_MS}ms wall-clock "
         f"budget from athenaeum#1357's spike is import-cost + this delta; import cost "
         f"is pinned separately by the import-weight guard tests above."
+    )
+
+
+# Issue athenaeum#2313 (AC10): a realistic "large raw/ tree" floor for the
+# regression below — same order of magnitude as MIN_PAGES above, shaped like
+# `raw/claude-session/<file>.md` entries folded into the SAME `wiki` FTS5
+# table real extra-root hits are indexed into
+# (`athenaeum.search._scan_all_entries` folds wiki + extra-root entries into
+# one table — see that function's docstring). A large raw tree is therefore
+# a large NUMBER OF ROWS in the identical table this hook already queries,
+# never a second index or a second scan.
+MIN_RAW_ROWS = 2000
+
+
+def _raw_extra_rows(n: int) -> list[tuple]:
+    return [
+        (
+            f"claude-session/{i:08d}-deadbeef.md",
+            f"Raw Note {i}",
+            "",
+            "",
+            f"a raw claude-session note about recall architecture {i}",
+            "|__access_open__|",
+            "",
+            "hot" if i % 2 == 0 else "warm",
+        )
+        for i in range(n)
+    ]
+
+
+def test_fts5_path_wall_clock_budget_with_large_raw_tree(tmp_path: Path) -> None:
+    """AC10 (issue athenaeum#2313): the per-turn hook keeps its existing
+    latency/token budget with a large `raw/` tree.
+
+    Mirrors :func:`test_fts5_path_wall_clock_budget` above exactly, adding
+    :data:`MIN_RAW_ROWS` extra rows shaped like `raw/claude-session/<file>.md`
+    entries alongside the same `MIN_PAGES` wiki rows -- proving the hook's
+    existing budget holds once this issue's new default
+    `recall.extra_intake_roots` entry means a real deployment's shared index
+    carries many more rows than before.
+    """
+    _build_index(
+        tmp_path / "wiki-index.db", MIN_PAGES, extra_rows=_raw_extra_rows(MIN_RAW_ROWS)
+    )
+    baseline_script = tmp_path / "baseline.py"
+    baseline_script.write_text("import athenaeum.context\n")
+    full_script = tmp_path / "probe.py"
+    full_script.write_text(
+        "from pathlib import Path\n"
+        "from athenaeum.context import build_context\n"
+        f"build_context('recall architecture note 500', 'sess', "
+        f"cache_dir=Path({str(tmp_path)!r}), use_llm=False)\n"
+    )
+
+    deltas = []
+    for _ in range(5):
+        baseline_ms = _time_subprocess(baseline_script)
+        full_ms = _time_subprocess(full_script)
+        deltas.append(full_ms - baseline_ms)
+    best_delta = min(deltas)
+    assert best_delta <= _DELTA_BUDGET_MS, (
+        f"FTS5 query+render delta best-of-{len(deltas)}={best_delta:.1f}ms exceeds "
+        f"the {_DELTA_BUDGET_MS}ms delta budget (deltas={[round(d, 1) for d in deltas]}) "
+        f"against a {MIN_PAGES}-page wiki + {MIN_RAW_ROWS}-row raw tree. The hook's "
+        f"budget must hold with a large raw/ tree present (issue athenaeum#2313, AC10)."
     )
 
 
