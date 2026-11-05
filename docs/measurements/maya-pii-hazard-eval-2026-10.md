@@ -57,7 +57,7 @@ python scripts/eval_maya_pii_hazard.py \
 
 ```sh
 # Jev (hosted, real egress and real spend -- see "Unredacted" above)
-JEV_API_KEY="$(op read 'op://Agent Tools/Jev Athenaeum Key/credential')" \
+JEV_API_KEY="$(op read 'op://<vault>/<item>/credential')" \
     python scripts/eval_jev_pii_hazard.py \
     --fixtures /path/to/host-side/positives.jsonl \
     --allowlist ~/knowledge/wiki/_pii-allowlist.yml \

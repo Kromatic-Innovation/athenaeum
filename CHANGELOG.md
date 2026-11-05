@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **No secret manager is baked in; a generic credential command replaces the
+  default `op://` paths (issue athenaeum#2205, operator ruling 2026-10-30).**
+  `session-start-recall.sh` ships NO default 1Password references, and
+  `librarian.receipt_signing.op_reference` /
+  `librarian.receipt_signing.public_key_ref` no longer default to a specific
+  vault item. New `ATHENAEUM_ANTHROPIC_KEY_COMMAND` and
+  `ATHENAEUM_JEV_KEY_COMMAND` run any shell command — `security
+  find-generic-password`, `secret-tool lookup`, `pass show`, `bw get`,
+  `op read` — at most once while a value is cached in `config.env`, bounded
+  by `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` (default 10s), inside the
+  detached background job. A failure, timeout, or empty result records a new
+  `credential_fetch_failed` degradation; the value is never an argument,
+  never logged, and never reported by `athenaeum status`.
+  `ATHENAEUM_CRED_REFRESH` is the generic name for `ATHENAEUM_OP_REFRESH`,
+  which still works.
+
+  **Upgrade note — defaults changed.** An install that relied on the shipped
+  `op://Agent Tools/...` paths now fetches nothing. Set
+  `ATHENAEUM_OP_KEY_PATH` (and `ATHENAEUM_OP_JEV_KEY_PATH`) to your own
+  references, or set `ATHENAEUM_ANTHROPIC_KEY_COMMAND` instead — an install
+  that already set either of those `OP_*` variables keeps working unchanged.
+  An operator using receipt signing must likewise set
+  `librarian.receipt_signing.op_reference` explicitly; with none set,
+  signing reports the key as unavailable (intake appends unsealed lines and
+  logs one warning) rather than failing.
+
 ### Added
 
 - **`athenaeum contact-surface-lint` — read-only contact-surface report,

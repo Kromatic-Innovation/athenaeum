@@ -72,7 +72,9 @@ from athenaeum.atomic_io import atomic_write_text
 #: cross-language interface is what actually exists; the ``Literal`` keeps
 #: mypy honest for the in-process caller (:mod:`athenaeum.claude_code_adapter`)
 #: without pretending the shell side carries anything richer.
-DegradationEvent = Literal["no_api_key", "index_not_ready", "step_timeout"]
+DegradationEvent = Literal[
+    "no_api_key", "index_not_ready", "step_timeout", "credential_fetch_failed"
+]
 
 _DEGRADATION_FILENAME = "hook_degradation.jsonl"
 _NOTICE_SHOWN_DIRNAME = "hook_notice_shown"
@@ -105,6 +107,16 @@ _NOTICE_TEXT: dict[str, str] = {
     "step_timeout": (
         "[athenaeum] A recall hook step ran out of its foreground budget and "
         "was skipped. Run `athenaeum status` for details."
+    ),
+    # Issue athenaeum#2205: a configured credential source (a key command,
+    # or an explicit `op://` reference) failed, timed out, or returned
+    # nothing. Deliberately says nothing about WHICH of the three it was
+    # and nothing about the value -- the secret store's own stderr can
+    # quote a credential, and this text reaches the model's context.
+    "credential_fetch_failed": (
+        "[athenaeum] A configured credential source did not return a key -- "
+        "recall is running on whatever was already cached. Run "
+        "`athenaeum status` for details."
     ),
 }
 

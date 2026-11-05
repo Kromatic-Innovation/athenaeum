@@ -6772,31 +6772,38 @@ RECEIPT_SEALERS = ("noop", "signing")
 #: never a variant of the 1Password one (operator ruling 2026-10-25).
 RECEIPT_SIGNING_KEY_PROVIDERS = ("onepassword",)
 
-#: Default ``op://`` reference for the private key: the operator-created
-#: 1Password **SSH Key** item (Ed25519), bare ``private key`` field.
+#: There is NO default private-key reference (issue athenaeum#2205,
+#: operator ruling 2026-10-30: no specific vault or item may be named in a
+#: shipped default). Receipt signing is opt-in and now requires an
+#: explicit ``librarian.receipt_signing.op_reference``; with none set,
+#: :class:`athenaeum.receipt_sealers.OnePasswordServiceAccountKeyProvider`
+#: raises :class:`athenaeum.receipt_sealers.KeyUnavailable`, which is the
+#: SAME degradation path as a missing credential — intake appends unsealed
+#: lines and logs one warning. It is deliberately not a hard config error:
+#: a nightly run must not start failing because signing was switched on
+#: before the reference was set.
 #:
-#: ``op read`` on this reference returns **PKCS8 PEM** — a plain
-#: ``PRIVATE KEY`` PEM block, not OpenSSH — and specifically the RFC 5958
-#: *v2* ``OneAsymmetricKey`` encoding, private key plus the optional public
-#: key, which is what 1Password emits for Ed25519 (issue athenaeum#2142
-#: corrected an earlier comment here that claimed OpenSSH). Appending
-#: ``?ssh-format=openssh`` to the reference yields an
-#: ``OPENSSH PRIVATE KEY`` block instead.
-#:
-#: The query is OPTIONAL: all three encodings load (see
-#: :func:`athenaeum.receipt_sealers._load_private_key`), so the default is
-#: kept free of vendor query syntax.
-DEFAULT_RECEIPT_SIGNING_OP_REFERENCE = (
-    "op://Agent Tools/Athenaeum Receipt Sealing Key/private key"
-)
+#: What the reference should point at, for an operator writing one: a
+#: 1Password **SSH Key** item (Ed25519), bare ``private key`` field —
+#: ``op://<vault>/<item>/private key``. ``op read`` on that field returns
+#: **PKCS8 PEM**, a plain ``PRIVATE KEY`` PEM block, not OpenSSH, and
+#: specifically the RFC 5958 *v2* ``OneAsymmetricKey`` encoding, private
+#: key plus the optional public key, which is what 1Password emits for
+#: Ed25519 (issue athenaeum#2142 corrected an earlier comment here that
+#: claimed OpenSSH). Appending ``?ssh-format=openssh`` yields an
+#: ``OPENSSH PRIVATE KEY`` block instead. The query is OPTIONAL: all three
+#: encodings load (see
+#: :func:`athenaeum.receipt_sealers._load_private_key`), so a reference
+#: needs no vendor query syntax.
+DEFAULT_RECEIPT_SIGNING_OP_REFERENCE = ""
 
-#: Fallback ``op://`` reference for the matching public key. Normally the
-#: public reference is DERIVED from whatever private reference is configured
-#: (see :func:`resolve_receipt_signing_public_key_ref`); this constant is only
-#: reached when the private reference has no field segment to replace.
-DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF = (
-    "op://Agent Tools/Athenaeum Receipt Sealing Key/public key"
-)
+#: No default public-key reference either (issue athenaeum#2205). Normally
+#: the public reference is DERIVED from whatever private reference is
+#: configured (see :func:`resolve_receipt_signing_public_key_ref`); this
+#: constant is only reached when the private reference is unset or has no
+#: field segment to replace, and an empty string there means "derive the
+#: public half from the private key", not "read this other item".
+DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF = ""
 
 
 def resolve_receipt_sealer(config: dict[str, Any] | None) -> str:
@@ -6874,8 +6881,12 @@ def resolve_receipt_signing_op_reference(config: dict[str, Any] | None) -> str:
 
     ``librarian.receipt_signing.op_reference`` is read with ``op read`` by the
     1Password provider, inside the signing call only — the key is never
-    written to disk or cached. The default points at the operator-created
-    Ed25519 **SSH Key** item, bare ``private key`` field.
+    written to disk or cached.
+
+    **There is NO default** (issue athenaeum#2205): unset, this returns the
+    empty string and signing is unavailable rather than pointed at some
+    operator's vault. Point it at an Ed25519 **SSH Key** item's bare
+    ``private key`` field — ``op://<vault>/<item>/private key``.
 
     **What ``op read`` actually returns for that field is PKCS8 PEM** — a
     plain ``PRIVATE KEY`` PEM block, not OpenSSH: 1Password serves the
@@ -6922,7 +6933,10 @@ def resolve_receipt_signing_public_key_ref(config: dict[str, Any] | None) -> str
     would use different keys and every seal would fail for a reason the
     output could not explain. Derivation keeps the pair coherent by
     construction; an item whose public field is named something else needs
-    this key set explicitly.
+    this key set explicitly. With no private reference configured either
+    (the default since issue athenaeum#2205) this is the empty string,
+    which the provider reads as "derive from the private key" — and there
+    being no private key to read is what makes signing unavailable.
     """
     raw: Any = None
     # The three key segments are read INLINE, in order, rather than
