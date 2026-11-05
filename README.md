@@ -59,10 +59,12 @@ uv tool install --python 3.13 'athenaeum[mcp]'
 athenaeum --version                                    # compare with the PyPI badge above
 ```
 
-`uv tool install` puts the `athenaeum` entry point on `~/.local/bin` (and
-adds that directory to your `PATH` the first time, if it isn't already
-there), so every command below — including the `claude mcp add` line —
-works from a plain shell with no virtual environment active.
+`uv tool install` puts the `athenaeum` entry point in `~/.local/bin`. It does
+**not** add that directory to your `PATH` for you — it only warns if it's
+missing. If you hit `command not found`, run `uv tool update-shell` (or add
+`~/.local/bin` to your shell profile yourself) once; after that, every
+command below — including the `claude mcp add` line — works from a plain
+shell with no virtual environment active.
 
 ```bash
 # Create a knowledge directory (default: ~/knowledge)

@@ -11,9 +11,11 @@ system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/in
 uv tool install --python 3.13 athenaeum
 ```
 
-`uv tool install` puts the `athenaeum` entry point on `~/.local/bin` (and
-adds that directory to your `PATH` the first time, if it isn't already
-there), so it works from a plain shell with no virtual environment active.
+`uv tool install` puts the `athenaeum` entry point in `~/.local/bin`. It does
+**not** add that directory to your `PATH` for you — it only warns if it's
+missing. If you hit `command not found`, run `uv tool update-shell` (or add
+`~/.local/bin` to your shell profile yourself) once; after that it works
+from a plain shell with no virtual environment active.
 
 Alternatively, with pip:
 
@@ -85,9 +87,8 @@ athenaeum test-mcp
 wrong-interpreter warning that applies to it.)
 
 For Claude Code specifically, register the server once and it auto-starts
-with every session. Because `uv tool install` put the entry point on
-`~/.local/bin`, this works from a plain shell with no virtual environment
-active:
+with every session. Once `~/.local/bin` is on your `PATH` (see above), this
+works from a plain shell with no virtual environment active:
 
 ```bash
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
