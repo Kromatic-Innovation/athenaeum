@@ -2353,7 +2353,7 @@ def _refresh_extra_root_index(
     against the stored manifest), so it costs one file read/hash, not a
     corpus rescan.
 
-    **`full_rehash_max_age_days=math.inf` (PR #2321 review finding 2).**
+    **`full_rehash_max_age_days=math.inf` (athenaeum#2321 review finding 2).**
     ``build_index(incremental=True)`` is not UNCONDITIONALLY one-file-cheap:
     ``athenaeum.search``'s issue athenaeum#373 self-healing backstop
     (``_full_rehash_due``) forces a full re-read-and-rehash of every file,
@@ -3087,7 +3087,7 @@ def create_server(
         history: bool = False,
         type: str | None = None,
     ) -> str:
-        # Issue athenaeum#2313 (PR #2321 review finding 1): re-resolve
+        # Issue athenaeum#2313 (athenaeum#2321 review finding 1): re-resolve
         # `recall.extra_intake_roots` FRESH from *config* on every call,
         # the same way `_refresh_extra_root_index` already does for
         # `remember`'s write side -- rather than trusting this closure's

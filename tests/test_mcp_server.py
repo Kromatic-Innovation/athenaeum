@@ -1840,7 +1840,7 @@ class TestRecallUncompiledClaudeSessionNotes:
     def test_remember_refresh_does_not_trigger_periodic_full_rehash(
         self, tmp_path: Path
     ) -> None:
-        """PR #2321 review finding 2: `remember`'s index refresh must stay a
+        """athenaeum#2321 review finding 2: `remember`'s index refresh must stay a
         one-file incremental cost even when the manifest's periodic
         full-rehash backstop (issue athenaeum#373, `_full_rehash_due`) is
         overdue -- otherwise an interactive `remember` call would
@@ -1894,7 +1894,7 @@ class TestRecallUncompiledClaudeSessionNotes:
     def test_preexisting_install_upgrade_same_session_remember_then_recall(
         self, tmp_path: Path
     ) -> None:
-        """PR #2321 review finding 1: a PRE-EXISTING install upgrading to
+        """athenaeum#2321 review finding 1: a PRE-EXISTING install upgrading to
         this version -- one whose `raw/claude-session` directory does not
         exist yet, because it was `athenaeum init`'d before this version's
         `init.py` change -- must NOT need a server restart between its
