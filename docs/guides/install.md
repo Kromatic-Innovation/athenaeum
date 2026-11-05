@@ -213,11 +213,12 @@ schedule yourself — and they write and spend very differently.
 
 **Nothing compiles itself.** The hooks above only ever populate
 `<knowledge_root>/raw/`. Turning that into searchable wiki pages needs
-`athenaeum run`, and nothing in this guide's install steps schedules it — you
-pick one of the options under "I want agents to write and read memory
-through MCP" above, or run it by hand. A `remember` call with no scheduled
-(or manual) `run` afterward looks like it worked and produces no `recall`
-hit; `athenaeum status` reports the growing raw backlog either way.
+`athenaeum run`, and nothing on this page schedules it — the three ways to
+do that (manual, cron, launchd) are in
+[the Claude Code integration README, "Install" step 6](../../examples/claude-code/README.md#install).
+A `remember` call with no scheduled (or manual) `run` afterward looks like
+it worked and produces no `recall` hit; `athenaeum status` reports the
+growing raw backlog either way.
 
 ## What happens when a prerequisite is missing
 
