@@ -307,6 +307,10 @@ MODULE_LAYER: dict[str, int] = {
     # computation is unavoidably arithmetic. Sibling L4 to librarian.py,
     # which claude_code_adapter.py also calls into for the same reason.
     "witness_anchor": 4,
+    # issue athenaeum#2301: follow-through analyzer -- own docstring states
+    # "Layering: L4 domain/pipeline". Imports push_metrics (L3) and
+    # transcript_verify (L1), same-or-below.
+    "follow_through": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_attribution": 5,  # issue athenaeum#2212

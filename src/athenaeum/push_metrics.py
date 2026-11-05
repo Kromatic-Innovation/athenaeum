@@ -56,10 +56,14 @@ enable/disable accessor) and :mod:`athenaeum.transcript_verify` (read-only
 transcript access) at L2/L3. Consumed by :mod:`athenaeum.mcp_server` (write
 side, push records), :mod:`athenaeum.librarian` (``session_end``, reference
 determination), :mod:`athenaeum.context` (the sidecar adapter's push path,
-issue athenaeum#1362), and :mod:`athenaeum._cmd_push_metrics` (the CLI
+issue athenaeum#1362), :mod:`athenaeum._cmd_push_metrics` (the CLI
 ``baseline`` + ``coverage-audit`` + ``record`` commands, the last of which is
-the hook-path reporting entry point, issue athenaeum#1478). Never imports
-either back.
+the hook-path reporting entry point, issue athenaeum#1478), and
+:mod:`athenaeum.follow_through` (the follow-through analyzer, issue
+athenaeum#2301, which reuses this module's transcript-reading/id helpers —
+``determine_references``, ``_find_session_transcript``, ``_parse_ts``,
+``_appears_as_whole_token``, ``opaque_push_id_from_filename`` — rather than
+re-parsing). Never imports either back.
 """
 
 from __future__ import annotations
