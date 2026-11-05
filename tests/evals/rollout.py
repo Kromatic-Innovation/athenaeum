@@ -1642,6 +1642,39 @@ def _cache_count_or_none(usage: Mapping[str, Any], key: str) -> int | None:
     return value
 
 
+def _merge_optional_max(existing: int | None, new: int | None) -> int | None:
+    """Combine two optional per-event counts for the SAME ``message.id``
+    (issue athenaeum#2305 / Seer review of PR athenaeum#2338).
+
+    A ``claude -p --output-format stream-json`` transcript can emit
+    MULTIPLE top-level ``assistant`` events that share one ``message.id``
+    -- the real shape under parallel tool use, confirmed against this
+    repo's own ``_canned_cli_events()`` fixture
+    (``tests/evals/test_cli_tool_passthrough_rollout.py``): two events for
+    one ``msg_1`` carry ``input_tokens=40`` on BOTH (unchanged -- the
+    model's input did not grow) but ``output_tokens=4`` then ``12`` (grew
+    as the second parallel tool-use block finished streaming). Each
+    event's ``usage`` is therefore a CUMULATIVE snapshot of the same
+    message so far, never an independent per-event increment and never a
+    byte-identical repeat -- summing double-counts (the bug Seer flagged:
+    ``input_tokens`` would land at 80, not 40), and naive dedup-by-id
+    risks keeping the SMALLER, incomplete snapshot. ``max()`` is the
+    correct combinator, mirroring ``_run_cli_tool_loop``'s own
+    max-per-id-bucket handling of this exact shape (see that function's
+    docstring).
+
+    ``None`` only when BOTH sides are ``None`` -- i.e. no event for this
+    message ever reported the field -- so "never captured" cannot turn
+    into a merged ``0``; a ``0`` that either side genuinely reported
+    survives into the result, same as any other observed value.
+    """
+    if existing is None:
+        return new
+    if new is None:
+        return existing
+    return max(existing, new)
+
+
 @dataclasses.dataclass(frozen=True)
 class ParsedPullStream:
     """Everything :func:`parse_pull_stream` extracts from a raw
@@ -1674,6 +1707,16 @@ def parse_stream(
     legitimately chose not to call a tool parses to ``recall_called=False``,
     the same as any other transcript — issue athenaeum#1522's "not calling
     recall is a recorded outcome, never an error" acceptance criterion.
+
+    Multiple top-level ``assistant`` events that share one real
+    ``message.id`` (the parallel-tool-use shape -- see
+    :func:`_merge_optional_max`'s docstring for the empirical evidence)
+    merge into ONE turn via that helper, rather than appending a second
+    turn that would double-count every token counter (issue athenaeum#2305,
+    Seer review of PR athenaeum#2338). An absent/empty id -- every fixture
+    this parser read before that issue, including the ones this module's
+    own tests pin turn counts against -- gets no such treatment: each
+    event remains its own turn exactly as before.
     """
     events: list[dict[str, Any]] = []
     mcp_connected = False
@@ -1682,6 +1725,17 @@ def parse_stream(
     turn_tokens: list[TurnTokenUsage] = []
     answer = ""
     turn = 0
+    # Issue athenaeum#2305 / Seer review of PR athenaeum#2338: maps a REAL
+    # (non-empty string) message.id to its turn_tokens index, so a second
+    # assistant event sharing that id merges into the SAME turn instead of
+    # appending a second one -- see _merge_optional_max's docstring for the
+    # empirical evidence (a repeated id is a cumulative snapshot of one
+    # message, never an independent turn). Never populated for an absent/
+    # empty id, so every pre-athenaeum#1733 fixture and hand-built test
+    # transcript in this repo keeps today's "one event = one turn" shape
+    # exactly -- there is no id to prove two such events are the same
+    # message rather than two genuinely separate ones.
+    turn_index_by_id: dict[str, int] = {}
 
     for raw_line in lines:
         raw_line = raw_line.strip()
@@ -1703,22 +1757,44 @@ def parse_stream(
             recall_tool_available = RECALL_TOOL_NAME in tools
 
         elif event_type == "assistant":
-            turn += 1
             message = event.get("message") or {}
             usage = message.get("usage") or {}
-            turn_tokens.append(
-                TurnTokenUsage(
-                    turn=turn,
-                    input_tokens=int(usage.get("input_tokens", 0) or 0),
-                    output_tokens=int(usage.get("output_tokens", 0) or 0),
-                    cache_creation_input_tokens=_cache_count_or_none(
-                        usage, "cache_creation_input_tokens"
+            raw_msg_id = message.get("id")
+            msg_id = raw_msg_id if isinstance(raw_msg_id, str) and raw_msg_id else None
+            input_tokens = int(usage.get("input_tokens", 0) or 0)
+            output_tokens = int(usage.get("output_tokens", 0) or 0)
+            cache_creation_input_tokens = _cache_count_or_none(
+                usage, "cache_creation_input_tokens"
+            )
+            cache_read_input_tokens = _cache_count_or_none(usage, "cache_read_input_tokens")
+
+            existing_idx = turn_index_by_id.get(msg_id) if msg_id is not None else None
+            if existing_idx is not None:
+                existing = turn_tokens[existing_idx]
+                turn_tokens[existing_idx] = TurnTokenUsage(
+                    turn=existing.turn,
+                    input_tokens=max(existing.input_tokens, input_tokens),
+                    output_tokens=max(existing.output_tokens, output_tokens),
+                    cache_creation_input_tokens=_merge_optional_max(
+                        existing.cache_creation_input_tokens, cache_creation_input_tokens
                     ),
-                    cache_read_input_tokens=_cache_count_or_none(
-                        usage, "cache_read_input_tokens"
+                    cache_read_input_tokens=_merge_optional_max(
+                        existing.cache_read_input_tokens, cache_read_input_tokens
                     ),
                 )
-            )
+            else:
+                turn += 1
+                if msg_id is not None:
+                    turn_index_by_id[msg_id] = len(turn_tokens)
+                turn_tokens.append(
+                    TurnTokenUsage(
+                        turn=turn,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_creation_input_tokens=cache_creation_input_tokens,
+                        cache_read_input_tokens=cache_read_input_tokens,
+                    )
+                )
             for block in message.get("content") or []:
                 if not isinstance(block, dict):
                     continue
