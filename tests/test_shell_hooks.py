@@ -5369,18 +5369,20 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
             ), f"{hook.name} no longer defaults SEARCH_BACKEND to vector"
 
     def test_the_two_cli_flags_default_to_fts5(self) -> None:
+        """Read through `parse_args`, not the parser's internals.
+
+        An argparse default read off `_actions` can be right while the flag
+        resolves to something else (a parser-level `set_defaults`, a
+        subparser override); parsing an argv with the flag omitted is the
+        same path a real invocation takes.
+        """
         from athenaeum.cli import build_parser
 
         parser = build_parser()
-        defaults: dict[str, str] = {}
-        for action in parser._actions:  # noqa: SLF001 - argparse has no public walk
-            if getattr(action, "choices", None) and action.dest == "command":
-                for name, subparser in action.choices.items():
-                    for sub_action in subparser._actions:  # noqa: SLF001
-                        if sub_action.dest == "backend":
-                            defaults[name] = sub_action.default
-        assert defaults.get("context") == "fts5", defaults
-        assert defaults.get("codex-context") == "fts5", defaults
+        assert parser.parse_args(["context", "a prompt"]).backend == "fts5"
+        assert (
+            parser.parse_args(["codex-context", "--seed", "a topic"]).backend == "fts5"
+        )
 
     def test_neither_doc_still_claims_a_single_fts5_default(self) -> None:
         readme = (HOOKS_DIR / "README.md").read_text()
