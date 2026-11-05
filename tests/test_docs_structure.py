@@ -37,6 +37,51 @@ _ISSUE_REF = re.compile(r"athenaeum#\d+")
 #: Real people must not appear as example data in a public repo.
 _OPERATOR_NAMES = re.compile(r"\bTristan\b|\btristankromer\b|\bAmanda\b", re.IGNORECASE)
 
+#: The one page allowed to show a package-install command (athenaeum#2300).
+#: Every other reader-facing page must link here instead of repeating one.
+INSTALL_CANONICAL_PAGE = DOCS / "guides" / "install.md"
+
+#: README plus every guide, minus the canonical page itself -- the set a
+#: stray install command is not allowed to appear in.
+_INSTALL_COMMAND_SCAN_TARGETS = tuple(
+    p
+    for p in [REPO_ROOT / "README.md", *sorted((DOCS / "guides").glob("*.md"))]
+    if p != INSTALL_CANONICAL_PAGE
+)
+
+#: Matches the install verb, not the package name -- checked against
+#: ``athenaeum`` separately so a line that names a different package (or no
+#: package at all) is never flagged.
+_INSTALL_VERB = re.compile(r"\bpip install\b|\bpython3?\s+-m\s+pip install\b|\buv tool install\b")
+#: A contributor-facing editable/dev install (``pip install -e .`` or
+#: ``-e ".[dev,vector]"``) is not a user install command and is exempt --
+#: CONTRIBUTING.md's dev setup and install.md's own source-checkout section
+#: both use this flag deliberately.
+_EDITABLE_INSTALL_FLAG = re.compile(r"(?:^|\s)-e(?:\s|$)")
+
+
+def _install_command_lines(text: str) -> list[str]:
+    """Lines that run a real ``athenaeum`` package install.
+
+    Split each line on ``#``/``&&``/``;`` before checking, so a line that
+    pairs a real install with an editable one in the same breath (e.g.
+    ``pip install athenaeum   # or: pip install -e . from a checkout``)
+    still flags the non-editable half instead of the editable flag
+    anywhere on the line hiding both.
+    """
+    hits: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for segment in re.split(r"#|&&|;", line):
+            if not _INSTALL_VERB.search(segment):
+                continue
+            if _EDITABLE_INSTALL_FLAG.search(segment):
+                continue
+            if "athenaeum" not in segment.lower():
+                continue
+            hits.append(f"{lineno}: {line.strip()}")
+            break
+    return hits
+
 
 def _markdown_files(target: Path) -> list[Path]:
     if target.is_file():
@@ -220,3 +265,105 @@ class TestGuidesAndModulesCrossLink:
         assert "**Reference:**" in head and "../modules/" in head, (
             f"{page.name} must open with a **Reference:** line naming its module page(s)"
         )
+
+
+class TestOneCanonicalInstallPage:
+    """Exactly one page may show a package-install command (athenaeum#2300).
+
+    Before the uv-first install work (athenaeum#2297), README, install.md,
+    claude-code.md, and sidecar.md each carried their own install command and
+    they drifted out of sync with each other. ``install.md`` is now the one
+    place a ``pip install athenaeum`` / ``uv tool install ... athenaeum``
+    line may live; every other guide must link to it instead of repeating
+    the command, so there is nothing left to drift.
+
+    ``CONTRIBUTING.md`` and ``CHANGELOG.md`` are deliberately not scanned:
+    CONTRIBUTING's dev-setup ``pip install -e ".[dev,vector]"`` is a
+    contributor editable install, not a user install command (and that
+    whole class is exempt everywhere, not just there -- see
+    ``_EDITABLE_INSTALL_FLAG``), and CHANGELOG.md is a historical record,
+    not an operating guide. ``docs/guides/upgrading.md`` was checked by hand
+    and carries no install command at all, so it needs no exemption either.
+    """
+
+    @pytest.mark.parametrize(
+        "page",
+        _INSTALL_COMMAND_SCAN_TARGETS,
+        ids=lambda p: str(p.relative_to(REPO_ROOT)),
+    )
+    def test_no_install_command_outside_canonical_page(self, page: Path) -> None:
+        hits = _install_command_lines(page.read_text(encoding="utf-8"))
+        assert not hits, (
+            f"{page.relative_to(REPO_ROOT)} repeats a package-install command; "
+            f"link to {INSTALL_CANONICAL_PAGE.relative_to(REPO_ROOT)} instead:\n  "
+            + "\n  ".join(hits)
+        )
+
+    def test_canonical_page_itself_still_holds_install_commands(self) -> None:
+        """Sanity check on the exemption, not a scan of the real tree.
+
+        If a future edit emptied install.md of its own commands, the test
+        above would pass vacuously (nothing left to find anywhere) while the
+        acceptance criterion silently broke. Pin that install.md actually is
+        where the commands live.
+        """
+        hits = _install_command_lines(INSTALL_CANONICAL_PAGE.read_text(encoding="utf-8"))
+        assert hits, (
+            f"{INSTALL_CANONICAL_PAGE.relative_to(REPO_ROOT)} is supposed to be the "
+            "one page holding install commands, but none were found there"
+        )
+
+    def test_detector_fires_on_a_synthetic_fixture_page(self, tmp_path: Path) -> None:
+        """The detector flags its own counter-example (athenaeum#2300's AC2).
+
+        A test that only scans the real docs tree would pass identically
+        whether the detector works or is silently broken, because the tree
+        is already clean -- this synthetic page is the positive control
+        that proves the regex itself still fires, independent of the real
+        corpus's current state.
+        """
+        fixture = tmp_path / "fixture-page.md"
+        fixture.write_text(
+            "# Fixture\n\nJust run:\n\n```bash\npip install athenaeum\n```\n",
+            encoding="utf-8",
+        )
+        hits = _install_command_lines(fixture.read_text(encoding="utf-8"))
+        assert hits, "detector failed to flag `pip install athenaeum` in a fixture page"
+
+    def test_detector_fires_on_realistic_variants(self, tmp_path: Path) -> None:
+        variants = [
+            "pip install athenaeum",
+            "pip install 'athenaeum[mcp]'",
+            'pip install "athenaeum[vector]"',
+            "python -m pip install athenaeum",
+            "python3 -m pip install athenaeum",
+            "uv tool install --python 3.13 athenaeum",
+            "uv tool install --python 3.13 'athenaeum[mcp]'",
+        ]
+        for variant in variants:
+            fixture = tmp_path / "fixture-page.md"
+            fixture.write_text(f"```bash\n{variant}\n```\n", encoding="utf-8")
+            hits = _install_command_lines(fixture.read_text(encoding="utf-8"))
+            assert hits, f"detector failed to flag variant: {variant!r}"
+
+    def test_detector_allows_an_editable_dev_install(self, tmp_path: Path) -> None:
+        fixture = tmp_path / "fixture-page.md"
+        fixture.write_text(
+            '```bash\npip install -e ".[dev,vector]"\n```\n', encoding="utf-8"
+        )
+        hits = _install_command_lines(fixture.read_text(encoding="utf-8"))
+        assert not hits, "an editable/dev install must not be flagged"
+
+    def test_detector_catches_a_real_install_hiding_behind_an_editable_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-editable install must not escape detection by sharing a line
+        with an editable one -- this is the exact shape ``sidecar.md`` had
+        before this fix (athenaeum#2300)."""
+        fixture = tmp_path / "fixture-page.md"
+        fixture.write_text(
+            "```bash\npip install athenaeum   # or: pip install -e . from a checkout\n```\n",
+            encoding="utf-8",
+        )
+        hits = _install_command_lines(fixture.read_text(encoding="utf-8"))
+        assert hits, "a real install sharing a line with an editable one must still be flagged"

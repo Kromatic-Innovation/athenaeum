@@ -370,8 +370,8 @@ in isolation with `--cluster-only` or `--merge-only`.
 ## 6. Quick start
 
 ```bash
-# 1. Install Athenaeum and initialise a knowledge base
-pip install athenaeum
+# 1. Install Athenaeum (see docs/guides/install.md) and initialise a
+#    knowledge base
 athenaeum init --path ~/knowledge
 
 # 2. Bridge Claude Code auto-memory into raw/

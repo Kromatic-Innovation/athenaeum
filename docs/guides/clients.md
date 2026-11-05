@@ -27,7 +27,8 @@ it calls them only when it decides to — there is no per-turn auto-recall outsi
 Claude Code. Support for Cursor, including auto-recall, is tracked in the
 [Cursor support issue](https://github.com/Kromatic-Innovation/athenaeum/issues/2202).
 
-1. Install with the MCP extra: `pip install 'athenaeum[mcp]'`.
+1. Install with the MCP extra — see [Install](install.md#i-want-agents-to-write-and-read-memory-through-mcp)
+   for the command.
 2. Find the absolute path to the `athenaeum` binary (`which athenaeum`). GUI apps do
    not read your shell's `PATH`, so a bare `athenaeum` usually won't be found.
 3. Add a server entry. For **Claude Desktop** on macOS, edit
