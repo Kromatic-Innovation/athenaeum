@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Four Claude Code setup-doc errors, each of which pointed a reader at the
+  wrong value or a file that does not exist (issue athenaeum#2232).**
+  `SEARCH_BACKEND`'s default is no longer stated as a single `fts5`: the
+  hooks, the packaged adapter and `athenaeum.yaml`'s own resolver default to
+  `vector`, while `athenaeum context --backend` and `codex-context
+  --backend` default to `fts5`, and `docs/reference/environment.md` now
+  carries that per-entry-point table (the same single-default claim is
+  corrected in `docs/guides/vector-search.md`,
+  `docs/guides/troubleshooting.md` and `docs/modules/recall.md`).
+  `examples/claude-code/`'s "Option C: launchd plist on macOS" pointed at a
+  `docs/` template that never existed and now ships one,
+  `com.athenaeum.run.plist`, with the `EnvironmentVariables` an
+  `ANTHROPIC_API_KEY`-needing launchd job requires. MCP registration names
+  `~/.claude.json` (user scope) and `.mcp.json` (project scope) instead of
+  `~/.claude/settings.json`, which Claude Code does not read MCP servers
+  from; `claude mcp add` stays the primary path. `session-start-recall.sh`'s
+  header states the real `op` gate.
+
 ### Changed
 
 - **No secret manager is baked in; a generic credential command replaces the

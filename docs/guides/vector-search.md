@@ -63,7 +63,7 @@ unavailable.
 
 | Variable | Description |
 |---|---|
-| `SEARCH_BACKEND` | `fts5` or `vector`, hook shell env (default: `fts5`) |
+| `SEARCH_BACKEND` | `fts5` or `vector`, hook shell env (the hooks default to `vector`; `athenaeum context --backend` defaults to `fts5`) |
 | `ATHENAEUM_TOPIC_MODEL` | Override the query-topic model (default: `claude-haiku-4-5-20251001`) |
 
 The per-turn hook is fail-silent: a vector-backend error leaves the turn

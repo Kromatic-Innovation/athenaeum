@@ -58,7 +58,8 @@ These are intentional for the current release line, not things to debug:
   hit it in practice.
 - **The `keyword` search backend is a scan-on-query fallback** — it reads
   every wiki page on every query. Fine under ~1,000 entities, painful past
-  that. Use `fts5` (the default) or `vector` for any non-trivial wiki.
+  that. Use `fts5` or `vector` (what the hooks default to) for any
+  non-trivial wiki.
 - **Pending decisions are a file, not a workflow.** Conflicts land in
   `wiki/_pending_questions.md`; there's no PR-opening or chat integration
   — see [Answering pending decisions](decisions.md).

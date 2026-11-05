@@ -37,7 +37,21 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | No | Snooze TTL in hours for pending-questions surfacing (default: `24`; consumed by the `resolve-questions` skill) |
 | `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
-| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: `fts5` |
+| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). **The default differs by entry point** — see below |
+
+**`SEARCH_BACKEND`'s default differs by entry point**, so there is no single
+default to quote:
+
+| Entry point | Default | Where |
+|---|---|---|
+| The Claude Code hooks (`session-start-recall.sh`, `rebuild-index.sh`), the packaged `athenaeum-claude-hook` adapter, and `athenaeum.yaml`'s own `search_backend` | `vector` | `config._DEFAULTS["search_backend"]`, mirrored by each hook's `${SEARCH_BACKEND:-vector}` |
+| `athenaeum context --backend` | `fts5` | that flag's own argparse default |
+| `athenaeum codex-context --backend` | `fts5` | same |
+
+The `fts5` keyword defaults on `context.build_context` /
+`build_context_for_turn` are not reachable from the hooks: the adapter always
+passes `search_backend` explicitly. They are the default only for an
+in-process caller that omits the argument.
 
 **Shell-env overrides.** `AUTO_RECALL` and `SEARCH_BACKEND` are read from the
 shell environment after the hook sources `~/.cache/athenaeum/config.env`, so

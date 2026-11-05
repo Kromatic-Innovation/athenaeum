@@ -12,6 +12,14 @@
 # default references: with nothing configured, no credential subprocess is
 # spawned at all and no timeout is spent.
 #
+# The `op` source carries one more gate (issue athenaeum#2193, item 4 of
+# issue athenaeum#2232): `op` runs only when `OP_SERVICE_ACCOUNT_TOKEN` is
+# set or `ATHENAEUM_OP_INTERACTIVE=1`, `op` is on PATH, and nothing is
+# cached for that credential. It is NOT "whenever `op` happens to be signed
+# in", which is what this header used to say. A key command has no such
+# gate: it has no 1Password session to probe and no OS permission prompt to
+# raise.
+#
 # 1. Reads athenaeum.yaml for config (auto_recall, search_backend)
 # 2. Writes a shell-readable cache at ~/.cache/athenaeum/config.env
 # 3. Builds the FTS5 index synchronously (cheap, ~1s/3k pages).
