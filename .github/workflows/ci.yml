@@ -422,7 +422,14 @@ jobs:
     name: Docs install path (uv, pre-3.13 default interpreter)
     needs: [check_duplicate]
     if: needs.check_duplicate.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    # Pinned, not `-latest` (athenaeum#2297): this job's whole premise is a
+    # default python3 that predates 3.13, and `ubuntu-latest` started
+    # migrating to Ubuntu 26 (default python3 3.13+) on 2026-10-19 — which is
+    # exactly what tripped the assertion step below. `ubuntu-24.04`'s default
+    # is still 3.12. When THIS label eventually floats too, the assertion
+    # step is what is supposed to catch it loudly rather than let the job
+    # pass green while testing nothing — do not remove it when bumping this.
+    runs-on: ubuntu-24.04
     steps:
       - name: Assert this runner's default python3 predates 3.13
         run: |
