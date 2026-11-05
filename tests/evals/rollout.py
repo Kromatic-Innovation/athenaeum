@@ -433,11 +433,29 @@ class ToolCall:
 @dataclasses.dataclass(frozen=True)
 class TurnTokenUsage:
     """Token counts for ONE turn (issue athenaeum#1523 needs the per-turn
-    series, not only a summed-per-task total)."""
+    series, not only a summed-per-task total).
+
+    ``cache_creation_input_tokens``/``cache_read_input_tokens`` (issue
+    athenaeum#2305, additive) are the SAME two counters
+    :class:`EvalSession` already accumulates per response
+    (:func:`_cache_usage_from_response` in ``tests.evals.harness``) but this
+    class used to discard before this issue: a provider's ``input_tokens``
+    for a turn EXCLUDES any prefix served from cache, so a PUSH/ORACLE arm's
+    injected content, once cached, was priced at zero on every turn after
+    the one that first wrote it -- "a per-turn view favors content" is the
+    issue's own name for that undercount. ``None`` -- never ``0`` -- for
+    any turn whose cache usage was never captured, which is EVERY row
+    persisted before this field existed: a real ``0`` means "this turn
+    touched no cache", which is a different, true observation
+    (:func:`tests.evals.north_star_report.compute_cost_per_correct` must
+    tell the two apart, per this issue's own acceptance criterion).
+    """
 
     turn: int
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
 
 @dataclasses.dataclass
@@ -589,6 +607,20 @@ class RolloutRecord:
     #: persisted before this field existed, matching this dataclass's own
     #: back-compat discipline for ``mode``/``search_backend``/etc.
     llm_provider: str | None = None
+    #: Issue athenaeum#2305 (additive): the UTF-8 byte length of the content
+    #: actually injected for this record -- the same text
+    #: ``injected_context_tokens`` already estimates a TOKEN count for
+    #: (PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB, PUSH_BREADCRUMB_PULL,
+    #: ORACLE; ``None`` for NONE/PULL, for the same reason
+    #: ``injected_context_tokens`` is -- see this class's own docstring).
+    #: Reported by the north-star report's cost-per-correct section
+    #: ALONGSIDE cost, never folded into the cost arithmetic itself: bytes
+    #: and tokens are different units, and this field exists so a reader
+    #: can see the raw payload size without going back to a token
+    #: estimator. ``None`` (never ``0``) for every row persisted before
+    #: this field existed, matching this dataclass's own back-compat
+    #: discipline.
+    injected_context_bytes: int | None = None
 
     @property
     def total_input_tokens(self) -> int:
@@ -635,6 +667,7 @@ class RolloutRecord:
             "config_isolated": self.config_isolated,
             "turns_exhausted": self.turns_exhausted,
             "llm_provider": self.llm_provider,
+            "injected_context_bytes": self.injected_context_bytes,
         }
 
     @classmethod
@@ -692,6 +725,11 @@ class RolloutRecord:
             # field existed -- ``None`` decodes as "unknown backend", the
             # same meaning it carries for a freshly-constructed record.
             llm_provider=payload.get("llm_provider"),
+            # Issue athenaeum#2305: absent on every row persisted before this
+            # field existed -- ``None`` decodes as "not recorded", never a
+            # claimed zero-byte injection, the same conservative meaning it
+            # carries for a freshly-constructed record.
+            injected_context_bytes=payload.get("injected_context_bytes"),
         )
 
 
@@ -713,8 +751,16 @@ def _observe_turn(session: EvalSession, model: str, response: Any, turn: int) ->
     session what THIS response added has no such window and is exact by
     construction, at one worker or at eight.
     """
-    input_tokens, output_tokens = session.observe_response_delta(model, response)
-    return TurnTokenUsage(turn=turn, input_tokens=input_tokens, output_tokens=output_tokens)
+    input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens = (
+        session.observe_response_delta(model, response)
+    )
+    return TurnTokenUsage(
+        turn=turn,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+    )
 
 
 def _single_shot(
@@ -814,6 +860,7 @@ def run_push_pages_upper_bound(
         tool_calls=[],
         recall_called=False,
         injected_context_tokens=estimate_tokens(pushed),
+        injected_context_bytes=len(pushed.encode("utf-8")),
         turn_count=1,
         transcript=[
             {
@@ -1418,6 +1465,7 @@ def run_push_breadcrumb(
         tool_calls=[],
         recall_called=False,
         injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        injected_context_bytes=len(breadcrumb.encode("utf-8")) if breadcrumb else 0,
         turn_count=1,
         transcript=[
             {
@@ -1470,6 +1518,7 @@ def run_oracle(
         tool_calls=[],
         recall_called=False,
         injected_context_tokens=estimate_tokens(context) if context else 0,
+        injected_context_bytes=len(context.encode("utf-8")) if context else 0,
         turn_count=1,
         transcript=[
             {
@@ -1570,6 +1619,29 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
     ]
 
 
+def _cache_count_or_none(usage: Mapping[str, Any], key: str) -> int | None:
+    """*usage[key]* as an int, or ``None`` when *key* is absent (issue
+    athenaeum#2305).
+
+    Absent is NOT the same as present-and-zero: a ``claude -p
+    --output-format stream-json`` ``message.usage`` dict that genuinely
+    carries ``0`` cache activity is a real observation
+    (:class:`TurnTokenUsage`'s docstring), while a key that is simply not
+    there at all (an older transport shape, or a hand-built test event)
+    means this turn's cache usage was never captured -- the exact
+    distinction :func:`tests.evals.north_star_report.compute_cost_per_correct`
+    needs to keep an undefined cache contribution from silently pricing as
+    free. A present-but-non-int value (defensively) also decodes as
+    ``None`` rather than raising.
+    """
+    if key not in usage:
+        return None
+    value = usage.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 @dataclasses.dataclass(frozen=True)
 class ParsedPullStream:
     """Everything :func:`parse_pull_stream` extracts from a raw
@@ -1639,6 +1711,12 @@ def parse_stream(
                     turn=turn,
                     input_tokens=int(usage.get("input_tokens", 0) or 0),
                     output_tokens=int(usage.get("output_tokens", 0) or 0),
+                    cache_creation_input_tokens=_cache_count_or_none(
+                        usage, "cache_creation_input_tokens"
+                    ),
+                    cache_read_input_tokens=_cache_count_or_none(
+                        usage, "cache_read_input_tokens"
+                    ),
                 )
             )
             for block in message.get("content") or []:
@@ -1834,6 +1912,7 @@ def run_push_breadcrumb_pull(
         tool_calls=parsed.tool_calls,
         recall_called=parsed.recall_called,
         injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        injected_context_bytes=len(breadcrumb.encode("utf-8")) if breadcrumb else 0,
         turn_count=parsed.turn_count,
         transcript=transcript,
         mode="cli",
@@ -3035,6 +3114,12 @@ def _run_cli_tool_loop(
                 turn=last.turn,
                 input_tokens=last.input_tokens,
                 output_tokens=last.output_tokens + topup.output_tokens,
+                # The topup call itself carries no cache activity (its
+                # SimpleNamespace above is hardcoded to zero on both) -- the
+                # last turn's OWN captured cache counts carry forward
+                # unchanged, never reset to None/0 by this reconstruction.
+                cache_creation_input_tokens=last.cache_creation_input_tokens,
+                cache_read_input_tokens=last.cache_read_input_tokens,
             )
             # Keep the transcript's recorded usage in sync with the
             # topped-up turn_tokens entry -- both must report the same
@@ -3368,6 +3453,7 @@ def run_push_breadcrumb_pull_api(
         tool_calls=tool_calls,
         recall_called=bool(tool_calls),
         injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        injected_context_bytes=len(breadcrumb.encode("utf-8")) if breadcrumb else 0,
         turn_count=turn_count,
         transcript=transcript,
         mode="api",

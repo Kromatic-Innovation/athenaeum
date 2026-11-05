@@ -559,8 +559,9 @@ class EvalSession:
         with self._lock:
             self._observe_counts(model, counts)
 
-    def observe_response_delta(self, model: str, response: Any) -> tuple[int, int]:
-        """Accumulate *response* and return the ``(input, output)`` IT added.
+    def observe_response_delta(self, model: str, response: Any) -> tuple[int, int, int, int]:
+        """Accumulate *response* and return the four counts IT added:
+        ``(input, output, cache_creation_input, cache_read_input)``.
 
         The delta a caller needs is exactly what was extracted from THIS
         response, so it is returned directly rather than recovered by
@@ -575,11 +576,23 @@ class EvalSession:
         per turn. There is still exactly ONE extraction site
         (``_cache_usage_from_response``), which is what the before/after
         shape was reaching for.
+
+        The two cache counts (issue athenaeum#2305, additive) used to be
+        accumulated here and then discarded by every caller -- this method
+        now hands them back too, so :func:`tests.evals.rollout._observe_turn`
+        can stamp them onto the per-turn record the north-star report's cost
+        dimension reads, instead of silently losing a turn's cache activity
+        the moment it left this accumulator.
         """
         counts = _cache_usage_from_response(response)
         with self._lock:
             self._observe_counts(model, counts)
-        return counts["input_tokens"], counts["output_tokens"]
+        return (
+            counts["input_tokens"],
+            counts["output_tokens"],
+            counts["cache_creation_input_tokens"],
+            counts["cache_read_input_tokens"],
+        )
 
     def _observe_counts(self, model: str, counts: dict[str, int]) -> None:
         self.input_tokens += counts["input_tokens"]
