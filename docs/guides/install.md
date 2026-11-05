@@ -4,7 +4,18 @@
 
 ## I want to install the package
 
-Requires Python 3.13+.
+Requires Python 3.13+. The fastest way to get that, regardless of what your
+system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/installation/):
+
+```bash
+uv tool install --python 3.13 athenaeum
+```
+
+`uv tool install` puts the `athenaeum` entry point on `~/.local/bin` (and
+adds that directory to your `PATH` the first time, if it isn't already
+there), so it works from a plain shell with no virtual environment active.
+
+Alternatively, with pip:
 
 ```bash
 pip install athenaeum
@@ -62,15 +73,21 @@ default of 800 API calls; omit it to accept the default.
 ## I want agents to write and read memory through MCP
 
 ```bash
-pip install 'athenaeum[mcp]'
+uv tool install --python 3.13 'athenaeum[mcp]'
 athenaeum serve --path ~/knowledge
 
 # Smoke test the round-trip without a live session
 athenaeum test-mcp
 ```
 
+(`pip install 'athenaeum[mcp]'` into an activated 3.13+ venv works too — see
+[I want to install the package](#i-want-to-install-the-package) above for the
+wrong-interpreter warning that applies to it.)
+
 For Claude Code specifically, register the server once and it auto-starts
-with every session:
+with every session. Because `uv tool install` put the entry point on
+`~/.local/bin`, this works from a plain shell with no virtual environment
+active:
 
 ```bash
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
