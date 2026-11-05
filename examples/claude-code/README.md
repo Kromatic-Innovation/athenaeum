@@ -122,10 +122,14 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_CLI`          | `athenaeum`                       | CLI binary (override for editable installs)                    |
 | `ATHENAEUM_PYTHON`       | `python3`                         | Python interpreter with athenaeum deps                         |
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
-| `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password item for `ANTHROPIC_API_KEY`, used only if you opt into the `op` fetch (see "Supplying an API key") |
-| `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password item for `JEV_API_KEY`, used only if you opt into the `op` fetch |
+| `ATHENAEUM_ANTHROPIC_KEY_COMMAND` | unset                | Shell command whose stdout is `ANTHROPIC_API_KEY`. Run through `sh -c`, at most once while a value is cached (see "Let the hook fetch the key for you") |
+| `ATHENAEUM_JEV_KEY_COMMAND` | unset                      | Same, for `JEV_API_KEY`                                        |
+| `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` | `10`          | Bound, in whole seconds, on a single credential command; a non-positive-integer value falls back to `10` |
+| `ATHENAEUM_CRED_REFRESH` | unset                          | Set to `1` to re-fetch a credential from its configured source even when a cached line already exists |
+| `ATHENAEUM_OP_KEY_PATH`  | unset                             | 1Password reference (`op://<vault>/<item>/credential`) for `ANTHROPIC_API_KEY`. **No default** — `op` is used only if you set this and opt into the `op` gate |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | unset                          | Same, for `JEV_API_KEY`                                        |
 | `ATHENAEUM_OP_INTERACTIVE` | unset           | Set to `1` to opt into 1Password's interactive desktop-app integration: `op` may then run without `OP_SERVICE_ACCOUNT_TOKEN`, and the non-interactive suppression flags below are NOT set (athenaeum#2193) |
-| `ATHENAEUM_OP_REFRESH`   | unset                              | Set to `1` to re-fetch a credential from `op` even when a cached line already exists (athenaeum#2193) |
+| `ATHENAEUM_OP_REFRESH`   | unset                              | Older name for `ATHENAEUM_CRED_REFRESH` above; still honoured (athenaeum#2193) |
 | `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`, inside the detached background job (athenaeum#2193, athenaeum#2204); a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` |
 | `ATHENAEUM_HOOK_BUDGET_SECONDS` | `10`                        | Shared foreground time budget for `session-start-recall.sh` and the packaged `athenaeum-claude-hook` adapter; each still-foreground step is bound by whatever's left of it, not by its own fixed timeout (athenaeum#2204) |
 | `ATHENAEUM_FORCE_REBUILD` | `0`                              | Set to `1` to force a vector-index rebuild even if the existing one is fresher than the wiki |
@@ -191,11 +195,13 @@ secret manager you already use (see "Using your own secret manager" below).
 
 - a key already exported in the hook's environment wins;
 - otherwise the cached `config.env` line is used;
-- otherwise, and only if you opted into `op` (see below), the hook fetches
-  the key with `op` and caches it.
+- otherwise, and only if you configured a source (see "Let the hook fetch
+  the key for you"), the hook fetches the key and caches it.
 
-Neither of the first two ever runs `op`. An exported key is never written
-into `config.env`.
+Neither of the first two runs anything. An exported key is never written
+into `config.env`. **athenaeum assumes no secret manager:** with no source
+configured, the third step does not happen at all — no subprocess is
+spawned and no timeout is spent.
 
 **Who reads `config.env`, and who doesn't.** `config.env` is read by:
 
@@ -239,6 +245,10 @@ names are placeholders; use your own.
 | Bitwarden | `bw get password "Anthropic API Key"` (needs an unlocked `BW_SESSION`) |
 | 1Password | `OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false op read "op://<vault>/<item>/credential"` |
 
+Any command in that table is also what you give
+`ATHENAEUM_ANTHROPIC_KEY_COMMAND` if you would rather the hook fetch and
+cache it for you — see "Let the hook fetch the key for you" below.
+
 Notes:
 
 - **Apple's Passwords app has no command-line interface.** It is a front end
@@ -252,31 +262,87 @@ Notes:
 - **When the key changes**, run the recipe again. The last
   `ANTHROPIC_API_KEY=` line in the file wins.
 
+### Optional: let the hook fetch the key for you
+
+The recipe above is a one-off you run by hand. If you would rather not
+repeat it when the key changes, name the fetch command and
+`session-start-recall.sh` runs it for you:
+
+```bash
+# macOS Keychain
+export ATHENAEUM_ANTHROPIC_KEY_COMMAND='security find-generic-password -s anthropic-api-key -a "$USER" -w'
+
+# Linux Secret Service (GNOME Keyring, KWallet)
+export ATHENAEUM_ANTHROPIC_KEY_COMMAND='secret-tool lookup service anthropic-api-key'
+
+# pass
+export ATHENAEUM_ANTHROPIC_KEY_COMMAND='pass show anthropic/api-key'
+
+# Bitwarden (needs an unlocked BW_SESSION)
+export ATHENAEUM_ANTHROPIC_KEY_COMMAND='bw get password "Anthropic API Key"'
+
+# 1Password
+export ATHENAEUM_ANTHROPIC_KEY_COMMAND='OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false op read "op://<vault>/<item>/credential"'
+```
+
+`ATHENAEUM_JEV_KEY_COMMAND` does the same for `JEV_API_KEY`. The command:
+
+- is run through `sh -c`, so a pipeline (`pass show x | head -1`) works;
+- runs **at most once** while a value is cached in `config.env` —
+  `ATHENAEUM_CRED_REFRESH=1` forces a re-fetch over a cached line;
+- is bounded by `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` (default 10, whole
+  seconds only);
+- runs inside the detached background job, never on the hook's own
+  foreground path, so it cannot push a session start past its budget;
+- has its stdout cached in `config.env` (mode 600) and nowhere else. The
+  value is never an argument to anything, so it cannot leak through `ps`,
+  and it is never written to `rebuild.log` or reported by
+  `athenaeum status`.
+
+**The once-only fetch is the point on macOS.** A Keychain item read with
+`security` can raise its own access prompt ("security wants to use your
+confidential information …") unless the item's ACL allows
+`/usr/bin/security`. Fetching once and caching is what keeps that to a
+single prompt instead of one per session. Granting
+`/usr/bin/security` access when the prompt appears ("Always Allow")
+suppresses it for later reads.
+
+A failure, a timeout, or empty output is recorded as a
+`credential_fetch_failed` degradation (see "Degraded-session visibility"
+below) and leaves whatever is already cached in place. The three cases are
+deliberately not distinguished and the store's own stderr is discarded: a
+secret store can quote the value it was asked about.
+
 ### Optional: let the hook fetch the key with `op`
 
-`session-start-recall.sh` can fetch a missing credential with `op` itself.
-It does this only when all of the following hold:
+`op` is one supported source, not the default. Set
+`ATHENAEUM_OP_KEY_PATH` (and/or `ATHENAEUM_OP_JEV_KEY_PATH`) to an
+`op://<vault>/<item>/credential` reference and the hook fetches it with
+`op` directly. **There are no default references** — with these unset,
+nothing runs `op`, whatever else is in your environment.
 
+The `op` source is used only when all of the following hold:
+
+- `ATHENAEUM_OP_KEY_PATH` is set (there is no shipped default);
 - `op` is on `PATH`;
 - `OP_SERVICE_ACCOUNT_TOKEN` is set, **or** you set `ATHENAEUM_OP_INTERACTIVE=1`
   to use 1Password's interactive desktop-app integration instead;
 - the key is not already exported, and nothing is cached in `config.env` for
-  it. `ATHENAEUM_OP_REFRESH=1` forces a re-fetch over a cached line.
+  it. `ATHENAEUM_CRED_REFRESH=1` forces a re-fetch over a cached line.
 
 Each `op read` is bounded by `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10,
 whole seconds only). Unless you set `ATHENAEUM_OP_INTERACTIVE=1`, it runs
 with `OP_LOAD_DESKTOP_APP_SETTINGS=false` and
 `OP_BIOMETRIC_UNLOCK_ENABLED=false`, set on that one subprocess. See
 "Repeated permission prompts" below for why. The fetched value is cached in
-`config.env` (mode 600). Any failure is silent and leaves the existing
-state in place.
+`config.env` (mode 600). A failure is recorded as a
+`credential_fetch_failed` degradation and leaves the existing state in
+place.
 
-The script ships default item paths (`op://Agent Tools/Anthropic API Key/credential`
-and `op://Agent Tools/Jev Athenaeum Key/credential`). They are used only if
-you opt into `op` as described above. Point them at your own items with
-`ATHENAEUM_OP_KEY_PATH` and `ATHENAEUM_OP_JEV_KEY_PATH`. athenaeum#2205
-plans to drop these baked-in paths in favour of a generic credential
-command.
+`ATHENAEUM_ANTHROPIC_KEY_COMMAND` takes precedence when both it and
+`ATHENAEUM_OP_KEY_PATH` are set, and it can express `op read` itself — so
+this section exists for installs that configured `op` before the generic
+command existed, and for anyone who prefers the dedicated knob.
 
 ### What happens with no key
 
@@ -307,10 +373,11 @@ nothing is cached yet).
 ### Degraded-session visibility
 
 `athenaeum status` reports the most recently recorded degradation event
-from any shipped hook — a missing credential (`no_api_key`), a search
-backend index that has never finished building (`index_not_ready`), or a
-foreground step that ran out of its budget and was skipped
-(`step_timeout`). The record lives under `~/.cache/athenaeum` alongside
+from any shipped hook — a missing credential (`no_api_key`), a configured
+credential source that returned nothing (`credential_fetch_failed`), a
+search backend index that has never finished building
+(`index_not_ready`), or a foreground step that ran out of its budget and
+was skipped (`step_timeout`). The record lives under `~/.cache/athenaeum` alongside
 `config.env`. No separate command: extending `status` was the natural
 place (there is no `doctor` command), and a dedicated hook also injects a
 one-line notice into the model's context the first time it sees a

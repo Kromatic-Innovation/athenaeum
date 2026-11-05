@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # SessionStart hook: read config, optionally bootstrap ANTHROPIC_API_KEY
-# from 1Password, and build the search index.
+# from whichever secret store the operator configured, and build the
+# search index.
+#
+# No secret manager is assumed (issue athenaeum#2205). Nothing is fetched
+# unless the operator names a source: a shell command
+# (`ATHENAEUM_ANTHROPIC_KEY_COMMAND` / `ATHENAEUM_JEV_KEY_COMMAND` -- so
+# `security find-generic-password`, `secret-tool lookup`, `pass show`,
+# `bw get` and `op read` all work), or a 1Password reference
+# (`ATHENAEUM_OP_KEY_PATH` / `ATHENAEUM_OP_JEV_KEY_PATH`). There are NO
+# default references: with nothing configured, no credential subprocess is
+# spawned at all and no timeout is spent.
 #
 # 1. Reads athenaeum.yaml for config (auto_recall, search_backend)
 # 2. Writes a shell-readable cache at ~/.cache/athenaeum/config.env
 # 3. Builds the FTS5 index synchronously (cheap, ~1s/3k pages).
 # 4. Decides whether the EXPENSIVE work -- a vector index (re)build and/or
-#    an `op` credential fetch -- is needed, and if so forks it as a
+#    a credential fetch -- is needed, and if so forks it as a
 #    DETACHED background job behind a lock (issue athenaeum#2204 AC3). This
 #    hook's own foreground path never runs either of them and never waits
 #    on the background job (AC4): the next turn, or the next session, uses
@@ -67,15 +77,36 @@
 #                                 after the budget is already spent is
 #                                 skipped and recorded as a `step_timeout`
 #                                 degradation (see "athenaeum status").
-#   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
-#   ATHENAEUM_OP_JEV_KEY_PATH  1Password path for JEV_API_KEY (default: op://Agent Tools/Jev Athenaeum Key/credential)
+#   ATHENAEUM_ANTHROPIC_KEY_COMMAND  Shell command whose stdout is
+#                                 ANTHROPIC_API_KEY (default: unset, issue
+#                                 athenaeum#2205). Run through `sh -c`, so a
+#                                 pipeline works, at most ONCE while a value
+#                                 is cached in config.env, bounded by
+#                                 ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS.
+#                                 Takes precedence over ATHENAEUM_OP_KEY_PATH.
+#   ATHENAEUM_JEV_KEY_COMMAND     Same, for JEV_API_KEY (default: unset)
+#   ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS  Bound, in WHOLE seconds, on a
+#                                 single credential command (default: 10).
+#                                 Normalised exactly like
+#                                 ATHENAEUM_OP_TIMEOUT_SECONDS below: a
+#                                 fractional, non-numeric, empty or zero
+#                                 value silently falls back to the default.
+#   ATHENAEUM_OP_KEY_PATH         1Password reference for ANTHROPIC_API_KEY.
+#                                 NO DEFAULT (issue athenaeum#2205): `op` is
+#                                 used only when this is set explicitly, e.g.
+#                                 op://<vault>/<item>/credential
+#   ATHENAEUM_OP_JEV_KEY_PATH     Same, for JEV_API_KEY. No default.
+#   ATHENAEUM_CRED_REFRESH        1 = re-fetch from the configured source even
+#                                 when a cached line for that credential
+#                                 already exists (default: unset,
+#                                 athenaeum#2205). ATHENAEUM_OP_REFRESH is
+#                                 still honoured as the older name.
 #   ATHENAEUM_OP_INTERACTIVE      1 = opt into 1Password's interactive desktop-app
 #                                 integration: `op` may run without a service-account
 #                                 token, and the non-interactive suppression flags
 #                                 below are NOT set (default: unset, athenaeum#2193)
-#   ATHENAEUM_OP_REFRESH          1 = re-fetch from `op` even when a cached line for
-#                                 that credential already exists (default: unset,
-#                                 athenaeum#2193)
+#   ATHENAEUM_OP_REFRESH          Older name for ATHENAEUM_CRED_REFRESH above;
+#                                 still honoured (athenaeum#2193)
 #   ATHENAEUM_OP_TIMEOUT_SECONDS  Bound, in WHOLE seconds, on a single `op read`
 #                                 (default: 10, athenaeum#2193). Must be a
 #                                 positive integer -- a fractional, non-numeric,
@@ -335,6 +366,125 @@ _athenaeum_op_read() {
   return 1
 }
 
+# ── Generic credential command (issue athenaeum#2205) ──────────────────────
+# `ATHENAEUM_<NAME>_KEY_COMMAND` in the style of git's credential helper or
+# AWS `credential_process`: athenaeum ships no client for any secret
+# manager, it runs the one command the operator already uses and caches the
+# result. `security find-generic-password -s ... -w`, `secret-tool lookup
+# ...`, `pass show ...`, `bw get password ...` and `op read op://...` are
+# then all the same mechanism, and 1Password is one example rather than the
+# default.
+#
+# _athenaeum_cred_command_read <command>
+# Writes the fetched value to stdout, nothing else; returns non-zero on any
+# failure, timeout, or empty output. Matches `_athenaeum_op_read`'s
+# contract exactly, so the caller's single `if _fetched="$(...)" &&
+# [ -n "$_fetched" ]` guard works for either source.
+#
+# Run through `sh -c`, NOT exec'd directly (issue athenaeum#2205's open
+# question): the documented recipes include pipelines (`pass show x |
+# head -1`), and a credential-helper knob that cannot express a pipeline
+# forces the operator to write a wrapper script for the common case. The
+# command string is operator-supplied configuration, exactly like a
+# launchd `ProgramArguments` entry; it is never built from untrusted input
+# by this hook. The fetched VALUE never becomes an argument to anything --
+# it is read from stdout and written straight to config.env -- so it cannot
+# leak through `ps`.
+_athenaeum_cred_command_read() {
+  local _command="$1"
+  # Same normalisation as `_athenaeum_op_read`'s budget, and for the same
+  # reason: a malformed knob must fall back to the documented default
+  # rather than reach the portable fallback's integer arithmetic.
+  local _cmd_budget="${ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS:-10}"
+  case "$_cmd_budget" in
+    ''|*[!0-9]*|0) _cmd_budget=10 ;;
+  esac
+
+  if [ -n "$_athenaeum_op_timeout_bin" ]; then
+    "$_athenaeum_op_timeout_bin" "$_cmd_budget" sh -c "$_command" 2>/dev/null
+    return $?
+  fi
+
+  # Portable fallback (no `timeout`/`gtimeout` on PATH): background + poll
+  # + kill, with the value landing in a mode-600 temp file inside
+  # $CACHE_DIR -- never a world-readable /tmp path. Deliberately the same
+  # shape as `_athenaeum_op_read`'s fallback; see that function for why
+  # the poll is in deciseconds.
+  local _cmd_tmp
+  _cmd_tmp=$(mktemp "${CACHE_DIR}/cred-command.XXXXXX")
+  chmod 600 "$_cmd_tmp"
+  sh -c "$_command" > "$_cmd_tmp" 2>/dev/null &
+  local _cmd_pid=$!
+  local _cmd_budget_ds=$((_cmd_budget * 10))
+  local _cmd_waited_ds=0
+  while kill -0 "$_cmd_pid" 2>/dev/null; do
+    if [ "$_cmd_waited_ds" -ge "$_cmd_budget_ds" ]; then
+      kill "$_cmd_pid" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$_cmd_pid" 2>/dev/null || true
+      wait "$_cmd_pid" 2>/dev/null || true
+      rm -f "$_cmd_tmp"
+      return 1
+    fi
+    sleep 0.1
+    _cmd_waited_ds=$((_cmd_waited_ds + 1))
+  done
+
+  local _cmd_status=0
+  wait "$_cmd_pid" 2>/dev/null || _cmd_status=$?
+  if [ "$_cmd_status" -eq 0 ]; then
+    cat "$_cmd_tmp"
+    rm -f "$_cmd_tmp"
+    return 0
+  fi
+  rm -f "$_cmd_tmp"
+  return 1
+}
+
+# _athenaeum_cred_refresh_requested: exit 0 when a cached line should be
+# re-fetched anyway. `ATHENAEUM_CRED_REFRESH` is the generic name (issue
+# athenaeum#2205); `ATHENAEUM_OP_REFRESH` is the older, op-specific one and
+# stays honoured so an existing install keeps working unchanged.
+_athenaeum_cred_refresh_requested() {
+  [ "${ATHENAEUM_CRED_REFRESH:-}" = "1" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]
+}
+
+# _athenaeum_cred_source <index>
+# Echoes the source configured for credential <index>: `command`, `op`, or
+# the empty string when the operator configured neither. Called by BOTH the
+# foreground "is a background fetch worth forking at all" decision and the
+# background job's own fetch loop, so the two can never disagree -- the
+# same single-definition discipline `_athenaeum_vector_stale` uses for the
+# vector half.
+#
+# A command beats a 1Password reference when both are set: the generic knob
+# is the one the operator added most recently, and it can express `op read`
+# itself if that is what they meant.
+#
+# The `op` branch still carries athenaeum#2193's gate (a service-account
+# token, or an explicit interactive opt-in) and additionally requires `op`
+# on PATH. The command branch requires neither: a `sh -c` fetch has no
+# 1Password session to probe and no desktop-app permission prompt to raise.
+_athenaeum_cred_source() {
+  local _idx="$1"
+  local _command_var="${_CRED_COMMAND_VARS[$_idx]}"
+  local _command_val="${!_command_var:-}"
+  if [ -n "$_command_val" ]; then
+    echo command
+    return 0
+  fi
+  local _op_path_var="${_CRED_OP_PATH_VARS[$_idx]}"
+  local _op_path_val="${!_op_path_var:-}"
+  if [ -n "$_op_path_val" ] \
+    && { [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; } \
+    && command -v op >/dev/null 2>&1; then
+    echo op
+    return 0
+  fi
+  echo ""
+  return 0
+}
+
 # _athenaeum_vector_stale: exit 0 (true/stale) if the vector index is
 # MISSING, older than the newest wiki page, or ATHENAEUM_FORCE_REBUILD=1;
 # exit 1 (false/fresh) otherwise. Shared by the foreground "is a background
@@ -418,43 +568,74 @@ _athenaeum_run_background_build() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: start backend=${SEARCH_BACKEND:-vector}"
 
     # -- credential refresh (issue athenaeum#2056's table, moved here by
-    # issue athenaeum#2204) ------------------------------------------------
-    if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
-      if command -v op >/dev/null 2>&1; then
-        local _i=0
-        while [ "$_i" -lt "$_cred_count" ]; do
-          local _name="${_CRED_ENV_NAMES[$_i]}"
-          local _default_path="${_CRED_DEFAULT_PATHS[$_i]}"
-          local _override_var="${_CRED_OVERRIDE_VARS[$_i]}"
-          local _override_val="${!_override_var:-}"
-          local _key_path="${_override_val:-$_default_path}"
-          local _existing_line=""
-          if [ -f "$CONFIG_ENV" ]; then
-            _existing_line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
-          fi
-          local _needs_fetch=false
-          case "$_existing_line" in
-            "${_name}="?*) [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ] && _needs_fetch=true ;;
-            *) _needs_fetch=true ;;
-          esac
-          if [ "$_needs_fetch" = true ]; then
-            local _fetched_key
-            if _fetched_key="$(_athenaeum_op_read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
-              local _tmp_env
-              _tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
-              chmod 600 "$_tmp_env"
-              grep -v "^${_name}=" "$CONFIG_ENV" > "$_tmp_env" 2>/dev/null || true
-              printf '%s=%s\n' "$_name" "$_fetched_key" >> "$_tmp_env"
-              mv "$_tmp_env" "$CONFIG_ENV"
-              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: refreshed ${_name}"
-            else
-              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: ${_name} fetch failed or empty"
+    # issue athenaeum#2204, generalised past 1Password by issue
+    # athenaeum#2205) ------------------------------------------------------
+    # The op-token / `command -v op` gate that used to wrap this whole loop
+    # is now per-credential, inside `_athenaeum_cred_source`: a command
+    # source needs no 1Password session, and a credential with NO source
+    # configured must spawn nothing at all (athenaeum#2205).
+    local _i=0
+    while [ "$_i" -lt "$_cred_count" ]; do
+      local _name="${_CRED_ENV_NAMES[$_i]}"
+      local _source
+      _source="$(_athenaeum_cred_source "$_i")"
+      if [ -n "$_source" ]; then
+        local _existing_line=""
+        if [ -f "$CONFIG_ENV" ]; then
+          _existing_line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+        fi
+        local _needs_fetch=false
+        case "$_existing_line" in
+          "${_name}="?*) _athenaeum_cred_refresh_requested && _needs_fetch=true ;;
+          *) _needs_fetch=true ;;
+        esac
+        if [ "$_needs_fetch" = true ]; then
+          # `_fetched_key` holds a secret: it is assigned from a command
+          # substitution (never an argument), written to a mode-600 file,
+          # and `unset` as soon as it has been used. It is never echoed
+          # into $REBUILD_LOG and never reaches `record_degradation`'s
+          # detail string, which `athenaeum status` prints (athenaeum#2205).
+          local _fetched_key
+          local _fetch_ok=false
+          if [ "$_source" = command ]; then
+            local _command_var="${_CRED_COMMAND_VARS[$_i]}"
+            local _command_val="${!_command_var:-}"
+            if _fetched_key="$(_athenaeum_cred_command_read "$_command_val" 2>/dev/null)" \
+              && [ -n "$_fetched_key" ]; then
+              _fetch_ok=true
+            fi
+          else
+            local _op_path_var="${_CRED_OP_PATH_VARS[$_i]}"
+            local _op_path_val="${!_op_path_var:-}"
+            if _fetched_key="$(_athenaeum_op_read "$_op_path_val" 2>/dev/null)" \
+              && [ -n "$_fetched_key" ]; then
+              _fetch_ok=true
             fi
           fi
-          _i=$((_i + 1))
-        done
+          if [ "$_fetch_ok" = true ]; then
+            local _tmp_env
+            _tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
+            chmod 600 "$_tmp_env"
+            grep -v "^${_name}=" "$CONFIG_ENV" > "$_tmp_env" 2>/dev/null || true
+            printf '%s=%s\n' "$_name" "$_fetched_key" >> "$_tmp_env"
+            mv "$_tmp_env" "$CONFIG_ENV"
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: refreshed ${_name} from ${_source}"
+          else
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: ${_name} ${_source} fetch failed, timed out, or returned nothing"
+            # Durable, operator-visible degradation (issue athenaeum#2205).
+            # The three failure modes are indistinguishable from here by
+            # design -- `_athenaeum_cred_command_read` and
+            # `_athenaeum_op_read` both report "no usable value" and
+            # nothing else, because the alternative is surfacing a secret
+            # store's own stderr, which can quote the value.
+            _athenaeum_record_degradation credential_fetch_failed \
+              "${_name}: the configured ${_source} source failed, timed out, or returned nothing; recall continues on whatever is already cached"
+          fi
+          unset _fetched_key
+        fi
       fi
-    fi
+      _i=$((_i + 1))
+    done
 
     # -- vector index build ------------------------------------------------
     if [ "${SEARCH_BACKEND:-vector}" = "vector" ] && _athenaeum_vector_stale; then
@@ -484,13 +665,20 @@ except ImportError as e:
 }
 
 # ── Credential table (issue athenaeum#2056) ─────────────────────────────────
-# (ENV_NAME, default op path, override env) entries. Used both by the
-# foreground preserve/restore logic below and by the background fetch loop
-# above. Parallel indexed arrays, not an associative array: stock macOS
+# (ENV_NAME, command env, 1Password-reference env) entries. Used both by
+# the foreground preserve/restore logic below and by the background fetch
+# loop above. Parallel indexed arrays, not an associative array: stock macOS
 # ships bash 3.2.57, which has no `declare -A`.
+#
+# Issue athenaeum#2205 removed the fourth column -- a baked-in default
+# `op://` reference naming one operator's vault and items. There is no
+# default reference and no default command: a credential has a SOURCE only
+# when the operator names one, which is what makes "no config -> no
+# subprocess, no timeout" true by construction rather than by a guard
+# somewhere downstream.
 _CRED_ENV_NAMES=(ANTHROPIC_API_KEY JEV_API_KEY)
-_CRED_DEFAULT_PATHS=("op://Agent Tools/Anthropic API Key/credential" "op://Agent Tools/Jev Athenaeum Key/credential")
-_CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
+_CRED_COMMAND_VARS=(ATHENAEUM_ANTHROPIC_KEY_COMMAND ATHENAEUM_JEV_KEY_COMMAND)
+_CRED_OP_PATH_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
 _cred_count=${#_CRED_ENV_NAMES[@]}
 # No warn-on-missing entry here: the no-key warning further down stays
 # hardcoded to ANTHROPIC_API_KEY only (Jev is optional, athenaeum#2056 AC).
@@ -512,8 +700,8 @@ fi
 # ── Preserve cached credentials across the rewrite below ───────────────────
 # Issue athenaeum#1886: both config.env writers below (the python path and
 # the bash fallback) truncate the file from scratch and neither carries a
-# credential forward -- only a *fresh* `op read` (now background-only, issue
-# athenaeum#2204) re-adds it. Capture whatever is cached on disk now, before
+# credential forward -- only a *fresh* fetch from the operator's configured
+# source (now background-only, issue athenaeum#2204) re-adds it. Capture whatever is cached on disk now, before
 # either writer runs, so each one can be restored unless a fresh fetch
 # supersedes it.
 #
@@ -719,7 +907,7 @@ if [ "$_read_config_ok" = false ]; then
 fi
 
 # Restore each cached credential both writers above just truncated away. A
-# fresh `op read` in the BACKGROUND job (issue athenaeum#2204) supersedes a
+# fresh fetch in the BACKGROUND job (issue athenaeum#2204) supersedes a
 # given line by rewriting it; until that completes, this cached line is
 # what stops the hook from silently dropping the credential (athenaeum#1886,
 # generalised by athenaeum#2056 to every entry in the table above).
@@ -843,18 +1031,21 @@ fi
 # disk, never blocking on this fork.
 _athenaeum_need_background=false
 
-if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
-  if command -v op >/dev/null 2>&1; then
-    _i=0
-    while [ "$_i" -lt "$_cred_count" ]; do
-      if [ "${_had_live_cred[$_i]}" = false ] \
-        && { [ -z "${_cached_cred_lines[$_i]}" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]; }; then
-        _athenaeum_need_background=true
-      fi
-      _i=$((_i + 1))
-    done
+# Issue athenaeum#2205: ask `_athenaeum_cred_source` per credential rather
+# than gating the whole loop on a 1Password session. A credential with no
+# source configured can never be fetched, so it must not be a reason to
+# fork the background job -- which is what makes "no credential config and
+# no cached key spawns no credential subprocess and spends no timeout"
+# hold for the WHOLE hook, foreground and background alike.
+_i=0
+while [ "$_i" -lt "$_cred_count" ]; do
+  if [ "${_had_live_cred[$_i]}" = false ] \
+    && { [ -z "${_cached_cred_lines[$_i]}" ] || _athenaeum_cred_refresh_requested; } \
+    && [ -n "$(_athenaeum_cred_source "$_i")" ]; then
+    _athenaeum_need_background=true
   fi
-fi
+  _i=$((_i + 1))
+done
 
 _athenaeum_vector_ever_built=true
 if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then

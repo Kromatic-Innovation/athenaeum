@@ -77,13 +77,25 @@ and covers resolver-backed knobs only. The variables below are read by the
 shell hook (and, for the two `OP_*` flags, by `op` itself), so they are
 listed here instead.
 
+**No secret manager is assumed, and nothing below has a default reference.**
+A credential is fetched only when you name a source: a shell command, or an
+explicit `op://` reference. With neither set, the hook spawns no credential
+subprocess and spends no timeout. A command beats a reference when both are
+set. See
+[`../../examples/claude-code/README.md`](../../examples/claude-code/README.md)
+("Using your own secret manager") for per-store commands.
+
 | Variable | Read by | Description |
 |----------|---------|-------------|
-| `ATHENAEUM_OP_KEY_PATH` | `session-start-recall.sh` | 1Password item path for `ANTHROPIC_API_KEY` when the `op` fetch is opted into. The shipped default (`op://Agent Tools/Anthropic API Key/credential`) is used only then |
-| `ATHENAEUM_OP_JEV_KEY_PATH` | `session-start-recall.sh` | Same, for `JEV_API_KEY` (default `op://Agent Tools/Jev Athenaeum Key/credential`, used only when `op` is opted into) |
+| `ATHENAEUM_ANTHROPIC_KEY_COMMAND` | `session-start-recall.sh` | Shell command whose stdout is `ANTHROPIC_API_KEY`, run through `sh -c` (so a pipeline works). Run at most once while a value is cached in `config.env`. No default |
+| `ATHENAEUM_JEV_KEY_COMMAND` | `session-start-recall.sh` | Same, for `JEV_API_KEY`. No default |
+| `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` | `session-start-recall.sh` | Bound on a single credential command, whole seconds. Default `10`; a non-positive-integer value falls back to `10` |
+| `ATHENAEUM_CRED_REFRESH` | `session-start-recall.sh` | `1` re-fetches from the configured source even when `config.env` already caches the credential. Default unset. `ATHENAEUM_OP_REFRESH` is the older name and still works |
+| `ATHENAEUM_OP_KEY_PATH` | `session-start-recall.sh` | 1Password reference (`op://<vault>/<item>/credential`) for `ANTHROPIC_API_KEY`. **No default:** `op` is used only when this is set and the `op` gate below is open |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | `session-start-recall.sh` | Same, for `JEV_API_KEY`. No default |
 | `OP_SERVICE_ACCOUNT_TOKEN` | `session-start-recall.sh`, `op`, the receipt-sealing key provider | 1Password service-account token. Setting it is one of the two ways to open the hook's `op` gate |
 | `ATHENAEUM_OP_INTERACTIVE` | `session-start-recall.sh` | `1` opens the `op` gate without a service-account token and uses 1Password's interactive desktop-app integration; the two `OP_*` suppression flags are then NOT set. Default unset |
-| `ATHENAEUM_OP_REFRESH` | `session-start-recall.sh` | `1` re-fetches from `op` even when `config.env` already caches the credential. Default unset |
+| `ATHENAEUM_OP_REFRESH` | `session-start-recall.sh` | Older name for `ATHENAEUM_CRED_REFRESH` above; still honoured. Default unset |
 | `ATHENAEUM_OP_TIMEOUT_SECONDS` | `session-start-recall.sh` | Bound on a single `op read`, whole seconds. Default `10`; a non-positive-integer value falls back to `10` |
 | `OP_LOAD_DESKTOP_APP_SETTINGS` | `op` | Set to `false` wherever `op` runs to stop its macOS App Data probe ("would like to access data from other apps"). The hook sets it on its own `op` calls unless `ATHENAEUM_OP_INTERACTIVE=1` |
 | `OP_BIOMETRIC_UNLOCK_ENABLED` | `op` | Set to `false` alongside the flag above to stop the matching biometric-unlock prompt |

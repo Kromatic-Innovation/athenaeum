@@ -2875,15 +2875,19 @@ inside the 1Password one. An unknown value raises
 - **YAML path:** `librarian.receipt_signing.op_reference`
 - **Environment variable:** —
 - **CLI flag:** —
-- **Default:** `'op://Agent Tools/Athenaeum Receipt Sealing Key/private key'`
+- **Default:** `''`
 - **Precedence:** `athenaeum.yaml` > code default
 
 Resolve the private-key ``op://`` reference.
 
 ``librarian.receipt_signing.op_reference`` is read with ``op read`` by the
 1Password provider, inside the signing call only — the key is never
-written to disk or cached. The default points at the operator-created
-Ed25519 **SSH Key** item, bare ``private key`` field.
+written to disk or cached.
+
+**There is NO default**: unset, this returns the
+empty string and signing is unavailable rather than pointed at some
+operator's vault. Point it at an Ed25519 **SSH Key** item's bare
+``private key`` field — ``op://<vault>/<item>/private key``.
 
 **What ``op read`` actually returns for that field is PKCS8 PEM** — a
 plain ``PRIVATE KEY`` PEM block, not OpenSSH: 1Password serves the
@@ -2918,7 +2922,7 @@ reference.
 - **YAML path:** `librarian.receipt_signing.public_key_ref`
 - **Environment variable:** —
 - **CLI flag:** —
-- **Default:** `'op://Agent Tools/Athenaeum Receipt Sealing Key/public key'`
+- **Default:** `''`
 - **Precedence:** `athenaeum.yaml` > code default
 
 Resolve the public-key ``op://`` reference.
@@ -2936,7 +2940,10 @@ reference with the stock item's public key, so signing and verification
 would use different keys and every seal would fail for a reason the
 output could not explain. Derivation keeps the pair coherent by
 construction; an item whose public field is named something else needs
-this key set explicitly.
+this key set explicitly. With no private reference configured either
+(the default since) this is the empty string,
+which the provider reads as "derive from the private key" — and there
+being no private key to read is what makes signing unavailable.
 
 ### `resolve_reindex_full_rehash_max_age_days`
 

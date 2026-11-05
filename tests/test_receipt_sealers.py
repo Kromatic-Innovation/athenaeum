@@ -699,14 +699,36 @@ class TestSelectSealer:
                 }
             )
 
-    def test_signing_defaults_point_at_the_operator_created_item(self) -> None:
+    def test_signing_names_no_vault_until_the_operator_does(self) -> None:
+        """Issue athenaeum#2205 replaced the two default `op://` references
+        with nothing at all, so this used to assert the opposite: that the
+        provider came pre-pointed at an operator-created item. Selecting
+        the signing sealer still works; the provider simply has no
+        reference to read, which `TestNoBakedInVaultReference2205` below
+        pins as a `KeyUnavailable` degradation rather than an error."""
         sealer = select_sealer({"librarian": {"receipt_sealer": "signing"}})
         assert isinstance(sealer, SigningSealer)
         provider = sealer.provider
         assert isinstance(provider, OnePasswordServiceAccountKeyProvider)
-        assert provider.op_reference.endswith("/private key")
-        assert provider.public_key_reference is not None
-        assert provider.public_key_reference.endswith("/public key")
+        assert provider.op_reference == ""
+        assert provider.public_key_reference == ""
+
+    def test_an_explicitly_configured_reference_reaches_the_provider(self) -> None:
+        """The pairing the old default-pointing test really covered: a
+        configured private reference derives the matching public one."""
+        sealer = select_sealer(
+            {
+                "librarian": {
+                    "receipt_sealer": "signing",
+                    "receipt_signing": {"op_reference": "op://V/I/private key"},
+                }
+            }
+        )
+        assert isinstance(sealer, SigningSealer)
+        provider = sealer.provider
+        assert isinstance(provider, OnePasswordServiceAccountKeyProvider)
+        assert provider.op_reference == "op://V/I/private key"
+        assert provider.public_key_reference == "op://V/I/public key"
 
 
 # ---------------------------------------------------------------------------
@@ -1166,6 +1188,88 @@ class TestSeerReviewFindings:
         assert fields == {"reason": "sealer-config-invalid"}
         assert any("receipt_sealer" in r.getMessage() for r in caplog.records)
         assert not (tmp_path / "wiki" / "_transcript_receipts").exists()
+
+
+class TestNoBakedInVaultReference2205:
+    """Receipt signing names no vault until the operator names one.
+
+    Issue athenaeum#2205, operator ruling 2026-10-30: 1Password must not be
+    in the base configuration. The two defaults used to point at one
+    operator's vault item, which meant a public package shipped a reference
+    nobody else could read.
+    """
+
+    def test_no_default_private_or_public_reference(self) -> None:
+        from athenaeum.config import (
+            resolve_receipt_signing_op_reference,
+            resolve_receipt_signing_public_key_ref,
+        )
+
+        assert resolve_receipt_signing_op_reference(None) == ""
+        assert resolve_receipt_signing_op_reference({}) == ""
+        assert resolve_receipt_signing_public_key_ref(None) == ""
+        assert resolve_receipt_signing_public_key_ref({}) == ""
+
+    def test_no_op_string_remains_in_the_shipped_defaults(self) -> None:
+        """The literals themselves, not just what the resolvers return.
+
+        A resolver can be made to return `""` while the constant still
+        carries the vault name in a published artifact, which is the thing
+        the ruling is actually about.
+        """
+        from athenaeum import config
+
+        assert config.DEFAULT_RECEIPT_SIGNING_OP_REFERENCE == ""
+        assert config.DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF == ""
+
+    def test_an_explicit_reference_is_still_honoured(self) -> None:
+        from athenaeum.config import resolve_receipt_signing_op_reference
+
+        assert (
+            resolve_receipt_signing_op_reference(
+                {"librarian": {"receipt_signing": {"op_reference": "op://V/I/private key"}}}
+            )
+            == "op://V/I/private key"
+        )
+
+    def test_signing_with_no_reference_reports_the_key_unavailable(
+        self, tmp_path: Path
+    ) -> None:
+        """Unavailable, NOT a hard config error.
+
+        `KeyUnavailable` is the documented degradation — intake appends
+        unsealed lines and logs one warning — so switching the knob on
+        before writing the reference cannot fail a nightly run. It must
+        also never shell out to `op`: there is nothing to read.
+        """
+        bin_dir = tmp_path / "fixture-bin"
+        signing_key = Ed25519PrivateKey.generate()
+        _fake_op(
+            bin_dir,
+            private=_openssh_private(signing_key),
+            public=_openssh_public(signing_key),
+        )
+        provider = OnePasswordServiceAccountKeyProvider(
+            "",
+            env=_provider_env(bin_dir, tmp_path / "home"),
+            op_binary=str(bin_dir / "op"),
+        )
+        with pytest.raises(KeyUnavailable) as excinfo:
+            provider.sign(b"payload")
+        assert "librarian.receipt_signing.op_reference" in str(excinfo.value)
+
+    def test_select_sealer_builds_a_signing_sealer_that_degrades(self) -> None:
+        """`receipt_sealer: signing` with no reference still selects the
+        signing sealer — it simply cannot reach a key.
+
+        Pinned because the alternative shape, raising from
+        `select_sealer`, would make the sealer selection itself fail and
+        take the whole run down rather than the one seal.
+        """
+        from athenaeum.receipt_sealers import SigningSealer, select_sealer
+
+        sealer = select_sealer({"librarian": {"receipt_sealer": "signing"}})
+        assert isinstance(sealer, SigningSealer)
 
 
 class TestKnownLimitASealDoesNotClose:
