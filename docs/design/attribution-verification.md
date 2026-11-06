@@ -699,10 +699,10 @@ adversarial ones.
 | Campaign or project page holding recipients | `other-known` per recipient |
 | Organiser's page holding colleagues' addresses | `other-known` |
 | Role inbox on the person's own domain | `alias` (`role-inbox`) |
-| Role inbox at an unrelated domain | `other-unknown` or `non-personal` |
+| Role inbox at an unrelated domain | `non-personal` |
 | Same person under two surnames, or a former name | `same-entity` or `alias` (`former-name`) |
-| Local part with a surname initial that does not match the page | `own` or `other-known`, depending on the excerpt |
-| Correct but unusual address (nickname, personal domain) | `own` |
+| Local part with a surname initial that does not match the page | `alias` (`personal-alias`) or `other-known`, depending on the excerpt |
+| Correct but unusual address (nickname, personal domain) | `alias` (`personal-alias`) |
 
 Each case has a target brief, holders, candidates, the checks that would fire,
 a source excerpt, and the gold label. There are at least 50 cases per question
@@ -907,3 +907,11 @@ the pass bar.
    filed on a non-owner target, in every mode. Whole-domain relay entries stay
    observe-only until a narrowed list exists, because they over-deny real
    employees of the relay's domain (§5.1, D1).
+4. **Option B for unusual-but-genuine addresses (2026-11, athenaeum#2260
+   comment).** An address that is unusual in shape but genuinely the
+   target's own (a personal nickname address, or a secondary address built
+   from a nickname-based surname form) is `alias` with
+   `alias_relation: "personal-alias"`, never `own`. `own` is reserved for an
+   address that plainly resembles the target's real name. The calibration
+   dataset (§12.1) is corrected to this ruling rather than the ruling
+   bending to the dataset's prior labels (athenaeum#2341).
