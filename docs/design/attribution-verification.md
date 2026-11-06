@@ -705,10 +705,19 @@ adversarial ones.
 | Correct but unusual address (nickname, personal domain) | `alias` (`personal-alias`) |
 
 Each case has a target brief, holders, candidates, the checks that would fire,
-a source excerpt, and the gold label. There are at least 50 cases per question
-class (§6.6), so at least 250 in all, with a fixed-seed stratified split into
-60% fit and 40% held out. Cases with no real-world counterpart are allowed,
-but they never make up more than 20% of a class.
+a source excerpt, and the gold label. There are at least 130 cases per
+question class (§6.6), so at least 650 in all, with a fixed-seed stratified
+split into 60% fit and 40% held out — which gives at least 52 held-out cases
+per class. That 52 is not a round number: it is the computed minimum for
+§12.3's pass bar, the **one-sided** Wilson lower bound (z = 1.6449) against
+the 0.95 accuracy floor, to be reachable at all with zero held-out errors (52
+of 52 clears it, at about 0.9505; 51 of 52 does not, at about 0.918). At the
+smaller sizing this design originally specified (at least 50 cases per class,
+20 held out), the bar could never be met by any model, at any threshold — the
+two-sided bound, which this design used before athenaeum#2344, needs 73
+held-out cases for the same zero-error floor, which no sizing this design
+ever specified reached either (§17). Cases with no real-world counterpart are
+allowed, but they never make up more than 20% of a class.
 
 Real labelled cases from an operator's deployment are the seed for the
 templates. They are never committed. A deployment can run the same harness
@@ -739,7 +748,10 @@ The harness reports these for each (tier, question class, signal):
   against observed accuracy);
 - ECE over those bins;
 - the threshold derived on the fit split, and accuracy above it on the
-  held-out split with its Wilson lower bound;
+  held-out split with its **one-sided** Wilson lower bound (the pass-bar
+  statistic below, athenaeum#2344 — not the two-sided interval reported
+  above, which answers a different question: see the field note at the end
+  of this section);
 - the abstain share, meaning the share below threshold, which is the expected
   human-queue share;
 - cost per case, from the existing `TokenUsage` accounting.
@@ -747,11 +759,17 @@ The harness reports these for each (tier, question class, signal):
 A class **passes** for a tier when every condition below holds on the
 held-out split:
 
-1. The Wilson 95% lower bound of accuracy among cases at or above threshold is
-   at least the target (`librarian.attribution.accuracy_floor`, default
-   **0.95**). This is one floor for every outcome: confirming a value as the
-   target's own and re-attributing it are held to the same bar (§17,
-   decision 2).
+1. The **one-sided** Wilson 95% lower bound (z = 1.6449) of accuracy among
+   cases at or above threshold is at least the target
+   (`librarian.attribution.accuracy_floor`, default **0.95**, resolved via
+   `resolve_attribution_accuracy_floor` — no separate one-sided config key).
+   This is one floor for every outcome: confirming a value as the target's
+   own and re-attributing it are held to the same bar (§17, decision 2). The
+   bound is one-sided because the bar only asks a floor question ("is
+   accuracy at least 0.95?"), never a ceiling one — splitting confidence
+   mass onto a tail that is never checked (as the two-sided interval does)
+   makes the bar unreachable at any sizing this design priced before
+   athenaeum#2344 (§12.1, §17).
 2. ECE is at most 0.05 for signals 1 and 2. Signal 3 has no ECE.
 3. The abstain share is at most 0.30. A class that would send more than this
    to humans is reported as failing, so a human decides whether to accept the
@@ -778,10 +796,11 @@ class:
   signal: self-reported | agreement-k3 | class-level
   bins: [[0.0, 0.42, 0.61], [0.42, 0.70, 0.83], ...]  # lo, hi, observed accuracy
   threshold: 0.93            # a calibrated probability
-  n_fit: 60
-  n_holdout: 40
-  holdout_accuracy_above: 0.98
-  holdout_wilson_lb: 0.95
+  n_fit: 78
+  n_holdout: 52
+  holdout_accuracy_above: 1.0
+  holdout_wilson_lb: 0.9505  # one-sided (z = 1.6449), athenaeum#2344 — not
+                             # the two-sided interval §12.3 also reports
   ece: 0.03
   auroc: 0.81
   abstain_share: 0.18
@@ -915,3 +934,17 @@ the pass bar.
    address that plainly resembles the target's real name. The calibration
    dataset (§12.1) is corrected to this ruling rather than the ruling
    bending to the dataset's prior labels (athenaeum#2341).
+5. **Option C for the pass-bar statistic (2026-11, athenaeum#2260 comment
+   6669781217; athenaeum#2344).** The pass bar switches from the two-sided
+   95% Wilson interval's lower bound to the one-sided 95% Wilson lower bound
+   (z = 1.6449), same 0.95 floor, same config knob. The corpus grows to
+   roughly 130 cases per question class (52 held out) so the bar is
+   reachable at zero held-out errors — the computed minimum; see §12.1. The
+   two-sided bound is not wrong on its own terms, but this design never
+   sized a corpus that could clear it: at the floor this design specified
+   before this issue (50 cases per class, 20 held out), the two-sided bound
+   tops out at 0.839, and even the largest sizing on the table (§12.1's new
+   130-per-class floor, 52 held out) only reaches 0.931 two-sided — short of
+   0.95 either way. The run that exposed this (athenaeum#2260's motivation:
+   run 42097116965, develop @ 7c6a1577, ~3.5M tokens, all-false record)
+   spent real tokens finding an unreachable bar, not a model failure.
