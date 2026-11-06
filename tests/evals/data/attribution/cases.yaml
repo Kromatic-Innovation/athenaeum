@@ -803,9 +803,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Alex Thistlewood prefers to be reached at their personal nickname address, ace0@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-001
   question_class: names-other
@@ -824,9 +824,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Jordan Thistlewood prefers to be reached at their personal nickname address, pix1@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-002
   question_class: names-other
@@ -845,9 +845,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Morgan Thistlewood prefers to be reached at their personal nickname address, sunny2@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-003
   question_class: names-other
@@ -866,9 +866,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Riley Thistlewood prefers to be reached at their personal nickname address, robin3@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-004
   question_class: names-other
@@ -887,9 +887,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Casey Thistlewood prefers to be reached at their personal nickname address, fox4@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-005
   question_class: names-other
@@ -908,9 +908,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Dana Thistlewood prefers to be reached at their personal nickname address, ace5@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-006
   question_class: names-other
@@ -929,9 +929,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Taylor Thistlewood prefers to be reached at their personal nickname address, pix6@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-007
   question_class: names-other
@@ -950,9 +950,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Quinn Thistlewood prefers to be reached at their personal nickname address, sunny7@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-008
   question_class: names-other
@@ -971,9 +971,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Avery Thistlewood prefers to be reached at their personal nickname address, robin8@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-009
   question_class: names-other
@@ -992,9 +992,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Reese Thistlewood prefers to be reached at their personal nickname address, fox9@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-010
   question_class: names-other
@@ -1013,9 +1013,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Skyler Thistlewood prefers to be reached at their personal nickname address, ace10@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-011
   question_class: names-other
@@ -1034,9 +1034,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Rowan Thistlewood prefers to be reached at their personal nickname address, pix11@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-012
   question_class: names-other
@@ -1055,9 +1055,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Elliot Thistlewood prefers to be reached at their personal nickname address, sunny12@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-013
   question_class: names-other
@@ -1076,9 +1076,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Harper Thistlewood prefers to be reached at their personal nickname address, robin13@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-014
   question_class: names-other
@@ -1097,9 +1097,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Sage Thistlewood prefers to be reached at their personal nickname address, fox14@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-015
   question_class: names-other
@@ -1118,9 +1118,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Drew Thistlewood prefers to be reached at their personal nickname address, ace15@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-016
   question_class: names-other
@@ -1139,9 +1139,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Emerson Thistlewood prefers to be reached at their personal nickname address, pix16@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-017
   question_class: names-other
@@ -1160,9 +1160,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Finley Thistlewood prefers to be reached at their personal nickname address, sunny17@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-018
   question_class: names-other
@@ -1181,9 +1181,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Hayden Thistlewood prefers to be reached at their personal nickname address, robin18@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-019
   question_class: names-other
@@ -1202,9 +1202,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Jules Thistlewood prefers to be reached at their personal nickname address, fox19@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-020
   question_class: names-other
@@ -1223,9 +1223,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Kendall Thistlewood prefers to be reached at their personal nickname address, ace20@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-021
   question_class: names-other
@@ -1244,9 +1244,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Lane Thistlewood prefers to be reached at their personal nickname address, pix21@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-022
   question_class: names-other
@@ -1265,9 +1265,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Marlowe Thistlewood prefers to be reached at their personal nickname address, sunny22@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-023
   question_class: names-other
@@ -1286,9 +1286,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Noor Thistlewood prefers to be reached at their personal nickname address, robin23@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-024
   question_class: names-other
@@ -1307,9 +1307,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Oakley Thistlewood prefers to be reached at their personal nickname address, fox24@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-025
   question_class: names-other
@@ -1328,9 +1328,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Parker Thistlewood prefers to be reached at their personal nickname address, ace25@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-026
   question_class: names-other
@@ -1349,9 +1349,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Remy Thistlewood prefers to be reached at their personal nickname address, pix26@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-027
   question_class: names-other
@@ -1370,9 +1370,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Sloane Thistlewood prefers to be reached at their personal nickname address, sunny27@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: correct_unusual_address-028
   question_class: names-other
@@ -1391,9 +1391,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Tatum Thistlewood prefers to be reached at their personal nickname address, robin28@example.org.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: correct_unusual_address-029
   question_class: names-other
@@ -1412,9 +1412,9 @@
     uids: []
     label: local-part-does-not-resemble-name
   source_excerpt: Wren Thistlewood prefers to be reached at their personal nickname address, fox29@example.com.
-  gold_verdict: own
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: deal_contact_company_page-000
   question_class: non-person-target
@@ -9045,7 +9045,7 @@
     label: role-local-part:info
   source_excerpt: Alex Thistlewood's page cites info@othercorp-0.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9089,7 +9089,7 @@
     label: role-local-part:hi
   source_excerpt: Morgan Thistlewood's page cites hi@othercorp-2.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9133,7 +9133,7 @@
     label: role-local-part:contact
   source_excerpt: Casey Thistlewood's page cites contact@othercorp-4.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9177,7 +9177,7 @@
     label: role-local-part:hello
   source_excerpt: Taylor Thistlewood's page cites hello@othercorp-6.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9221,7 +9221,7 @@
     label: role-local-part:team
   source_excerpt: Avery Thistlewood's page cites team@othercorp-1.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9265,7 +9265,7 @@
     label: role-local-part:info
   source_excerpt: Skyler Thistlewood's page cites info@othercorp-3.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9309,7 +9309,7 @@
     label: role-local-part:hi
   source_excerpt: Elliot Thistlewood's page cites hi@othercorp-5.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9353,7 +9353,7 @@
     label: role-local-part:contact
   source_excerpt: Sage Thistlewood's page cites contact@othercorp-0.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9397,7 +9397,7 @@
     label: role-local-part:hello
   source_excerpt: Emerson Thistlewood's page cites hello@othercorp-2.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9441,7 +9441,7 @@
     label: role-local-part:team
   source_excerpt: Hayden Thistlewood's page cites team@othercorp-4.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9485,7 +9485,7 @@
     label: role-local-part:info
   source_excerpt: Kendall Thistlewood's page cites info@othercorp-6.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9529,7 +9529,7 @@
     label: role-local-part:hi
   source_excerpt: Marlowe Thistlewood's page cites hi@othercorp-1.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9573,7 +9573,7 @@
     label: role-local-part:contact
   source_excerpt: Oakley Thistlewood's page cites contact@othercorp-3.example.org, a role inbox at an
     unrelated organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9617,7 +9617,7 @@
     label: role-local-part:hello
   source_excerpt: Remy Thistlewood's page cites hello@othercorp-5.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: fit
@@ -9661,7 +9661,7 @@
     label: role-local-part:team
   source_excerpt: Tatum Thistlewood's page cites team@othercorp-0.example.org, a role inbox at an unrelated
     organisation.
-  gold_verdict: other-unknown
+  gold_verdict: non-personal
   gold_owner_uid: null
   gold_alias_relation: null
   split: holdout
@@ -9703,11 +9703,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Alex Thistlewood occasionally signs as alex.t@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Alex Thistlewood also signs correspondence from alex.t@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-001
   question_class: names-other
@@ -9757,11 +9757,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Morgan Thistlewood occasionally signs as morgan.t@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Morgan Thistlewood also signs correspondence from morgan.t@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-003
   question_class: names-other
@@ -9811,11 +9811,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Casey Thistlewood occasionally signs as casey.t@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Casey Thistlewood also signs correspondence from casey.t@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-005
   question_class: names-other
@@ -9865,11 +9865,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Taylor Thistlewood occasionally signs as taylor.t@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Taylor Thistlewood also signs correspondence from taylor.t@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-007
   question_class: names-other
@@ -9919,11 +9919,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Avery Thistlewood occasionally signs as avery.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Avery Thistlewood also signs correspondence from avery.v@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-009
   question_class: names-other
@@ -9973,11 +9973,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Skyler Thistlewood occasionally signs as skyler.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Skyler Thistlewood also signs correspondence from skyler.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-011
   question_class: names-other
@@ -10027,11 +10027,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Elliot Thistlewood occasionally signs as elliot.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Elliot Thistlewood also signs correspondence from elliot.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-013
   question_class: names-other
@@ -10081,11 +10081,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Sage Thistlewood occasionally signs as sage.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Sage Thistlewood also signs correspondence from sage.v@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-015
   question_class: names-other
@@ -10135,11 +10135,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Emerson Thistlewood occasionally signs as emerson.v@example.org (goes by a shortened
-    surname initial).
-  gold_verdict: own
+  source_excerpt: Emerson Thistlewood also signs correspondence from emerson.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-017
   question_class: names-other
@@ -10189,11 +10189,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Hayden Thistlewood occasionally signs as hayden.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Hayden Thistlewood also signs correspondence from hayden.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-019
   question_class: names-other
@@ -10243,11 +10243,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Kendall Thistlewood occasionally signs as kendall.v@example.org (goes by a shortened
-    surname initial).
-  gold_verdict: own
+  source_excerpt: Kendall Thistlewood also signs correspondence from kendall.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-021
   question_class: names-other
@@ -10297,11 +10297,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Marlowe Thistlewood occasionally signs as marlowe.v@example.org (goes by a shortened
-    surname initial).
-  gold_verdict: own
+  source_excerpt: Marlowe Thistlewood also signs correspondence from marlowe.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: fit
 - id: surname_initial_mismatch-023
   question_class: names-other
@@ -10351,11 +10351,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Oakley Thistlewood occasionally signs as oakley.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Oakley Thistlewood also signs correspondence from oakley.v@example.org, a secondary
+    address built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-025
   question_class: names-other
@@ -10405,11 +10405,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Remy Thistlewood occasionally signs as remy.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Remy Thistlewood also signs correspondence from remy.v@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-027
   question_class: names-other
@@ -10459,11 +10459,11 @@
   - check_id: C2
     uids: []
     label: surname-initial-mismatch
-  source_excerpt: Tatum Thistlewood occasionally signs as tatum.v@example.org (goes by a shortened surname
-    initial).
-  gold_verdict: own
+  source_excerpt: Tatum Thistlewood also signs correspondence from tatum.v@example.org, a secondary address
+    built from a nickname-based surname form they use themselves.
+  gold_verdict: alias
   gold_owner_uid: null
-  gold_alias_relation: null
+  gold_alias_relation: personal-alias
   split: holdout
 - id: surname_initial_mismatch-029
   question_class: names-other
@@ -10508,15 +10508,25 @@
     aliases:
     - Alex Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0572
+    name: Alex Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0572
+    name: Alex Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Alex Thistlewood published under their former name, Alex Thistlewood, at alex.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0571
+  gold_owner_uid: attr-eval-0572
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-001
@@ -10530,18 +10540,8 @@
     aliases:
     - Jordan Thistlewood
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0574
-    name: Jordan Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0574
-    name: Jordan Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10562,15 +10562,25 @@
     aliases:
     - Morgan Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0576
+    name: Morgan Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0576
+    name: Morgan Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Morgan Thistlewood published under their former name, Morgan Thistlewood, at morgan.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0575
+  gold_owner_uid: attr-eval-0576
   gold_alias_relation: null
   split: holdout
 - id: two_surnames_former_name-003
@@ -10584,18 +10594,8 @@
     aliases:
     - Riley Thistlewood
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0578
-    name: Riley Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0578
-    name: Riley Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10616,15 +10616,25 @@
     aliases:
     - Casey Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0580
+    name: Casey Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0580
+    name: Casey Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Casey Thistlewood published under their former name, Casey Thistlewood, at casey.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0579
+  gold_owner_uid: attr-eval-0580
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-005
@@ -10638,18 +10648,8 @@
     aliases:
     - Dana Thistlewood
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0582
-    name: Dana Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0582
-    name: Dana Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10670,15 +10670,25 @@
     aliases:
     - Taylor Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0584
+    name: Taylor Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0584
+    name: Taylor Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Taylor Thistlewood published under their former name, Taylor Thistlewood, at taylor.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0583
+  gold_owner_uid: attr-eval-0584
   gold_alias_relation: null
   split: holdout
 - id: two_surnames_former_name-007
@@ -10692,18 +10702,8 @@
     aliases:
     - Quinn Thistlewood
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0586
-    name: Quinn Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0586
-    name: Quinn Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10724,15 +10724,25 @@
     aliases:
     - Avery Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0588
+    name: Avery Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0588
+    name: Avery Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Avery Thistlewood published under their former name, Avery Thistlewood, at avery.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0587
+  gold_owner_uid: attr-eval-0588
   gold_alias_relation: null
   split: holdout
 - id: two_surnames_former_name-009
@@ -10746,18 +10756,8 @@
     aliases:
     - Reese Thistlewood
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0590
-    name: Reese Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0590
-    name: Reese Thistlewood
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10778,15 +10778,25 @@
     aliases:
     - Skyler Thistlewood
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0592
+    name: Skyler Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0592
+    name: Skyler Thistlewood
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Skyler Thistlewood published under their former name, Skyler Thistlewood, at skyler.thistlewood@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0591
+  gold_owner_uid: attr-eval-0592
   gold_alias_relation: null
   split: holdout
 - id: two_surnames_former_name-011
@@ -10800,18 +10810,8 @@
     aliases:
     - Rowan Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0594
-    name: Rowan Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0594
-    name: Rowan Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10832,15 +10832,25 @@
     aliases:
     - Elliot Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0596
+    name: Elliot Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0596
+    name: Elliot Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Elliot Thistlewood published under their former name, Elliot Vexmoor, at elliot.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0595
+  gold_owner_uid: attr-eval-0596
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-013
@@ -10854,18 +10864,8 @@
     aliases:
     - Harper Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0598
-    name: Harper Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0598
-    name: Harper Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10886,15 +10886,25 @@
     aliases:
     - Sage Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0600
+    name: Sage Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0600
+    name: Sage Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Sage Thistlewood published under their former name, Sage Vexmoor, at sage.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0599
+  gold_owner_uid: attr-eval-0600
   gold_alias_relation: null
   split: holdout
 - id: two_surnames_former_name-015
@@ -10908,18 +10918,8 @@
     aliases:
     - Drew Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0602
-    name: Drew Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0602
-    name: Drew Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10940,15 +10940,25 @@
     aliases:
     - Emerson Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0604
+    name: Emerson Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0604
+    name: Emerson Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Emerson Thistlewood published under their former name, Emerson Vexmoor, at emerson.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0603
+  gold_owner_uid: attr-eval-0604
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-017
@@ -10962,18 +10972,8 @@
     aliases:
     - Finley Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0606
-    name: Finley Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0606
-    name: Finley Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -10994,15 +10994,25 @@
     aliases:
     - Hayden Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0608
+    name: Hayden Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0608
+    name: Hayden Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Hayden Thistlewood published under their former name, Hayden Vexmoor, at hayden.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0607
+  gold_owner_uid: attr-eval-0608
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-019
@@ -11016,18 +11026,8 @@
     aliases:
     - Jules Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0610
-    name: Jules Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0610
-    name: Jules Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -11048,15 +11048,25 @@
     aliases:
     - Kendall Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0612
+    name: Kendall Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0612
+    name: Kendall Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Kendall Thistlewood published under their former name, Kendall Vexmoor, at kendall.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0611
+  gold_owner_uid: attr-eval-0612
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-021
@@ -11070,18 +11080,8 @@
     aliases:
     - Lane Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0614
-    name: Lane Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0614
-    name: Lane Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -11102,15 +11102,25 @@
     aliases:
     - Marlowe Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0616
+    name: Marlowe Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0616
+    name: Marlowe Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Marlowe Thistlewood published under their former name, Marlowe Vexmoor, at marlowe.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0615
+  gold_owner_uid: attr-eval-0616
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-023
@@ -11124,18 +11134,8 @@
     aliases:
     - Noor Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0618
-    name: Noor Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0618
-    name: Noor Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -11156,15 +11156,25 @@
     aliases:
     - Oakley Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0620
+    name: Oakley Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0620
+    name: Oakley Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Oakley Thistlewood published under their former name, Oakley Vexmoor, at oakley.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0619
+  gold_owner_uid: attr-eval-0620
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-025
@@ -11178,18 +11188,8 @@
     aliases:
     - Parker Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0622
-    name: Parker Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0622
-    name: Parker Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -11210,15 +11210,25 @@
     aliases:
     - Remy Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0624
+    name: Remy Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0624
+    name: Remy Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Remy Thistlewood published under their former name, Remy Vexmoor, at remy.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0623
+  gold_owner_uid: attr-eval-0624
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-027
@@ -11232,18 +11242,8 @@
     aliases:
     - Sloane Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0626
-    name: Sloane Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0626
-    name: Sloane Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
@@ -11264,15 +11264,25 @@
     aliases:
     - Tatum Vexmoor
     employer_domain_hints: []
-  holders: []
-  candidates: []
+  holders:
+  - uid: attr-eval-0628
+    name: Tatum Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
+  candidates:
+  - uid: attr-eval-0628
+    name: Tatum Vexmoor
+    type: person
+    aliases: []
+    employer_domain_hints: []
   checks:
   - check_id: C2
     uids: []
     label: local-part-names-other-surname
   source_excerpt: Tatum Thistlewood published under their former name, Tatum Vexmoor, at tatum.vexmoor@example.org.
   gold_verdict: same-entity
-  gold_owner_uid: attr-eval-0627
+  gold_owner_uid: attr-eval-0628
   gold_alias_relation: null
   split: fit
 - id: two_surnames_former_name-029
@@ -11286,18 +11296,8 @@
     aliases:
     - Wren Vexmoor
     employer_domain_hints: []
-  holders:
-  - uid: attr-eval-0630
-    name: Wren Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
-  candidates:
-  - uid: attr-eval-0630
-    name: Wren Vexmoor
-    type: person
-    aliases: []
-    employer_domain_hints: []
+  holders: []
+  candidates: []
   checks:
   - check_id: C2
     uids: []
