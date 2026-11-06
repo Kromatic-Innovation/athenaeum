@@ -55,9 +55,12 @@ from athenaeum import pii, pii_attribution
 from athenaeum.calibration import ATTRIBUTION_TIER_NAME, read_calibration_ledger
 from athenaeum.config import (
     DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN,
+    DEFAULT_ATTRIBUTION_MODE,
+    AttributionModeConfigError,
     resolve_attribution_context_window_chars,
     resolve_attribution_escalate,
     resolve_attribution_max_escalations_per_run,
+    resolve_attribution_mode,
 )
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
@@ -2448,6 +2451,46 @@ class TestEscalationKnobs:
         monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", "lots")
         config = {"librarian": {"attribution": {"max_escalations_per_run": 50}}}
         assert resolve_attribution_max_escalations_per_run(config) == 50
+
+
+class TestAttributionModeKnob:
+    """``librarian.attribution.mode`` (athenaeum#2220): ``observe`` / ``enforce`` /
+    ``auto``, env > yaml > default, closed vocabulary."""
+
+    def test_default_is_auto(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        assert DEFAULT_ATTRIBUTION_MODE == "auto"
+        for config in (None, {}, {"librarian": {}}, {"librarian": {"attribution": {}}}):
+            assert resolve_attribution_mode(config) == "auto"
+
+    @pytest.mark.parametrize("mode", ["observe", "enforce", "auto"])
+    def test_reads_the_yaml_value(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": mode}}}
+        assert resolve_attribution_mode(config) == mode
+
+    def test_yaml_value_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": "ENFORCE"}}}
+        assert resolve_attribution_mode(config) == "enforce"
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "enforce")
+        config = {"librarian": {"attribution": {"mode": "observe"}}}
+        assert resolve_attribution_mode(config) == "enforce"
+
+    def test_unknown_yaml_value_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": "disabled"}}}
+        with pytest.raises(AttributionModeConfigError):
+            resolve_attribution_mode(config)
+
+    def test_unknown_env_value_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "sometimes")
+        with pytest.raises(AttributionModeConfigError):
+            resolve_attribution_mode(None)
 
 
 class TestLibrarianShadowPhase:
