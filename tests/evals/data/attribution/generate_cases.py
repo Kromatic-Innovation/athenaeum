@@ -396,7 +396,6 @@ def _pattern_role_inbox_unrelated_domain(i: int) -> dict[str, Any]:
     value = f"{local}@{unrelated_domain}"
     checks = [_check(CHECK_D1_ROLE, label=f"role-local-part:{local}")]
     excerpt = f"{tf} {tl}'s page cites {value}, a role inbox at an unrelated organisation."
-    unknown = i % 2 == 0
     return {
         "pattern": "role_inbox_unrelated_domain",
         "value": value,
@@ -405,7 +404,7 @@ def _pattern_role_inbox_unrelated_domain(i: int) -> dict[str, Any]:
         "candidates": [],
         "checks": checks,
         "source_excerpt": excerpt,
-        "gold_verdict": "other-unknown" if unknown else "non-personal",
+        "gold_verdict": "non-personal",
         "gold_owner_uid": None,
         "gold_alias_relation": None,
     }
@@ -427,12 +426,12 @@ def _pattern_two_surnames_former_name(i: int) -> dict[str, Any]:
         "pattern": "two_surnames_former_name",
         "value": value,
         "target": _brief(target_uid, f"{tf} {tl}", aliases=(f"{tf} {former_last}",)),
-        "holders": [_brief(other_uid, f"{tf} {former_last}")] if not same_entity else [],
-        "candidates": [_brief(other_uid, f"{tf} {former_last}")] if not same_entity else [],
+        "holders": [_brief(other_uid, f"{tf} {former_last}")] if same_entity else [],
+        "candidates": [_brief(other_uid, f"{tf} {former_last}")] if same_entity else [],
         "checks": checks,
         "source_excerpt": excerpt,
         "gold_verdict": "same-entity" if same_entity else "alias",
-        "gold_owner_uid": target_uid if same_entity else None,
+        "gold_owner_uid": other_uid if same_entity else None,
         "gold_alias_relation": None if same_entity else "former-name",
     }
 
@@ -449,7 +448,8 @@ def _pattern_surname_initial_mismatch(i: int) -> dict[str, Any]:
     checks = [_check("C2", label="surname-initial-mismatch")]
     is_own = i % 2 == 0
     excerpt = (
-        f"{tf} {tl} occasionally signs as {value} (goes by a shortened surname initial)."
+        f"{tf} {tl} also signs correspondence from {value}, a secondary address "
+        "built from a nickname-based surname form they use themselves."
         if is_own
         else f"{value} appears on {tf} {tl}'s page, but the excerpt names {of} {ol} as the sender."
     )
@@ -461,9 +461,9 @@ def _pattern_surname_initial_mismatch(i: int) -> dict[str, Any]:
         "candidates": [_brief(other_uid, f"{of} {ol}")] if not is_own else [],
         "checks": checks,
         "source_excerpt": excerpt,
-        "gold_verdict": "own" if is_own else "other-known",
+        "gold_verdict": "alias" if is_own else "other-known",
         "gold_owner_uid": None if is_own else other_uid,
-        "gold_alias_relation": None,
+        "gold_alias_relation": "personal-alias" if is_own else None,
     }
 
 
@@ -483,9 +483,9 @@ def _pattern_correct_unusual_address(i: int) -> dict[str, Any]:
         "candidates": [],
         "checks": checks,
         "source_excerpt": excerpt,
-        "gold_verdict": "own",
+        "gold_verdict": "alias",
         "gold_owner_uid": None,
-        "gold_alias_relation": None,
+        "gold_alias_relation": "personal-alias",
     }
 
 
