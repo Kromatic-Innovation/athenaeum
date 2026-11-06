@@ -15,16 +15,25 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
+from athenaeum.config import resolve_attribution_accuracy_floor
 from athenaeum.pii_attribution import QUESTION_CLASSES
 from tests.evals.data.attribution.generate_cases import (
     _PATTERNS,
-    N_PER_PATTERN,
     OUTPUT_PATH,
+    PATTERN_CASE_COUNTS,
     assign_splits,
     generate_cases,
 )
+from tests.evals.metrics import wilson_lower_bound_one_sided
+
+#: athenaeum#2344: the computed minimum for the one-sided Wilson lower
+#: bound (z = 1.6449) to clear the 0.95 accuracy floor at zero held-out
+#: errors -- 52/52 gives ~0.9505 (passes), 51/52 gives ~0.918 (fails). At
+#: this corpus's 60/40 fit/holdout split that is 130 cases per class.
+MIN_HOLDOUT_PER_CLASS = 52
 
 DATA_DIR = Path(__file__).resolve().parent / "data" / "attribution"
 CASES_PATH = DATA_DIR / "cases.yaml"
@@ -53,9 +62,14 @@ def test_corpus_file_exists_and_is_nonempty() -> None:
     assert cases, "cases.yaml is empty"
 
 
-def test_corpus_has_at_least_250_cases() -> None:
+def test_corpus_has_at_least_the_one_sided_bound_s_floor_of_cases() -> None:
+    """athenaeum#2344: the one-sided Wilson lower bound (z = 1.6449) only
+    clears the 0.95 accuracy floor at zero held-out errors when n_holdout
+    >= 52, i.e. >= 130 cases per class at this corpus's 60/40 split -- see
+    ``test_every_question_class_meets_the_holdout_floor`` for the per-class
+    check. Five question classes x 130 is the floor on the total."""
     cases = _load_cases()
-    assert len(cases) >= 250, f"expected at least 250 cases, got {len(cases)}"
+    assert len(cases) >= 650, f"expected at least 650 cases (5 classes x 130), got {len(cases)}"
 
 
 def test_every_question_class_has_at_least_the_minimum() -> None:
@@ -68,6 +82,51 @@ def test_every_question_class_has_at_least_the_minimum() -> None:
             f"question class {question_class!r} has only "
             f"{counts.get(question_class, 0)} cases, need >= {MIN_CASES_PER_CLASS}"
         )
+
+
+def test_every_question_class_meets_the_holdout_floor() -> None:
+    """athenaeum#2344: the computed minimum for the pass bar to be
+    reachable at all. For every question class in the committed
+    ``cases.yaml``, ``n_holdout`` must be >= 52 (the issue's computed
+    minimum: zero held-out errors needs n = 52 for the one-sided Wilson
+    lower bound, z = 1.6449, to clear the 0.95 accuracy floor -- 52/52
+    gives ~0.9505, 51/52 gives ~0.918), i.e. >= 130 cases per class at this
+    corpus's 60/40 fit/holdout split -- and the one-sided bound computed
+    with all n_holdout cases correct must itself be at least
+    ``resolve_attribution_accuracy_floor(None)``, so the test tracks the
+    live floor rather than a hand-copied 0.95.
+    """
+    cases = _load_cases()
+    holdout_counts: dict[str, int] = {}
+    for case in cases:
+        if case.get("split") == "holdout":
+            holdout_counts[case["question_class"]] = (
+                holdout_counts.get(case["question_class"], 0) + 1
+            )
+    floor = resolve_attribution_accuracy_floor(None)
+    for question_class in QUESTION_CLASSES:
+        n_holdout = holdout_counts.get(question_class, 0)
+        assert n_holdout >= MIN_HOLDOUT_PER_CLASS, (
+            f"question class {question_class!r} has only {n_holdout} held-out "
+            f"cases, need >= {MIN_HOLDOUT_PER_CLASS}"
+        )
+        best_possible = wilson_lower_bound_one_sided(n_holdout, n_holdout)
+        assert best_possible >= floor, (
+            f"question class {question_class!r}: n_holdout={n_holdout} gives a "
+            f"best-possible one-sided lower bound of {best_possible!r}, below "
+            f"the {floor!r} floor even with zero held-out errors"
+        )
+
+
+def test_counter_example_48_holdout_cases_fails_the_holdout_floor() -> None:
+    """Counter-example for ``test_every_question_class_meets_the_holdout_floor``:
+    a synthetic class with 48 held-out cases (below the 52-case computed
+    minimum) must fail, even at zero held-out errors."""
+    floor = resolve_attribution_accuracy_floor(None)
+    n_holdout = 48
+    assert n_holdout < MIN_HOLDOUT_PER_CLASS
+    best_possible = wilson_lower_bound_one_sided(n_holdout, n_holdout)
+    assert best_possible < floor
 
 
 def test_every_case_is_a_known_question_class() -> None:
@@ -151,13 +210,18 @@ def test_cases_path_constant_matches_this_test_s_path() -> None:
     assert OUTPUT_PATH == CASES_PATH
 
 
-def test_each_pattern_contributes_n_per_pattern_cases() -> None:
+def test_each_pattern_contributes_its_configured_case_count() -> None:
+    """athenaeum#2344: replaced the old flat ``N_PER_PATTERN`` with
+    per-pattern counts (:data:`PATTERN_CASE_COUNTS`) sized so every
+    question class totals >= 130 cases -- patterns no longer all
+    contribute the same count, so each is checked against its own
+    configured target rather than one shared constant."""
     cases = _load_cases()
     counts: dict[str, int] = {}
     for case in cases:
         counts[case["pattern"]] = counts.get(case["pattern"], 0) + 1
-    for count in counts.values():
-        assert count == N_PER_PATTERN
+    expected = {fn.__name__[len("_pattern_") :]: n for fn, n in PATTERN_CASE_COUNTS.items()}
+    assert counts == expected
 
 
 def test_no_case_carries_a_usage_class_field() -> None:
@@ -445,3 +509,53 @@ def test_counter_example_own_case_describing_a_nickname_is_rejected() -> None:
         pass
     else:
         raise AssertionError("check (d) failed to reject an own case describing a nickname address")
+
+
+# ---------------------------------------------------------------------------
+# Design §12.4 example record (athenaeum#2344)
+# ---------------------------------------------------------------------------
+
+DESIGN_DOC_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "design" / "attribution-verification.md"
+)
+
+
+def _section_12_4_yaml_block() -> str:
+    text = DESIGN_DOC_PATH.read_text(encoding="utf-8")
+    after_12_4 = text.split("### 12.4 Choosing the tier and storing the result", 1)[1]
+    fenced = after_12_4.split("```yaml", 1)[1]
+    return fenced.split("```", 1)[0]
+
+
+def _yaml_number(block: str, key: str) -> float:
+    match = re.search(rf"^\s*{re.escape(key)}:\s*([0-9.]+)", block, re.M)
+    assert match, f"{key!r} not found in the §12.4 example block"
+    return float(match.group(1))
+
+
+def test_design_doc_example_holdout_wilson_lb_matches_its_own_numbers() -> None:
+    """athenaeum#2344: the design doc's §12.4 example record must be
+    arithmetically possible under the one-sided Wilson lower bound --
+    recompute ``holdout_wilson_lb`` from the example's own ``n_holdout`` and
+    ``holdout_accuracy_above`` rather than trusting the literal in the doc,
+    so a future hand-edit that drifts the example back out of reach fails
+    here instead of shipping silently (the original defect this issue
+    fixed: §12.4's prior example, n_holdout=40 / accuracy=0.98, could not
+    occur under any Wilson bound at all)."""
+    block = _section_12_4_yaml_block()
+    n_holdout = int(_yaml_number(block, "n_holdout"))
+    accuracy = _yaml_number(block, "holdout_accuracy_above")
+    documented_lb = _yaml_number(block, "holdout_wilson_lb")
+
+    successes = round(n_holdout * accuracy)
+    recomputed = wilson_lower_bound_one_sided(successes, n_holdout)
+
+    floor = resolve_attribution_accuracy_floor(None)
+    assert recomputed >= floor, (
+        f"§12.4 example (n_holdout={n_holdout}, accuracy={accuracy}) recomputes to a "
+        f"one-sided lower bound of {recomputed!r}, below the {floor!r} floor"
+    )
+    assert recomputed == pytest.approx(documented_lb, abs=5e-3), (
+        f"§12.4's documented holdout_wilson_lb ({documented_lb!r}) does not match the "
+        f"recomputed value ({recomputed!r}) for n_holdout={n_holdout}, accuracy={accuracy}"
+    )

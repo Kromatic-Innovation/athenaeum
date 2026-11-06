@@ -55,13 +55,17 @@ OUTPUT_PATH = Path(__file__).resolve().parent / "cases.yaml"
 #: reproducible.
 SEED = 2211
 
-#: Cases generated per pattern template. 14 patterns x 30 = 420 total,
-#: comfortably over design §12.1's "at least 250 cases... at least 50 per
-#: question class" floor for every one of the five classes (see this
-#: module's own docstring for the per-class pattern counts: the thinnest
-#: class, non-person-target, gets 2 patterns x 30 = 60).
-N_PER_PATTERN = 30
-
+#: Per-class fit/holdout split (design §12.1, §12.3; athenaeum#2344). The
+#: pass bar reads the one-sided Wilson lower bound
+#: (:func:`tests.evals.metrics.wilson_lower_bound_one_sided`, z = 1.6449)
+#: against the 0.95 accuracy floor. Zero held-out errors clears that floor
+#: only at n_holdout >= 52 (52/52 gives ~0.9505; 51/52 gives ~0.918) -- at a
+#: 60/40 fit/holdout split that is 130 cases per class. ``FIT_SHARE`` stays
+#: 0.6 (unchanged, out of this issue's scope); this issue's change is
+#: ``PATTERN_CASE_COUNTS`` below, which replaces the old flat
+#: ``N_PER_PATTERN = 30`` with a per-pattern count sized so each class
+#: totals >= 130 (and so splits evenly across its own pattern count,
+#: landing each class's n_holdout at exactly 52 or 53 -- see that table).
 FIT_SHARE = 0.6
 
 #: Invented first names. Common-sounding on purpose (so a generated excerpt
@@ -506,12 +510,49 @@ _PATTERNS: tuple[Any, ...] = (
     _pattern_correct_unusual_address,
 )
 
+#: Cases generated per pattern template (athenaeum#2344, replacing the old
+#: flat ``N_PER_PATTERN = 30``). Each question class's patterns are keyed by
+#: :func:`athenaeum.pii_attribution.question_class_for` over the pattern's
+#: own ``checks`` -- not hand-copied here -- so the count below is a
+#: per-pattern SIZE chosen to hit >= 130 cases for the class that pattern
+#: belongs to:
+#:
+#:   question class       patterns  per-pattern  class total  n_holdout
+#:   non-person-target    2         65           130          52
+#:   held-elsewhere        2         65           130          52
+#:   names-other           3         44           132          53
+#:   source-context        3         44           132          53
+#:   role-unmatched        4         33           132          53
+#:
+#: (``n_holdout`` is ``class_total - round(class_total * FIT_SHARE)``, the
+#: same rounding :func:`assign_splits` applies -- the two 130-case classes
+#: land on exactly 52, the three 132-case classes on 53, both >= the
+#: one-sided bound's 52-case minimum.) Total corpus: 656 cases, no class
+#: above ~150 (design §12.1's token-impact proviso does not apply).
+PATTERN_CASE_COUNTS: dict[Any, int] = {
+    _pattern_introducer_on_introducee: 44,  # source-context (3 patterns x 44 = 132)
+    _pattern_referred_by_field: 44,
+    _pattern_reverse_referrer: 44,
+    _pattern_referrer_fanout: 65,  # held-elsewhere (2 patterns x 65 = 130)
+    _pattern_relay_sender: 33,  # role-unmatched (4 patterns x 33 = 132)
+    _pattern_operator_mailer: 33,
+    _pattern_deal_contact_company_page: 65,  # non-person-target (2 patterns x 65 = 130)
+    _pattern_campaign_recipients: 65,
+    _pattern_organiser_colleagues: 65,  # held-elsewhere
+    _pattern_role_inbox_own_domain: 33,  # role-unmatched
+    _pattern_role_inbox_unrelated_domain: 33,  # role-unmatched
+    _pattern_two_surnames_former_name: 44,  # names-other (3 patterns x 44 = 132)
+    _pattern_surname_initial_mismatch: 44,
+    _pattern_correct_unusual_address: 44,
+}
+
 
 def generate_cases() -> list[dict[str, Any]]:
     """Generate every case, across every pattern, with no split assigned yet."""
     cases: list[dict[str, Any]] = []
     for pattern_fn in _PATTERNS:
-        for i in range(N_PER_PATTERN):
+        count = PATTERN_CASE_COUNTS[pattern_fn]
+        for i in range(count):
             case = pattern_fn(i)
             question_class = question_class_for(_checks_as_evidence(case["checks"]))
             case_id = f"{case['pattern']}-{i:03d}"

@@ -23,14 +23,14 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 36
-  n_holdout: 24
+  n_fit: 78
+  n_holdout: 52
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
 - question_class: names-other
@@ -39,14 +39,14 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 54
-  n_holdout: 36
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
 - question_class: source-context
@@ -55,14 +55,14 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 54
-  n_holdout: 36
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
 - question_class: non-person-target
@@ -71,14 +71,14 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 36
-  n_holdout: 24
+  n_fit: 78
+  n_holdout: 52
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
 - question_class: role-unmatched
@@ -87,13 +87,13 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 72
-  n_holdout: 48
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
