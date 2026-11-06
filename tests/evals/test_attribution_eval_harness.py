@@ -25,7 +25,15 @@ Covers:
 - the best-candidate selection among failing reports
   (``best_failing_report``);
 - ``to_calibration_entries``' non-degenerate rendering for a sweep where
-  no class passes, including the genuinely-unmeasured placeholder row.
+  no class passes, including the genuinely-unmeasured placeholder row;
+- ``render_class_report_line`` — the AC3 "one line per report, naming
+  class/model/signal/n_fit/n_holdout/threshold/lower bound/passes"
+  formatter. (The "every candidate report written to the calibration
+  summary artifact" half of AC3 is wiring inside the live,
+  ``pytest.mark.calibration`` test against the session-scoped
+  ``calibration_session`` fixture — a shared :mod:`tests.evals.harness`
+  type this module deliberately does not reach into; it stays covered by
+  reading the diff in ``test_attribution_eval.py``, not by a test here.)
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from tests.evals.attribution_eval import (
     load_cases,
     needs_agreement_k3,
     preflight_unreachable_classes,
+    render_class_report_line,
     require_some_class_passes,
     run_case_agreement_k3,
     self_reported_auroc_or_reason,
@@ -364,3 +373,87 @@ class TestToCalibrationEntriesNonDegenerate:
         held = next(e for e in entries if e["question_class"] == "held-elsewhere")
         assert held["measured"] is True
         assert held["passes"] is True
+
+
+class TestRenderClassReportLine:
+    """issue athenaeum#2342 AC3: "every candidate ClassReport ... printed
+    to the test output as one line per report (class, model, signal,
+    n_fit, n_holdout, threshold, lower bound, passes)" — direct coverage
+    of the formatter itself, which the live (``calibration``-marked) test
+    only exercises by actually printing it.
+    """
+
+    def _undefined_auroc_report(self) -> ClassReport:
+        """A class-level report shaped exactly like
+        :func:`tests.evals.attribution_eval._report_for_signal`'s
+        no-threshold branch: ``threshold``/``ece``/``auroc`` all ``None``
+        — the degenerate case :func:`render_class_report_line` must still
+        render without blowing up on a missing threshold/AUROC."""
+        return ClassReport(
+            question_class="role-unmatched",
+            model=CANDIDATE_MODELS[-1],
+            signal="class-level",
+            bins=(),
+            threshold=None,
+            n_fit=72,
+            n_holdout=48,
+            holdout_accuracy_above=0.0,
+            holdout_wilson_lb=0.0,
+            ece=None,
+            auroc=None,
+            abstain_share=1.0,
+            passes=False,
+        )
+
+    def test_line_names_every_ac_enumerated_field(self) -> None:
+        passing = _report(
+            question_class="held-elsewhere",
+            model=CANDIDATE_MODELS[0],
+            signal="self-reported",
+            n_fit=36,
+            n_holdout=24,
+            holdout_wilson_lb=0.965,
+            threshold=0.82,
+            passes=True,
+        )
+        failing = _report(
+            question_class="names-other",
+            model=CANDIDATE_MODELS[-1],
+            signal="agreement-k3",
+            n_fit=54,
+            n_holdout=36,
+            holdout_wilson_lb=0.41,
+            threshold=0.55,
+            passes=False,
+        )
+        undefined_auroc = self._undefined_auroc_report()
+
+        for report in (passing, failing, undefined_auroc):
+            line = render_class_report_line(report)
+            assert report.question_class in line
+            assert f"model={report.model}" in line
+            assert f"signal={report.signal}" in line
+            assert f"n_fit={report.n_fit}" in line
+            assert f"n_holdout={report.n_holdout}" in line
+            assert f"threshold={report.threshold}" in line
+            assert f"lower_bound={report.holdout_wilson_lb:.4f}" in line
+            assert f"passes={report.passes}" in line
+
+        # `passes` renders as the literal, legible Python bool, not `0`/`1`.
+        assert "passes=True" in render_class_report_line(passing)
+        assert "passes=False" in render_class_report_line(failing)
+        assert "passes=False" in render_class_report_line(undefined_auroc)
+
+    def test_one_line_per_report_no_cross_contamination(self) -> None:
+        reports = [
+            _report(question_class="held-elsewhere", model="model-a", passes=True),
+            _report(question_class="names-other", model="model-b", passes=False),
+            self._undefined_auroc_report(),
+        ]
+        rendered = [render_class_report_line(r) for r in reports]
+        assert len(rendered) == len(reports)
+        # Each report's own model/class never leaks into another's line.
+        assert "model-b" not in rendered[0]
+        assert "model-a" not in rendered[1]
+        joined = "\n".join(rendered)
+        assert joined.count("\n") == len(reports) - 1
