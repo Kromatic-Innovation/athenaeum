@@ -121,8 +121,10 @@ jobs:
           # summary whose token_usage is this dispatch's own spend receipt.
           # The result store itself (*.jsonl, tens of MB of transcripts) is
           # deliberately NOT carried: the derived summaries above are what a
-          # reader needs, and a store that size does not belong in git.
-          find relayed -type f ! -name '*.jsonl' -size -400k -exec cp -v {} "$DEST"/ \;
+          # reader needs, and a store that size does not belong in git. The 2M
+          # bound is sized for the rendered report: the 768-row 2026-09-19
+          # render is 221 KB, so a 1824-row render lands around 500 KB.
+          find relayed -type f ! -name '*.jsonl' -size -2M -exec cp -v {} "$DEST"/ \;
           # -f: eval-summary.json is gitignored at the repo root (it is a
           # generated artifact), and it is this dispatch's own spend receipt.
           git add -f "$DEST"
