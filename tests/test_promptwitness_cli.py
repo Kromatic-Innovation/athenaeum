@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -791,6 +792,12 @@ class TestClearAppendOnlyBestEffort:
     does not have that capability (chattr silently no-ops here), so these
     tests exercise the mechanism directly via a stubbed `subprocess.run`
     rather than relying on a real immutable file.
+
+    They still drive `cli._clear_append_only_best_effort`, which is the
+    contract callers depend on, but athenaeum#2335 moved the implementation
+    next to the apply path it undoes, so the `sys.platform` and
+    `subprocess.run` they stub are now `ledger`'s -- patching `cli`'s would
+    silently stub nothing and assert over an empty call list.
     """
 
     def test_invokes_chattr_minus_a_on_linux_for_every_file(
@@ -802,11 +809,12 @@ class TestClearAppendOnlyBestEffort:
 
         calls: list[list[str]] = []
 
-        def fake_run(cmd: list[str], **kwargs: object) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(cli.sys, "platform", "linux")
-        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(ledger.sys, "platform", "linux")
+        monkeypatch.setattr(ledger.subprocess, "run", fake_run)
 
         cli._clear_append_only_best_effort(tmp_path)
 
@@ -819,8 +827,12 @@ class TestClearAppendOnlyBestEffort:
     ) -> None:
         (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
         calls: list[list[str]] = []
-        monkeypatch.setattr(cli.sys, "platform", "darwin")
-        monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(ledger.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            ledger.subprocess,
+            "run",
+            lambda cmd, **kw: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
+        )
 
         cli._clear_append_only_best_effort(tmp_path)
 
@@ -831,8 +843,8 @@ class TestClearAppendOnlyBestEffort:
     ) -> None:
         (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
         calls: list[list[str]] = []
-        monkeypatch.setattr(cli.sys, "platform", "win32")
-        monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(ledger.sys, "platform", "win32")
+        monkeypatch.setattr(ledger.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
 
         cli._clear_append_only_best_effort(tmp_path)
 
@@ -842,12 +854,12 @@ class TestClearAppendOnlyBestEffort:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
-        monkeypatch.setattr(cli.sys, "platform", "linux")
+        monkeypatch.setattr(ledger.sys, "platform", "linux")
 
         def raising_run(cmd: list[str], **kwargs: object) -> None:
             raise FileNotFoundError("chattr: command not found")
 
-        monkeypatch.setattr(cli.subprocess, "run", raising_run)
+        monkeypatch.setattr(ledger.subprocess, "run", raising_run)
 
         cli._clear_append_only_best_effort(tmp_path)  # must not raise
 
