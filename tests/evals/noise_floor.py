@@ -155,7 +155,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
-from athenaeum.models import _rates_for_model
+from athenaeum.models import _rates_for_model, model_has_price
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
 from tests.evals.containment import ResultStore
@@ -1066,8 +1066,14 @@ class SpendTotals:
     cache_creation_tokens: int
     cache_read_tokens: int
     billable_input_tokens: float
-    usd: float
+    usd: float | None
     rows_counted: int
+    #: Turns whose cache counters are ``None`` -- "never captured" (every turn
+    #: persisted before athenaeum#239 recorded them), which is NOT the same
+    #: fact as a measured zero. Counted and reported rather than folded into
+    #: the zero above, because a cache-heavy run read as zero would
+    #: under-report spend against a dollar cap.
+    turns_without_cache_data: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -1092,16 +1098,31 @@ def compute_spend(
     multipliers rather than ignored -- ignoring them under-reports spend,
     which is the wrong direction for a capped budget.
     """
-    input_rate, output_rate = _rates_for_model(model_priced)
     plain = cache_create = cache_read = output = 0
+    uncaptured = 0
     for row in rows:
         for turn in row.record.turn_tokens:
             plain += turn.input_tokens
             output += turn.output_tokens
-            cache_create += turn.cache_creation_input_tokens
-            cache_read += turn.cache_read_input_tokens
+            # ``None`` -- never ``0`` -- is the documented value for a turn
+            # persisted before athenaeum#239 recorded cache counters at all
+            # (see TurnTokenUsage). Coalesce for the arithmetic, and count
+            # the turn so the zero below is never mistaken for a measurement.
+            if turn.cache_creation_input_tokens is None and turn.cache_read_input_tokens is None:
+                uncaptured += 1
+            cache_create += turn.cache_creation_input_tokens or 0
+            cache_read += turn.cache_read_input_tokens or 0
     billable_input = plain + 1.25 * cache_create + 0.1 * cache_read
-    usd = (billable_input * input_rate + output * output_rate) / 1_000_000
+    # An unpriceable store gets NO dollar figure rather than a blended-rate
+    # guess: this report is read against a dollar cap, and a wrong number
+    # there is worse than a stated absence. _rates_for_model would silently
+    # fall back to the blended $1.50/$7.50 for an unknown id.
+    usd: float | None
+    if model_has_price(model_priced):
+        input_rate, output_rate = _rates_for_model(model_priced)
+        usd = (billable_input * input_rate + output * output_rate) / 1_000_000
+    else:
+        usd = None
     return SpendTotals(
         model_priced=model_priced,
         input_tokens=plain,
@@ -1111,6 +1132,7 @@ def compute_spend(
         billable_input_tokens=billable_input,
         usd=usd,
         rows_counted=len(rows),
+        turns_without_cache_data=uncaptured,
     )
 
 
@@ -1418,8 +1440,24 @@ def render_report(report: NoiseFloorReport) -> str:
         f"| {spend.rows_counted} | {spend.input_tokens:,} | "
         f"{spend.cache_creation_tokens:,} | {spend.cache_read_tokens:,} | "
         f"{spend.output_tokens:,} | {spend.billable_input_tokens:,.0f} | "
-        f"${spend.usd:.2f} |"
+        f"{('$%.2f' % spend.usd) if spend.usd is not None else 'NOT PRICEABLE'} |"
     )
+    if spend.usd is None:
+        lines.append("")
+        lines.append(
+            f"**No dollar figure**: `{spend.model_priced}` carries no rate, so this "
+            "store cannot be priced. Pass `--model-label` naming the model that "
+            "produced it. A blended-rate guess is deliberately not substituted -- "
+            "this figure is read against a dollar cap."
+        )
+    if spend.turns_without_cache_data:
+        lines.append("")
+        lines.append(
+            f"**{spend.turns_without_cache_data} turn(s) carry no cache counters at "
+            "all** (persisted before athenaeum#239 recorded them). The cache columns "
+            "above count them as zero for the arithmetic; that zero is an absence, "
+            "not a measurement."
+        )
     lines.append("")
     lines.append(f"Total tokens: {spend.total_tokens:,}.")
     lines.append("")
