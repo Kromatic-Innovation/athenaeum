@@ -75,7 +75,7 @@ from tests.evals.metrics import (
     derive_threshold,
     expected_calibration_error,
     reliability_table,
-    wilson_lower_bound,
+    wilson_lower_bound_one_sided,
 )
 
 CASES_PATH = EVAL_DATA_ROOT / "attribution" / "cases.yaml"
@@ -111,8 +111,12 @@ MAX_ABSTAIN_SHARE = 0.30
 #: function, so both reach it through this one named reference rather than
 #: each calling :func:`tests.evals.metrics.wilson_lower_bound` directly.
 #: athenaeum#2344 swaps this to a one-sided bound in exactly this one place;
-#: nothing here depends on which bound it points to.
-PASS_BAR_LOWER_BOUND = wilson_lower_bound
+#: nothing here depends on which bound it points to. One-sided (z = 1.6449)
+#: because the bar only ever asks a floor question ("is accuracy at least
+#: the target?"), never a ceiling one -- the two-sided bound this used to
+#: point at made the bar unreachable at any corpus size this design priced
+#: before this issue (design §12.1, §17).
+PASS_BAR_LOWER_BOUND = wilson_lower_bound_one_sided
 
 
 class EmptyCorpusError(BaseException):
