@@ -2953,6 +2953,61 @@ class TestLibrarianShadowPhase:
         assert ctx.attribution_shadow_summary == {"skipped_failed": True}
 
 
+class TestOneFloorForEveryOutcome:
+    """Design §17 decision 2 / §12.3: ONE accuracy floor
+    (``librarian.attribution.accuracy_floor``) for every outcome -- "it
+    applies equally to confirming a value as the target's own and to
+    re-attributing it. There is no separate, stricter floor for
+    re-attribution."
+
+    This AC turned out to be a VERIFICATION, not a code change: no
+    outcome-specific floor exists anywhere in the tree (confirmed by a
+    repo-wide grep for a second floor/threshold constant namespaced to
+    re-attribution/``own`` -- none found; :func:`threshold_for_class` and
+    :func:`calibrated_probability_for_class` both take only a question
+    class, never a judgement verdict). Pinned two ways: structurally (the
+    config module has exactly one attribution floor resolver) and
+    behaviourally (an ``own`` and an ``other-known`` verdict at the same
+    score, for the same class, get the identical threshold and calibrated
+    probability).
+    """
+
+    def test_config_has_exactly_one_attribution_floor_resolver(self) -> None:
+        import inspect
+
+        from athenaeum import config as config_module
+
+        floor_resolvers = [
+            name
+            for name, _fn in inspect.getmembers(config_module, inspect.isfunction)
+            if name.startswith("resolve_") and "floor" in name and "attribution" in name
+        ]
+        assert floor_resolvers == ["resolve_attribution_accuracy_floor"]
+
+    def test_own_and_other_known_share_the_same_threshold_at_the_same_score(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.90))
+        context = _context(tmp_path)
+
+        own_outcome = _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="own", score=0.95),
+        )
+        other_known_outcome = _escalate(
+            context,
+            _suspect_verdict(context, value="other@example.org"),
+            value="other@example.org",
+            client=_judge_client(verdict="other-known", score=0.95, owner_uid=_HOLDER_UID),
+        )
+
+        assert own_outcome.threshold == other_known_outcome.threshold
+        assert own_outcome.calibrated_p == other_known_outcome.calibrated_p
+        assert own_outcome.above_threshold is True
+        assert other_known_outcome.above_threshold is True
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2219, design §8.3 — calibration audit-sampling of
 # above-threshold ATTRIBUTION placements, and the human audit review that
