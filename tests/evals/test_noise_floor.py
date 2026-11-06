@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.evals import noise_floor
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import build_corpus
-from tests.evals import noise_floor
 from tests.evals.noise_floor import (
     _Z_SUM,
     POSITIVE_CONTROL_PROBE_CLASS,

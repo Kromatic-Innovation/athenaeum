@@ -1100,9 +1100,7 @@ def build_noise_floor_report(
         # RolloutRecord.model) has no model to price against, so the caller's
         # --model-label is used and named in the output as the thing the
         # figure rests on. Never a silent fallback to the blended rate.
-        spend=compute_spend(
-            rows, model_priced=(provenance.model or model_label or "unknown")
-        ),
+        spend=compute_spend(rows, model_priced=(provenance.model or model_label or "unknown")),
     )
 
 
