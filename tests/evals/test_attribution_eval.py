@@ -50,21 +50,23 @@ from athenaeum.pii_attribution import (
     QUESTION_CLASSES,
 )
 from tests.evals.attribution_eval import (
-    AUROC_BAR,
     CANDIDATE_MODELS,
     CASES_PATH,
     ClassReport,
+    assert_accuracy_bar_reachable,
     assert_corpus_covers_every_question_class,
     load_cases,
-    recommended_report,
+    needs_agreement_k3,
+    render_class_report_line,
+    require_some_class_passes,
     run_case_agreement_k3,
     run_case_self_reported,
     select_signal_and_report,
+    summarize_classes,
     to_calibration_entries,
     write_calibration_record,
 )
 from tests.evals.harness import LAYER_ATTRIBUTION, RecordingClient, build_live_client, live_ready
-from tests.evals.metrics import auroc as _auroc
 
 pytestmark = pytest.mark.calibration
 
@@ -95,14 +97,20 @@ def test_attribution_calibration_eval(
     _live_ready: None,
 ) -> None:
     """Run the full corpus against every candidate model; write the record."""
-    inner = build_live_client()
     accuracy_floor = config_module.resolve_attribution_accuracy_floor(None)
+
+    # Zero-token preflight (issue athenaeum#2342): refuse before
+    # constructing any client when the corpus is too small to reach the
+    # bar for one or more classes, no matter how the live run turns out.
+    assert_accuracy_bar_reachable(_cases, accuracy_floor=accuracy_floor)
+
+    inner = build_live_client()
     dataset_sha256 = hashlib.sha256(CASES_PATH.read_bytes()).hexdigest()
     prompt_sha256 = hashlib.sha256(
         CONTACT_ATTRIBUTION_JUDGE_SYSTEM.encode("utf-8")
     ).hexdigest()
 
-    reports_by_class: dict[str, ClassReport | None] = {}
+    reports_by_class: dict[str, list[ClassReport]] = {}
 
     for question_class in QUESTION_CLASSES:
         class_cases = [c for c in _cases if c["question_class"] == question_class]
@@ -139,26 +147,76 @@ def test_attribution_calibration_eval(
                     expected=run.gold_verdict,
                     observed=run.judgement_verdict,
                     passed=run.correct,
+                    detail=(
+                        f"question_class={run.question_class} split={run.split} "
+                        f"signal={run.signal} score={run.score} "
+                        f"owner_uid={run.owner_uid} alias_relation={run.alias_relation}"
+                    ),
                 )
 
             agreement_fit = agreement_holdout = None
-            try:
-                preliminary_auroc: float | None = _auroc(
-                    [r.score for r in self_fit], [r.correct for r in self_fit]
-                )
-            except ValueError:
-                preliminary_auroc = None
-            if preliminary_auroc is None or preliminary_auroc < AUROC_BAR:
+            # issue athenaeum#2342: skip agreement-K3 entirely for a class
+            # whose self-reported fit split is already perfect (no wrong
+            # case at all) -- it is the class K3 helps least.
+            if needs_agreement_k3(self_fit):
                 agreement_fit = []
                 for case in fit_cases:
-                    client.start_case(f"agree__{model}__{case['id']}")
-                    agreement_fit.append(run_case_agreement_k3(case, model, client))
+                    # issue athenaeum#2342: a distinct recording stamp per
+                    # K3 call (not one `start_case` for all three) --
+                    # otherwise all three raw responses land on the same
+                    # `recorded_path` and only the last survives on disk.
+                    agreement_fit.append(
+                        run_case_agreement_k3(
+                            case,
+                            model,
+                            client,
+                            on_call=lambda i, case=case: client.start_case(
+                                f"agree__{model}__{case['id']}__k{i}"
+                            ),
+                        )
+                    )
                     client.end_case()
                 agreement_holdout = []
                 for case in holdout_cases:
-                    client.start_case(f"agree__{model}__{case['id']}")
-                    agreement_holdout.append(run_case_agreement_k3(case, model, client))
+                    agreement_holdout.append(
+                        run_case_agreement_k3(
+                            case,
+                            model,
+                            client,
+                            on_call=lambda i, case=case: client.start_case(
+                                f"agree__{model}__{case['id']}__k{i}"
+                            ),
+                        )
+                    )
                     client.end_case()
+
+                for run in agreement_fit + agreement_holdout:
+                    calibration_session.record_case(
+                        LAYER_ATTRIBUTION,
+                        f"{model}::{run.case_id}::agreement",
+                        expected=run.gold_verdict,
+                        observed=run.judgement_verdict,
+                        passed=run.correct,
+                        detail=(
+                            f"question_class={run.question_class} split={run.split} "
+                            f"signal={run.signal} majority_verdict={run.judgement_verdict} "
+                            f"agreement_score={run.score} "
+                            f"raw_verdicts={list(run.raw_verdicts)} "
+                            f"owner_uid={run.owner_uid} alias_relation={run.alias_relation}"
+                        ),
+                    )
+                    for index, verdict in enumerate(run.raw_verdicts):
+                        calibration_session.record_case(
+                            LAYER_ATTRIBUTION,
+                            f"{model}::{run.case_id}::agreement::run{index}",
+                            expected=run.gold_verdict,
+                            observed=verdict,
+                            passed=(verdict == run.gold_verdict),
+                            detail=(
+                                f"question_class={run.question_class} split={run.split} "
+                                f"raw_run_index={index}"
+                            ),
+                        )
 
             report = select_signal_and_report(
                 question_class,
@@ -171,8 +229,26 @@ def test_attribution_calibration_eval(
             )
             candidate_reports.append(report)
 
-        reports_by_class[question_class] = recommended_report(candidate_reports)
+            # issue athenaeum#2342: every candidate (class x model x
+            # signal) report, not just the recommended one, is written to
+            # the calibration summary artifact and printed to test output.
+            print(render_class_report_line(report))
+            calibration_session.record_case(
+                LAYER_ATTRIBUTION,
+                f"report::{model}::{question_class}::{report.signal}",
+                expected=f"wilson_lb>={accuracy_floor}",
+                observed=f"wilson_lb={report.holdout_wilson_lb:.4f}",
+                passed=report.passes,
+                detail=render_class_report_line(report),
+            )
 
+        reports_by_class[question_class] = candidate_reports
+
+    # Write the record BEFORE the pass-count assertion below, mirroring
+    # calibration_session's own "emit the artifact before asserting"
+    # convention -- an all-fail sweep still leaves its real measured
+    # values on disk for triage, exactly the data this issue's motivating
+    # run failed to produce.
     entries = to_calibration_entries(
         reports_by_class,
         dataset_sha256=dataset_sha256,
@@ -180,3 +256,9 @@ def test_attribution_calibration_eval(
         measured_at=datetime.now(timezone.utc).date().isoformat(),
     )
     write_calibration_record(entries, CALIBRATION_RECORD_PATH)
+
+    lines, passed, total = summarize_classes(reports_by_class)
+    for line in lines:
+        print(line)
+    print(f"{passed}/{total} classes passed")
+    require_some_class_passes(reports_by_class)
