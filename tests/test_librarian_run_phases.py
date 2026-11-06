@@ -266,6 +266,33 @@ class TestRunPreconditions:
         ctx.config = {"llm": {"providers": {"rule_proposals": "not-a-real-provider"}}}
         assert _run_preconditions(ctx) == 1
 
+    def test_bad_attribution_mode_config_returns_1_not_a_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2220 (Seer PR review finding on PR athenaeum#2348): an
+        unrecognized ``librarian.attribution.mode`` must fail HERE, at the
+        same startup gate every other knob validates at, not the first
+        time a per-file ``build_attribution_context`` call resolves it deep
+        inside the entity loop. Uses the REAL ``resolve_attribution_mode``
+        (not mocked), mirroring
+        ``test_bad_rule_proposals_provider_config_returns_1_not_traceback``'s
+        own real-resolver discipline."""
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {"librarian": {"attribution": {"mode": "sometimes"}}}
+        assert _run_preconditions(ctx) == 1
+
+    def test_valid_attribution_mode_config_does_not_fail_preconditions(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.config = {"librarian": {"attribution": {"mode": "enforce"}}}
+        assert _run_preconditions(ctx) is None
+
     def test_preflight_failure_returns_1(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path)
         with (

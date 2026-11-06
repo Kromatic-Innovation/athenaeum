@@ -45,6 +45,7 @@ Cases:
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -55,9 +56,12 @@ from athenaeum import pii, pii_attribution
 from athenaeum.calibration import ATTRIBUTION_TIER_NAME, read_calibration_ledger
 from athenaeum.config import (
     DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN,
+    DEFAULT_ATTRIBUTION_MODE,
+    AttributionModeConfigError,
     resolve_attribution_context_window_chars,
     resolve_attribution_escalate,
     resolve_attribution_max_escalations_per_run,
+    resolve_attribution_mode,
 )
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
@@ -2450,6 +2454,437 @@ class TestEscalationKnobs:
         assert resolve_attribution_max_escalations_per_run(config) == 50
 
 
+class TestAttributionModeKnob:
+    """``librarian.attribution.mode`` (athenaeum#2220): ``observe`` / ``enforce`` /
+    ``auto``, env > yaml > default, closed vocabulary."""
+
+    def test_default_is_auto(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        assert DEFAULT_ATTRIBUTION_MODE == "auto"
+        for config in (None, {}, {"librarian": {}}, {"librarian": {"attribution": {}}}):
+            assert resolve_attribution_mode(config) == "auto"
+
+    @pytest.mark.parametrize("mode", ["observe", "enforce", "auto"])
+    def test_reads_the_yaml_value(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": mode}}}
+        assert resolve_attribution_mode(config) == mode
+
+    def test_yaml_value_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": "ENFORCE"}}}
+        assert resolve_attribution_mode(config) == "enforce"
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "enforce")
+        config = {"librarian": {"attribution": {"mode": "observe"}}}
+        assert resolve_attribution_mode(config) == "enforce"
+
+    def test_unknown_yaml_value_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        config = {"librarian": {"attribution": {"mode": "disabled"}}}
+        with pytest.raises(AttributionModeConfigError):
+            resolve_attribution_mode(config)
+
+    def test_unknown_env_value_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "sometimes")
+        with pytest.raises(AttributionModeConfigError):
+            resolve_attribution_mode(None)
+
+
+def _live_identity(question_class: str, config: dict[str, Any] | None = None) -> tuple[str, str]:
+    """The REAL ``(model, prompt_sha256)`` :func:`attribution_call_identity`
+    resolves right now -- used to build a calibration entry / observe report
+    that genuinely matches, rather than ``_entry``'s fixed synthetic
+    ``prompt_sha256``, which by design never matches the live prompt (it
+    exists for the pre-athenaeum#2220 callers that never compare it)."""
+    return pii_attribution.attribution_call_identity(question_class, config)
+
+
+def _matching_entry(
+    question_class: str, *, model: str, prompt_sha256: str, passes: bool = True
+) -> pii_attribution.CalibrationEntry:
+    """Like ``_entry``, but with an explicit ``prompt_sha256`` so a caller can
+    make it equal the live prompt's sha (:func:`_live_identity`)."""
+    return pii_attribution.CalibrationEntry(
+        question_class=question_class,
+        model=model,
+        prompt_sha256=prompt_sha256,
+        signal=pii_attribution.SIGNAL_SELF_REPORTED,
+        bins=((0.0, 0.5, 0.20), (0.5, 0.9, 0.70), (0.9, 1.0, 0.98)),
+        threshold=0.90,
+        n_fit=60,
+        n_holdout=40,
+        holdout_accuracy_above=0.98,
+        holdout_wilson_lb=0.95,
+        abstain_share=0.18,
+        dataset_sha256="synthetic-dataset-sha",
+        measured_at="2026-10-31",
+        passes=passes,
+        ece=0.03,
+        auroc=0.81,
+    )
+
+
+class TestObserveReportAcknowledgement:
+    """``athenaeum attribution ack-observe-report`` and the ledger behind it
+    (athenaeum#2220, design §9.3)."""
+
+    def test_round_trip(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE: "m"},
+            prompt_sha256_by_class={pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE: "s"},
+        )
+        ack = pii_attribution.acknowledge_attribution_observe_report(
+            contacts_root, report.report_id
+        )
+        assert ack.report_id == report.report_id
+        acks = pii_attribution.read_attribution_observe_report_acks(contacts_root)
+        assert [a.ack_id for a in acks] == [ack.ack_id]
+
+    def test_unknown_report_id_raises(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        with pytest.raises(pii_attribution.ObserveReportAckError):
+            pii_attribution.acknowledge_attribution_observe_report(
+                contacts_root, "never-written"
+            )
+
+    def test_reading_with_no_ledger_yields_empty(self, tmp_path: Path) -> None:
+        assert pii_attribution.read_attribution_observe_report_acks(tmp_path / "contacts") == []
+
+    def test_cli_acknowledges_and_refuses_unknown_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum._cmd_attribution import add_attribution_subparser
+
+        contacts_root = tmp_path / "contacts"
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={},
+            prompt_sha256_by_class={},
+        )
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        add_attribution_subparser(subparsers)
+
+        args = parser.parse_args(
+            [
+                "attribution",
+                "ack-observe-report",
+                report.report_id,
+                "--path",
+                str(tmp_path),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert report.report_id in out
+
+        bad_args = parser.parse_args(
+            [
+                "attribution",
+                "ack-observe-report",
+                "no-such-report",
+                "--path",
+                str(tmp_path),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+        rc = bad_args.func(bad_args)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "no-such-report" in err
+
+
+class TestAutoModePreflight:
+    """``attribution_enforced_classes`` (athenaeum#2220, design §9.1/§9.3):
+    the ``auto`` mode's run-start check, both halves (calibration + ack) and
+    the staleness rules on each.
+
+    Every case pins the model via ``ATHENAEUM_ATTRIBUTION_MODEL`` so
+    :func:`_live_identity` and the fixture's calibration entry agree on it,
+    and reads the REAL prompt sha off :func:`_live_identity` so only the
+    cases that mean to test a prompt-sha mismatch deliberately diverge.
+    """
+
+    QC = pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE
+
+    def _ack_report(
+        self, contacts_root: Path, *, model: str, prompt_sha256: str
+    ) -> str:
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={self.QC: model},
+            prompt_sha256_by_class={self.QC: prompt_sha256},
+        )
+        pii_attribution.acknowledge_attribution_observe_report(contacts_root, report.report_id)
+        return report.report_id
+
+    def test_fresh_install_observes_every_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        enforced = pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        assert enforced == frozenset()
+
+    def test_observe_mode_enforces_nothing_even_with_both_measurements(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "observe")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert pii_attribution.attribution_enforced_classes(None, contacts_root) == frozenset()
+
+    def test_enforce_mode_enforces_everything_unconditionally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "enforce")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        enforced = pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        assert enforced == frozenset(pii_attribution.QUESTION_CLASSES)
+
+    def test_auto_both_present_enforces_the_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_calibration_valid_but_no_ack_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_ack_present_but_no_valid_calibration_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch)  # empty record: no entry for QC at all
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_model_mismatch_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        # The stored entry's model does not match the live model.
+        _patch_record(
+            monkeypatch, _matching_entry(self.QC, model="some-other-model", prompt_sha256=sha)
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_prompt_sha_mismatch_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        # The stored entry's prompt sha does not match the live prompt.
+        _patch_record(
+            monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256="stale-sha")
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_passes_false_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(
+            monkeypatch,
+            _matching_entry(self.QC, model=model, prompt_sha256=sha, passes=False),
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_ack_under_a_different_prompt_sha_is_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The report was acknowledged while the prompt resolved to ``sha``;
+        the live prompt has since changed to a different sha (simulated here
+        by acknowledging a report that recorded a sha the LIVE prompt does
+        not currently match) -- design §9.3: "A changed model or prompt
+        makes the acknowledgement stale."."""
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        # Report+ack recorded under a DIFFERENT prompt sha than the live one.
+        self._ack_report(contacts_root, model=model, prompt_sha256="old-prompt-sha")
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_warning_logged_once_per_observed_class(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.pii_attribution"):
+            pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        warnings_for_qc = [
+            r for r in caplog.records if repr(self.QC) in r.getMessage()
+        ]
+        assert len(warnings_for_qc) == 1
+
+    def test_caching_prevents_repeat_reads_and_repeat_warnings_across_a_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """athenaeum#2220 (Seer PR review finding on PR athenaeum#2348):
+        ``attribution_enforced_classes``'s docstring claims the preflight
+        runs once per run and a demoted class logs its WARNING exactly
+        once per run. Before the cache this added, that was false:
+        ``build_attribution_context`` called it UNCONDITIONALLY on every
+        build, and real call sites (``librarian._record_correspondent_contact``,
+        the tier-3 scrub wiring in ``librarian.py``) build a fresh context
+        once per raw file inside a run-length loop while reusing the SAME
+        ``ExcludedRecordIndex`` across that whole loop (issue athenaeum#883)
+        -- so a multi-file run paid the calibration-record and
+        observe-report-ledger reads, and the WARNINGs, once per FILE.
+
+        This mirrors that real shape -- one shared index, TWO context
+        builds -- and would have failed before the cache existed: two
+        full re-reads (``load_calibration_record`` called 10 times, not
+        5) and two WARNING sets per class (10 total, not 5). The old test
+        above calls the function exactly once and therefore cannot tell a
+        once-per-call cache apart from a once-per-run one; this one can.
+        """
+        import logging
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        knowledge = tmp_path / "knowledge"
+        contacts_root = knowledge / "contacts"
+        (knowledge / "wiki").mkdir(parents=True)
+        config: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
+
+        load_calls = 0
+        real_load = pii_attribution.load_calibration_record
+
+        def _counting_load() -> dict[str, pii_attribution.CalibrationEntry]:
+            nonlocal load_calls
+            load_calls += 1
+            return real_load()
+
+        monkeypatch.setattr(pii_attribution, "load_calibration_record", _counting_load)
+
+        # Baseline: what ONE full (uncached -- no excluded_index) preflight
+        # pass costs, in `load_calibration_record` calls. Each class reads
+        # it more than once internally (the validity check and the model
+        # resolution it also needs each call it separately) -- that
+        # per-class multiplier is pre-existing and not this fix's concern;
+        # what this fix must prove is that the SECOND context build does
+        # not pay it a second time.
+        baseline_calls = load_calls
+        pii_attribution.attribution_enforced_classes(config, contacts_root)
+        one_pass_cost = load_calls - baseline_calls
+        assert one_pass_cost > 0  # sanity: the counting wrapper is live
+
+        load_calls = 0  # reset before the real two-build exercise
+        # caplog accumulates for the WHOLE test regardless of the `with
+        # at_level(...)` scope below (that context only adjusts the
+        # logger's level, it does not window which records get captured)
+        # -- clear the baseline call's own 5 warnings so they cannot be
+        # mistaken for ones the two-build exercise below produced.
+        caplog.clear()
+
+        # The exact sharing real per-file loops already do (issue
+        # athenaeum#883): ONE index, built once, threaded through every
+        # context this "run" builds.
+        idx = pii.ExcludedRecordIndex(contacts_root)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.pii_attribution"):
+            context1 = pii_attribution.build_attribution_context(
+                knowledge, config, excluded_index=idx, contacts_root=contacts_root
+            )
+            context2 = pii_attribution.build_attribution_context(
+                knowledge, config, excluded_index=idx, contacts_root=contacts_root
+            )
+
+        assert context1.enforced_classes == context2.enforced_classes == frozenset()
+
+        for question_class in pii_attribution.QUESTION_CLASSES:
+            warnings_for_qc = [
+                r for r in caplog.records if repr(question_class) in r.getMessage()
+            ]
+            assert len(warnings_for_qc) == 1, (
+                f"{question_class!r} warned {len(warnings_for_qc)} time(s) across "
+                "two context builds sharing one index; expected exactly 1"
+            )
+
+        # TWO context builds must cost exactly ONE pass's worth of reads,
+        # not two -- the second build reused the first's cached answer.
+        assert load_calls == one_pass_cost
+
+    def test_a_different_contacts_root_under_the_same_index_is_not_a_hit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Staleness guard: a cache hit requires both the resolved mode AND
+        the resolved contacts_root to match what produced the cached entry
+        -- mirroring ``_CHILD_C_INDEX_CACHE``'s stored-secret check. Reusing
+        the SAME index object across two genuinely different contacts
+        roots (an edge case, not a real call shape) must not hand back the
+        first root's answer for the second."""
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        idx = pii.ExcludedRecordIndex(tmp_path / "shared-index-root")
+
+        first_root = tmp_path / "contacts-a"
+        second_root = tmp_path / "contacts-b"
+        first = pii_attribution.attribution_enforced_classes(
+            None, first_root, excluded_index=idx
+        )
+        second = pii_attribution.attribution_enforced_classes(
+            None, second_root, excluded_index=idx
+        )
+        # Both observe everything (fresh install), so the RESULT happens to
+        # be equal -- the real assertion is that the cache actually keyed on
+        # contacts_root, verified by checking the cache entry itself.
+        assert first == second == frozenset()
+        cached = pii_attribution._ATTRIBUTION_ENFORCED_CLASSES_CACHE[idx]
+        assert cached[1] == second_root  # the LATEST call's root, not the first's
+
+
 class TestLibrarianShadowPhase:
     def test_the_phase_is_off_by_default(self, tmp_path: Path) -> None:
         from athenaeum.librarian import _run_attribution_shadow_phase
@@ -2507,9 +2942,105 @@ class TestLibrarianShadowPhase:
             "skipped_not_suspect": 0,
             "skipped_already_answered": 0,
             "skipped_over_cap": 0,
+            # athenaeum#2220: no non-shadow suspects exist in this fixture,
+            # so the enforce sweep (a disjoint population) sees nothing.
+            "enforced_considered": 0,
+            "enforced_escalated": 0,
+            "enforced_filed": 0,
+            "enforced_queued": 0,
+            "enforced_skipped_already_answered": 0,
+            "enforced_skipped_over_cap": 0,
         }
         assert record.read_bytes() == before
         assert ctx.knob_models["attribution"]
+
+    def test_the_phase_files_an_enforced_suspect_and_escalates_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2220's own AC: an escalation verdict is applied through
+        the placement executor in enforce mode. One withheld (non-shadow)
+        suspect at/above threshold is FILED for real; a second, below
+        threshold, reaches the real `_pending_questions.md` via
+        `tier4_escalate` -- the handoff the shadow-only phase (athenaeum#2212)
+        deliberately skipped."""
+        from athenaeum import librarian
+        from tests.test_librarian_run_phases import _make_ctx
+
+        _patch_record(monkeypatch, _entry(threshold=0.90))
+        knowledge = tmp_path / "knowledge"
+        (knowledge / "wiki").mkdir(parents=True)
+        _write_page(knowledge / "wiki", uid=_TARGET_UID, name=_TARGET_NAME)
+        context = pii_attribution.build_attribution_context(knowledge, EXCLUDED_CONFIG)
+        record = _write_contact_record(
+            context.contacts_root, "target.md", uid=_TARGET_UID, emails=["old@example.com"]
+        )
+        before = record.read_bytes()
+
+        above_verdict = _suspect_verdict(context)
+        pii_attribution.park_suspect(
+            context,
+            _VALUE,
+            above_verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/above.md",
+            shadow=False,  # withheld by its writer under enforce
+        )
+        below_value = "below@example.org"
+        below_verdict = _suspect_verdict(context, value=below_value)
+        pii_attribution.park_suspect(
+            context,
+            below_value,
+            below_verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/below.md",
+            shadow=False,
+        )
+
+        def _responder(**kwargs: Any) -> str:
+            # Suspects are escalated in filename (hash) order, not insertion
+            # order, so the answer must be keyed on which VALUE is actually
+            # being asked about, not on call sequence.
+            messages = kwargs.get("messages") or [{}]
+            content = str(messages[0].get("content", ""))
+            if _VALUE in content:
+                return json.dumps({"verdict": "own", "score": 0.95})
+            return json.dumps({"verdict": "other-unknown", "score": 0.10})
+
+        client = FakeLLMClient(responder=_responder)
+        monkeypatch.setattr(librarian, "build_llm_client", lambda *a, **k: client)
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge)
+        ctx.config = {
+            **EXCLUDED_CONFIG,
+            "librarian": {"attribution": {"escalate": True}},
+        }
+        librarian._run_attribution_shadow_phase(ctx)
+
+        summary = ctx.attribution_shadow_summary
+        assert summary is not None
+        assert summary["enforced_considered"] == 2
+        assert summary["enforced_escalated"] == 2
+        assert summary["enforced_filed"] == 1
+        assert summary["enforced_queued"] == 1
+
+        # The above-threshold value ("own") was actually filed: a fresh
+        # per-identifier record now links it to the target's uid (a new
+        # value files at its own per-identifier path, design §7.1 "own" --
+        # it is not merged into the pre-existing target.md record).
+        filed_records = pii.resolve_contact_records(context.contacts_root, _VALUE)
+        assert len(filed_records) == 1
+        assert pii.uid_on_record(filed_records[0]) == _TARGET_UID
+        assert record.read_bytes() == before  # the pre-existing record is untouched
+
+        # The below-threshold one reached the REAL human queue.
+        pending_text = (knowledge / "wiki" / "_pending_questions.md").read_text(
+            encoding="utf-8"
+        )
+        assert below_value not in pending_text  # masked, never the raw value
+        assert pii.mask_contact_address(below_value) in pending_text
 
     def test_the_phase_is_skipped_once_the_deadline_tripped(self, tmp_path: Path) -> None:
         from athenaeum.librarian import _run_attribution_shadow_phase
@@ -2539,6 +3070,61 @@ class TestLibrarianShadowPhase:
         ctx.config = {"librarian": {"attribution": {"escalate": True}}}
         librarian._run_attribution_shadow_phase(ctx)
         assert ctx.attribution_shadow_summary == {"skipped_failed": True}
+
+
+class TestOneFloorForEveryOutcome:
+    """Design §17 decision 2 / §12.3: ONE accuracy floor
+    (``librarian.attribution.accuracy_floor``) for every outcome -- "it
+    applies equally to confirming a value as the target's own and to
+    re-attributing it. There is no separate, stricter floor for
+    re-attribution."
+
+    This AC turned out to be a VERIFICATION, not a code change: no
+    outcome-specific floor exists anywhere in the tree (confirmed by a
+    repo-wide grep for a second floor/threshold constant namespaced to
+    re-attribution/``own`` -- none found; :func:`threshold_for_class` and
+    :func:`calibrated_probability_for_class` both take only a question
+    class, never a judgement verdict). Pinned two ways: structurally (the
+    config module has exactly one attribution floor resolver) and
+    behaviourally (an ``own`` and an ``other-known`` verdict at the same
+    score, for the same class, get the identical threshold and calibrated
+    probability).
+    """
+
+    def test_config_has_exactly_one_attribution_floor_resolver(self) -> None:
+        import inspect
+
+        from athenaeum import config as config_module
+
+        floor_resolvers = [
+            name
+            for name, _fn in inspect.getmembers(config_module, inspect.isfunction)
+            if name.startswith("resolve_") and "floor" in name and "attribution" in name
+        ]
+        assert floor_resolvers == ["resolve_attribution_accuracy_floor"]
+
+    def test_own_and_other_known_share_the_same_threshold_at_the_same_score(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.90))
+        context = _context(tmp_path)
+
+        own_outcome = _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="own", score=0.95),
+        )
+        other_known_outcome = _escalate(
+            context,
+            _suspect_verdict(context, value="other@example.org"),
+            value="other@example.org",
+            client=_judge_client(verdict="other-known", score=0.95, owner_uid=_HOLDER_UID),
+        )
+
+        assert own_outcome.threshold == other_known_outcome.threshold
+        assert own_outcome.calibrated_p == other_known_outcome.calibrated_p
+        assert own_outcome.above_threshold is True
+        assert other_known_outcome.above_threshold is True
 
 
 # ---------------------------------------------------------------------------

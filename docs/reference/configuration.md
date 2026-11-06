@@ -437,6 +437,39 @@ value logs a WARNING (via `_env_number`) and falls back to yaml; a
 `resolve_relay_local_prefixes` for why this inlines its own
 ``librarian.attribution.*`` chain rather than sharing a helper.
 
+### `resolve_attribution_mode`
+
+- **YAML path:** `librarian.attribution.mode`
+- **Environment variable:** `ATHENAEUM_ATTRIBUTION_MODE`
+- **CLI flag:** —
+- **Default:** `'auto'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.attribution.mode`` (env ``ATHENAEUM_ATTRIBUTION_MODE``,
+default ``"auto"``).
+
+ (design §9.1): governs how a contact-value writer
+acts on `athenaeum.pii_attribution.check_contact_attribution`'s
+verdict, per question class:
+
+- ``"observe"`` -- every writer logs the verdict and behaves exactly as
+ it does today. Suspects are parked as shadow entries.
+- ``"enforce"`` -- a ``suspect`` value is parked and not written to its
+ target; a ``non-personal`` value is not written to its target;
+ escalation places what it can and sends the rest to the human queue.
+- ``"auto"`` (the default) -- enforces a question class only when BOTH
+ hold (design §17, decision 1): a valid calibration record exists for
+ the model and prompt that class resolves to, AND the operator has
+ acknowledged a clean observe report for this deployment covering that
+ class under the same model and prompt sha. Otherwise that class
+ observes. A fresh install therefore observes every class.
+
+An unrecognized value raises `AttributionModeConfigError` naming
+the key -- env beats yaml beats default, mirroring
+`resolve_pii_hazard_classifier_mode`. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper.
+
 ### `resolve_operator_mailer_domains`
 
 - **YAML path:** `librarian.attribution.operator_mailer_domains`

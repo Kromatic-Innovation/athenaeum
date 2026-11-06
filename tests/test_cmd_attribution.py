@@ -296,6 +296,52 @@ class TestPlaceAsOwn:
         assert "still say 'non-personal'" in captured.err
         assert relay in _record_for(knowledge, _TARGET_UID)["emails"]
 
+    def test_an_enforce_withheld_suspect_is_also_reversible(
+        self, knowledge: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """athenaeum#2220's own reversibility AC: a value withheld because a
+        writer's question class was ENFORCED (not D1-narrow) is parked
+        exactly like any other suspect — ``shadow: false``, disposition
+        ``suspect`` — and ``place --as own`` is the same documented
+        rollback (design §9.4) regardless of WHY it was withheld.
+        """
+        context = pii_attribution.build_attribution_context(
+            knowledge, {"storage": {"mapping": {"pii": "excluded"}}}
+        )
+        role_value = "info@vendor.example.org"
+        verdict = pii_attribution.AttributionVerdict(
+            disposition=pii_attribution.DISPOSITION_SUSPECT,
+            checks=(
+                pii_attribution.CheckEvidence(
+                    check_id=pii_attribution.CHECK_D1_ROLE, label="role-local-part:info"
+                ),
+            ),
+            value_key=pii_attribution.value_key_for(context, role_value),
+        )
+        pii_attribution.park_suspect(
+            context,
+            role_value,
+            verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/role.md",
+            shadow=False,  # withheld -- enforced under athenaeum#2220
+        )
+        suspect_id = pii_attribution.suspect_id_for(verdict.value_key, _TARGET_UID)
+
+        rc = _place(knowledge, suspect_id, "own")
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert f"own -> {pii.PLACEMENT_FILED}" in out
+        meta = _record_for(knowledge, _TARGET_UID)
+        assert role_value in meta["emails"]
+        assert (
+            pii.classification_for_value(meta, role_value).usage_class
+            == pii.USAGE_CLASS_UNCLASSIFIED
+        )
+
 
 class TestPlaceAsOther:
     def test_re_attributes_to_the_named_uid_and_leaves_the_target_alone(

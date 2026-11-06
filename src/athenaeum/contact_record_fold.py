@@ -336,10 +336,13 @@ def merge_contact_values(
     :func:`athenaeum.pii_attribution.check_contact_attribution`'s own
     "pure apart from the log" for what IS a side effect here regardless):
     the verdicts are returned for :func:`fold_contact_record` to park. A
-    D1-narrow verdict (:func:`athenaeum.pii_attribution.is_d1_narrow`)
-    excludes that one value from the merge entirely — it is never carried
-    onto the canonical record — while every other value is added exactly as
-    it is with *attribution_context* omitted (design
+    value withheld under the resolved attribution mode
+    (:func:`athenaeum.pii_attribution.should_enforce_verdict` — issue
+    athenaeum#2220: D1-narrow always, or any other suspect verdict whose
+    question class is enforced under `enforce`/`auto`) excludes that one
+    value from the merge entirely — it is never carried onto the canonical
+    record — while every other value is added exactly as it is with
+    *attribution_context* omitted (design
     ``docs/design/attribution-verification.md`` §9.1). Omitting
     *attribution_context* (the default) skips the seam and returns an empty
     verdicts tuple, so every existing caller is byte-identical.
@@ -362,7 +365,7 @@ def merge_contact_values(
                     context=attribution_context,
                 )
                 verdicts.append((value, verdict))
-                if pii_attribution.is_d1_narrow(verdict):
+                if pii_attribution.should_enforce_verdict(verdict, attribution_context):
                     parked_values.add(_value_key(field_name, value))
         if parked_values:
             missing = {
@@ -708,7 +711,7 @@ def fold_contact_record(
                 target_name=canonical_name if isinstance(canonical_name, str) else None,
                 writer=pii_attribution.WRITER_CONTACT_FOLD,
                 source_ref=str(absorbed_path),
-                shadow=not pii_attribution.is_d1_narrow(verdict),
+                shadow=not pii_attribution.should_enforce_verdict(verdict, attribution_context),
             )
     pii.retire_contact_record(
         root,

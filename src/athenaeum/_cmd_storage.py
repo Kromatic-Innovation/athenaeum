@@ -468,9 +468,15 @@ def _apply_plan(
 
     *attribution_context* (issue athenaeum#2210): when given, parks a
     suspect entry for every non-``pass`` verdict on
-    ``plan.attribution_verdicts`` — shadow for everything except a
-    D1-narrow verdict (:attr:`PiiMigrationPlan.parked_tokens`), which parks
-    non-shadow. The log row itself was already written when
+    ``plan.attribution_verdicts`` — shadow for everything except a token
+    withheld under the resolved attribution mode
+    (:attr:`PiiMigrationPlan.parked_tokens` — issue athenaeum#2220: D1-narrow
+    always, or an enforced suspect question class under `enforce`/`auto`),
+    which parks non-shadow. Read straight off ``plan.parked_tokens`` rather
+    than recomputed here, so the "would withhold" decision
+    :func:`athenaeum.storage_migrate.plan_pii_migration` already made cannot
+    disagree with the "did withhold" one this records. The log row itself
+    was already written when
     :func:`athenaeum.storage_migrate.plan_pii_migration` called the seam
     (the seam logs as its own side effect) — this function only parks. The
     log/park entries land ONLY on apply because BOTH CLI entry points below
@@ -494,7 +500,7 @@ def _apply_plan(
                 target_name=plan.target_name,
                 writer=pii_attribution.WRITER_PII_MIGRATION,
                 source_ref=str(plan.page_path),
-                shadow=not pii_attribution.is_d1_narrow(verdict),
+                shadow=token not in plan.parked_tokens,
             )
 
 

@@ -215,11 +215,13 @@ class PiiMigrationPlan:
     attribution_verdicts: "dict[str, pii_attribution.AttributionVerdict]" = dataclass_field(
         default_factory=dict
     )
-    #: Tokens whose verdict fired D1-narrow (issue athenaeum#2210,
-    #: :func:`athenaeum.pii_attribution.is_d1_narrow`) — enforced in every
-    #: mode. These are still redacted from the rewritten origin page (the
-    #: token itself never belongs in the wiki regardless of attribution) but
-    #: are NOT added to :attr:`excluded_page_text`'s ``emails``/``phones``.
+    #: Tokens withheld under the resolved attribution mode (issue
+    #: athenaeum#2210's D1-narrow, always; or issue athenaeum#2220's
+    #: enforced-suspect question class under `enforce`/`auto` —
+    #: :func:`athenaeum.pii_attribution.should_enforce_verdict`). These are
+    #: still redacted from the rewritten origin page (the token itself never
+    #: belongs in the wiki regardless of attribution) but are NOT added to
+    #: :attr:`excluded_page_text`'s ``emails``/``phones``.
     parked_tokens: tuple[str, ...] = ()
     #: The origin page's own uid/name (issue athenaeum#2210) — every
     #: migration files tokens onto the page's OWN record, so these are the
@@ -630,11 +632,13 @@ def plan_pii_migration(
     nothing" (``docs/design/attribution-verification.md`` §4.2) — the
     verdicts are returned on :attr:`PiiMigrationPlan.attribution_verdicts`
     for the caller (:mod:`athenaeum._cmd_storage`) to log and park on apply.
-    A D1-narrow token (:attr:`PiiMigrationPlan.parked_tokens`) is still
-    redacted from the rewritten origin page — the token never belongs in the
-    wiki regardless of attribution — but is excluded from the excluded-
-    surface record's own ``emails``/``phones``, i.e. never added to the
-    page's uid's contact record.
+    A withheld token (:attr:`PiiMigrationPlan.parked_tokens` — issue
+    athenaeum#2220: D1-narrow always, or any other suspect verdict whose
+    question class is enforced under `enforce`/`auto`) is still redacted
+    from the rewritten origin page — the token never belongs in the wiki
+    regardless of attribution — but is excluded from the excluded-surface
+    record's own ``emails``/``phones``, i.e. never added to the page's
+    uid's contact record.
     """
     entries = coerce_pii_allowlist(allowlist)
     text = page_path.read_text(encoding="utf-8")
@@ -705,7 +709,7 @@ def plan_pii_migration(
                 context=attribution_context,
             )
             attribution_verdicts[token] = verdict
-            if pii_attribution.is_d1_narrow(verdict):
+            if pii_attribution.should_enforce_verdict(verdict, attribution_context):
                 parked_tokens.append(token)
 
     # Rewrite origin: frontmatter with contact data stripped/redacted (durable

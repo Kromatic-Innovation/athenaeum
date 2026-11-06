@@ -233,6 +233,8 @@ from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistr
 from athenaeum.pii import (
     OBSERVED_CONTACT_OTHER_ENTITY,
     OBSERVED_CONTACT_RECORD_WITHOUT_UID,
+    PLACEMENT_FILED,
+    PLACEMENT_MERGE_PROPOSED,
     DoNotEmailFact,
     ExcludedRecordIndex,
     HardBounceFact,
@@ -1949,6 +1951,7 @@ def _record_correspondent_contact(
             writer=pii_attribution.WRITER_OBSERVED_CONTACT,
             context=attribution_context,
         )
+        withheld = pii_attribution.should_enforce_verdict(av_verdict, attribution_context)
         if av_verdict.disposition != pii_attribution.DISPOSITION_PASS:
             pii_attribution.park_suspect(
                 attribution_context,
@@ -1958,14 +1961,18 @@ def _record_correspondent_contact(
                 target_name=entity.name,
                 writer=pii_attribution.WRITER_OBSERVED_CONTACT,
                 source_ref=raw.ref,
-                shadow=not pii_attribution.is_d1_narrow(av_verdict),
+                shadow=not withheld,
             )
-        if pii_attribution.is_d1_narrow(av_verdict):
-            # Enforced in every mode (design §9.1): never mint, never
-            # classify — this writer's write primitive is not even called.
+        if withheld:
+            # Withheld under the resolved attribution mode (design §9.1,
+            # issue athenaeum#2220): D1-narrow in every mode, or — under
+            # `enforce`/an `auto`-enforced class — any other suspect
+            # verdict. Never mint, never classify: this writer's write
+            # primitive is not even called.
             log.info(
-                "  Correspondent address for %s (uid %s) is a D1-narrow "
-                "non-personal identifier; not recorded (issue athenaeum#2210)",
+                "  Correspondent address for %s (uid %s) is withheld under "
+                "the current attribution mode; not recorded (issue "
+                "athenaeum#2220)",
                 entity.name,
                 entity.uid,
             )
@@ -6462,6 +6469,22 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         log.error("%s", exc)
         return 1
 
+    # Issue athenaeum#2220 (Seer PR review finding on PR athenaeum#2348): an
+    # unrecognized ``librarian.attribution.mode``/``ATHENAEUM_ATTRIBUTION_MODE``
+    # must fail HERE, at the same startup gate every other knob above
+    # validates at, rather than the first time a per-file
+    # ``build_attribution_context`` call resolves it deep inside the entity
+    # loop. Resolution here is otherwise thrown away (cheap: no I/O, no
+    # client) -- every real caller re-resolves it from ``ctx.config`` when it
+    # actually needs the value, exactly like the provider checks above.
+    from athenaeum.config import AttributionModeConfigError, resolve_attribution_mode
+
+    try:
+        resolve_attribution_mode(ctx.config)
+    except AttributionModeConfigError as exc:
+        log.error("%s", exc)
+        return 1
+
     # Issue athenaeum#330: fail loudly at startup if the claude-cli binary is missing,
     # instead of silently deferring every file to an rc-0 no-op run.
     preflight_err = preflight_provider(ctx.provider)
@@ -7616,14 +7639,32 @@ def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
 
 
 def _run_attribution_shadow_phase(ctx: RunContext) -> None:
-    """Shadow attribution escalation (issue athenaeum#2212, design §9.1/§9.2).
+    """Attribution escalation: shadow estimate AND real enforcement (issues
+    athenaeum#2212, athenaeum#2220; design §9.1/§9.2).
 
-    Escalates the parked SHADOW attribution suspects to the measured tier for
-    their question class and logs the placement it WOULD have made, with that
-    placement's calibrated probability. **It files nothing**: every call goes
-    through :func:`athenaeum.pii_attribution.escalate_shadow_suspects`, which
-    passes ``apply=False`` to the placement executor. Enforcement is
-    athenaeum#2220.
+    Two sweeps, back to back, over two disjoint populations of parked
+    suspects:
+
+    - :func:`athenaeum.pii_attribution.escalate_shadow_suspects` over
+      SHADOW suspects (``shadow: true`` — not withheld by any writer,
+      design §9.1's observe estimate). Passes ``apply=False``: it logs the
+      placement it WOULD have made, with its calibrated probability, and
+      **files nothing**.
+    - :func:`athenaeum.pii_attribution.escalate_enforced_suspects` over
+      NON-shadow :data:`~athenaeum.pii_attribution.DISPOSITION_SUSPECT`
+      suspects — values a writer already WITHHELD from their target
+      because :func:`athenaeum.pii_attribution.should_enforce_verdict` said
+      so (design §9.1's enforce path: a per-writer decision made at write
+      time, not a mode check made here). Passes ``apply=True``: an
+      at-or-above-threshold answer actually FILES, through the same
+      placement executor. A below-threshold or unsettled answer queues an
+      :class:`~athenaeum.models.EscalationItem`, which this phase hands to
+      :func:`athenaeum.tiers.tier4_escalate` — the handoff the shadow sweep
+      deliberately skips (design §8.1 sends such an item to a human only
+      "when the mode is enforce", and a withheld suspect existing at all
+      is already that signal; D1-narrow's own non-shadow entries carry no
+      question and are filtered out by disposition before either sweep,
+      see :func:`athenaeum.pii_attribution.escalate_enforced_suspects`).
 
     **Why this site.** It is the one place in the pipeline where all four
     conditions hold:
@@ -7654,13 +7695,12 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
     flood the human queue on every run, which is the one way a default-on
     observe hook could do damage.
 
-    **The queue items are counted, not filed.** ``escalate_shadow_suspects``
-    returns the ``EscalationItem``s a human would see, and this phase logs
-    the count. It deliberately does NOT hand them to :func:`tier4_escalate`:
-    design §8.1 sends an item with no valid calibration to a human only when
-    "the mode is ``enforce``", and this issue is observe-only. Filing them
-    now would put one block in ``_pending_questions.md`` per parked suspect
-    on a store whose shipped calibration record passes no class at all.
+    **The shadow sweep's queue items are counted, not filed** — unchanged
+    from athenaeum#2212: design §8.1 sends an item with no valid calibration
+    to a human only when "the mode is ``enforce``", and a SHADOW suspect is
+    exactly the population no writer withheld, so there is nothing for a
+    human to settle yet. The ENFORCE sweep's queue items (below) are the
+    ones actually handed to :func:`tier4_escalate`.
 
     Skipped whenever ``ctx.deadline_tripped`` or the deadline has expired,
     mirroring its opt-in siblings above: a run that already blew its
@@ -7683,15 +7723,36 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
 
     try:
         context = pii_attribution.build_attribution_context(ctx.knowledge_root, ctx.config)
+        cap = resolve_attribution_max_escalations_per_run(ctx.config)
         summary = pii_attribution.escalate_shadow_suspects(
             context,
             client=client,
             config=ctx.config,
             usage=ctx.usage,
-            limit=resolve_attribution_max_escalations_per_run(ctx.config),
+            limit=cap,
         )
+        enforce_summary = pii_attribution.escalate_enforced_suspects(
+            context,
+            client=client,
+            config=ctx.config,
+            usage=ctx.usage,
+            limit=cap,
+        )
+        if enforce_summary.queue_items:
+            # Issue athenaeum#2220 (handoff note on the issue, from
+            # athenaeum#2212's shadow-only phase): the items already exist,
+            # tested end-to-end through the real tier4_escalate
+            # (tests/test_attribution_escalation.py::
+            # TestRawValueNeverReachesPendingQuestions) -- this is the one
+            # caller on this path that hands them over.
+            tier4_escalate(
+                list(enforce_summary.queue_items),
+                ctx.wiki_root / "_pending_questions.md",
+                config=ctx.config,
+                projects_root=ctx.projects_root,
+            )
     except Exception:
-        log.exception("attribution shadow-escalation phase failed; continuing run")
+        log.exception("attribution escalation phase failed; continuing run")
         ctx.attribution_shadow_summary = {"skipped_failed": True}
         return
 
@@ -7708,6 +7769,20 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
         "skipped_not_suspect": summary.skipped_not_suspect,
         "skipped_already_answered": summary.skipped_already_answered,
         "skipped_over_cap": summary.skipped_over_cap,
+        # Issue athenaeum#2220: the enforce sweep's own counters, over the
+        # disjoint withheld-suspect population. `enforced_filed` is the
+        # subset of `enforced_escalated` that actually wrote (the rest
+        # queued to tier4_escalate above).
+        "enforced_considered": enforce_summary.considered,
+        "enforced_escalated": enforce_summary.escalated,
+        "enforced_filed": sum(
+            1
+            for p in enforce_summary.placements
+            if p.outcome in (PLACEMENT_FILED, PLACEMENT_MERGE_PROPOSED)
+        ),
+        "enforced_queued": enforce_summary.queued,
+        "enforced_skipped_already_answered": enforce_summary.skipped_already_answered,
+        "enforced_skipped_over_cap": enforce_summary.skipped_over_cap,
     }
     if summary.escalated or summary.skipped_already_answered:
         log.info(
@@ -7722,6 +7797,18 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
             summary.skipped_already_answered,
             summary.skipped_not_suspect,
             summary.skipped_over_cap,
+        )
+    if enforce_summary.escalated or enforce_summary.skipped_already_answered:
+        log.info(
+            "attribution enforce-escalation: %d/%d withheld suspect(s) "
+            "escalated, %d filed for real, %d sent to the human queue, "
+            "%d already answered (no call), %d still to do (over cap)",
+            enforce_summary.escalated,
+            enforce_summary.considered,
+            ctx.attribution_shadow_summary["enforced_filed"],
+            enforce_summary.queued,
+            enforce_summary.skipped_already_answered,
+            enforce_summary.skipped_over_cap,
         )
 
 
