@@ -1819,6 +1819,13 @@ class CalibrationEntry:
     ``ece``/``auroc`` are ``None`` for a :data:`SIGNAL_CLASS_LEVEL` entry —
     design §12.3: "Signal 3 has no ECE", and by the same reasoning no AUROC
     either, since there is no scalar score to rank.
+
+    ``measured`` (issue athenaeum#2342, optional field — absent in every
+    record shipped before this issue) is ``False`` only for a class the
+    calibration sweep never ran at all; a measured failure still carries
+    its real numbers with ``passes: false``. Defaults to ``True`` when the
+    row omits the field, so an older shipped record (every row genuinely
+    measured, just never passing) keeps reading exactly as it always did.
     """
 
     question_class: str
@@ -1837,6 +1844,7 @@ class CalibrationEntry:
     passes: bool
     ece: float | None = None
     auroc: float | None = None
+    measured: bool = True
 
 
 def _calibration_entry_from_dict(raw: dict[str, Any]) -> CalibrationEntry:
@@ -1878,6 +1886,7 @@ def _calibration_entry_from_dict(raw: dict[str, Any]) -> CalibrationEntry:
             dataset_sha256=str(raw["dataset_sha256"]),
             measured_at=str(raw["measured_at"]),
             passes=bool(raw["passes"]),
+            measured=bool(raw.get("measured", True)),
         )
     except (TypeError, ValueError) as exc:
         raise CalibrationRecordError(
