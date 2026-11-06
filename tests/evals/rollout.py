@@ -147,11 +147,18 @@ from athenaeum.mcp_server import (
     recall_search,
     recall_tool_docstring,
 )
+from athenaeum.models import parse_frontmatter
 from athenaeum.provider import ClaudeCliClient
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import _DB_NAME as _HOOK_FTS5_DB_NAME
 from athenaeum.search import fts5_index_available, get_backend
+
+# Issue athenaeum#2310: the markdown-heading section splitter PUSH_SECTIONS_PULL
+# reuses rather than re-implementing (see build_push_sections_context) --
+# already imported cross-module by tests/test_tiers.py for the identical
+# "reuse the one splitter" reason.
+from athenaeum.tiers import _split_into_sections
 from tests.evals.containment import GridCell, SpendCeilingExceededError, build_grid
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.harness import EvalSession, build_live_client
@@ -189,6 +196,18 @@ class Arm(str, Enum):
     :attr:`NATIVE_INDEX` a materialized ``MEMORY.md`` index that Claude Code
     loads and truncates itself; for :attr:`NATIVE_GREP`, no index at all, so
     the model must find pages with its own file-search tools.
+
+    Issue athenaeum#2310 adds :attr:`PUSH_SECTIONS_PULL` — a THIRD point on
+    the PUSH spectrum, between :attr:`PUSH_BREADCRUMB_PULL` (name +
+    description bullets only) and :attr:`PUSH_PAGES_UPPER_BOUND` (five full
+    pages, no ``recall`` tool, an explicit upper bound rather than a
+    competing design). It injects ROUTED, SECTION-level page content —
+    whole markdown sections (:func:`athenaeum.tiers._split_into_sections`'s
+    own heading-bounded split, reused rather than re-split) of the same
+    ranked pages :func:`run_push_pages_upper_bound` reads, packed under
+    :data:`PUSH_SECTIONS_BYTE_BUDGET` — with BOTH the ``recall`` and
+    ``read_entity`` tools still available, same as
+    :attr:`PUSH_BREADCRUMB_PULL`. See :func:`build_push_sections_context`.
     """
 
     NONE = "none"
@@ -199,6 +218,7 @@ class Arm(str, Enum):
     PULL = "pull"
     NATIVE_INDEX = "native_index"
     NATIVE_GREP = "native_grep"
+    PUSH_SECTIONS_PULL = "push_sections_pull"
 
     @classmethod
     def _missing_(cls, value: object) -> Arm | None:
@@ -231,6 +251,9 @@ ALL_ARMS: tuple[Arm, ...] = (
     # every existing stored measurement and test relies on is unchanged.
     Arm.NATIVE_INDEX,
     Arm.NATIVE_GREP,
+    # Issue athenaeum#2310: same discipline -- appended, not interleaved, so
+    # every pre-existing stored row's arm order is unchanged.
+    Arm.PUSH_SECTIONS_PULL,
 )
 
 #: Model used for both the single-shot arms and PULL's ``claude -p`` spawn
@@ -1998,6 +2021,244 @@ def run_push_breadcrumb_pull(
 
 
 # ---------------------------------------------------------------------------
+# PUSH_SECTIONS_PULL — routed, section-level content + recall/read_entity
+# (issue athenaeum#2310). The third point on the PUSH spectrum: richer than
+# PUSH_BREADCRUMB_PULL's name+description bullets, never a whole oversized
+# page the way PUSH_PAGES_UPPER_BOUND can be.
+# ---------------------------------------------------------------------------
+
+#: Byte budget for this arm's injected section content (issue athenaeum#2310
+#: AC: "a stated byte budget"). Derived from the REAL production
+#: unprompted-push dial -- ``athenaeum.config.resolve_push_token_budget``'s
+#: default of 1200 tokens-per-turn -- converted to bytes via the SAME
+#: 4-bytes-per-token estimate this module already uses everywhere
+#: (:func:`estimate_tokens`: ``len(text) // 4``), rather than inventing a new
+#: number: ``1200 * 4 == 4800``. This sits strictly between
+#: PUSH_BREADCRUMB_PULL's <=~600-byte breadcrumb (three 200-char-clamped
+#: bullets) and PUSH_PAGES_UPPER_BOUND's uncapped five-full-page delivery --
+#: the "between the two" point issue athenaeum#2310 asks this arm to occupy.
+PUSH_SECTIONS_BYTE_BUDGET = 4800
+
+
+def _page_sections(body: str) -> list[tuple[str, str]]:
+    """*body* split into whole markdown sections.
+
+    Reuses :func:`athenaeum.tiers._split_into_sections` (issue athenaeum#2310:
+    "reuse whatever section/block splitting the codebase already has" --
+    the same splitter ``tests/test_tiers.py`` already imports cross-module,
+    for the identical "one splitter, not a second implementation" reason).
+
+    That function returns ``[]`` for a body with no markdown heading at all
+    (nothing to scope by) -- this wrapper folds that case to a single
+    ``("", body)`` section instead, so a headingless page still has
+    something to pack/truncate by rather than vanishing from the budget
+    pack entirely.
+    """
+    sections = _split_into_sections(body)
+    return sections if sections else [("", body)]
+
+
+def build_push_sections_context(
+    wiki_root: Path,
+    query: str,
+    *,
+    cache_dir: Path,
+    top_k: int = 5,
+    search_backend: str = "fts5",
+    byte_budget: int = PUSH_SECTIONS_BYTE_BUDGET,
+) -> str:
+    """PUSH_SECTIONS_PULL's injected context: ROUTED, section-level page
+    content under *byte_budget* (issue athenaeum#2310).
+
+    **Routed — reused, not reimplemented.** Which pages to pull sections
+    from is decided by ``athenaeum.search.get_backend(search_backend)
+    .query(...)`` — the exact ranking primitive
+    ``athenaeum.mcp_server._recall_via_backend`` (what every real ``recall``
+    call, and :func:`run_push_pages_upper_bound`'s own ``recall_search``
+    call, resolve through) calls internally. Called directly here rather
+    than through ``recall_search``'s own render path, because that path
+    renders a 400-char SNIPPET per hit (``mcp_server._snippet``) — not the
+    raw page body a section split needs.
+
+    **Section-level, not page-level.** Each ranked page's raw body (read
+    straight off disk, frontmatter stripped via
+    :func:`athenaeum.models.parse_frontmatter`) is split into whole markdown
+    sections by :func:`_page_sections`.
+
+    **A page over budget is never injected whole.** Sections are packed
+    page by page in RANK order, and in document order within a page,
+    against one running byte total — never re-ordered and never a
+    skip-ahead best-fit pack (a lower-ranked page's small section is never
+    injected ahead of a higher-ranked page's content). The moment the next
+    whole section would exceed *byte_budget*, packing stops immediately —
+    for the rest of that page AND every page ranked after it. A page whose
+    full body fits is injected in full; one that does not is TRUNCATED to
+    its leading whole sections, at the section boundary where the budget
+    ran out — or, if not even its first section fits in what remains of
+    the budget, DROPPED entirely. Either way, no section is ever cut
+    mid-text, and no page is ever injected whole past the budget.
+
+    Each page's block opens with ``**Uid:** <uid>`` on its own line — the
+    exact marker ``tests.evals.metrics._UID_LINE`` parses (the same marker
+    ``recall_search``'s own rendering emits) — so
+    :func:`tests.evals.metrics.uids_from_recall_output` recovers delivered
+    uids from this arm's pushed text unchanged: the same extractor
+    PUSH_PAGES_UPPER_BOUND and PULL already rely on, rather than a new
+    per-arm name-matching heuristic (contrast
+    ``tests.evals.north_star_report._breadcrumb_delivered_uids``, which
+    needs one only because the breadcrumb carries no uid marker at all).
+    The ``\\n\\n---\\n\\n`` separators between page blocks are not themselves
+    counted against *byte_budget* — negligible relative to it, and the same
+    "budget covers content, not structure" convention
+    ``athenaeum.context._apply_budget`` already uses for its own bullet
+    costs.
+
+    Returns ``""`` when nothing is retrieved (an abstention-shaped query, an
+    empty/unbuilt index, or a budget too small for even one section) —
+    never raises.
+    """
+    backend = get_backend(search_backend)
+    hits = backend.query(query, cache_dir, n=top_k, wiki_root=wiki_root)
+
+    blocks: list[str] = []
+    used = 0
+    for filename, name, _score in hits:
+        page_path = wiki_root / filename
+        if not page_path.is_file():
+            continue
+        try:
+            text = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, body = parse_frontmatter(text)
+        uid = str(fm.get("uid") or "")
+        if not uid:
+            continue
+        header = f"**Uid:** {uid}\n**Name:** {name}\n"
+        header_bytes = len(header.encode("utf-8"))
+        if used + header_bytes > byte_budget:
+            break
+        page_sections: list[str] = []
+        page_bytes = header_bytes
+        for _heading, section_text in _page_sections(body):
+            section_bytes = len(section_text.encode("utf-8"))
+            if used + page_bytes + section_bytes > byte_budget:
+                break
+            page_sections.append(section_text)
+            page_bytes += section_bytes
+        if not page_sections:
+            # Not even this page's FIRST (best) section fit in what remains
+            # of the budget -- dropped entirely, never injected as a bare
+            # header with no content. Ends the whole pack, not just this
+            # page: every page ranked after this one is ranked LOWER, so if
+            # this page's best section does not fit, packing one of theirs
+            # anyway would place lower-ranked content ahead of the point
+            # the budget actually ran out.
+            break
+        # "".join, not "\n".join: _page_sections' underlying
+        # _split_into_sections guarantees each section_text is a verbatim,
+        # CONTIGUOUS substring of body -- one section's text runs up to
+        # (not including) the next heading line -- so concatenating them
+        # directly reproduces the original bytes with nothing added. A
+        # "\n".join here would insert one byte per section boundary that
+        # was never counted against page_bytes above, silently exceeding
+        # byte_budget by that amount.
+        blocks.append(header + "".join(page_sections))
+        used += page_bytes
+    return "\n\n---\n\n".join(blocks)
+
+
+def run_push_sections_pull(
+    probe: Probe,
+    knowledge_root: Path,
+    cache_dir: Path,
+    corpus_scale: str,
+    *,
+    claude_binary: str = "claude",
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    timeout: float = 120.0,
+    athenaeum_bin: str | None = None,
+    search_backend: str = "fts5",
+    context_fn: Callable[..., str] | None = None,
+    wiki_root: Path | None = None,
+) -> RolloutRecord:
+    """PUSH_SECTIONS_PULL arm (issue athenaeum#2310): ROUTED, section-level
+    page content is injected AND the ``recall``/``read_entity`` tools remain
+    available — the third point on the PUSH spectrum, between
+    PUSH_BREADCRUMB_PULL (breadcrumbs only) and PUSH_PAGES_UPPER_BOUND (five
+    full pages, no recall tool). See :func:`build_push_sections_context` for
+    the routing/section-split/byte-budget contract. Reuses
+    :func:`run_pull`'s ``claude -p`` loop verbatim (same MCP config, same
+    argv, same stream parser) exactly as :func:`run_push_breadcrumb_pull`
+    does — only the injected text differs.
+
+    *wiki_root* defaults to ``knowledge_root / "wiki"``
+    (:meth:`tests.evals.corpus.Corpus.materialize`'s own layout), matching
+    what ``athenaeum serve --path knowledge_root`` derives for the spawned
+    CLI session — the same default :func:`run_push_breadcrumb_pull_api`
+    already uses for its own *wiki_root* parameter.
+
+    ``recall_called`` is recorded exactly like PULL and PUSH_BREADCRUMB_PULL:
+    choosing not to pull further after seeing the injected sections is a
+    legitimate, recorded outcome, never an error.
+    """
+    resolved_wiki_root = wiki_root if wiki_root is not None else knowledge_root / "wiki"
+    assemble = context_fn or build_push_sections_context
+    sections_context = assemble(
+        resolved_wiki_root, probe.query, cache_dir=cache_dir, search_backend=search_backend
+    )
+
+    if shutil.which(claude_binary) is None:
+        raise RuntimeError(f"{claude_binary!r} not found on PATH")
+    _require_isolated_cli_config()
+
+    mcp_config = build_pull_mcp_config(knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin)
+    prompt_text = f"{sections_context}\n\n{probe.query}" if sections_context else probe.query
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        config_path = Path(tmp_dir) / "mcp-config.json"
+        config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
+        argv = build_pull_argv(claude_binary, config_path, model)
+        proc = subprocess.run(
+            argv,
+            input=prompt_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    parsed = parse_pull_stream((proc.stdout or "").splitlines())
+    # Same leading-dict transcript shape PUSH_BREADCRUMB_PULL uses (issue
+    # athenaeum#1574's own convention) -- north_star_report._push_delivered_text
+    # reads transcript[0]["pushed_context"] generically, no arm branch needed.
+    transcript = [{"pushed_context": sections_context}, *parsed.transcript]
+    harness_failure = _permission_request_harness_failure(parsed.answer)
+    if harness_failure is None and not sections_context and probe.expected_uids:
+        harness_failure = (
+            "push_sections_pull arm delivered empty injected context "
+            "(pushed_context == '') for a non-abstention probe -- never graded "
+            "as an ordinary miss"
+        )
+    return RolloutRecord(
+        arm=Arm.PUSH_SECTIONS_PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=parsed.answer,
+        turn_tokens=parsed.turn_tokens,
+        tool_calls=parsed.tool_calls,
+        recall_called=parsed.recall_called,
+        injected_context_tokens=estimate_tokens(sections_context) if sections_context else 0,
+        injected_context_bytes=len(sections_context.encode("utf-8")) if sections_context else 0,
+        turn_count=parsed.turn_count,
+        transcript=transcript,
+        mode="cli",
+        harness_failure=harness_failure,
+        config_isolated=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # NATIVE_INDEX / NATIVE_GREP — Claude Code auto-memory arms (athenaeum#1725)
 #
 # Design lock: docs/design/native-memory-baseline.md §2-§4, §6, §9. Both are
@@ -3538,6 +3799,96 @@ def run_push_breadcrumb_pull_api(
     )
 
 
+def run_push_sections_pull_api(
+    probe: Probe,
+    knowledge_root: Path,
+    cache_dir: Path,
+    corpus_scale: str,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    search_backend: str = "fts5",
+    context_fn: Callable[..., str] | None = None,
+    wiki_root: Path | None = None,
+) -> RolloutRecord:
+    """API-mode PUSH_SECTIONS_PULL (issue athenaeum#2310): the injected
+    context is assembled by :func:`build_push_sections_context`, exactly
+    like :func:`run_push_sections_pull` — only the tool-use loop itself is
+    API-backed rather than a ``claude -p`` spawn. The executor and
+    ``tools=`` list are IDENTICAL to :func:`run_push_breadcrumb_pull_api`'s
+    own (same ``recall``/``read_entity`` in-process serving) — only the
+    assembled push text differs between the two arms.
+    """
+    resolved_wiki_root = wiki_root if wiki_root is not None else knowledge_root / "wiki"
+    assemble = context_fn or build_push_sections_context
+    sections_context = assemble(
+        resolved_wiki_root, probe.query, cache_dir=cache_dir, search_backend=search_backend
+    )
+    prompt_text = f"{sections_context}\n\n{probe.query}" if sections_context else probe.query
+    # Issue athenaeum#1761: same reasoning as run_push_breadcrumb_pull_api's
+    # own config load -- the recall tool call below must apply whatever
+    # operator-configured relevance floor this knowledge root carries.
+    config = load_config(knowledge_root)
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == READ_ENTITY_TOOL_NAME:
+            return _serve_read_entity(resolved_wiki_root, tool_input)
+        if name != RECALL_TOOL_NAME:
+            return f"error: unknown tool {name!r}"
+        return recall_search(
+            resolved_wiki_root,
+            str(tool_input.get("query", "")),
+            top_k=int(tool_input.get("top_k") or 5),
+            search_backend=search_backend,
+            cache_dir=cache_dir,
+            with_pii=bool(tool_input.get("with_pii", False)),
+            history=bool(tool_input.get("history", False)),
+            type_filter=tool_input.get("type"),
+            config=config,
+        )
+
+    answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
+        user_prompt=prompt_text,
+        tools=[_recall_tool_schema(resolved_wiki_root), _read_entity_tool_schema()],
+        tool_executor=_executor,
+        client=client,
+        session=session,
+        model=model,
+        system=_PULL_API_SYSTEM_PROMPT,
+    )
+    # Same transcript[0] shape run_push_sections_pull/run_push_breadcrumb_pull
+    # use, so north_star_report._push_delivered_text needs no mode branch.
+    transcript = [{"pushed_context": sections_context}, *loop_transcript]
+    harness_failure = None
+    if not sections_context and probe.expected_uids:
+        harness_failure = (
+            "push_sections_pull arm delivered empty injected context "
+            "(pushed_context == '') for a non-abstention probe -- never graded "
+            "as an ordinary miss"
+        )
+    turns_exhausted = _api_loop_turns_exhausted(turn_count, _API_LOOP_MAX_TURNS, loop_transcript)
+    if harness_failure is None:
+        harness_failure = _turn_cap_harness_failure(turns_exhausted)
+    return RolloutRecord(
+        arm=Arm.PUSH_SECTIONS_PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=turn_tokens,
+        tool_calls=tool_calls,
+        recall_called=bool(tool_calls),
+        injected_context_tokens=estimate_tokens(sections_context) if sections_context else 0,
+        injected_context_bytes=len(sections_context.encode("utf-8")) if sections_context else 0,
+        turn_count=turn_count,
+        transcript=transcript,
+        mode="api",
+        harness_failure=harness_failure,
+        turns_exhausted=turns_exhausted,
+    )
+
+
 def run_native_index_api(
     probe: Probe,
     materialize_root: Path,
@@ -4297,12 +4648,13 @@ def run_probe_all_arms(
     breadcrumb_pull_runner: Callable[..., RolloutRecord] | None = None,
     native_index_runner: Callable[..., RolloutRecord] | None = None,
     native_grep_runner: Callable[..., RolloutRecord] | None = None,
+    push_sections_pull_runner: Callable[..., RolloutRecord] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, RolloutRecord]:
-    """Run ONE probe across all eight arms against a materialized corpus at
+    """Run ONE probe across all nine arms against a materialized corpus at
     *corpus_scale* (issue athenaeum#1522 AC2/AC3/AC4; issue athenaeum#1574
     added the two breadcrumb arms; issue athenaeum#1725 added the two
-    native-memory arms).
+    native-memory arms; issue athenaeum#2310 added PUSH_SECTIONS_PULL).
 
     Builds exactly one :class:`~tests.evals.containment.GridCell` per arm via
     ``containment.build_grid("full", ...)`` — "full" is uncapped on the arms
@@ -4317,7 +4669,9 @@ def run_probe_all_arms(
     breadcrumb arms (default to :func:`build_push_breadcrumb_context` /
     :func:`run_push_breadcrumb_pull`); *native_index_runner* and
     *native_grep_runner* are the same kind of seam again, for the two native
-    arms (default to :func:`run_native_index` / :func:`run_native_grep`) —
+    arms (default to :func:`run_native_index` / :func:`run_native_grep`);
+    *push_sections_pull_runner* is the same kind of seam once more, for
+    issue athenaeum#2310's arm (default to :func:`run_push_sections_pull`) —
     so a caller, including the offline test suite, can supply stubs and
     exercise the arm-dispatch wiring without a network call or a subprocess
     spawn.
@@ -4328,7 +4682,8 @@ def run_probe_all_arms(
     across this module and its CLI driver, per Quine review) drives an
     Anthropic Messages API tool-use loop (see
     ``run_pull_api``/``run_push_breadcrumb_pull_api``/``run_native_index_api``/
-    ``run_native_grep_api``, docs/design/native-memory-baseline.md §4) and
+    ``run_native_grep_api``/``run_push_sections_pull_api``,
+    docs/design/native-memory-baseline.md §4) and
     requires *client* (no ``claude`` binary is ever invoked in this mode).
     ``"cli"`` spawns ``claude -p`` as it always has -- pass it explicitly for
     that behavior; every offline test in this suite that wants CLI-shaped
@@ -4336,9 +4691,10 @@ def run_probe_all_arms(
     passes ``mode="cli"`` explicitly rather than relying on a default that
     used to be "cli" but no longer is.
     An explicitly passed ``pull_runner``/``breadcrumb_pull_runner``/
-    ``native_index_runner``/``native_grep_runner`` always wins over *mode*'s
-    default resolution -- exactly how these seams already behaved before
-    *mode* existed, so no caller that already injects a stub needs to change.
+    ``native_index_runner``/``native_grep_runner``/``push_sections_pull_runner``
+    always wins over *mode*'s default resolution -- exactly how these seams
+    already behaved before *mode* existed, so no caller that already injects
+    a stub needs to change.
     The four single-shot arms (NONE, PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB,
     ORACLE) are unaffected by *mode*: they always call *client* directly.
     """
@@ -4418,6 +4774,9 @@ def run_probe_all_arms(
     )
     resolved_native_grep_runner = native_grep_runner or (
         run_native_grep_api if mode == "api" else run_native_grep
+    )
+    resolved_push_sections_pull_runner = push_sections_pull_runner or (
+        run_push_sections_pull_api if mode == "api" else run_push_sections_pull
     )
 
     records: dict[str, RolloutRecord] = {}
@@ -4545,6 +4904,32 @@ def run_probe_all_arms(
                     corpus_scale,
                     claude_binary=claude_binary,
                     model=model,
+                )
+        elif arm is Arm.PUSH_SECTIONS_PULL:
+            # Takes ``materialize_root`` (the KNOWLEDGE root), same as PULL
+            # and PUSH_BREADCRUMB_PULL above -- see the PULL branch's own
+            # comment below for why that must NOT be ``wiki_root``.
+            if mode == "api":
+                record = resolved_push_sections_pull_runner(
+                    probe,
+                    materialize_root,
+                    cache_dir,
+                    corpus_scale,
+                    client=resolved_client,
+                    session=session,
+                    model=model,
+                    search_backend=search_backend,
+                    wiki_root=wiki_root,
+                )
+            else:
+                record = resolved_push_sections_pull_runner(
+                    probe,
+                    materialize_root,
+                    cache_dir,
+                    corpus_scale,
+                    claude_binary=claude_binary,
+                    model=model,
+                    search_backend=search_backend,
                 )
         else:
             # PULL gets ``materialize_root``, NOT ``wiki_root``, and the two

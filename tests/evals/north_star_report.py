@@ -589,6 +589,15 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
     marker exists to enable, previously invisible here because that tool
     returns JSON rather than the recall markdown. Only :attr:`Arm.NONE`
     falls through to ``()`` -- it delivers no context by design.
+
+    Issue athenaeum#2310's PUSH_SECTIONS_PULL reads like PUSH_PAGES_UPPER_BOUND
+    plus PULL combined, never like PUSH_BREADCRUMB_PULL:
+    ``build_push_sections_context`` renders the SAME ``**Uid:**`` marker
+    ``recall_search`` does (see that function's own docstring), so
+    :func:`uids_from_recall_output` applies to its pushed text directly --
+    no bespoke name-matching helper (``_breadcrumb_delivered_uids``) is
+    needed the way PUSH_BREADCRUMB/PUSH_BREADCRUMB_PULL require, because
+    unlike a breadcrumb bullet, a pushed section carries a real uid marker.
     """
     if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
         return tuple(uids_from_recall_output(_push_delivered_text(record)))
@@ -605,6 +614,11 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
         pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
         read = _read_entity_delivered_uids(record)
         return tuple(dict.fromkeys((*breadcrumb, *pulled, *read)))
+    if record.arm is Arm.PUSH_SECTIONS_PULL:
+        pushed = tuple(uids_from_recall_output(_push_delivered_text(record)))
+        pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        read = _read_entity_delivered_uids(record)
+        return tuple(dict.fromkeys((*pushed, *pulled, *read)))
     if record.arm is Arm.NATIVE_GREP:
         return _native_loaded_uids(record)
     if record.arm is Arm.NATIVE_INDEX:
@@ -1200,6 +1214,16 @@ def delivered_text_for_utilization(row: RolloutRow) -> str:
         breadcrumb = _push_delivered_text(record)
         pulled = _pull_delivered_text(record)
         return "\n\n".join(part for part in (breadcrumb, pulled) if part)
+    if record.arm is Arm.PUSH_SECTIONS_PULL:
+        # Issue athenaeum#2310: unlike the breadcrumb, this arm's pushed
+        # text IS a real retrieval basis (routed, section-level page
+        # content under a byte budget -- see
+        # ``tests.evals.rollout.build_push_sections_context``), so both
+        # halves count toward utilization exactly as PUSH_PAGES_UPPER_BOUND
+        # and PULL's own text each do independently.
+        pushed = _push_delivered_text(record)
+        pulled = _pull_delivered_text(record)
+        return "\n\n".join(part for part in (pushed, pulled) if part)
     return ""
 
 
@@ -1248,6 +1272,13 @@ def delivered_uids_for_utilization(row: RolloutRow) -> tuple[str, ...]:
         return tuple(uids_from_recall_output(_pull_delivered_text(record)))
     if record.arm is Arm.PUSH_BREADCRUMB_PULL:
         return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+    if record.arm is Arm.PUSH_SECTIONS_PULL:
+        # Both halves carry real ``**Uid:**`` markers (see
+        # ``delivered_text_for_utilization``'s own PUSH_SECTIONS_PULL
+        # branch above), unlike PUSH_BREADCRUMB_PULL's breadcrumb half.
+        pushed = tuple(uids_from_recall_output(_push_delivered_text(record)))
+        pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        return tuple(dict.fromkeys((*pushed, *pulled)))
     return ()
 
 
@@ -3738,6 +3769,12 @@ def render_report(report: NorthStarReport) -> str:
         "| `push_breadcrumb_pull` | breadcrumbs injected + `recall` tool available | matches "
         "production PUSH, agent may still PULL |"
     )
+    lines.append(
+        "| `push_sections_pull` | routed, section-level page content under a byte budget "
+        "(`tests/evals/rollout.py`'s `PUSH_SECTIONS_BYTE_BUDGET`) + `recall`/`read_entity` "
+        "tools available | **a competing delivery design, not an upper bound** -- issue "
+        "athenaeum#2310, between `push_breadcrumb_pull` and `push_pages_upper_bound` |"
+    )
     lines.append("| `oracle` | ground-truth pages verbatim | ceiling |")
     lines.append("| `pull` | nothing injected, `recall` tool available | agent-initiated only |")
     lines.append(
@@ -3757,6 +3794,15 @@ def render_report(report: NorthStarReport) -> str:
         "continuation decision turns on. Neither is scored against a `pushed_context`/pulled-"
         "recall basis the way the other arms are: there is no Athenaeum retrieval step to "
         "attribute utilization to."
+    )
+    lines.append("")
+    lines.append(
+        "**Issue athenaeum#2310:** `push_sections_pull` is NOT an upper bound and NOT a "
+        "shipped configuration -- it is a candidate design point this comparison measures "
+        "against `push_breadcrumb_pull`. Unlike the breadcrumb, its pushed text carries a "
+        "real `**Uid:**` marker per page, so it is scored the same way "
+        "`push_pages_upper_bound` and `pull` are (`uids_from_recall_output`), not via the "
+        "breadcrumb's name-matching fallback."
     )
     lines.append("")
 
