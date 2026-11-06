@@ -64,9 +64,9 @@ def test_input_is_declared_and_reaches_the_cli(
     assert inputs[input_name].get("required", False) is False
 
     step = _north_star_run_step()
-    assert step["env"][env_name] == (
-        "${{ github.event.inputs." + input_name + " }}"
-    ), f"{env_name} is not routed from the {input_name} input through env:"
+    assert step["env"][env_name] == ("${{ github.event.inputs." + input_name + " }}"), (
+        f"{env_name} is not routed from the {input_name} input through env:"
+    )
 
     script = step["run"]
     # Routed through env: and quoted into an argv array, never interpolated

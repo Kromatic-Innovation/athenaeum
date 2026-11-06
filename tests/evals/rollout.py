@@ -622,6 +622,19 @@ class RolloutRecord:
     #: discipline.
     injected_context_bytes: int | None = None
 
+    #: Issue athenaeum#2309: WHICH MODEL produced this row. Stamped once per
+    #: probe by :func:`run_probe_all_arms` (never at the dozen individual
+    #: ``RolloutRecord(...)`` construction sites), so every arm's row --
+    #: including any arm added later -- carries it without a new stamp site.
+    #: Empty string on every row persisted before this field existed, and on
+    #: a record constructed directly in a test: "unstamped", never a guess at
+    #: which model it was. A noise floor is only readable against ONE model
+    #: (athenaeum#2310's conditions may not be read against a floor measured on a
+    #: different one), and until this field existed the model appeared
+    #: NOWHERE in the store or the rendered report -- it was recoverable
+    #: only from the dispatch inputs of the run that produced it.
+    model: str = ""
+
     @property
     def total_input_tokens(self) -> int:
         return sum(t.input_tokens for t in self.turn_tokens)
@@ -668,6 +681,7 @@ class RolloutRecord:
             "turns_exhausted": self.turns_exhausted,
             "llm_provider": self.llm_provider,
             "injected_context_bytes": self.injected_context_bytes,
+            "model": self.model,
         }
 
     @classmethod
@@ -730,6 +744,10 @@ class RolloutRecord:
             # claimed zero-byte injection, the same conservative meaning it
             # carries for a freshly-constructed record.
             injected_context_bytes=payload.get("injected_context_bytes"),
+            # Issue athenaeum#2309: absent on every row persisted before
+            # this field existed -- decodes as "" ("unstamped"), never a
+            # guess at which model produced it.
+            model=payload.get("model", ""),
         )
 
 
@@ -4591,5 +4609,13 @@ def run_probe_all_arms(
         record.llm_provider = (
             "claude-cli" if isinstance(resolved_client, ClaudeCliClient) else "api"
         )
+        # Issue athenaeum#2309: stamped HERE, once, for the same reason
+        # ``llm_provider`` is -- every arm's record passes through this one
+        # loop, so an arm added later carries the model without a new stamp
+        # site, and no individual ``RolloutRecord(...)`` construction site
+        # has to be taught about it. *model* is this probe's resolved model
+        # for every arm in the dict (the single-shot arms and PULL's spawn
+        # both take it from the same parameter).
+        record.model = model
         records[arm.value] = record
     return records
