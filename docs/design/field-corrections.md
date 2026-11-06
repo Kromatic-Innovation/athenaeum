@@ -480,6 +480,8 @@ batch cannot double-file the same question.
 
 ## 6. The cheap tier's conflict resolution
 
+- **Domain-scoped override:** `docs/design/trust-graph.md` (issue athenaeum#2145) wires an opt-in, deployment-configured trust edge into this tier's rank comparison (TG3) — it can flip a verdict within one (entity type, field, evidence kind) domain, but only ever as an override layer on top of the deterministic ranker below, never a replacement for it.
+
 ### 6.1 The deterministic ranker (new)
 
 `conflict-resolution.md` §11 states it plainly: *"the taxonomy is enforced at PROMPT time

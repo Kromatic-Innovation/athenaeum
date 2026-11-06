@@ -324,6 +324,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ## 11. Resolver source-precedence taxonomy — channel split (issue athenaeum#326)
 
+- **Domain-scoped override:** `docs/design/trust-graph.md` (issue athenaeum#2145) adds an opt-in override layer on top of this global taxonomy — a deployment-configured edge can outrank this taxonomy's order within one (entity type, field, evidence kind) domain, falling back to the taxonomy below wherever no edge matches.
 - **File:** [`src/athenaeum/resolutions.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/src/athenaeum/resolutions.py)
   — the `_RESOLVE_SYSTEM` prompt's `SOURCE-PRECEDENCE TAXONOMY` block.
 - **Trigger:** the resolver LLM applies this taxonomy when a
