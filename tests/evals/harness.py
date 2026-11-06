@@ -44,13 +44,21 @@ EVAL_TOKEN_CEILING = 250_000
 # Issue athenaeum#2287: the operator-run calibration SWEEP's own ceiling,
 # asserted by the separate ``calibration_session`` fixture
 # (tests/evals/conftest.py) -- never folded into EVAL_TOKEN_CEILING, which
-# stays sized for the default ``-m eval`` regression suite. Sized from the
-# measured full sweep: eval run 41325591218 spent 3,686,060 tokens
-# (420-case attribution corpus x 2 candidate models, plus 3-sample
-# agreement reruns for any class under the AUROC bar), with headroom for a
-# corpus or candidate-set change. A sweep that outgrows this fails loudly;
-# raise it deliberately, with a new measurement, never to make a run pass.
-CALIBRATION_TOKEN_CEILING = 4_500_000
+# stays sized for the default ``-m eval`` regression suite.
+#
+# Issue athenaeum#2343: re-sized for the corpus resize to ~650 cases
+# (~130 per class, up from the 420-case corpus the original 4,500,000
+# ceiling was measured against). The post-fix estimate (scaled from the
+# measured 420-case run at ~840 tokens/call, one-sided bar, K3 skipped on
+# perfectly fitted classes) is 2.5M-4M tokens; today's behaviour (K3 run
+# on nearly every class) at 650 cases projects to about 5.5M worst case.
+# ``CALIBRATION_TOKEN_UPPER_ESTIMATE`` below is the machine-readable form
+# of that 4M post-fix upper bound; the ceiling is sized with headroom
+# above the 5.5M worst case so it stays a safety net, not a trip-wire for
+# ordinary K3 variance. A sweep that outgrows THIS fails loudly; raise it
+# deliberately, with a new measurement, never to make a run pass.
+CALIBRATION_TOKEN_UPPER_ESTIMATE = 4_000_000
+CALIBRATION_TOKEN_CEILING = 6_500_000
 
 # Layer directory names — used to look up fixtures and to slice the
 # eval-summary JSON.
