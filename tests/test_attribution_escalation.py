@@ -45,6 +45,7 @@ Cases:
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -2491,6 +2492,278 @@ class TestAttributionModeKnob:
         monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "sometimes")
         with pytest.raises(AttributionModeConfigError):
             resolve_attribution_mode(None)
+
+
+def _live_identity(question_class: str, config: dict[str, Any] | None = None) -> tuple[str, str]:
+    """The REAL ``(model, prompt_sha256)`` :func:`attribution_call_identity`
+    resolves right now -- used to build a calibration entry / observe report
+    that genuinely matches, rather than ``_entry``'s fixed synthetic
+    ``prompt_sha256``, which by design never matches the live prompt (it
+    exists for the pre-athenaeum#2220 callers that never compare it)."""
+    return pii_attribution.attribution_call_identity(question_class, config)
+
+
+def _matching_entry(
+    question_class: str, *, model: str, prompt_sha256: str, passes: bool = True
+) -> pii_attribution.CalibrationEntry:
+    """Like ``_entry``, but with an explicit ``prompt_sha256`` so a caller can
+    make it equal the live prompt's sha (:func:`_live_identity`)."""
+    return pii_attribution.CalibrationEntry(
+        question_class=question_class,
+        model=model,
+        prompt_sha256=prompt_sha256,
+        signal=pii_attribution.SIGNAL_SELF_REPORTED,
+        bins=((0.0, 0.5, 0.20), (0.5, 0.9, 0.70), (0.9, 1.0, 0.98)),
+        threshold=0.90,
+        n_fit=60,
+        n_holdout=40,
+        holdout_accuracy_above=0.98,
+        holdout_wilson_lb=0.95,
+        abstain_share=0.18,
+        dataset_sha256="synthetic-dataset-sha",
+        measured_at="2026-10-31",
+        passes=passes,
+        ece=0.03,
+        auroc=0.81,
+    )
+
+
+class TestObserveReportAcknowledgement:
+    """``athenaeum attribution ack-observe-report`` and the ledger behind it
+    (athenaeum#2220, design §9.3)."""
+
+    def test_round_trip(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE: "m"},
+            prompt_sha256_by_class={pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE: "s"},
+        )
+        ack = pii_attribution.acknowledge_attribution_observe_report(
+            contacts_root, report.report_id
+        )
+        assert ack.report_id == report.report_id
+        acks = pii_attribution.read_attribution_observe_report_acks(contacts_root)
+        assert [a.ack_id for a in acks] == [ack.ack_id]
+
+    def test_unknown_report_id_raises(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        with pytest.raises(pii_attribution.ObserveReportAckError):
+            pii_attribution.acknowledge_attribution_observe_report(
+                contacts_root, "never-written"
+            )
+
+    def test_reading_with_no_ledger_yields_empty(self, tmp_path: Path) -> None:
+        assert pii_attribution.read_attribution_observe_report_acks(tmp_path / "contacts") == []
+
+    def test_cli_acknowledges_and_refuses_unknown_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum._cmd_attribution import add_attribution_subparser
+
+        contacts_root = tmp_path / "contacts"
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={},
+            prompt_sha256_by_class={},
+        )
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        add_attribution_subparser(subparsers)
+
+        args = parser.parse_args(
+            [
+                "attribution",
+                "ack-observe-report",
+                report.report_id,
+                "--path",
+                str(tmp_path),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert report.report_id in out
+
+        bad_args = parser.parse_args(
+            [
+                "attribution",
+                "ack-observe-report",
+                "no-such-report",
+                "--path",
+                str(tmp_path),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+        rc = bad_args.func(bad_args)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "no-such-report" in err
+
+
+class TestAutoModePreflight:
+    """``attribution_enforced_classes`` (athenaeum#2220, design §9.1/§9.3):
+    the ``auto`` mode's run-start check, both halves (calibration + ack) and
+    the staleness rules on each.
+
+    Every case pins the model via ``ATHENAEUM_ATTRIBUTION_MODEL`` so
+    :func:`_live_identity` and the fixture's calibration entry agree on it,
+    and reads the REAL prompt sha off :func:`_live_identity` so only the
+    cases that mean to test a prompt-sha mismatch deliberately diverge.
+    """
+
+    QC = pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE
+
+    def _ack_report(
+        self, contacts_root: Path, *, model: str, prompt_sha256: str
+    ) -> str:
+        report = pii_attribution.append_attribution_observe_report(
+            contacts_root,
+            per_class_shadow_counts={},
+            model_by_class={self.QC: model},
+            prompt_sha256_by_class={self.QC: prompt_sha256},
+        )
+        pii_attribution.acknowledge_attribution_observe_report(contacts_root, report.report_id)
+        return report.report_id
+
+    def test_fresh_install_observes_every_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODE", raising=False)
+        enforced = pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        assert enforced == frozenset()
+
+    def test_observe_mode_enforces_nothing_even_with_both_measurements(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "observe")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert pii_attribution.attribution_enforced_classes(None, contacts_root) == frozenset()
+
+    def test_enforce_mode_enforces_everything_unconditionally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "enforce")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        enforced = pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        assert enforced == frozenset(pii_attribution.QUESTION_CLASSES)
+
+    def test_auto_both_present_enforces_the_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_calibration_valid_but_no_ack_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_ack_present_but_no_valid_calibration_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(monkeypatch)  # empty record: no entry for QC at all
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_model_mismatch_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        # The stored entry's model does not match the live model.
+        _patch_record(
+            monkeypatch, _matching_entry(self.QC, model="some-other-model", prompt_sha256=sha)
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_prompt_sha_mismatch_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        # The stored entry's prompt sha does not match the live prompt.
+        _patch_record(
+            monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256="stale-sha")
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_auto_passes_false_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        self._ack_report(contacts_root, model=model, prompt_sha256=sha)
+        _patch_record(
+            monkeypatch,
+            _matching_entry(self.QC, model=model, prompt_sha256=sha, passes=False),
+        )
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_ack_under_a_different_prompt_sha_is_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The report was acknowledged while the prompt resolved to ``sha``;
+        the live prompt has since changed to a different sha (simulated here
+        by acknowledging a report that recorded a sha the LIVE prompt does
+        not currently match) -- design §9.3: "A changed model or prompt
+        makes the acknowledgement stale."."""
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", _MODEL)
+        model, sha = _live_identity(self.QC)
+        contacts_root = tmp_path / "contacts"
+        # Report+ack recorded under a DIFFERENT prompt sha than the live one.
+        self._ack_report(contacts_root, model=model, prompt_sha256="old-prompt-sha")
+        _patch_record(monkeypatch, _matching_entry(self.QC, model=model, prompt_sha256=sha))
+        assert self.QC not in pii_attribution.attribution_enforced_classes(None, contacts_root)
+
+    def test_warning_logged_once_per_observed_class(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.pii_attribution"):
+            pii_attribution.attribution_enforced_classes(None, tmp_path / "contacts")
+        warnings_for_qc = [
+            r for r in caplog.records if repr(self.QC) in r.getMessage()
+        ]
+        assert len(warnings_for_qc) == 1
 
 
 class TestLibrarianShadowPhase:

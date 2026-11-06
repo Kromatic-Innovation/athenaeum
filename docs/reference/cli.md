@@ -11,6 +11,7 @@ python scripts/gen_cli_reference.py
 ## Command index
 
 - [`athenaeum attribution`](#athenaeum-attribution) (group) — Read and answer parked contact-value attribution suspects. `show` prints one suspect through the excluded-surface read gate (the only place a raw contact value is shown); `place` files a human answer through the placement executor.
+- [`athenaeum attribution ack-observe-report`](#athenaeum-attribution-ack-observe-report) (command) — Acknowledge one contact-surface-lint --attribution observe report as clean, for the `auto` preflight (design §9.3).
 - [`athenaeum attribution place`](#athenaeum-attribution-place) (command) — File a human answer for one parked suspect through the placement executor, with decided_by: human and no calibrated probability.
 - [`athenaeum attribution show`](#athenaeum-attribution-show) (command) — Print one parked suspect, including its raw contact value. This is the sanctioned read for that value.
 - [`athenaeum audit`](#athenaeum-audit) (command) — Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, fills determinable valid_from/valid_until/claimed_scope. Dry-run by default; --apply writes.
@@ -157,8 +158,25 @@ Read and answer parked contact-value attribution suspects. `show` prints one sus
 
 Subcommands:
 
+- `athenaeum attribution ack-observe-report` — Acknowledge one contact-surface-lint --attribution observe report as clean, for the `auto` preflight (design §9.3).
 - `athenaeum attribution place` — File a human answer for one parked suspect through the placement executor, with decided_by: human and no calibrated probability.
 - `athenaeum attribution show` — Print one parked suspect, including its raw contact value. This is the sanctioned read for that value.
+
+## `athenaeum attribution ack-observe-report`
+
+Acknowledge one contact-surface-lint --attribution observe report as clean, for the `auto` preflight (design §9.3).
+
+**Positional arguments:**
+
+- `report_id` — Report id, as printed by `contact-surface-lint --attribution`.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum attribution place`
 
