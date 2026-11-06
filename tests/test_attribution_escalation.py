@@ -2823,9 +2823,105 @@ class TestLibrarianShadowPhase:
             "skipped_not_suspect": 0,
             "skipped_already_answered": 0,
             "skipped_over_cap": 0,
+            # athenaeum#2220: no non-shadow suspects exist in this fixture,
+            # so the enforce sweep (a disjoint population) sees nothing.
+            "enforced_considered": 0,
+            "enforced_escalated": 0,
+            "enforced_filed": 0,
+            "enforced_queued": 0,
+            "enforced_skipped_already_answered": 0,
+            "enforced_skipped_over_cap": 0,
         }
         assert record.read_bytes() == before
         assert ctx.knob_models["attribution"]
+
+    def test_the_phase_files_an_enforced_suspect_and_escalates_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2220's own AC: an escalation verdict is applied through
+        the placement executor in enforce mode. One withheld (non-shadow)
+        suspect at/above threshold is FILED for real; a second, below
+        threshold, reaches the real `_pending_questions.md` via
+        `tier4_escalate` -- the handoff the shadow-only phase (athenaeum#2212)
+        deliberately skipped."""
+        from athenaeum import librarian
+        from tests.test_librarian_run_phases import _make_ctx
+
+        _patch_record(monkeypatch, _entry(threshold=0.90))
+        knowledge = tmp_path / "knowledge"
+        (knowledge / "wiki").mkdir(parents=True)
+        _write_page(knowledge / "wiki", uid=_TARGET_UID, name=_TARGET_NAME)
+        context = pii_attribution.build_attribution_context(knowledge, EXCLUDED_CONFIG)
+        record = _write_contact_record(
+            context.contacts_root, "target.md", uid=_TARGET_UID, emails=["old@example.com"]
+        )
+        before = record.read_bytes()
+
+        above_verdict = _suspect_verdict(context)
+        pii_attribution.park_suspect(
+            context,
+            _VALUE,
+            above_verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/above.md",
+            shadow=False,  # withheld by its writer under enforce
+        )
+        below_value = "below@example.org"
+        below_verdict = _suspect_verdict(context, value=below_value)
+        pii_attribution.park_suspect(
+            context,
+            below_value,
+            below_verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/below.md",
+            shadow=False,
+        )
+
+        def _responder(**kwargs: Any) -> str:
+            # Suspects are escalated in filename (hash) order, not insertion
+            # order, so the answer must be keyed on which VALUE is actually
+            # being asked about, not on call sequence.
+            messages = kwargs.get("messages") or [{}]
+            content = str(messages[0].get("content", ""))
+            if _VALUE in content:
+                return json.dumps({"verdict": "own", "score": 0.95})
+            return json.dumps({"verdict": "other-unknown", "score": 0.10})
+
+        client = FakeLLMClient(responder=_responder)
+        monkeypatch.setattr(librarian, "build_llm_client", lambda *a, **k: client)
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge)
+        ctx.config = {
+            **EXCLUDED_CONFIG,
+            "librarian": {"attribution": {"escalate": True}},
+        }
+        librarian._run_attribution_shadow_phase(ctx)
+
+        summary = ctx.attribution_shadow_summary
+        assert summary is not None
+        assert summary["enforced_considered"] == 2
+        assert summary["enforced_escalated"] == 2
+        assert summary["enforced_filed"] == 1
+        assert summary["enforced_queued"] == 1
+
+        # The above-threshold value ("own") was actually filed: a fresh
+        # per-identifier record now links it to the target's uid (a new
+        # value files at its own per-identifier path, design §7.1 "own" --
+        # it is not merged into the pre-existing target.md record).
+        filed_records = pii.resolve_contact_records(context.contacts_root, _VALUE)
+        assert len(filed_records) == 1
+        assert pii.uid_on_record(filed_records[0]) == _TARGET_UID
+        assert record.read_bytes() == before  # the pre-existing record is untouched
+
+        # The below-threshold one reached the REAL human queue.
+        pending_text = (knowledge / "wiki" / "_pending_questions.md").read_text(
+            encoding="utf-8"
+        )
+        assert below_value not in pending_text  # masked, never the raw value
+        assert pii.mask_contact_address(below_value) in pending_text
 
     def test_the_phase_is_skipped_once_the_deadline_tripped(self, tmp_path: Path) -> None:
         from athenaeum.librarian import _run_attribution_shadow_phase

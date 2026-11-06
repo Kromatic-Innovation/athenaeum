@@ -4119,6 +4119,73 @@ def escalate_shadow_suspects(
     if limit is not None and limit <= 0:
         return ShadowEscalationSummary()
     suspects = iter_parked_suspects(context.contacts_root, shadow_only=True)
+    return _escalate_parked_suspects(
+        context, suspects, apply=False, client=client, config=config, usage=usage, limit=limit
+    )
+
+
+def escalate_enforced_suspects(
+    context: AttributionContext,
+    *,
+    client: "LLMBackend | None" = None,
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+    limit: int | None = None,
+) -> ShadowEscalationSummary:
+    """Escalate withheld (non-shadow) SUSPECT suspects, filing for real (issue athenaeum#2220).
+
+    The enforce-mode counterpart to :func:`escalate_shadow_suspects`. A
+    writer withholds a suspect value from its target exactly when
+    :func:`should_enforce_verdict` says so (D1-narrow, or an enforced
+    question class), parking it NON-shadow. That withheld value is already
+    not on its target -- resolving it for real, by placing it on the
+    model's answer or sending it to a human when the model cannot settle
+    it, is the whole point of enforce mode (design §9.1). D1-narrow's own
+    non-shadow entries are filtered out by *disposition* alone, the same
+    way :func:`escalate_shadow_suspects` already filters a non-``suspect``
+    entry: D1-narrow's disposition is :data:`DISPOSITION_NON_PERSONAL`,
+    never :data:`DISPOSITION_SUSPECT`, so it carries no question to ask and
+    this sweep is a correct no-op for it, by construction, without a
+    special case.
+
+    Mirrors :func:`escalate_shadow_suspects`'s memo/cap/ordering discipline
+    exactly (see its docstring), with two differences: it reads NON-shadow
+    suspects instead of shadow ones, and it passes ``apply=True`` to
+    :func:`escalate_contact_attribution_suspect`, so an at-or-above-
+    threshold placement actually writes (design §9.1's "escalation places
+    what it can") instead of only logging what it would have placed.
+    """
+    if client is None:
+        return ShadowEscalationSummary()
+    if limit is not None and limit <= 0:
+        return ShadowEscalationSummary()
+    suspects = [
+        s
+        for s in iter_parked_suspects(context.contacts_root, shadow_only=False)
+        if not s.shadow and s.disposition == DISPOSITION_SUSPECT
+    ]
+    return _escalate_parked_suspects(
+        context, suspects, apply=True, client=client, config=config, usage=usage, limit=limit
+    )
+
+
+def _escalate_parked_suspects(
+    context: AttributionContext,
+    suspects: list[ParkedSuspect],
+    *,
+    apply: bool,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None,
+    usage: TokenUsage | None,
+    limit: int | None,
+) -> ShadowEscalationSummary:
+    """Shared body of :func:`escalate_shadow_suspects` /
+    :func:`escalate_enforced_suspects` — *suspects* is already the right
+    population (shadow-only or withheld-only); only *apply* differs between
+    the two callers. Split out so the memo/cap/ordering discipline
+    documented on :func:`escalate_shadow_suspects` is written once, and so
+    an edit to it cannot silently diverge between the two modes.
+    """
     considered = len(suspects)
     memo = read_attribution_memo(
         default_attribution_memo_path(context.contacts_root)
@@ -4168,7 +4235,7 @@ def escalate_shadow_suspects(
             client=client,
             config=config,
             usage=usage,
-            apply=False,
+            apply=apply,
             suspect_id=suspect.suspect_id,
         )
         outcomes.append(outcome)
@@ -4231,6 +4298,7 @@ __all__ += [
     "record_attribution_audit_review",
     "ShadowEscalationSummary",
     "escalate_shadow_suspects",
+    "escalate_enforced_suspects",
 ]
 
 
