@@ -3386,6 +3386,33 @@ class NorthStarReport:
     # excluded from graded_rows). Empty tuple (the default) for every
     # pre-athenaeum#1836 report and for any run with zero turn-cap rows.
     turn_cap_counts: tuple[TurnCapCount, ...] = ()
+    # issue athenaeum#2309: WHICH MODEL produced these rows, pooled from the
+    # rows themselves (:func:`_pooled_model`) rather than taken as a
+    # build_report() argument -- a report must never be able to claim a
+    # model the data did not come from. ``"unstamped"`` for a store written
+    # before RolloutRecord carried the field; ``"MIXED: a, b"`` when rows
+    # disagree, which is never comparable data and must be visible as such
+    # rather than silently pooled (the same reason _pooled_floor_value
+    # refuses a mixed-floor store).
+    model: str = "unstamped"
+
+
+def _pooled_model(rows: Sequence[RolloutRow]) -> str:
+    """The one model *rows* came from -- issue athenaeum#2309.
+
+    Mirrors :func:`_pooled_floor_value`'s discipline but never raises: a
+    mixed store is a legitimate thing to RENDER (so a reader can see the
+    mix and discard the comparison), while a mixed FLOOR silently changes
+    what retrieval did. Unstamped rows (every row written before
+    ``RolloutRecord.model`` existed) read as ``"unstamped"``, never as a
+    guess.
+    """
+    models = sorted({row.record.model for row in rows if row.record.model})
+    if not models:
+        return "unstamped"
+    if len(models) == 1:
+        return models[0]
+    return "MIXED: " + ", ".join(models)
 
 
 class MixedFloorError(ValueError):
@@ -3536,6 +3563,7 @@ def build_report(
         git_sha=_get_git_sha(),
         generated=now_iso(),
         corpus_digests=digests,
+        model=_pooled_model(rows),
         weak_probes=weak_probes(graded_rows),
         write_path_stats=tuple(write_path_stats),
         write_costs=tuple(write_costs),
@@ -3687,6 +3715,14 @@ def render_report(report: NorthStarReport) -> str:
     # be able to see that the rule changed, not infer it from a number
     # moving.
     lines.append(f"- grader_revision: {GRADER_REVISION}")
+    # issue athenaeum#2309: the model appeared NOWHERE in this header or in
+    # the result store before that issue -- it was recoverable only from the
+    # dispatch inputs of the run that produced the artifact, which made a
+    # noise floor unverifiable from the artifact alone and made "same model"
+    # (the precondition athenaeum#2310's conditions are read under)
+    # uncheckable. Stamped beside corpus_digest and grader_revision for the
+    # same reason those two are.
+    lines.append(f"- model: {report.model}")
     lines.append(f"- total rollout rows: {len(report.rows)}")
     # issue athenaeum#1819: printed unconditionally -- 0 is a real, useful
     # value (this run had none), not something to hide by omission.

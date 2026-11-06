@@ -152,6 +152,17 @@ Evidence, kept out of the reading path.
 - [Transcript-receipts writer: ledger scans and transcript reads](measurements/transcript-receipts-writer-2026-10.md) — synthetic before/after for the nightly receipts phase.
 - [Frontmatter parse cost](measurements/frontmatter-parse-cost-2026-10-31.md) — full vs.
   field-selective frontmatter parsing over a generated 26k-page corpus.
+- [North-star grid noise floor](measurements/north-star-noise-floor-2026-11-06.md) — the
+  smallest difference the north-star grid can detect, per class and scale, with the
+  replicate-to-replicate variance behind it, the `oracle` ceiling-arm counter-example,
+  and the probe count the epic's question would need. Relayed evidence, recorded
+  in-tree because the Actions artifacts expire after 30 days:
+  [pooled summary](measurements/north-star-noise-floor-2026-11-06/noise-floor-pooled.md),
+  [run 42169666857 receipt](measurements/north-star-noise-floor-2026-11-06/noise-floor-run1-42169666857.md),
+  [run 42174214012 receipt](measurements/north-star-noise-floor-2026-11-06/noise-floor-run2-42174214012.md),
+  [render, run 42169666857](measurements/north-star-noise-floor-2026-11-06/north-star-render-run1-42169666857.md),
+  [render, run 42174214012](measurements/north-star-noise-floor-2026-11-06/north-star-render-run2-42174214012.md),
+  [artifact manifest](measurements/north-star-noise-floor-2026-11-06/manifest.md).
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)

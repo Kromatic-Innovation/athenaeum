@@ -417,3 +417,38 @@ def test_mode_is_threaded_through_to_run_probe_all_arms(
     )
 
     assert seen_modes == ["cli"]  # the GRID's own call, unambiguously
+
+
+def test_probes_flag_rejects_an_unknown_probe_id() -> None:
+    """Issue athenaeum#2309: ``--probes`` is now reachable from a workflow
+    input (``north_star_probes``), and a probe subset is how a replicated or
+    higher-tier grid is kept inside a stated USD cap -- so a typo'd id must
+    be caught before any spend, exactly like
+    :func:`test_corpus_scales_flag_rejects_an_unknown_scale` above. It used
+    to build cells for a probe that does not exist."""
+    args = north_star_cli.build_arg_parser().parse_args(["--probes", "bogus_probe"])
+    with pytest.raises(ValueError, match="unknown probe id"):
+        north_star_cli._build_cells(args)
+
+
+def test_probes_flag_accepts_a_real_subset() -> None:
+    args = north_star_cli.build_arg_parser().parse_args(
+        ["--scale", "full", "--corpus-scales", "core", "--probes", "pto_allowance"]
+    )
+    cells = north_star_cli._build_cells(args)
+    assert cells
+    assert {c.probe for c in cells} == {"pto_allowance"}
+
+
+def test_replicates_flag_multiplies_the_grid_in_one_store() -> None:
+    """Issue athenaeum#2309: a replicate-to-replicate noise floor needs more
+    than one replicate index in ONE store -- the cell key carries the
+    replicate, so the same (probe, arm, corpus_scale) appears once per
+    index rather than resuming over itself."""
+    parser = north_star_cli.build_arg_parser()
+    base = ["--scale", "full", "--corpus-scales", "core", "--probes", "pto_allowance"]
+    one = north_star_cli._build_cells(parser.parse_args(base))
+    two = north_star_cli._build_cells(parser.parse_args([*base, "--replicates", "0,1"]))
+    assert len(two) == 2 * len(one)
+    assert {c.replicate for c in two} == {0, 1}
+    assert len({(c.probe, c.arm, c.corpus_scale, c.replicate) for c in two}) == len(two)

@@ -96,6 +96,18 @@ on:
           - "smoke"
           - "small"
           - "full"
+      north_star_model:
+        description: "north_star_cli.py --model (blank = the CLI's own default, the shipped DEFAULT_CLASSIFY_MODEL tier). Issue athenaeum#2309: without this input every dispatch ran the default tier, so a higher-tier (Sonnet/Opus-class) grid could not be dispatched at all."
+        required: false
+        default: ""
+      north_star_replicates:
+        description: "north_star_cli.py --replicates (comma-separated indices; blank = the CLI's own default, 0). Issue athenaeum#2309: more than one index is what makes a replicate-to-replicate noise floor measurable in ONE store, and it multiplies the grid's cost by the number of indices."
+        required: false
+        default: ""
+      north_star_probes:
+        description: "north_star_cli.py --probes (comma-separated probe ids; blank = every probe in the corpus). Issue athenaeum#2309: a probe subset is how a replicated or higher-tier grid is kept inside a stated USD cap."
+        required: false
+        default: ""
       north_star_corpus_scales:
         description: "north_star_cli.py --corpus-scales (comma-separated; blank = the default scales; xlarge is opt-in; forced to core,medium when north_star_search_backend=vector and left blank)"
         required: false
@@ -459,6 +471,9 @@ jobs:
           ATHENAEUM_EVAL_MODE: api
           NORTH_STAR_SCALE: ${{ github.event.inputs.north_star_scale }}
           NORTH_STAR_CORPUS_SCALES: ${{ github.event.inputs.north_star_corpus_scales }}
+          NORTH_STAR_MODEL: ${{ github.event.inputs.north_star_model }}
+          NORTH_STAR_REPLICATES: ${{ github.event.inputs.north_star_replicates }}
+          NORTH_STAR_PROBES: ${{ github.event.inputs.north_star_probes }}
           NORTH_STAR_SEARCH_BACKEND: ${{ github.event.inputs.north_star_search_backend }}
           NORTH_STAR_MAX_SPEND: ${{ github.event.inputs.north_star_max_spend }}
           NORTH_STAR_MAX_TOKENS: ${{ github.event.inputs.north_star_max_tokens }}
@@ -482,6 +497,30 @@ jobs:
             CORPUS_SCALES_FLAG=(--corpus-scales "$NORTH_STAR_CORPUS_SCALES")
           elif [ "${NORTH_STAR_SEARCH_BACKEND:-vector}" = "vector" ]; then
             CORPUS_SCALES_FLAG=(--corpus-scales "core,medium")
+          fi
+          # Issue athenaeum#2309: left off entirely when blank, exactly like
+          # every other optional flag here -- a dispatch that names none of
+          # the three is byte-identical to one that predates these inputs
+          # (the CLI's own --model / --replicates / --probes defaults apply).
+          # --model is what lets a dispatch choose the north-star model at
+          # all: before this input every dispatch ran the CLI default tier,
+          # so no higher-tier noise floor or comparison could be dispatched.
+          MODEL_FLAG=()
+          if [ -n "${NORTH_STAR_MODEL:-}" ]; then
+            MODEL_FLAG=(--model "$NORTH_STAR_MODEL")
+          fi
+          # More than one replicate index multiplies the grid's cell count,
+          # and therefore its cost, by the number of indices -- the
+          # --max-spend pre-flight prices the whole replicated grid before
+          # any cell runs, so an over-cap replicated dispatch refuses to
+          # start rather than spending part of it.
+          REPLICATES_FLAG=()
+          if [ -n "${NORTH_STAR_REPLICATES:-}" ]; then
+            REPLICATES_FLAG=(--replicates "$NORTH_STAR_REPLICATES")
+          fi
+          PROBES_FLAG=()
+          if [ -n "${NORTH_STAR_PROBES:-}" ]; then
+            PROBES_FLAG=(--probes "$NORTH_STAR_PROBES")
           fi
           # Left off entirely when blank, so the CLI derives the token
           # ceiling from --max-spend (issue athenaeum#1754) instead of this
@@ -562,6 +601,9 @@ jobs:
             --out-dir measurements \
             --materialize-root measurements/materialize \
             "${CORPUS_SCALES_FLAG[@]}" \
+            "${MODEL_FLAG[@]}" \
+            "${REPLICATES_FLAG[@]}" \
+            "${PROBES_FLAG[@]}" \
             "${MAX_TOKENS_FLAG[@]}" \
             "${RELEVANCE_FLOOR_VECTOR_FLAG[@]}" \
             "${RELEVANCE_FLOOR_FTS5_FLAG[@]}" \
