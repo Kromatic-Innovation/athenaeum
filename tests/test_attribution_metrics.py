@@ -20,6 +20,7 @@ from tests.evals.metrics import (
     reliability_table,
     wilson_interval,
     wilson_lower_bound,
+    wilson_lower_bound_one_sided,
 )
 
 
@@ -58,6 +59,56 @@ class TestWilsonInterval:
         narrow = wilson_interval(8, 10, confidence=0.80)
         wide = wilson_interval(8, 10, confidence=0.99)
         assert (wide[1] - wide[0]) > (narrow[1] - narrow[0])
+
+
+class TestWilsonLowerBoundOneSided:
+    """athenaeum#2344: the one-sided bound is what makes the 0.95 accuracy
+    floor reachable at a 52-case held-out split -- known values pinned from
+    the issue's own arithmetic (z = 1.6449, the 95th percentile of the
+    standard normal)."""
+
+    def test_52_of_52_clears_the_point_95_floor(self) -> None:
+        assert wilson_lower_bound_one_sided(52, 52) == pytest.approx(0.9505, abs=5e-4)
+        assert wilson_lower_bound_one_sided(52, 52) >= 0.95
+
+    def test_51_of_52_fails_the_point_95_floor(self) -> None:
+        assert wilson_lower_bound_one_sided(51, 52) == pytest.approx(0.918, abs=5e-4)
+        assert wilson_lower_bound_one_sided(51, 52) < 0.95
+
+    def test_n_zero_is_maximally_uncertain(self) -> None:
+        """Handled the same way ``wilson_interval(0, 0)`` is: no evidence,
+        so the floor is 0.0 -- the lower half of that function's
+        ``(0.0, 1.0)``."""
+        assert wilson_lower_bound_one_sided(0, 0) == 0.0
+
+    def test_two_sided_bound_is_below_floor_at_the_same_n(self) -> None:
+        """The counter-example that makes the one-sided/two-sided switch
+        observable: at 52/52, the two-sided lower bound (``wilson_lower_
+        bound``) sits BELOW the 0.95 floor the one-sided bound clears."""
+        two_sided = wilson_lower_bound(52, 52)
+        one_sided = wilson_lower_bound_one_sided(52, 52)
+        assert two_sided < 0.95
+        assert one_sided >= 0.95
+        assert one_sided > two_sided
+
+    def test_higher_confidence_lowers_the_bound(self) -> None:
+        looser = wilson_lower_bound_one_sided(8, 10, confidence=0.80)
+        tighter = wilson_lower_bound_one_sided(8, 10, confidence=0.99)
+        assert tighter < looser
+
+    def test_matches_known_textbook_value(self) -> None:
+        """Cross-check against the one-sided lower half of
+        ``wilson_interval`` computed with the one-tailed z directly, so this
+        isn't just re-deriving the same formula twice with no independent
+        anchor: a one-sided 95% bound uses z = 1.6449, not wilson_interval's
+        two-tailed 1.96."""
+        from statistics import NormalDist
+
+        z_two_sided = NormalDist().inv_cdf(1 - (1 - 0.95) / 2)
+        z_one_sided = NormalDist().inv_cdf(0.95)
+        assert z_two_sided == pytest.approx(1.96, abs=1e-2)
+        assert z_one_sided == pytest.approx(1.6449, abs=1e-3)
+        assert z_one_sided < z_two_sided
 
 
 class TestAuroc:
