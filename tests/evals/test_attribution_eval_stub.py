@@ -314,8 +314,8 @@ class TestRecommendedReportAndRecord:
         assert recommended_report([failing]) is None
 
     def test_to_calibration_entries_covers_every_class(self) -> None:
-        reports_by_class = {
-            qc: (self._passing_report(qc, "m1", abstain=0.1) if qc == "held-elsewhere" else None)
+        reports_by_class: dict[str, list[ClassReport]] = {
+            qc: ([self._passing_report(qc, "m1", abstain=0.1)] if qc == "held-elsewhere" else [])
             for qc in QUESTION_CLASSES
         }
         entries = to_calibration_entries(
@@ -327,11 +327,14 @@ class TestRecommendedReportAndRecord:
         assert {e["question_class"] for e in entries} == set(QUESTION_CLASSES)
         held = next(e for e in entries if e["question_class"] == "held-elsewhere")
         assert held["passes"] is True
+        assert held["measured"] is True
         other = next(e for e in entries if e["question_class"] == "names-other")
         assert other["passes"] is False
+        assert other["measured"] is False
+        assert other["model"] == ""
 
     def test_write_calibration_record_round_trips(self) -> None:
-        reports_by_class: dict[str, ClassReport | None] = {qc: None for qc in QUESTION_CLASSES}
+        reports_by_class: dict[str, list[ClassReport]] = {qc: [] for qc in QUESTION_CLASSES}
         entries = to_calibration_entries(
             reports_by_class,
             dataset_sha256="a" * 64,

@@ -105,6 +105,15 @@ AGREEMENT_K = 3
 MAX_ECE = 0.05
 MAX_ABSTAIN_SHARE = 0.30
 
+#: issue athenaeum#2342 / athenaeum#2344 seam: the pass bar
+#: (:func:`_report_for_signal`) and the zero-token preflight below
+#: (:func:`assert_accuracy_bar_reachable`) must read the IDENTICAL bound
+#: function, so both reach it through this one named reference rather than
+#: each calling :func:`tests.evals.metrics.wilson_lower_bound` directly.
+#: athenaeum#2344 swaps this to a one-sided bound in exactly this one place;
+#: nothing here depends on which bound it points to.
+PASS_BAR_LOWER_BOUND = wilson_lower_bound
+
 
 class EmptyCorpusError(BaseException):
     """The attribution corpus is empty or under-covers the question classes.
@@ -137,6 +146,81 @@ def assert_corpus_covers_every_question_class(cases: list[dict[str, Any]]) -> No
         raise EmptyCorpusError(
             f"attribution eval corpus is missing question_class value(s): "
             f"{sorted(missing)} (has {sorted(present)})."
+        )
+
+
+class UnreachableAccuracyBarError(BaseException):
+    """At least one question class's held-out split is too small to reach
+    the accuracy floor even if every held-out case scored correctly
+    (issue athenaeum#2342).
+
+    Deliberately a :class:`BaseException` subclass, mirroring
+    :class:`EmptyCorpusError` above, so a broad ``except Exception``
+    elsewhere can never swallow it and let a sweep spend tokens it was
+    already certain to waste.
+    """
+
+
+def best_achievable_lower_bound(n_holdout: int) -> float:
+    """The best :data:`PASS_BAR_LOWER_BOUND` a class can reach with
+    *n_holdout* held-out cases, scoring every single one of them correct —
+    the zero-token preflight's "can this even pass" arithmetic (issue
+    athenaeum#2342). Uses the SAME bound function the pass bar itself uses
+    (:func:`_report_for_signal`), via the module-level
+    :data:`PASS_BAR_LOWER_BOUND` reference, so this preflight can never
+    disagree with the real measurement about what "reachable" means.
+    """
+    return PASS_BAR_LOWER_BOUND(n_holdout, n_holdout) if n_holdout else 0.0
+
+
+def preflight_unreachable_classes(
+    cases: list[dict[str, Any]], *, accuracy_floor: float
+) -> dict[str, float]:
+    """For every question class in *cases*, the best achievable lower
+    bound given that class's held-out split size
+    (:func:`best_achievable_lower_bound`), filtered down to the classes
+    that CANNOT reach *accuracy_floor* even in the best case.
+
+    Pure and zero-cost — no client is constructed and no case is run — so
+    a caller can refuse an entire sweep before spending a single token
+    (issue athenaeum#2342: the run that spent ~3.5M tokens was certain to
+    fail this check — held-out splits of 24/36/48 cases against a 0.95
+    floor cannot reach a Wilson lower bound of 0.95 even at 100% holdout
+    accuracy).
+    """
+    holdout_counts: Counter[str] = Counter(
+        c["question_class"] for c in cases if c.get("split") == "holdout"
+    )
+    unreachable: dict[str, float] = {}
+    for question_class in QUESTION_CLASSES:
+        best = best_achievable_lower_bound(holdout_counts.get(question_class, 0))
+        if best < accuracy_floor:
+            unreachable[question_class] = best
+    return unreachable
+
+
+def assert_accuracy_bar_reachable(
+    cases: list[dict[str, Any]], *, accuracy_floor: float
+) -> None:
+    """Raise :class:`UnreachableAccuracyBarError` naming every question
+    class whose held-out split cannot reach *accuracy_floor*
+    (:func:`preflight_unreachable_classes`).
+
+    Call this before constructing any client or running any case — the
+    whole point (issue athenaeum#2342) is refusing the run at zero token
+    cost when the corpus is already too small to pass.
+    """
+    unreachable = preflight_unreachable_classes(cases, accuracy_floor=accuracy_floor)
+    if unreachable:
+        detail = ", ".join(
+            f"{qc} (best achievable lower bound {bound:.4f})"
+            for qc, bound in sorted(unreachable.items())
+        )
+        raise UnreachableAccuracyBarError(
+            f"accuracy floor {accuracy_floor} is unreachable at today's "
+            f"corpus size for: {detail}. Refusing to spend tokens on a "
+            "sweep that cannot pass — grow the corpus (athenaeum#2341) or "
+            "lower the floor before re-running."
         )
 
 
@@ -209,7 +293,17 @@ def _assert_attribution_model_not_env_pinned() -> None:
 
 @dataclasses.dataclass(frozen=True)
 class CaseRun:
-    """One (case, model, signal) run's outcome."""
+    """One (case, model, signal) run's outcome.
+
+    ``split``, ``owner_uid`` and ``alias_relation`` (issue athenaeum#2342)
+    carry the values the calibration record-keeper AC asks for, as the
+    model returned them (``owner_uid``/``alias_relation`` are ``None``
+    when the judgement didn't set them). ``raw_verdicts`` is empty for a
+    self-reported run; for an agreement-K3 run it holds the ``k``
+    individual verdicts that ``judgement_verdict``/``score`` were
+    summarized FROM (majority verdict / agreement share), so a caller can
+    record each individual run as its own row without re-deriving them.
+    """
 
     case_id: str
     question_class: str
@@ -219,6 +313,10 @@ class CaseRun:
     judgement_verdict: str
     score: float
     correct: bool
+    split: str = ""
+    owner_uid: str | None = None
+    alias_relation: str | None = None
+    raw_verdicts: tuple[str, ...] = ()
 
 
 def run_case_self_reported(
@@ -242,6 +340,9 @@ def run_case_self_reported(
         judgement_verdict=judgement.verdict,
         score=judgement.score,
         correct=judgement_matches_gold(case, judgement),
+        split=str(case.get("split", "")),
+        owner_uid=judgement.owner_uid,
+        alias_relation=judgement.alias_relation,
     )
 
 
@@ -292,6 +393,10 @@ def run_case_agreement_k3(
         judgement_verdict=majority_verdict,
         score=agreement_score,
         correct=judgement_matches_gold(case, representative),
+        split=str(case.get("split", "")),
+        owner_uid=representative.owner_uid,
+        alias_relation=representative.alias_relation,
+        raw_verdicts=tuple(verdicts),
     )
 
 
@@ -359,7 +464,7 @@ def _report_for_signal(
     n_above = len(at_or_above)
     n_correct_above = sum(1 for c in at_or_above if c)
     accuracy_above = n_correct_above / n_above if n_above else 0.0
-    wilson_lb = wilson_lower_bound(n_correct_above, n_above)
+    wilson_lb = PASS_BAR_LOWER_BOUND(n_correct_above, n_above)
     ece = expected_calibration_error(holdout_scores, holdout_correct) if has_ece else None
     abstain = abstain_share(holdout_scores, threshold)
     bins = tuple(reliability_table(holdout_scores, holdout_correct)) if has_ece else ()
@@ -385,6 +490,56 @@ def _report_for_signal(
         abstain_share=abstain,
         passes=passes,
     )
+
+
+#: issue athenaeum#2342: the reason :func:`tests.evals.metrics.auroc` raised
+#: on the fit split, distinguishing "no wrong case at all" (the one case
+#: design §12.2 says needs agreement-K3 LEAST — a perfectly self-fit class)
+#: from any other single-label degenerate split.
+AUROC_UNDEFINED_NO_WRONG_CASES = "no-wrong-cases"
+AUROC_UNDEFINED_NO_CORRECT_CASES = "no-correct-cases"
+
+
+def self_reported_auroc_or_reason(fit_runs: list[CaseRun]) -> tuple[float | None, str | None]:
+    """AUROC of *fit_runs*' (score, correct) pairs on the fit split, or
+    ``(None, reason)`` when :func:`tests.evals.metrics.auroc` raises
+    because the split is single-label.
+
+    *reason* is :data:`AUROC_UNDEFINED_NO_WRONG_CASES` when every run in
+    *fit_runs* is correct (no negative/incorrect case), or
+    :data:`AUROC_UNDEFINED_NO_CORRECT_CASES` for the opposite single-label
+    split (every run wrong). Both are "a single-label fit split"; this
+    function only tells them apart — it does not decide what a caller
+    should do about either.
+    """
+    correct = [r.correct for r in fit_runs]
+    try:
+        return auroc([r.score for r in fit_runs], correct), None
+    except ValueError:
+        if correct and all(correct):
+            return None, AUROC_UNDEFINED_NO_WRONG_CASES
+        return None, AUROC_UNDEFINED_NO_CORRECT_CASES
+
+
+def needs_agreement_k3(fit_runs: list[CaseRun]) -> bool:
+    """Design §12.2's cost-bounding rule, reason-aware (issue
+    athenaeum#2342): agreement-K3 runs only when self-reported confidence's
+    AUROC on the fit split is EITHER defined and below :data:`AUROC_BAR`,
+    OR undefined for a reason other than "no wrong cases".
+
+    A fit split with zero incorrect cases is already perfectly self-fit —
+    it is the class K3 helps least, so that one specific undefined-AUROC
+    reason (:data:`AUROC_UNDEFINED_NO_WRONG_CASES`) routes straight past
+    K3 (the caller falls through to the class-level signal, since
+    :func:`select_signal_and_report` already does that whenever no
+    agreement runs are supplied). Any other undefined reason (for example
+    :data:`AUROC_UNDEFINED_NO_CORRECT_CASES`) keeps the pre-existing
+    behaviour of still attempting agreement-K3.
+    """
+    value, reason = self_reported_auroc_or_reason(fit_runs)
+    if reason == AUROC_UNDEFINED_NO_WRONG_CASES:
+        return False
+    return value is None or value < AUROC_BAR
 
 
 def select_signal_and_report(
@@ -481,30 +636,134 @@ def recommended_report(reports: list[ClassReport]) -> ClassReport | None:
     )
 
 
+def best_failing_report(reports: list[ClassReport]) -> ClassReport:
+    """Among *reports* (none of which need have passed — a caller that
+    already has a passing report should use :func:`recommended_report`
+    instead), the measured report CLOSEST to reaching the bar (issue
+    athenaeum#2342's "best candidate" selection among failing reports).
+
+    Choice rule, deterministic: highest Wilson holdout lower bound first;
+    ties broken by the larger held-out sample (more evidence backing the
+    same bound); a further tie falls back to :data:`CANDIDATE_MODELS`
+    order (the cheaper tier), the same tie-break :func:`recommended_report`
+    uses, so repeated runs over the same inputs always pick the same row.
+
+    Raises :class:`ValueError` on an empty *reports* — callers only reach
+    this function when at least one candidate was measured.
+    """
+    if not reports:
+        raise ValueError("best_failing_report requires at least one ClassReport")
+    model_rank = {model: i for i, model in enumerate(CANDIDATE_MODELS)}
+    return max(
+        reports,
+        key=lambda r: (
+            r.holdout_wilson_lb,
+            r.n_holdout,
+            -model_rank.get(r.model, len(CANDIDATE_MODELS)),
+        ),
+    )
+
+
+def summarize_classes(
+    reports_by_class: dict[str, list[ClassReport]],
+) -> tuple[list[str], int, int]:
+    """One ``PASS``/``FAIL`` line per question class — a class passes if
+    ANY of its candidate reports does — plus the overall ``(passed,
+    total)`` count (issue athenaeum#2342: the sweep must emit this and
+    fail when ``passed == 0`` rather than exiting quietly). Pure and
+    offline-testable: takes already-collected :class:`ClassReport` lists,
+    makes no client call.
+    """
+    lines: list[str] = []
+    passed = 0
+    for question_class in QUESTION_CLASSES:
+        candidates = reports_by_class.get(question_class) or []
+        class_passes = any(r.passes for r in candidates)
+        if class_passes:
+            passed += 1
+        lines.append(f"{'PASS' if class_passes else 'FAIL'} {question_class}")
+    return lines, passed, len(QUESTION_CLASSES)
+
+
+class NoClassPassedError(BaseException):
+    """Every question class failed the calibration bar (issue
+    athenaeum#2342): an all-false sweep must fail loudly, not pass
+    unnoticed the way the original (unasserted) test did. Deliberately a
+    :class:`BaseException` subclass, mirroring :class:`EmptyCorpusError`
+    above.
+    """
+
+
+def require_some_class_passes(reports_by_class: dict[str, list[ClassReport]]) -> None:
+    """Raise :class:`NoClassPassedError` when :func:`summarize_classes`
+    reports zero classes passing."""
+    lines, passed, total = summarize_classes(reports_by_class)
+    if passed == 0:
+        raise NoClassPassedError(
+            f"every question class failed the calibration bar (0/{total}); "
+            "refusing to report a silent pass. Per-class results:\n"
+            + "\n".join(lines)
+        )
+
+
+def render_class_report_line(report: ClassReport) -> str:
+    """One text line summarizing *report* (issue athenaeum#2342: "every
+    candidate ClassReport ... printed to the test output as one line per
+    report")."""
+    return (
+        f"{report.question_class} model={report.model} signal={report.signal} "
+        f"n_fit={report.n_fit} n_holdout={report.n_holdout} "
+        f"threshold={report.threshold} "
+        f"lower_bound={report.holdout_wilson_lb:.4f} passes={report.passes}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shipped-record rendering (design §12.4)
 # ---------------------------------------------------------------------------
 
 
 def to_calibration_entries(
-    reports_by_class: dict[str, ClassReport | None],
+    reports_by_class: dict[str, list[ClassReport]],
     *,
     dataset_sha256: str,
     prompt_sha256: str,
     measured_at: str,
 ) -> list[dict[str, Any]]:
-    """Render selected :class:`ClassReport`\\ s into the shipped YAML shape
-    (design §12.4). A ``None`` report (no tier passed) still yields a row,
-    with ``passes: false`` and a ``class-level`` placeholder signal — the
-    record always carries one entry per class."""
+    """Render every question class's candidate :class:`ClassReport`\\ s
+    into the shipped YAML shape (design §12.4), one entry per class.
+
+    A class with at least one measured candidate ALWAYS writes a real
+    measurement: the recommended (passing) report when one exists
+    (:func:`recommended_report`), otherwise the best-performing failing
+    report (:func:`best_failing_report`) — real ``n_fit``, ``n_holdout``,
+    ``threshold``, Wilson lower bound, AUROC, ECE, ``bins``, ``signal`` and
+    the real ``model`` that produced it, with ``passes: false`` (issue
+    athenaeum#2342: a measured failure must not render identically to the
+    "not yet measured" stub).
+
+    Only a class with ZERO candidate reports (the sweep never ran it at
+    all) gets the legacy zero-placeholder row — ``n_fit: 0``,
+    ``n_holdout: 0``, ``threshold: 0.0`` — marked ``measured: false``.
+    That row's ``model`` is ``""``, never :data:`CANDIDATE_MODELS`\\ ``[0]``
+    — defaulting to a real model id would misrepresent an unmeasured class
+    as one actually scored by that model.
+
+    Every entry carries ``measured`` (``True``/``False``) so a reader can
+    tell a genuine failure from "never ran" without inspecting the other
+    fields.
+    """
     entries: list[dict[str, Any]] = []
     for question_class in QUESTION_CLASSES:
-        report = reports_by_class.get(question_class)
+        candidates = reports_by_class.get(question_class) or []
+        report = recommended_report(candidates) if candidates else None
+        if report is None and candidates:
+            report = best_failing_report(candidates)
         if report is None:
             entries.append(
                 {
                     "question_class": question_class,
-                    "model": CANDIDATE_MODELS[0],
+                    "model": "",
                     "prompt_sha256": prompt_sha256,
                     "signal": SIGNAL_CLASS_LEVEL,
                     "bins": [],
@@ -519,6 +778,7 @@ def to_calibration_entries(
                     "dataset_sha256": dataset_sha256,
                     "measured_at": measured_at,
                     "passes": False,
+                    "measured": False,
                 }
             )
             continue
@@ -540,6 +800,7 @@ def to_calibration_entries(
                 "dataset_sha256": dataset_sha256,
                 "measured_at": measured_at,
                 "passes": report.passes,
+                "measured": True,
             }
         )
     return entries
