@@ -1,11 +1,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <!--
-Rendered north-star grid report, Actions run 42169666857 (2026-11-06, `hestia/2309-measure-the-north-star-grid-noise-floor` @ 6d8dbbd7183f), recorded in-tree for issue athenaeum#2309 because the Actions artifact expires 30 days after the run -- the same reason athenaeum#1854 recorded its own. PARTIAL: this run tripped its token ceiling at 1360 of 1824 cells. Byte-identical to the artifact's own `north-star-2026-11-06.md` (sha256 in manifest.md) apart from this comment.
+Rendered north-star grid report, Actions run 42169666857 (2026-11-06, `hestia/2309-measure-the-north-star-grid-noise-floor` @ 6d8dbbd7183f), recorded in-tree for issue athenaeum#2309 because the Actions artifact expires 30 days after the run -- the same reason athenaeum#1854 recorded its own. PARTIAL: this run tripped its token ceiling at 1360 of 1824 cells. Byte-identical to the artifact's own `north-star-2026-11-06.md` (sha256 in manifest.md) apart from this comment AND one redaction: the Actions runner's own absolute checkout
+root, which prefixed the traceback locator inside the abort_reason, is
+replaced with `<repo>/`. `public-safe-lint`'s `local-absolute-path-home`
+rule rejects an absolute home-rooted path in a public file, and this note
+cannot quote the offending literal either. The locator's meaning --
+`tests/evals/north_star_cli.py:1539` -- is unchanged.
 -->
 
 > **PARTIAL RUN** — stopped early.
-> abort_reason: SpendCeilingExceededError: rollout run exceeded token ceiling (11014424 > 10842105) mid-grid -- stopped every worker. Groups not yet started never run, and a group already in flight stops at its next arm boundary, so the overshoot is at most one cell per worker. Shrink the grid or the --scale tier, or raise the ceiling deliberately with --max-tokens (or a larger --max-spend, which derives it). (/home/runner/work/athenaeum/athenaeum/tests/evals/north_star_cli.py:1539)
+> abort_reason: SpendCeilingExceededError: rollout run exceeded token ceiling (11014424 > 10842105) mid-grid -- stopped every worker. Groups not yet started never run, and a group already in flight stops at its next arm boundary, so the overshoot is at most one cell per worker. Shrink the grid or the --scale tier, or raise the ceiling deliberately with --max-tokens (or a larger --max-spend, which derives it). (<repo>/tests/evals/north_star_cli.py:1539)
 
 # North-star report: free dimensions only (athenaeum#1523)
 
