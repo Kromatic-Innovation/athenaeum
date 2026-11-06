@@ -152,6 +152,17 @@ Evidence, kept out of the reading path.
 - [Transcript-receipts writer: ledger scans and transcript reads](measurements/transcript-receipts-writer-2026-10.md) — synthetic before/after for the nightly receipts phase.
 - [Frontmatter parse cost](measurements/frontmatter-parse-cost-2026-10-31.md) — full vs.
   field-selective frontmatter parsing over a generated 26k-page corpus.
+- [Routed section-level content vs pointers plus tool](measurements/routed-section-arm-2026-11-06.md) — the
+  `push_sections_pull` arm (routed sections under a byte budget, recall still available)
+  against the shipped `push_breadcrumb_pull` under a higher-tier model and Haiku, read
+  against the measured noise floor. Relayed evidence, recorded in-tree because the
+  Actions artifacts expire after 30 days:
+  [higher-tier floor and coverage](measurements/routed-section-arm-2026-11-06/noise-floor-sonnet.md),
+  [Haiku coverage and spend](measurements/routed-section-arm-2026-11-06/noise-floor-haiku.md),
+  [render, higher tier](measurements/routed-section-arm-2026-11-06/north-star-render-sonnet.md),
+  [render, Haiku](measurements/routed-section-arm-2026-11-06/north-star-render-haiku.md),
+  [artifact manifest, higher tier](measurements/routed-section-arm-2026-11-06/manifest-sonnet.md),
+  [artifact manifest, Haiku](measurements/routed-section-arm-2026-11-06/manifest-haiku.md).
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)

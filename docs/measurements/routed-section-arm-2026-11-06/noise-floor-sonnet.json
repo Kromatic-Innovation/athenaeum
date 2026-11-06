@@ -1,0 +1,5054 @@
+{
+  "correctness_by_arm_class_scale": [
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 0.5714285714285714
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 3,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 0.75
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 11,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.9166666666666666
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 3,
+      "n": 3,
+      "probe_class": "multi_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.5
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 15,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 1.0
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 1.0
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 2,
+      "n": 18,
+      "probe_class": "unprompted_push",
+      "rate": 0.3333333333333333
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 2,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 0.3333333333333333
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 3,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 0.75
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 1.0
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 2,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.3333333333333333
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.75
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 0.8
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 10,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 0.8333333333333334
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "correct": 8,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.4
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 0.0
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.0
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 1.0
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 11,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.9166666666666666
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 5,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.8333333333333334
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.75
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 14,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 0.9333333333333333
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 1.0
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "correct": 9,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.45
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 1.0
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 1.0
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 2,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.3333333333333333
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 5,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.625
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 15,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 1.0
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 11,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 0.9166666666666666
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "correct": 5,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.25
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 3,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 0.5
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 3,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 0.75
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 9,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.75
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 1,
+      "harness_failures": 1,
+      "n": 5,
+      "probe_class": "multi_hop",
+      "rate": 0.2
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.5
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 15,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 10,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 0.8333333333333334
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.35
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.75
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 8,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 0.5333333333333333
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "correct": 0,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 5,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "abstention",
+      "rate": 0.8333333333333334
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 7,
+      "harness_failures": 0,
+      "n": 7,
+      "probe_class": "disambiguation",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 4,
+      "harness_failures": 0,
+      "n": 4,
+      "probe_class": "distractor_robustness",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "follow_through",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 2,
+      "harness_failures": 0,
+      "n": 6,
+      "probe_class": "multi_hop",
+      "rate": 0.3333333333333333
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 8,
+      "probe_class": "redundancy",
+      "rate": 0.75
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 15,
+      "harness_failures": 0,
+      "n": 15,
+      "probe_class": "single_hop",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 12,
+      "probe_class": "temporal",
+      "rate": 1.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "correct": 12,
+      "harness_failures": 0,
+      "n": 20,
+      "probe_class": "unprompted_push",
+      "rate": 0.6
+    }
+  ],
+  "coverage": [
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "abstention",
+      "probe_id": "abstain_unknown_client"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "abstention",
+      "probe_id": "abstain_unknown_person"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "abstention",
+      "probe_id": "abstain_unknown_policy"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "distractor_robustness",
+      "probe_id": "acme_billing_exception"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "anchorline_retirement_rationale"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "bluewater_terms"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 9,
+      "missing": [
+        [
+          "core",
+          0,
+          "native_grep"
+        ],
+        [
+          "core",
+          0,
+          "native_index"
+        ],
+        [
+          "core",
+          0,
+          "none"
+        ],
+        [
+          "core",
+          0,
+          "oracle"
+        ],
+        [
+          "core",
+          0,
+          "pull"
+        ],
+        [
+          "core",
+          0,
+          "push_breadcrumb"
+        ],
+        [
+          "core",
+          0,
+          "push_breadcrumb_pull"
+        ],
+        [
+          "core",
+          0,
+          "push_pages_upper_bound"
+        ],
+        [
+          "core",
+          0,
+          "push_sections_pull"
+        ]
+      ],
+      "probe_class": "single_hop",
+      "probe_id": "bramfield_retainer_renewal"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "budget_threshold_current"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 9,
+      "missing": [
+        [
+          "core",
+          1,
+          "native_grep"
+        ],
+        [
+          "core",
+          1,
+          "native_index"
+        ],
+        [
+          "core",
+          1,
+          "none"
+        ],
+        [
+          "core",
+          1,
+          "oracle"
+        ],
+        [
+          "core",
+          1,
+          "pull"
+        ],
+        [
+          "core",
+          1,
+          "push_breadcrumb"
+        ],
+        [
+          "core",
+          1,
+          "push_breadcrumb_pull"
+        ],
+        [
+          "core",
+          1,
+          "push_pages_upper_bound"
+        ],
+        [
+          "core",
+          1,
+          "push_sections_pull"
+        ]
+      ],
+      "probe_class": "unprompted_push",
+      "probe_id": "cache_layer_merge"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "callum_drews_last_contact"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "claims_logging_off"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "confidentiality_rule"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "connection_pool_widen"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "corvale_holdings_history"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "redundancy",
+      "probe_id": "driftgate_migration_funding"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "redundancy",
+      "probe_id": "dual_signoff_threshold"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "export_flag_deletion"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "fenwick_relationship_history"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "distractor_robustness",
+      "probe_id": "former_client_not_current"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "gilcrest_vendor_decision"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "disambiguation",
+      "probe_id": "given_name_is_ambiguous"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "invoice_role_merge"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "redundancy",
+      "probe_id": "keelbridge_programme_scope"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "lighthouse_migration_rollback"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "migration_spot_check_cut"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "redundancy",
+      "probe_id": "mira_castellane_role"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "nightly_job_drop"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "office_address_current"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "onboarding_length"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "disambiguation",
+      "probe_id": "person_not_repo"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "pinemarsh_goal_rationale"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "multi_hop",
+      "probe_id": "portal_design_reviewer"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "pto_allowance"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "rate_limit_removal"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "multi_hop",
+      "probe_id": "ratecard_tooling_owner"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 9,
+      "missing": [
+        [
+          "core",
+          0,
+          "native_grep"
+        ],
+        [
+          "core",
+          0,
+          "native_index"
+        ],
+        [
+          "core",
+          0,
+          "none"
+        ],
+        [
+          "core",
+          0,
+          "oracle"
+        ],
+        [
+          "core",
+          0,
+          "pull"
+        ],
+        [
+          "core",
+          0,
+          "push_breadcrumb"
+        ],
+        [
+          "core",
+          0,
+          "push_breadcrumb_pull"
+        ],
+        [
+          "core",
+          0,
+          "push_pages_upper_bound"
+        ],
+        [
+          "core",
+          0,
+          "push_sections_pull"
+        ]
+      ],
+      "probe_class": "unprompted_push",
+      "probe_id": "relay_sync_fix"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "remote_equipment_stipend_cap"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "disambiguation",
+      "probe_id": "repo_not_person"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "multi_hop",
+      "probe_id": "spend_approver_named"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "standup_time_current"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "follow_through",
+      "probe_id": "subsidiary_onboarding_lesson"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 9,
+      "missing": [
+        [
+          "core",
+          1,
+          "native_grep"
+        ],
+        [
+          "core",
+          1,
+          "native_index"
+        ],
+        [
+          "core",
+          1,
+          "none"
+        ],
+        [
+          "core",
+          1,
+          "oracle"
+        ],
+        [
+          "core",
+          1,
+          "pull"
+        ],
+        [
+          "core",
+          1,
+          "push_breadcrumb"
+        ],
+        [
+          "core",
+          1,
+          "push_breadcrumb_pull"
+        ],
+        [
+          "core",
+          1,
+          "push_pages_upper_bound"
+        ],
+        [
+          "core",
+          1,
+          "push_sections_pull"
+        ]
+      ],
+      "probe_class": "disambiguation",
+      "probe_id": "surname_is_ambiguous"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "tamsin_ferro_role_change"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "temporal",
+      "probe_id": "thorncastle_first_contact"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "tls_library_bump"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "single_hop",
+      "probe_id": "triform_vendor_consolidation"
+    },
+    {
+      "cells_expected": 18,
+      "cells_present": 18,
+      "missing": [],
+      "probe_class": "unprompted_push",
+      "probe_id": "webhook_backoff_lower"
+    }
+  ],
+  "duplicate_rows": 0,
+  "generated": "2026-11-06T07:23:34Z",
+  "mde": [
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.7859617707103925,
+      "mde_unpaired": 0.7974362721289938,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.3333333333333333,
+      "p10": 0.16666666666666666,
+      "probe_class": "abstention",
+      "rate_arm": 0.3333333333333333,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5718711879417242,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.5,
+      "probe_class": "abstention",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.539165326611733,
+      "mde_unpaired": 0.7624949172556322,
+      "n": 6,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.3333333333333333,
+      "probe_class": "abstention",
+      "rate_arm": 0.8333333333333334,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.524019441953961,
+      "mde_unpaired": 0.6144672622486844,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.42857142857142855,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 0.5714285714285714,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.7487551447163624,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 1.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.7487551447163624,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 1.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 7,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "disambiguation",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.9905099528998366,
+      "mde_unpaired": 0.8578067819125862,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.25,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.9905099528998366,
+      "mde_unpaired": 0.8578067819125862,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.25,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.9590571379584399,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.75,
+      "p10": 0.0,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.6551607516268171,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.6551607516268171,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.9590571379584399,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.75,
+      "p10": 0.0,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.6551607516268171,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6065609924381996,
+      "mde_unpaired": 0.6551607516268171,
+      "n": 4,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "distractor_robustness",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.4262476168704179,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "follow_through",
+      "rate_arm": 0.9166666666666666,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.3782572363142204,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "follow_through",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.5537118967685374,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.75,
+      "p10": 0.0,
+      "probe_class": "follow_through",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.4262476168704179,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "follow_through",
+      "rate_arm": 0.9166666666666666,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.3782572363142204,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "follow_through",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.5537118967685374,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.75,
+      "p10": 0.0,
+      "probe_class": "follow_through",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.5537118967685374,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.75,
+      "p10": 0.0,
+      "probe_class": "follow_through",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3501981522641211,
+      "mde_unpaired": 0.3782572363142204,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "follow_through",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.75,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 3,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.7087512278637279,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.2,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5011627993967339,
+      "mde_unpaired": 0.5315634208977958,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.2,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.6137965682934015,
+      "mde_unpaired": 0.8859390348296597,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.6,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.8,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.7087512278637279,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.2,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5011627993967339,
+      "mde_unpaired": 0.5315634208977958,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.2,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.5011627993967339,
+      "mde_unpaired": 0.5315634208977958,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.2,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.7087512278637279,
+      "n": 5,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "multi_hop",
+      "rate_arm": 0.2,
+      "rate_verdict_arm": 0.2,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.7003963045282422,
+      "mde_unpaired": 0.7003963045282422,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.25,
+      "p10": 0.25,
+      "probe_class": "redundancy",
+      "rate_arm": 0.5,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4289033909562931,
+      "mde_unpaired": 0.6781558057957751,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "redundancy",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4952549764499182,
+      "mde_unpaired": 0.6065609924381995,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.5,
+      "p10": 0.0,
+      "probe_class": "redundancy",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4289033909562931,
+      "mde_unpaired": 0.6781558057957751,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "redundancy",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.32758037581340854,
+      "mde_unpaired": 0.6949029153638966,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.125,
+      "probe_class": "redundancy",
+      "rate_arm": 0.625,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4952549764499182,
+      "mde_unpaired": 0.6065609924381995,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.5,
+      "p10": 0.0,
+      "probe_class": "redundancy",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4289033909562931,
+      "mde_unpaired": 0.6781558057957751,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "redundancy",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.4289033909562931,
+      "mde_unpaired": 0.6781558057957751,
+      "n": 8,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "redundancy",
+      "rate_arm": 0.75,
+      "rate_verdict_arm": 0.5,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.2893464771395307,
+      "mde_unpaired": 0.30689828414670073,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 0.2,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 0.8,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.5114971402445013,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 1.0,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.1804392305876904,
+      "mde_unpaired": 0.183633093239642,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 0.06666666666666667,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 0.9333333333333333,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.5114971402445013,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 1.0,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3608784611753808,
+      "mde_unpaired": 0.4326780750473692,
+      "n": 15,
+      "normal_approx_reliable": true,
+      "p01": 0.4666666666666667,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 0.5333333333333333,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.0,
+      "n": 15,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "single_hop",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 1.0,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.31611369313625226,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "temporal",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.33016998429994554,
+      "mde_unpaired": 0.42624761687041773,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.08333333333333333,
+      "p10": 0.08333333333333333,
+      "probe_class": "temporal",
+      "rate_arm": 0.8333333333333334,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3014025803536778,
+      "mde_unpaired": 0.5638725955865326,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.8333333333333334,
+      "p10": 0.0,
+      "probe_class": "temporal",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.31611369313625226,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "temporal",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.22352613604256744,
+      "mde_unpaired": 0.3782572363142204,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.08333333333333333,
+      "probe_class": "temporal",
+      "rate_arm": 0.9166666666666666,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3014025803536778,
+      "mde_unpaired": 0.5638725955865326,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.8333333333333334,
+      "p10": 0.0,
+      "probe_class": "temporal",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.31611369313625226,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "temporal",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.30140258035367784,
+      "mde_unpaired": 0.31611369313625226,
+      "n": 12,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.16666666666666666,
+      "probe_class": "temporal",
+      "rate_arm": 1.0,
+      "rate_verdict_arm": 0.8333333333333334,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.0,
+      "mde_unpaired": 0.44022664573326076,
+      "n": 18,
+      "normal_approx_reliable": false,
+      "p01": 0.0,
+      "p10": 0.0,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.3333333333333333,
+      "rate_verdict_arm": 0.3333333333333333,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.31165668084058457,
+      "mde_unpaired": 0.4289033909562931,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.1,
+      "p10": 0.15,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.4,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.29879927539775075,
+      "mde_unpaired": 0.3366276892423809,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.35,
+      "p10": 0.0,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.2730647496040387,
+      "mde_unpaired": 0.43401971570929604,
+      "n": 20,
+      "normal_approx_reliable": false,
+      "p01": 0.05,
+      "p10": 0.15,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.45,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.3912200848880426,
+      "mde_unpaired": 0.4059882688223034,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.25,
+      "p10": 0.15,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.25,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.29879927539775075,
+      "mde_unpaired": 0.3366276892423809,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.35,
+      "p10": 0.0,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.29879927539775075,
+      "mde_unpaired": 0.3366276892423809,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.35,
+      "p10": 0.0,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.0,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "estimator_paired": "paired/McNemar: MDE = (z_a/2 + z_b) * sqrt(p_disc - (p10-p01)^2) / sqrt(n), alpha=0.05 two-sided, power=0.80",
+      "estimator_unpaired": "unpaired two-proportion normal approximation (pooled variance at the mean rate, SAME n per side, pairing structure discarded): MDE = (z_a/2 + z_b) * sqrt(2 * pbar * (1-pbar)) / sqrt(n)",
+      "mde_paired": 0.27126232231831005,
+      "mde_unpaired": 0.44241545901486135,
+      "n": 20,
+      "normal_approx_reliable": true,
+      "p01": 0.0,
+      "p10": 0.25,
+      "probe_class": "unprompted_push",
+      "rate_arm": 0.6,
+      "rate_verdict_arm": 0.35,
+      "verdict_arm": "push_breadcrumb_pull"
+    }
+  ],
+  "n_graded_rows": 804,
+  "n_harness_failures": 6,
+  "n_rows": 810,
+  "oracle_harness_failures": [],
+  "oracle_incorrect": [
+    {
+      "corpus_scale": "core",
+      "probe_class": "follow_through",
+      "probe_id": "gilcrest_vendor_decision",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "multi_hop",
+      "probe_id": "portal_design_reviewer",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "redundancy",
+      "probe_id": "keelbridge_programme_scope",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "redundancy",
+      "probe_id": "keelbridge_programme_scope",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "single_hop",
+      "probe_id": "bramfield_retainer_renewal",
+      "push_breadcrumb_pull_correct": true,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "cache_layer_merge",
+      "push_breadcrumb_pull_correct": true,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "connection_pool_widen",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "connection_pool_widen",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "export_flag_deletion",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "export_flag_deletion",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "invoice_role_merge",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "rate_limit_removal",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "rate_limit_removal",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "tls_library_bump",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "webhook_backoff_lower",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "probe_class": "unprompted_push",
+      "probe_id": "webhook_backoff_lower",
+      "push_breadcrumb_pull_correct": false,
+      "push_breadcrumb_pull_harness_failure": false,
+      "replicate": 1
+    }
+  ],
+  "pooled_correctness_by_arm": [
+    {
+      "arm": "native_grep",
+      "correct": 61,
+      "harness_failures": 5,
+      "n": 85,
+      "rate": 0.7176470588235294
+    },
+    {
+      "arm": "native_index",
+      "correct": 62,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.6888888888888889
+    },
+    {
+      "arm": "none",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.06666666666666667
+    },
+    {
+      "arm": "oracle",
+      "correct": 74,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.8222222222222222
+    },
+    {
+      "arm": "pull",
+      "correct": 67,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.7444444444444445
+    },
+    {
+      "arm": "push_breadcrumb",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.06666666666666667
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "correct": 59,
+      "harness_failures": 1,
+      "n": 89,
+      "rate": 0.6629213483146067
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "correct": 43,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.4777777777777778
+    },
+    {
+      "arm": "push_sections_pull",
+      "correct": 75,
+      "harness_failures": 0,
+      "n": 90,
+      "rate": 0.8333333333333334
+    }
+  ],
+  "positive_control_unprompted_push": [
+    {
+      "corpus_scale": "core",
+      "correct": 3,
+      "harness_failures": 0,
+      "n": 10,
+      "rate": 0.3,
+      "replicate": 0
+    },
+    {
+      "corpus_scale": "core",
+      "correct": 6,
+      "harness_failures": 0,
+      "n": 10,
+      "rate": 0.6,
+      "replicate": 1
+    }
+  ],
+  "probes_absent": [
+    "aggregation_delivery_roles",
+    "aggregation_retainer_clients",
+    "aggregation_inhouse_tools",
+    "expense_approval_limit_manager",
+    "overtime_request_approver",
+    "invoicing_api_pagination_workaround",
+    "regional_office_onboarding_lesson",
+    "vendor_migration_rerun_lesson",
+    "junior_analyst_ramp_lesson",
+    "invoiceref_rename"
+  ],
+  "provenance": {
+    "athenaeum_version": "0.23.4",
+    "corpus_digests": {
+      "core": "3c5ea876688b089e"
+    },
+    "git_sha": "531fe48d9aaa",
+    "grader_revision": "athenaeum#1935",
+    "model": "claude-sonnet-5",
+    "model_unverified_arms": [],
+    "search_backend": "vector"
+  },
+  "replicate_variance": [
+    {
+      "arm": "native_grep",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_index",
+      "concordant": 1,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.6666666666666666,
+      "discordant": 2,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 0.6666666666666666,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.19245008972987523,
+      "sd_rate_difference": 0.2721655269759087,
+      "variance_of_difference": 0.2222222222222222
+    },
+    {
+      "arm": "none",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 0.3333333333333333,
+      "rate_replicate1": 0.6666666666666666,
+      "sd_class_rate_implied": 0.19245008972987523,
+      "sd_rate_difference": 0.2721655269759087,
+      "variance_of_difference": 0.2222222222222222
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "abstention",
+      "rate_replicate0": 0.6666666666666666,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.19245008972987523,
+      "sd_rate_difference": 0.2721655269759087,
+      "variance_of_difference": 0.2222222222222222
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 0.5,
+      "rate_replicate1": 0.6666666666666666,
+      "sd_class_rate_implied": 0.19245008972987523,
+      "sd_rate_difference": 0.2721655269759087,
+      "variance_of_difference": 0.2222222222222222
+    },
+    {
+      "arm": "native_index",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "none",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 4,
+      "n_replicate1": 3,
+      "probe_class": "disambiguation",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 1,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.5,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 0.5,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.25,
+      "sd_rate_difference": 0.3535533905932738,
+      "variance_of_difference": 0.25
+    },
+    {
+      "arm": "native_index",
+      "concordant": 1,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.5,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 0.5,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.25,
+      "sd_rate_difference": 0.3535533905932738,
+      "variance_of_difference": 0.25
+    },
+    {
+      "arm": "none",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 1,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.5,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 0.5,
+      "sd_class_rate_implied": 0.25,
+      "sd_rate_difference": 0.3535533905932738,
+      "variance_of_difference": 0.25
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 2,
+      "n_replicate1": 2,
+      "probe_class": "distractor_robustness",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 5,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.16666666666666666,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 0.8333333333333334,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.1075828707279838,
+      "sd_rate_difference": 0.15214515486254615,
+      "variance_of_difference": 0.1388888888888889
+    },
+    {
+      "arm": "native_index",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "none",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 5,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.16666666666666666,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 0.8333333333333334,
+      "sd_class_rate_implied": 0.1075828707279838,
+      "sd_rate_difference": 0.15214515486254615,
+      "variance_of_difference": 0.1388888888888889
+    },
+    {
+      "arm": "pull",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 5,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.16666666666666666,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 0.6666666666666666,
+      "rate_replicate1": 0.8333333333333334,
+      "sd_class_rate_implied": 0.1075828707279838,
+      "sd_rate_difference": 0.15214515486254615,
+      "variance_of_difference": 0.1388888888888889
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "follow_through",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 1,
+      "corpus_scale": "core",
+      "df": 0,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 1,
+      "n_replicate0": 1,
+      "n_replicate1": 2,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_index",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.3333333333333333,
+      "rate_replicate1": 0.3333333333333333,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "none",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 0.6666666666666666,
+      "sd_class_rate_implied": 0.19245008972987523,
+      "sd_rate_difference": 0.2721655269759087,
+      "variance_of_difference": 0.2222222222222222
+    },
+    {
+      "arm": "pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.3333333333333333,
+      "rate_replicate1": 0.3333333333333333,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 2,
+      "corpus_scale": "core",
+      "df": 1,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 2,
+      "n_replicate0": 3,
+      "n_replicate1": 2,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.3333333333333333,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 2,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 3,
+      "n_replicate0": 3,
+      "n_replicate1": 3,
+      "probe_class": "multi_hop",
+      "rate_replicate0": 0.3333333333333333,
+      "rate_replicate1": 0.3333333333333333,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.5,
+      "rate_replicate1": 0.5,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_index",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.75,
+      "rate_replicate1": 0.75,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "none",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.75,
+      "rate_replicate1": 0.75,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 3,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.25,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.75,
+      "rate_replicate1": 0.5,
+      "sd_class_rate_implied": 0.15309310892394862,
+      "sd_rate_difference": 0.21650635094610965,
+      "variance_of_difference": 0.1875
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.5,
+      "rate_replicate1": 0.5,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.75,
+      "rate_replicate1": 0.75,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 3,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 4,
+      "n_replicate0": 4,
+      "n_replicate1": 4,
+      "probe_class": "redundancy",
+      "rate_replicate0": 0.75,
+      "rate_replicate1": 0.75,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_index",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.14285714285714285,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 0.7142857142857143,
+      "rate_replicate1": 0.875,
+      "sd_class_rate_implied": 0.09352195295828244,
+      "sd_rate_difference": 0.13226001425322165,
+      "variance_of_difference": 0.12244897959183673
+    },
+    {
+      "arm": "none",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 0.875,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 0.5714285714285714,
+      "rate_replicate1": 0.5,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 6,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 7,
+      "n_replicate0": 7,
+      "n_replicate1": 8,
+      "probe_class": "single_hop",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_index",
+      "concordant": 4,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 2,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 0.8333333333333334,
+      "rate_replicate1": 0.8333333333333334,
+      "sd_class_rate_implied": 0.16666666666666666,
+      "sd_rate_difference": 0.23570226039551584,
+      "variance_of_difference": 0.3333333333333333
+    },
+    {
+      "arm": "none",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "pull",
+      "concordant": 5,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.16666666666666666,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 0.8333333333333334,
+      "sd_class_rate_implied": 0.1075828707279838,
+      "sd_rate_difference": 0.15214515486254615,
+      "variance_of_difference": 0.1388888888888889
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 0.8333333333333334,
+      "rate_replicate1": 0.8333333333333334,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 5,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 6,
+      "n_replicate0": 6,
+      "n_replicate1": 6,
+      "probe_class": "temporal",
+      "rate_replicate0": 1.0,
+      "rate_replicate1": 1.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "native_grep",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 7,
+      "discordance_rate": 0.125,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 8,
+      "n_replicate0": 8,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.25,
+      "rate_replicate1": 0.4,
+      "sd_class_rate_implied": 0.08267972847076845,
+      "sd_rate_difference": 0.11692679333668567,
+      "variance_of_difference": 0.109375
+    },
+    {
+      "arm": "native_index",
+      "concordant": 6,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.3333333333333333,
+      "discordant": 3,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.4,
+      "rate_replicate1": 0.4,
+      "sd_class_rate_implied": 0.13353893612829587,
+      "sd_rate_difference": 0.18885257457751053,
+      "variance_of_difference": 0.32098765432098764
+    },
+    {
+      "arm": "none",
+      "concordant": 9,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "oracle",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.2222222222222222,
+      "discordant": 2,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.3,
+      "rate_replicate1": 0.6,
+      "sd_class_rate_implied": 0.09799078929868853,
+      "sd_rate_difference": 0.13857990321384966,
+      "variance_of_difference": 0.1728395061728395
+    },
+    {
+      "arm": "pull",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.2222222222222222,
+      "discordant": 2,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.3,
+      "rate_replicate1": 0.2,
+      "sd_class_rate_implied": 0.09799078929868853,
+      "sd_rate_difference": 0.13857990321384966,
+      "variance_of_difference": 0.1728395061728395
+    },
+    {
+      "arm": "push_breadcrumb",
+      "concordant": 9,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_breadcrumb_pull",
+      "concordant": 8,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.1111111111111111,
+      "discordant": 1,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.3,
+      "rate_replicate1": 0.4,
+      "sd_class_rate_implied": 0.07407407407407407,
+      "sd_rate_difference": 0.10475656017578482,
+      "variance_of_difference": 0.09876543209876543
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "concordant": 9,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.0,
+      "discordant": 0,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.0,
+      "rate_replicate1": 0.0,
+      "sd_class_rate_implied": 0.0,
+      "sd_rate_difference": 0.0,
+      "variance_of_difference": 0.0
+    },
+    {
+      "arm": "push_sections_pull",
+      "concordant": 7,
+      "corpus_scale": "core",
+      "df": 8,
+      "discordance_rate": 0.2222222222222222,
+      "discordant": 2,
+      "estimator": "paired per-probe replicate-0-vs-replicate-1 discordance (exact Var(d_i) = p_disc - (p10-p01)^2, no normal-approximation assumption); class-rate SD assumes the two replicates are iid noisy measurements of one true rate",
+      "n_paired": 9,
+      "n_replicate0": 10,
+      "n_replicate1": 10,
+      "probe_class": "unprompted_push",
+      "rate_replicate0": 0.6,
+      "rate_replicate1": 0.6,
+      "sd_class_rate_implied": 0.11111111111111109,
+      "sd_rate_difference": 0.15713484026367722,
+      "variance_of_difference": 0.2222222222222222
+    }
+  ],
+  "required_n": [
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 1483,
+        "0.1": 371,
+        "0.15": 165,
+        "0.2": 93
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 6,
+      "probe_class": "abstention",
+      "required_n": {
+        "0.05": 698,
+        "0.1": 175,
+        "0.15": 78,
+        "0.2": 44
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": 769,
+        "0.1": 193,
+        "0.15": 86,
+        "0.2": 49
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 7,
+      "probe_class": "disambiguation",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 1570,
+        "0.1": 393,
+        "0.15": 175,
+        "0.2": 99
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 1570,
+        "0.1": 393,
+        "0.15": 175,
+        "0.2": 99
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 4,
+      "probe_class": "distractor_robustness",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "follow_through",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 3,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": 503,
+        "0.1": 126,
+        "0.15": 56,
+        "0.2": 32
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": 754,
+        "0.1": 189,
+        "0.15": 84,
+        "0.2": 48
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": 503,
+        "0.1": 126,
+        "0.15": 56,
+        "0.2": 32
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": 503,
+        "0.1": 126,
+        "0.15": 56,
+        "0.2": 32
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 5,
+      "probe_class": "multi_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 1570,
+        "0.1": 393,
+        "0.15": 175,
+        "0.2": 99
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 344,
+        "0.1": 86,
+        "0.15": 39,
+        "0.2": 22
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 785,
+        "0.1": 197,
+        "0.15": 88,
+        "0.2": 50
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 8,
+      "probe_class": "redundancy",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": 503,
+        "0.1": 126,
+        "0.15": 56,
+        "0.2": 32
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": 196,
+        "0.1": 49,
+        "0.15": 22,
+        "0.2": 13
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": 782,
+        "0.1": 196,
+        "0.15": 87,
+        "0.2": 49
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 15,
+      "probe_class": "single_hop",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 524,
+        "0.1": 131,
+        "0.15": 59,
+        "0.2": 33
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 240,
+        "0.1": 60,
+        "0.15": 27,
+        "0.2": 15
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 12,
+      "probe_class": "temporal",
+      "required_n": {
+        "0.05": 437,
+        "0.1": 110,
+        "0.15": 49,
+        "0.2": 28
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_grep",
+      "corpus_scale": "core",
+      "n_achieved": 18,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": null,
+        "0.1": null,
+        "0.15": null,
+        "0.2": null
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "native_index",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 778,
+        "0.1": 195,
+        "0.15": 87,
+        "0.2": 49
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "none",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 715,
+        "0.1": 179,
+        "0.15": 80,
+        "0.2": 45
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "oracle",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 597,
+        "0.1": 150,
+        "0.15": 67,
+        "0.2": 38
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "pull",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 1225,
+        "0.1": 307,
+        "0.15": 137,
+        "0.2": 77
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_breadcrumb",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 715,
+        "0.1": 179,
+        "0.15": 80,
+        "0.2": 45
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_pages_upper_bound",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 715,
+        "0.1": 179,
+        "0.15": 80,
+        "0.2": 45
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    },
+    {
+      "arm": "push_sections_pull",
+      "corpus_scale": "core",
+      "n_achieved": 20,
+      "probe_class": "unprompted_push",
+      "required_n": {
+        "0.05": 589,
+        "0.1": 148,
+        "0.15": 66,
+        "0.2": 37
+      },
+      "verdict_arm": "push_breadcrumb_pull"
+    }
+  ],
+  "run_id": "42174388801",
+  "spend": {
+    "billable_input_tokens": 6827682.0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "input_tokens": 6827682,
+    "model_priced": "claude-sonnet-5",
+    "output_tokens": 327765,
+    "rows_counted": 810,
+    "usd": 25.399521
+  },
+  "torn_rows": 0
+}
