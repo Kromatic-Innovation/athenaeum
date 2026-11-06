@@ -340,6 +340,60 @@ def is_d1_narrow(verdict: AttributionVerdict) -> bool:
     return any(c.check_id == CHECK_D1_NARROW for c in verdict.checks)
 
 
+def _is_d1_domain(verdict: AttributionVerdict) -> bool:
+    """True when *verdict* fired the D1-domain check — never enforced.
+
+    Design §17, decision 3: "Whole-domain relay entries stay observe-only
+    until a narrowed list exists, because they over-deny real employees of
+    the relay's domain." Unlike D1-narrow (always withheld) this check must
+    never be withheld, in ANY mode including a literal ``enforce`` — see
+    :func:`should_enforce_verdict`, which checks this BEFORE consulting a
+    question class, so a D1-domain verdict can never be caught by
+    ``enforce``'s own blanket grant or by an ``auto``-enforced class it
+    would otherwise fall through to (:func:`question_class_for` has no
+    trigger entry for ``D1-domain`` and would default it to
+    ``role-unmatched``, which is exactly the accidental capture this
+    ordering rules out).
+    """
+    return any(c.check_id == CHECK_D1_DOMAIN for c in verdict.checks)
+
+
+def should_enforce_verdict(
+    verdict: AttributionVerdict, context: AttributionContext
+) -> bool:
+    """True when *verdict* must be withheld from its target (issue athenaeum#2220).
+
+    The one decision point every writer's enforce branch calls, so the
+    "D1-narrow always, D1-domain never, otherwise gated by question class"
+    rule (design §9.1, §17 decision 3) is expressed exactly once rather
+    than re-derived at each of the five writer call sites:
+
+    - D1-narrow is withheld in every mode (issue athenaeum#2210; unchanged
+      here).
+    - D1-domain is never withheld, in every mode (design §17 decision 3) --
+      checked before disposition/question-class so it can never be
+      accidentally swept into an enforced class.
+    - Any other :data:`DISPOSITION_SUSPECT` verdict (D1-role, D2, D3, D4,
+      C1-C3, in any combination) is withheld exactly when
+      :func:`question_class_for` resolves it to a class in
+      :attr:`AttributionContext.enforced_classes`.
+    - :data:`DISPOSITION_PASS` is never withheld.
+
+    A writer that withholds (return value ``True``) parks the suspect
+    NON-shadow (``shadow=not should_enforce_verdict(...)``, mirroring the
+    pre-existing D1-narrow idiom) and skips its own write; otherwise it
+    parks shadow (when not a plain pass) and writes exactly as it does
+    today.
+    """
+    if is_d1_narrow(verdict):
+        return True
+    if _is_d1_domain(verdict):
+        return False
+    if verdict.disposition != DISPOSITION_SUSPECT:
+        return False
+    return question_class_for(verdict.checks) in context.enforced_classes
+
+
 @dataclass
 class AttributionContext:
     """Indexes and config built once per run, passed to every seam call.
@@ -404,6 +458,22 @@ class AttributionContext:
     #: compatibility rather than widening :func:`build_attribution_context`'s
     #: own required arguments.
     wiki_root: Path | None = None
+    #: Issue athenaeum#2220 (design §9.1/§9.3): the question classes that
+    #: ENFORCE under this run's resolved ``librarian.attribution.mode`` --
+    #: computed here by :func:`attribution_enforced_classes`, so every
+    #: writer sharing THIS context object sees the same decision. Empty
+    #: under ``observe``; every :data:`QUESTION_CLASSES` member under
+    #: ``enforce``. See :func:`should_enforce_verdict`, the one place
+    #: every writer consults this field.
+    #:
+    #: A demoted ``auto`` class's WARNING fires once per CALL to
+    #: :func:`attribution_enforced_classes`, not once per run, UNLESS the
+    #: caller building this context passes the same
+    #: :class:`~athenaeum.pii.ExcludedRecordIndex` object across every
+    #: context it builds in one run -- see
+    #: :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE` for which callers that
+    #: is true for today and which it is not.
+    enforced_classes: frozenset[str] = frozenset()
 
 
 def _attribution_key_path(contacts_root: Path) -> Path:
@@ -530,6 +600,9 @@ def build_attribution_context(
         inline_elsewhere_index=inline_elsewhere_index,
         person_name_index=person_name_index,
         wiki_root=resolved_wiki_root,
+        enforced_classes=attribution_enforced_classes(
+            config, resolved_contacts_root, excluded_index=idx
+        ),
     )
 
 
@@ -1251,26 +1324,53 @@ def scrub_compiled_contact_tokens(
     as the target, regardless of the verdict's disposition (unlike the other
     four writers, which only park a non-``pass`` verdict, this writer has no
     "file it on the record" path at all in observe mode, so a ``pass`` token
-    would otherwise vanish with no trace). It is then parked via
-    :func:`park_suspect` as a **shadow** suspect (design §10.2: "In observe
-    mode, every token is parked as a shadow entry" — unlike the other
-    writers' ``shadow=not is_d1_narrow(verdict)``, this writer removes the
-    token from the body unconditionally regardless of disposition, so there
-    is no enforce-vs-observe distinction for the shadow flag to encode until
-    the enforce child (athenaeum#2220) adds the "file a pass on the
-    subject's record" path design §10.2 describes).
+    would otherwise vanish with no trace).
+
+    **Issue athenaeum#2220 adds the enforce path design §10.2 describes, with
+    one all-or-nothing gate** (:data:`QUESTION_CLASSES` all in
+    :attr:`AttributionContext.enforced_classes`, i.e. every class enforced —
+    unconditional under a literal ``enforce``, and reachable under ``auto``
+    only once every class has independently cleared calibration+ack): a
+    ``pass`` token has no question class of its own for a PARTIAL ``auto``
+    to gate against, so this writer only ever leaves observe behaviour for
+    the fully-measured case, never a half-enforced one.
+
+    - **Not fully enforced** (``observe``, or ``auto`` with any class still
+      unmeasured): unchanged from before this issue. Every token — any
+      disposition — is parked via :func:`park_suspect` as a **shadow**
+      suspect (design §10.2: "In observe mode, every token is parked as a
+      shadow entry"), and nothing is ever filed on a record.
+    - **Fully enforced:** a ``pass`` token is instead FILED on the
+      subject's own record via :func:`athenaeum.pii.record_contact_value`
+      with :data:`athenaeum.pii.USAGE_CLASS_UNCLASSIFIED` — never
+      ``observed``, because this writer only ever confirmed the
+      deterministic checks found no reason to suspect the token, not that
+      the note actually named it as the subject's own. A non-``pass``
+      verdict is parked via :func:`park_suspect`, with its candidates, so
+      re-attribution can later file it on its real owner —
+      :func:`should_enforce_verdict` decides the shadow flag exactly as it
+      does for the other four writers (D1-narrow non-shadow in every mode;
+      D1-domain shadow in every mode, design §17 decision 3; any other
+      suspect non-shadow because every class is enforced here by
+      construction).
     """
-    tokens = pii.find_inline_emails(body) + pii.find_inline_phones(body)
-    if not tokens:
+    email_tokens = pii.find_inline_emails(body)
+    phone_tokens = pii.find_inline_phones(body)
+    tagged_tokens = [(t, "emails") for t in email_tokens] + [
+        (t, "phones") for t in phone_tokens
+    ]
+    if not tagged_tokens:
         return body, []
 
     name_pii_values = (
         set(pii.name_field_pii_values({"name": target_name})) if target_name else set()
     )
+    # Issue athenaeum#2220: see the docstring's "all-or-nothing gate" above.
+    full_enforce = context.enforced_classes == frozenset(QUESTION_CLASSES)
 
     scrubbed = body
     removed: list[str] = []
-    for token in tokens:
+    for token, record_field in tagged_tokens:
         if token in name_pii_values:
             continue
         verdict = check_contact_attribution(
@@ -1282,21 +1382,34 @@ def scrub_compiled_contact_tokens(
             writer=WRITER_PROSE_COMPILE,
             context=context,
         )
-        park_suspect(
-            context,
-            token,
-            verdict,
-            target_uid=subject_uid,
-            target_name=target_name,
-            writer=WRITER_PROSE_COMPILE,
-            source_ref=source_ref,
-            # NOT `shadow=not is_d1_narrow(verdict)` (the other four writers'
-            # convention) — design §10.2 states shadow=True unconditionally
-            # for THIS writer, and prose-compile never files a value onto a
-            # record regardless of disposition, so there is no
-            # enforce-vs-shadow distinction here to encode yet (athenaeum#2216).
-            shadow=True,
-        )
+        if full_enforce and verdict.disposition == DISPOSITION_PASS:
+            pii.record_contact_value(
+                context.contacts_root,
+                token,
+                uid=subject_uid,
+                name=target_name,
+                usage_class=pii.USAGE_CLASS_UNCLASSIFIED,
+                field=record_field,
+                source=source_ref if source_ref is not None else "",
+                observed_at=now_iso(),
+            )
+        else:
+            # Not fully enforced: unconditional shadow=True, byte-identical
+            # to this writer's pre-athenaeum#2220 behaviour (the design's
+            # "every token is parked as a shadow entry" in observe mode).
+            # Fully enforced: the shared per-verdict decision every other
+            # writer already uses.
+            shadow = True if not full_enforce else not should_enforce_verdict(verdict, context)
+            park_suspect(
+                context,
+                token,
+                verdict,
+                target_uid=subject_uid,
+                target_name=target_name,
+                writer=WRITER_PROSE_COMPILE,
+                source_ref=source_ref,
+                shadow=shadow,
+            )
         scrubbed = scrubbed.replace(token, "")
         removed.append(token)
 
@@ -1469,6 +1582,7 @@ __all__ = [
     "AttributionVerdict",
     "AttributionContext",
     "is_d1_narrow",
+    "should_enforce_verdict",
     "build_attribution_context",
     "check_contact_attribution",
     "scrub_compiled_contact_tokens",
@@ -4022,6 +4136,73 @@ def escalate_shadow_suspects(
     if limit is not None and limit <= 0:
         return ShadowEscalationSummary()
     suspects = iter_parked_suspects(context.contacts_root, shadow_only=True)
+    return _escalate_parked_suspects(
+        context, suspects, apply=False, client=client, config=config, usage=usage, limit=limit
+    )
+
+
+def escalate_enforced_suspects(
+    context: AttributionContext,
+    *,
+    client: "LLMBackend | None" = None,
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+    limit: int | None = None,
+) -> ShadowEscalationSummary:
+    """Escalate withheld (non-shadow) SUSPECT suspects, filing for real (issue athenaeum#2220).
+
+    The enforce-mode counterpart to :func:`escalate_shadow_suspects`. A
+    writer withholds a suspect value from its target exactly when
+    :func:`should_enforce_verdict` says so (D1-narrow, or an enforced
+    question class), parking it NON-shadow. That withheld value is already
+    not on its target -- resolving it for real, by placing it on the
+    model's answer or sending it to a human when the model cannot settle
+    it, is the whole point of enforce mode (design §9.1). D1-narrow's own
+    non-shadow entries are filtered out by *disposition* alone, the same
+    way :func:`escalate_shadow_suspects` already filters a non-``suspect``
+    entry: D1-narrow's disposition is :data:`DISPOSITION_NON_PERSONAL`,
+    never :data:`DISPOSITION_SUSPECT`, so it carries no question to ask and
+    this sweep is a correct no-op for it, by construction, without a
+    special case.
+
+    Mirrors :func:`escalate_shadow_suspects`'s memo/cap/ordering discipline
+    exactly (see its docstring), with two differences: it reads NON-shadow
+    suspects instead of shadow ones, and it passes ``apply=True`` to
+    :func:`escalate_contact_attribution_suspect`, so an at-or-above-
+    threshold placement actually writes (design §9.1's "escalation places
+    what it can") instead of only logging what it would have placed.
+    """
+    if client is None:
+        return ShadowEscalationSummary()
+    if limit is not None and limit <= 0:
+        return ShadowEscalationSummary()
+    suspects = [
+        s
+        for s in iter_parked_suspects(context.contacts_root, shadow_only=False)
+        if not s.shadow and s.disposition == DISPOSITION_SUSPECT
+    ]
+    return _escalate_parked_suspects(
+        context, suspects, apply=True, client=client, config=config, usage=usage, limit=limit
+    )
+
+
+def _escalate_parked_suspects(
+    context: AttributionContext,
+    suspects: list[ParkedSuspect],
+    *,
+    apply: bool,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None,
+    usage: TokenUsage | None,
+    limit: int | None,
+) -> ShadowEscalationSummary:
+    """Shared body of :func:`escalate_shadow_suspects` /
+    :func:`escalate_enforced_suspects` — *suspects* is already the right
+    population (shadow-only or withheld-only); only *apply* differs between
+    the two callers. Split out so the memo/cap/ordering discipline
+    documented on :func:`escalate_shadow_suspects` is written once, and so
+    an edit to it cannot silently diverge between the two modes.
+    """
     considered = len(suspects)
     memo = read_attribution_memo(
         default_attribution_memo_path(context.contacts_root)
@@ -4071,7 +4252,7 @@ def escalate_shadow_suspects(
             client=client,
             config=config,
             usage=usage,
-            apply=False,
+            apply=apply,
             suspect_id=suspect.suspect_id,
         )
         outcomes.append(outcome)
@@ -4134,6 +4315,7 @@ __all__ += [
     "record_attribution_audit_review",
     "ShadowEscalationSummary",
     "escalate_shadow_suspects",
+    "escalate_enforced_suspects",
 ]
 
 
@@ -4313,6 +4495,364 @@ def read_attribution_observe_reports(contacts_root: Path) -> list[ObserveReport]
     return reports
 
 
+# ---------------------------------------------------------------------------
+# Observe-report acknowledgement (design §9.3, issue athenaeum#2220)
+# ---------------------------------------------------------------------------
+#
+# "The operator acknowledges a report as clean with `athenaeum attribution
+# ack-observe-report <report-id>`. An acknowledgement is valid for a class
+# when the report covers that class under the same model and prompt sha the
+# class resolves to now." (design §9.3) -- the ack itself names only a
+# report id; which classes/model/prompt it covers is read back OFF THAT
+# REPORT (:class:`ObserveReport`'s own ``model_by_class`` /
+# ``prompt_sha256_by_class``, which already cover every question class —
+# see :func:`athenaeum.contact_surface_lint.persist_observe_report`), never
+# duplicated onto the ack. That is what makes "a changed model or prompt
+# makes the acknowledgement stale" (design §9.3) automatic: the ack does not
+# move, but the LIVE (model, prompt_sha256) a class resolves to
+# (:func:`attribution_call_identity`) no longer matches what the acknowledged
+# report recorded, so :func:`attribution_class_observe_report_acknowledged`
+# stops finding a match for that class without anyone editing the ack.
+#
+# Same append-only JSONL convention as the observe-report ledger itself
+# (and :func:`athenaeum.pii.append_observation` before it) -- a fourth
+# ledger shape here would cost a reader nothing except having to notice it
+# differs for no reason.
+
+#: Ack ledger filename, beside the observe-report ledger on the contacts
+#: (excluded) surface.
+ATTRIBUTION_OBSERVE_REPORT_ACK_FILENAME = "_attribution_observe_report_acks.jsonl"
+
+#: Row-schema version, mirroring :data:`ATTRIBUTION_OBSERVE_REPORT_VERSION`.
+ATTRIBUTION_OBSERVE_REPORT_ACK_VERSION = 1
+
+
+def default_attribution_observe_report_ack_path(contacts_root: Path) -> Path:
+    """Default ack-ledger path: ``<contacts_root>/_attribution_observe_report_acks.jsonl``."""
+    return Path(contacts_root) / ATTRIBUTION_OBSERVE_REPORT_ACK_FILENAME
+
+
+@dataclass(frozen=True)
+class ObserveReportAck:
+    """One operator acknowledgement of an observe report (design §9.3).
+
+    Carries only the report id acknowledged, a fresh ack id, and a
+    timestamp — never a value, a model or a prompt sha. Those live on the
+    :class:`ObserveReport` the ack points at, read back at check time so a
+    later model/prompt change can make the SAME ack stale without rewriting
+    it (see this section's module comment above).
+    """
+
+    ack_id: str
+    report_id: str
+    ts: str
+
+
+def build_attribution_observe_report_ack_record(
+    *, ack_id: str, report_id: str, ts: str
+) -> dict[str, Any]:
+    """Build one ack record dict (the on-disk JSONL shape)."""
+    return {
+        "v": ATTRIBUTION_OBSERVE_REPORT_ACK_VERSION,
+        "ack_id": ack_id,
+        "report_id": report_id,
+        "ts": ts,
+    }
+
+
+class ObserveReportAckError(ValueError):
+    """Raised by :func:`acknowledge_attribution_observe_report` on an unknown report id.
+
+    An acknowledgement of a report that was never persisted would silently
+    create a dangling ack that can never match a live report — loud, rather
+    than a no-op the operator would have no way to notice (issue
+    athenaeum#2220).
+    """
+
+
+def append_attribution_observe_report_ack(
+    contacts_root: Path,
+    *,
+    report_id: str,
+    ack_id: str | None = None,
+    ts: str | None = None,
+    log_path: Path | None = None,
+) -> ObserveReportAck:
+    """Append one observe-report acknowledgement. Raises on a write failure.
+
+    Mirrors :func:`append_attribution_observe_report`'s discipline exactly:
+    the append IS the entire side effect. *ack_id* defaults to a fresh
+    :func:`uuid.uuid4` hex string; *ts* defaults to
+    :func:`athenaeum.store.now_iso`. Does not itself check that *report_id*
+    names a real report — see :func:`acknowledge_attribution_observe_report`
+    for the validated, CLI-facing entry point; this primitive is the raw
+    append, for callers (such as a test fixture) that already know the id
+    is good.
+    """
+    aid = ack_id if ack_id is not None else uuid.uuid4().hex
+    timestamp = ts if ts is not None else now_iso()
+    record = build_attribution_observe_report_ack_record(
+        ack_id=aid, report_id=report_id, ts=timestamp
+    )
+    target = (
+        log_path
+        if log_path is not None
+        else default_attribution_observe_report_ack_path(contacts_root)
+    )
+    append_line_durable(target, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+    return ObserveReportAck(ack_id=aid, report_id=report_id, ts=timestamp)
+
+
+def read_attribution_observe_report_acks(contacts_root: Path) -> list[ObserveReportAck]:
+    """Read every well-formed ack row at the default path.
+
+    Tolerant, mirroring :func:`read_attribution_observe_reports`: an
+    unreadable file or a malformed line is skipped (logged at WARNING),
+    never fatal. Returns acks in file order (oldest first).
+    """
+    path = default_attribution_observe_report_ack_path(contacts_root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    acks: list[ObserveReportAck] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError:
+            log.warning(
+                "pii_attribution: skipping malformed observe-report-ack line %d in %s",
+                lineno,
+                path,
+            )
+            continue
+        if not isinstance(raw, dict) or not raw.get("ack_id") or not raw.get("report_id"):
+            log.warning(
+                "pii_attribution: skipping keyless observe-report-ack line %d in %s",
+                lineno,
+                path,
+            )
+            continue
+        acks.append(
+            ObserveReportAck(
+                ack_id=str(raw["ack_id"]),
+                report_id=str(raw["report_id"]),
+                ts=str(raw.get("ts", "")),
+            )
+        )
+    return acks
+
+
+def acknowledge_attribution_observe_report(
+    contacts_root: Path, report_id: str
+) -> ObserveReportAck:
+    """Validate *report_id* names a real persisted report, then acknowledge it.
+
+    Raises :class:`ObserveReportAckError` when *report_id* matches no row in
+    :func:`read_attribution_observe_reports` — the CLI-facing entry point
+    (``athenaeum attribution ack-observe-report``) must not let an operator
+    acknowledge a report id that was never written, which would otherwise
+    look like a successful acknowledgement forever.
+    """
+    reports = read_attribution_observe_reports(contacts_root)
+    if not any(r.report_id == report_id for r in reports):
+        raise ObserveReportAckError(
+            f"no observe report with id {report_id!r} under {contacts_root} "
+            "(run `athenaeum contact-surface-lint --attribution` first)"
+        )
+    return append_attribution_observe_report_ack(contacts_root, report_id=report_id)
+
+
+def attribution_class_observe_report_acknowledged(
+    contacts_root: Path,
+    question_class: str,
+    config: dict[str, Any] | None,
+) -> bool:
+    """True when an acknowledged, non-stale observe report covers *question_class*.
+
+    Design §9.3: "An acknowledgement is valid for a class when the report
+    covers that class under the same model and prompt sha the class
+    resolves to now." Walks every ack, resolves the report it points at,
+    and compares that report's ``model_by_class``/``prompt_sha256_by_class``
+    entries for *question_class* against :func:`attribution_call_identity`'s
+    LIVE answer for the same class — a changed model or judge prompt since
+    the report ran makes every ack that cites it stale for this class,
+    automatically, with nothing to edit on the ack itself.
+    """
+    model, prompt_sha256 = attribution_call_identity(question_class, config)
+    acks = read_attribution_observe_report_acks(contacts_root)
+    if not acks:
+        return False
+    reports_by_id = {r.report_id: r for r in read_attribution_observe_reports(contacts_root)}
+    for ack in acks:
+        report = reports_by_id.get(ack.report_id)
+        if report is None:
+            continue
+        if (
+            report.model_by_class.get(question_class) == model
+            and report.prompt_sha256_by_class.get(question_class) == prompt_sha256
+        ):
+            return True
+    return False
+
+
+def attribution_class_has_valid_calibration(
+    question_class: str, config: dict[str, Any] | None
+) -> bool:
+    """True when *question_class* has a calibration record valid for enforcement.
+
+    Design §9.3: "its ``model`` equals the model that class resolves to; its
+    ``prompt_sha256`` equals the live prompt's; it passes the bar in
+    §12.3." :func:`_valid_calibration_entry` already checks the third
+    condition (``passes``); this adds the first two, comparing the entry's
+    stored ``model``/``prompt_sha256`` against
+    :func:`attribution_call_identity`'s live answer for this class. Stricter
+    than :func:`_valid_calibration_entry` alone (which
+    :func:`threshold_for_class` / :func:`calibrated_probability_for_class`
+    use unchanged for their own, pre-existing purposes) — this function is
+    the ``auto`` preflight's own check, not a replacement for those.
+    """
+    entry = _valid_calibration_entry(question_class)
+    if entry is None:
+        return False
+    model, prompt_sha256 = attribution_call_identity(question_class, config)
+    return entry.model == model and entry.prompt_sha256 == prompt_sha256
+
+
+#: Memoizes :func:`attribution_enforced_classes`'s ``auto``-mode preflight
+#: for one run (issue athenaeum#2220, Seer PR review finding on PR
+#: athenaeum#2348). Without this, the function's own docstring claim --
+#: "called once ... so every writer in one run sees the same decision and
+#: a demoted class logs its WARNING exactly once per run" -- was false:
+#: :func:`build_attribution_context` called it UNCONDITIONALLY on every
+#: build, and several real callers build a fresh context once per raw
+#: file/record inside a run-length loop
+#: (``librarian._record_correspondent_contact``, the tier-3 scrub wiring
+#: in ``librarian.py``, ``corrections.py``'s batch-file path), so a
+#: multi-file run re-read the calibration YAML and both observe-report
+#: ledgers for all five classes, and re-logged up to five WARNINGs, once
+#: PER FILE rather than once per run.
+#:
+#: Keyed on the caller's :class:`~athenaeum.pii.ExcludedRecordIndex`
+#: object IDENTITY -- the exact precedent :data:`_CHILD_C_INDEX_CACHE`
+#: already sets for :func:`_cached_child_c_indexes`, reused rather than
+#: reinvented. ``excluded_index`` is the right handle for THIS cache
+#: specifically because, unlike ``entity_index`` (``None`` whenever no
+#: wiki directory exists yet), :func:`build_attribution_context` NEVER
+#: leaves it unset: it resolves one on every call, built fresh or passed
+#: in. Every run-length loop that builds one context per file already
+#: builds ONE ``ExcludedRecordIndex`` ahead of the loop and threads it
+#: through for an unrelated reason (issue athenaeum#883: avoiding an
+#: O(corpus) rescan per file) -- this piggybacks on that SAME object
+#: rather than asking any caller to plumb a new one through. A caller that
+#: builds a fresh index per call (no loop to share one over) simply never
+#: hits the cache, exactly like :func:`_cached_child_c_indexes`'s own
+#: documented degrade path: never worse than the pre-cache cost, only
+#: sometimes not better.
+#:
+#: The stored ``(mode, contacts_root)`` pair is the staleness guard,
+#: mirroring the stored secret in :data:`_CHILD_C_INDEX_CACHE`: if either
+#: differs from what THIS call resolves, the entry is a miss, never a
+#: stale hit -- a config change under a reused index object must never
+#: return a different call's answer. A mid-run change to the CONTENT of
+#: the calibration file or the observe-report ledger is deliberately NOT
+#: detected: the whole point of a run-start preflight is "decide once,
+#: use for the whole run" (design §9.3's "checks both at run start"), so a
+#: ledger append mid-run -- e.g. this same run's own lint pass
+#: acknowledging a report -- must not retroactively change what an
+#: earlier-built context in this run already decided.
+#:
+#: A :class:`weakref.WeakKeyDictionary`, not a plain module-level dict, so
+#: this never pins an ``ExcludedRecordIndex`` the rest of the process has
+#: already let go of, and -- just as important for the test suite, which
+#: builds many contexts over many independent ``tmp_path`` roots -- never
+#: leaks a cached answer across two unrelated index objects: once an
+#: index is garbage-collected, its entry goes with it, so there is no
+#: process-global state for one test's cache to leave behind for the next.
+_ATTRIBUTION_ENFORCED_CLASSES_CACHE: (
+    "weakref.WeakKeyDictionary[pii.ExcludedRecordIndex, tuple[str, Path, frozenset[str]]]"
+) = weakref.WeakKeyDictionary()
+
+
+def attribution_enforced_classes(
+    config: dict[str, Any] | None,
+    contacts_root: Path,
+    *,
+    excluded_index: "pii.ExcludedRecordIndex | None" = None,
+) -> frozenset[str]:
+    """Which :data:`QUESTION_CLASSES` enforce, under the resolved attribution mode.
+
+    The run-start preflight (design §9.1/§9.3, issue athenaeum#2220),
+    intended to run once per run so every writer sharing one run sees the
+    same decision and a demoted class logs its WARNING exactly once per
+    run:
+
+    - ``"observe"`` -- no class enforces. Cheap (no file I/O); never cached.
+    - ``"enforce"`` -- every class enforces. Cheap; never cached.
+    - ``"auto"`` (the default) -- a class enforces only when BOTH
+      :func:`attribution_class_has_valid_calibration` and
+      :func:`attribution_class_observe_report_acknowledged` hold for it;
+      otherwise it observes, and this logs one WARNING naming which of the
+      two checks failed. A fresh install (no valid record, no acknowledged
+      report) therefore observes every class.
+
+    **Caching (issue athenaeum#2220 fix, see
+    :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE`).** The ``auto`` branch's
+    result is memoized per *excluded_index* identity when the caller
+    passes one -- which :func:`build_attribution_context` always does,
+    with the :class:`~athenaeum.pii.ExcludedRecordIndex` it resolves for
+    its own :attr:`AttributionContext.excluded_index`. This is "once per
+    run" for exactly the calls that matter: every caller that builds one
+    context per raw file/record inside a run-length loop already shares
+    ONE index object across that whole loop (issue athenaeum#883), so the
+    expensive read and the WARNING genuinely fire once per run for those
+    call sites, not once per file. A caller with no stable index to share
+    (one built fresh per call, no run-length loop around it) gets no
+    caching here, matching :func:`_cached_child_c_indexes`'s own
+    documented limit -- never worse than before this fix, only sometimes
+    not better.
+    """
+    mode = config_module.resolve_attribution_mode(config)
+    if mode == "observe":
+        return frozenset()
+    if mode == "enforce":
+        return frozenset(QUESTION_CLASSES)
+    resolved_contacts_root = Path(contacts_root)
+    if excluded_index is not None:
+        cached = _ATTRIBUTION_ENFORCED_CLASSES_CACHE.get(excluded_index)
+        if cached is not None:
+            cached_mode, cached_root, cached_result = cached
+            if cached_mode == mode and cached_root == resolved_contacts_root:
+                return cached_result
+    enforced: set[str] = set()
+    for question_class in QUESTION_CLASSES:
+        calibration_ok = attribution_class_has_valid_calibration(question_class, config)
+        ack_ok = attribution_class_observe_report_acknowledged(
+            resolved_contacts_root, question_class, config
+        )
+        if calibration_ok and ack_ok:
+            enforced.add(question_class)
+        else:
+            log.warning(
+                "pii_attribution: auto mode observing question class %r "
+                "(calibration_valid=%s, observe_report_acknowledged=%s)",
+                question_class,
+                calibration_ok,
+                ack_ok,
+            )
+    result = frozenset(enforced)
+    if excluded_index is not None:
+        _ATTRIBUTION_ENFORCED_CLASSES_CACHE[excluded_index] = (
+            mode,
+            resolved_contacts_root,
+            result,
+        )
+    return result
+
+
 __all__ += [
     "resolve_source_value_presence",
     "WRITER_LINT",
@@ -4323,4 +4863,16 @@ __all__ += [
     "build_attribution_observe_report_record",
     "append_attribution_observe_report",
     "read_attribution_observe_reports",
+    "ATTRIBUTION_OBSERVE_REPORT_ACK_FILENAME",
+    "ATTRIBUTION_OBSERVE_REPORT_ACK_VERSION",
+    "default_attribution_observe_report_ack_path",
+    "ObserveReportAck",
+    "build_attribution_observe_report_ack_record",
+    "ObserveReportAckError",
+    "append_attribution_observe_report_ack",
+    "read_attribution_observe_report_acks",
+    "acknowledge_attribution_observe_report",
+    "attribution_class_observe_report_acknowledged",
+    "attribution_class_has_valid_calibration",
+    "attribution_enforced_classes",
 ]

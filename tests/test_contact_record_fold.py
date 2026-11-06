@@ -362,6 +362,95 @@ class TestAttributionSeamWiring:
         assert without_context.values_added == with_context.values_added
         assert canon2.read_bytes() == after_no_context
 
+    def _enforce_context(
+        self, tmp_path: Path, root: Path
+    ) -> "pii_attribution.AttributionContext":
+        return pii_attribution.build_attribution_context(
+            tmp_path,
+            {
+                "storage": {"mapping": {"pii": "excluded"}},
+                "librarian": {"attribution": {"mode": "enforce"}},
+            },
+            excluded_index=pii.ExcludedRecordIndex(root),
+        )
+
+    def test_merge_contact_values_excludes_an_enforced_suspect_from_the_merge(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2220: under `enforce`, a non-D1-narrow suspect
+        (a role local part whose domain is not on the canonical record) is
+        also excluded from the merge, like D1-narrow already was."""
+        root = tmp_path / "excluded"
+        root.mkdir(parents=True)
+        context = self._enforce_context(tmp_path, root)
+        canonical = {"uid": CANON, "name": "Casey", "emails": ["c@example.org"]}
+        absorbed = {"uid": ABSORBED, "emails": ["info@vendor.example.org"]}
+        merged, added, _facts, verdicts = merge_contact_values(
+            canonical,
+            absorbed,
+            attribution_context=context,
+            target_uid=CANON,
+            target_name="Casey",
+        )
+        assert merged["emails"] == ["c@example.org"]
+        assert added == {}
+        values_and_dispositions = [(value, v.disposition) for value, v in verdicts]
+        assert values_and_dispositions == [
+            ("info@vendor.example.org", pii_attribution.DISPOSITION_SUSPECT)
+        ]
+
+    def test_fold_contact_record_enforce_mode_parks_the_suspect_non_shadow(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "excluded"
+        canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
+        absorbed = _record(
+            root, f"{ABSORBED}.md", ABSORBED, emails=["info@vendor.example.org"]
+        )
+        context = self._enforce_context(tmp_path, root)
+
+        summary = fold_absorbed_contact_records(
+            root, [(ABSORBED, CANON)], attribution_context=context
+        )
+
+        meta = _meta(canon)
+        assert "info@vendor.example.org" not in (meta.get("emails") or [])
+        assert summary.records_folded == 1
+        assert not absorbed.exists()  # still retired, like any other fold
+
+        suspects = list((root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["disposition"] == "suspect"
+        assert suspect_meta["value"] == "info@vendor.example.org"
+        # Design AC: parked with the absorbed record as its source.
+        assert str(absorbed) in str(suspect_meta["source"])
+
+    def test_fold_contact_record_observe_mode_still_carries_the_suspect(
+        self, tmp_path: Path
+    ) -> None:
+        """The observe-mode counterpart: byte-identical to pre-athenaeum#2220
+        behaviour -- a non-D1-narrow suspect IS carried and parked shadow."""
+        root = tmp_path / "excluded"
+        canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
+        _record(root, f"{ABSORBED}.md", ABSORBED, emails=["info@vendor.example.org"])
+        context = self._context(tmp_path, root)
+
+        summary = fold_absorbed_contact_records(
+            root, [(ABSORBED, CANON)], attribution_context=context
+        )
+
+        meta = _meta(canon)
+        assert "info@vendor.example.org" in (meta.get("emails") or [])
+        assert summary.values_added == {"emails": 1}
+
+        suspects = list((root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is True
+        assert suspect_meta["disposition"] == "suspect"
+
 
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2196: orphaned per-address fact entries (identifier in

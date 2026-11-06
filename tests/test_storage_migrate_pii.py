@@ -559,6 +559,87 @@ class TestAttributionSeamWiring:
         assert suspect_meta["shadow"] is False
         assert suspect_meta["value"] == "noreply@example.com"
 
+    def test_apply_enforce_mode_withholds_a_non_narrow_suspect(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2220: under `librarian.attribution.mode: enforce`
+        a non-D1-narrow suspect token (a role local part whose domain is not
+        on jane's own record -- D1-role, question class `role-unmatched`) is
+        also redacted from the page and parked NON-shadow, same as
+        D1-narrow, instead of being added to the excluded record."""
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n"
+            "librarian:\n  attribution:\n    mode: enforce\n",
+            encoding="utf-8",
+        )
+        page = root / "wiki" / "jane.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "Jane leads widgets.",
+                "Jane leads widgets. CC info@vendor.example.org for scheduling.",
+            ),
+            encoding="utf-8",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+
+        assert rc == 0
+        origin = page.read_text(encoding="utf-8")
+        assert "info@vendor.example.org" not in origin  # still redacted from the wiki
+
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane.md"
+        meta, _ = parse_frontmatter(excluded_page.read_text(encoding="utf-8"))
+        assert "info@vendor.example.org" not in (meta.get("emails") or [])
+        assert "jane@example.com" in (meta.get("emails") or [])  # unrelated value unaffected
+
+        contacts_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        suspects = list((contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["disposition"] == "suspect"
+        assert suspect_meta["value"] == "info@vendor.example.org"
+
+    def test_apply_observe_mode_still_files_a_non_narrow_suspect(
+        self, tmp_path: Path
+    ) -> None:
+        """The observe-mode counterpart to the enforce test above, byte-
+        identical to pre-athenaeum#2220 behaviour: a non-D1-narrow suspect
+        is filed on the record and parked shadow."""
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n"
+            "librarian:\n  attribution:\n    mode: observe\n",
+            encoding="utf-8",
+        )
+        page = root / "wiki" / "jane.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "Jane leads widgets.",
+                "Jane leads widgets. CC info@vendor.example.org for scheduling.",
+            ),
+            encoding="utf-8",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+
+        assert rc == 0
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane.md"
+        meta, _ = parse_frontmatter(excluded_page.read_text(encoding="utf-8"))
+        assert "info@vendor.example.org" in (meta.get("emails") or [])
+
+        contacts_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        suspects = list((contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is True
+        assert suspect_meta["disposition"] == "suspect"
+
 
 # ---------------------------------------------------------------------------
 # Bulk migration target-set resolution (issue athenaeum#495)

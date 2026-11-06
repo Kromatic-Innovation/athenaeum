@@ -429,6 +429,75 @@ class TestAttributionSeamWiring:
         assert meta["disposition"] == "non-personal"
 
 
+_ENFORCE_CONFIG: dict[str, object] = {
+    "storage": {"mapping": {"pii": "excluded"}},
+    "librarian": {"attribution": {"mode": "enforce"}},
+}
+_OBSERVE_CONFIG: dict[str, object] = {
+    "storage": {"mapping": {"pii": "excluded"}},
+    "librarian": {"attribution": {"mode": "observe"}},
+}
+#: A role local part (design D1-role) that is a SUSPECT, not D1-narrow — the
+#: writer-enforce case issue athenaeum#2220 adds. Not in
+#: ``BUILTIN_RELAY_LOCAL_PREFIXES``/narrow territory, and its domain is not
+#: already on the target's own record, so it resolves to question class
+#: ``role-unmatched`` rather than ``non-personal``.
+_ROLE_ADDRESS = "info@vendor.example.org"
+
+
+class TestEnforceModeWithholdsASuspectValue:
+    """Issue athenaeum#2220: a non-D1-narrow suspect is withheld under
+    `enforce`, and the `observe` counterpart is byte-identical to the
+    pre-athenaeum#2220 (``TestAttributionSeamWiring``) behaviour."""
+
+    def test_enforce_mode_withholds_and_parks_non_shadow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(address=_ROLE_ADDRESS),
+            classified=[_person(_DISPLAY)],
+            config=dict(_ENFORCE_CONFIG),
+        )
+        # The write primitive was never called under enforce: no mint.
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, _ENFORCE_CONFIG)
+        assert pii.resolve_contact_records(contacts, _ROLE_ADDRESS) == []
+
+        suspects = list((contacts / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta, _ = pii.parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["disposition"] == "suspect"
+        assert "D1-role" in meta["checks"]
+
+    def test_observe_mode_is_byte_identical_to_pre_2220_behaviour(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(address=_ROLE_ADDRESS),
+            classified=[_person(_DISPLAY)],
+            config=dict(_OBSERVE_CONFIG),
+        )
+        # Written exactly as it always has been: a suspect verdict (not
+        # D1-narrow) never blocked the write before this issue.
+        assert result.correspondent_contacts_recorded == 1  # type: ignore[attr-defined]
+        created = result.created[0]  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, _OBSERVE_CONFIG)
+        records = pii.resolve_contact_records(contacts, _ROLE_ADDRESS)
+        assert len(records) == 1
+        assert pii.uid_on_record(records[0]) == created.uid
+
+        suspects = list((contacts / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta, _ = pii.parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta["shadow"] is True
+        assert meta["disposition"] == "suspect"
+
+
 class TestProseCompileRecordsTheAddress:
     def test_address_lands_on_the_excluded_record_with_provenance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

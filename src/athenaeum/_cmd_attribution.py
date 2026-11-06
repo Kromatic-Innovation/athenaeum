@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum attribution {show,place}`` -- the human end of the attribution
-seam (issue athenaeum#2212).
+"""``athenaeum attribution {show,place,ack-observe-report}`` -- the human end
+of the attribution seam (issues athenaeum#2212, athenaeum#2220).
 
-Design ``docs/design/attribution-verification.md`` §8.1 names exactly these
-two commands:
+Design ``docs/design/attribution-verification.md`` §8.1/§9.3 names these
+three commands:
 
 - ``show <suspect-id>`` prints one parked suspect, and is **the only place a
   raw contact value is shown**. It is the "one way out" a human who needs
@@ -15,6 +15,16 @@ two commands:
   answers go through (:func:`athenaeum.pii.place_contact_value`), with
   ``decided_by: human`` and -- per §8.1 -- no calibrated probability, model
   id or prompt sha in the provenance.
+- ``ack-observe-report <report-id>`` (issue athenaeum#2220, design §9.3)
+  records the operator's acknowledgement that one
+  ``contact-surface-lint --attribution`` observe report is clean. The
+  ``auto`` preflight (:func:`athenaeum.pii_attribution.attribution_enforced_classes`)
+  enforces a question class only once a calibration record AND an
+  acknowledged, non-stale report both cover it -- this command is the only
+  way to produce the second half of that pair. Refuses (exit 1) when
+  *report-id* names no report :func:`athenaeum.pii_attribution.
+  read_attribution_observe_reports` can find, so an operator cannot
+  silently "acknowledge" a typo.
 
 **The design §7.2 re-check is injected for some ``--as`` forms and only
 REPORTED for others.** The asymmetry is deliberate; do not simplify it away.
@@ -58,10 +68,12 @@ Exit codes (see ``docs/reference/exit-codes.md``):
 
     0  -- success.
     1  -- errors: no such suspect, a malformed ``--as``, an unknown uid, an
-          unreadable excluded surface, or a placement the executor declined
-          or refused to make.
+          unreadable excluded surface, a placement the executor declined
+          or refused to make, or (``ack-observe-report``) an unknown
+          report id.
     2  -- usage (no subcommand given).
-    75 -- ``EXIT_LOCK_HELD``: ``place`` could not take the run lock.
+    75 -- ``EXIT_LOCK_HELD``: ``place``/``ack-observe-report`` could not
+          take the run lock.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` -- see
@@ -204,14 +216,17 @@ def _render_suspect(suspect: Any) -> str:
 
 
 def cmd_attribution(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum attribution {show,place}``."""
+    """Dispatch ``athenaeum attribution {show,place,ack-observe-report}``."""
     target = getattr(args, "attribution_target", None)
     if target == "show":
         return _cmd_show(args)
     if target == "place":
         return _cmd_place(args)
+    if target == "ack-observe-report":
+        return _cmd_ack_observe_report(args)
     print(
-        f"usage: athenaeum attribution {{show,place}} <suspect-id> [--as {_AS_FORMS}]",
+        "usage: athenaeum attribution {show,place,ack-observe-report} "
+        f"<suspect-id|report-id> [--as {_AS_FORMS}]",
         file=sys.stderr,
     )
     return 2
@@ -240,6 +255,44 @@ def _cmd_show(args: argparse.Namespace) -> int:
         sys.stdout.write(json.dumps(_suspect_to_json(suspect)) + "\n")
     else:
         print(_render_suspect(suspect))
+    return 0
+
+
+def _cmd_ack_observe_report(args: argparse.Namespace) -> int:
+    """``athenaeum attribution ack-observe-report <report-id>`` (issue athenaeum#2220).
+
+    Takes the run lock (same posture as ``place``: this appends a durable
+    ack row, and the ``auto`` preflight reads it at run start, so two
+    concurrent acknowledgements must not race the same way two concurrent
+    placements must not).
+    """
+    from athenaeum import pii_attribution
+
+    knowledge_root, config, contacts_root = _resolve_roots(args)
+
+    lock: "RunLock | int" = _acquire_or_exit(knowledge_root, args, config)
+    if isinstance(lock, int):
+        return lock
+    try:
+        try:
+            ack = pii_attribution.acknowledge_attribution_observe_report(
+                contacts_root, args.report_id
+            )
+        except pii_attribution.ObserveReportAckError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        lock.release()
+
+    if args.json:
+        sys.stdout.write(
+            json.dumps({"ack_id": ack.ack_id, "report_id": ack.report_id, "ts": ack.ts}) + "\n"
+        )
+    else:
+        print(
+            f"acknowledged observe report {ack.report_id} as clean "
+            f"(ack {ack.ack_id} at {ack.ts})"
+        )
     return 0
 
 
@@ -503,7 +556,7 @@ def _cmd_place(args: argparse.Namespace) -> int:
 
 
 def add_attribution_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum attribution`` and its two modes on *subparsers*."""
+    """Register ``athenaeum attribution`` and its three modes on *subparsers*."""
     parser = subparsers.add_parser(
         "attribution",
         help=(
@@ -567,3 +620,32 @@ def add_attribution_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_lock_args(place_p)
+
+    ack_p = sub.add_parser(
+        "ack-observe-report",
+        help=(
+            "Acknowledge one contact-surface-lint --attribution observe "
+            "report as clean, for the `auto` preflight (design §9.3)."
+        ),
+    )
+    ack_p.add_argument(
+        "report_id", help="Report id, as printed by `contact-surface-lint --attribution`."
+    )
+    ack_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge).",
+    )
+    ack_p.add_argument(
+        "--contacts-root",
+        type=Path,
+        default=None,
+        help="Excluded 'pii' surface root, resolved from config by default.",
+    )
+    ack_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    _add_lock_args(ack_p)

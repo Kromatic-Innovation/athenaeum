@@ -719,6 +719,79 @@ def resolve_attribution_max_escalations_per_run(config: dict[str, Any] | None) -
     return DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN
 
 
+class AttributionModeConfigError(ValueError):
+    """Raised by :func:`resolve_attribution_mode` on an unknown mode.
+
+    Mirrors :class:`PiiHazardClassifierConfigError` /
+    :class:`SensitivityRoutingConfigError` / ``ScreeningConfigError`` /
+    ``StorageConfigError``: a misrouted knob must be unconfigurable, not
+    silently broken (issue athenaeum#2220).
+    """
+
+
+#: Mode vocabulary :func:`resolve_attribution_mode` resolves to (issue
+#: athenaeum#2220, design §9.1). Any value outside this tuple raises
+#: :class:`AttributionModeConfigError` naming the key.
+_ATTRIBUTION_VALID_MODES = ("observe", "enforce", "auto")
+
+#: Default for :func:`resolve_attribution_mode` (issue athenaeum#2220, design
+#: §9.1): ``"auto"`` is the shipped default once this issue lands. A fresh
+#: install (no valid calibration record, no acknowledged observe report)
+#: therefore still OBSERVES every question class -- ``auto`` only enforces a
+#: class once both of decision 1's measurements exist for it.
+DEFAULT_ATTRIBUTION_MODE = "auto"
+
+
+def resolve_attribution_mode(config: dict[str, Any] | None) -> str:
+    """``librarian.attribution.mode`` (env ``ATHENAEUM_ATTRIBUTION_MODE``,
+    default ``"auto"``).
+
+    Issue athenaeum#2220 (design §9.1): governs how a contact-value writer
+    acts on :func:`athenaeum.pii_attribution.check_contact_attribution`'s
+    verdict, per question class:
+
+    - ``"observe"`` -- every writer logs the verdict and behaves exactly as
+      it does today. Suspects are parked as shadow entries.
+    - ``"enforce"`` -- a ``suspect`` value is parked and not written to its
+      target; a ``non-personal`` value is not written to its target;
+      escalation places what it can and sends the rest to the human queue.
+    - ``"auto"`` (the default) -- enforces a question class only when BOTH
+      hold (design §17, decision 1): a valid calibration record exists for
+      the model and prompt that class resolves to, AND the operator has
+      acknowledged a clean observe report for this deployment covering that
+      class under the same model and prompt sha. Otherwise that class
+      observes. A fresh install therefore observes every class.
+
+    An unrecognized value raises :class:`AttributionModeConfigError` naming
+    the key -- env beats yaml beats default, mirroring
+    :func:`resolve_pii_hazard_classifier_mode`. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper.
+    """
+    env = os.environ.get("ATHENAEUM_ATTRIBUTION_MODE")
+    if env is not None and env.strip():
+        mode = env.strip().lower()
+        source = "env ATHENAEUM_ATTRIBUTION_MODE"
+    else:
+        mode = DEFAULT_ATTRIBUTION_MODE
+        source = "default"
+        if isinstance(config, dict):
+            librarian_cfg = config.get("librarian")
+            if isinstance(librarian_cfg, dict):
+                attribution_cfg = librarian_cfg.get("attribution")
+                if isinstance(attribution_cfg, dict):
+                    raw_mode = attribution_cfg.get("mode")
+                    if isinstance(raw_mode, str) and raw_mode.strip():
+                        mode = raw_mode.strip().lower()
+                        source = "yaml librarian.attribution.mode"
+    if mode not in _ATTRIBUTION_VALID_MODES:
+        raise AttributionModeConfigError(
+            f"unknown librarian.attribution.mode {mode!r} (from {source}); "
+            f"valid values are: {', '.join(_ATTRIBUTION_VALID_MODES)}"
+        )
+    return mode
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):
