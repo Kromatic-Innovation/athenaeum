@@ -321,6 +321,20 @@ It therefore carries `pytest.mark.calibration` **instead of** `eval`:
 - `tests/evals/test_containment_ci_wiring.py` fails if it re-enters the
   default or `-m eval` selection.
 
+**Issue athenaeum#2343:** the corpus is being resized to ~650 cases (~130
+per class, up from 420), so `CALIBRATION_TOKEN_CEILING` is raised to
+6,500,000 and the `calibration` job's `timeout-minutes` to 300 (see
+`tests/evals/harness.py` and `.github/workflows/evals.yml` for the sizing
+rationale).
+
+**Raw responses are recorded by default for this job**, independent of the
+workflow's `record` input (that input governs the `eval` job only; its
+default is unchanged). The "Run calibration sweep" step always sets
+`ATHENAEUM_EVAL_RECORD=1`, and the "Upload recorded fixtures" step uploads
+the `calibration-recorded-fixtures` artifact (30-day retention)
+unconditionally (`if: always()`), so a failed or timed-out sweep still
+leaves replayable fixtures instead of losing them with the runner.
+
 The sanctioned way to run it in CI is a dispatch with `suite=calibration`.
 That runs ONLY the `calibration` job and skips the default `eval` job:
 
@@ -328,9 +342,17 @@ That runs ONLY the `calibration` job and skips the default `eval` job:
 gh workflow run evals.yml --repo Kromatic-Innovation/athenaeum --ref <branch> -f suite=calibration
 ```
 
-The job uploads a `calibration-results` artifact: `calibration-summary.json`
-plus the regenerated `contact_attribution.yaml`. Download it and commit the
-record in a follow-up PR.
+The job uploads two artifacts: `calibration-results`
+(`calibration-summary.json` plus the regenerated
+`contact_attribution.yaml`) and `calibration-recorded-fixtures` (the raw
+recorded responses under `tests/fixtures/recorded/`, see "Layer 2" below).
+Download `calibration-results` and commit the record in a follow-up PR.
+
+**To replay a calibration run offline:** download the
+`calibration-recorded-fixtures` artifact, extract it so its contents land
+at `tests/fixtures/recorded/` in a checkout of the branch that was
+dispatched, then run the replay suite (`tests/test_recorded_fixtures.py`,
+see "Layer 2" below) against those fixtures -- no network, no credential.
 
 Locally: `pytest -m calibration tests/evals/ -v` (with a live key).
 

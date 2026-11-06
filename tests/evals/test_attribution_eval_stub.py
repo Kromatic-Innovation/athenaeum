@@ -15,6 +15,7 @@ machinery on top of those real (stub-sourced) runs.
 
 from __future__ import annotations
 
+import json
 import random
 import tempfile
 from pathlib import Path
@@ -78,11 +79,12 @@ class TestRunCaseSelfReported:
     def test_correct_case_scores_correct(self) -> None:
         case = _case_for_class("names-other")
         gold = case["gold_verdict"]
-        text = f'{{"verdict": "{gold}", "score": 0.95}}'
+        payload: dict[str, object] = {"verdict": gold, "score": 0.95}
         if case.get("gold_owner_uid"):
-            owner_uid = case["gold_owner_uid"]
-            text = f'{{"verdict": "{gold}", "owner_uid": "{owner_uid}", "score": 0.95}}'
-        client = FakeLLMClient(text=text)
+            payload["owner_uid"] = case["gold_owner_uid"]
+        if case.get("gold_alias_relation"):
+            payload["alias_relation"] = case["gold_alias_relation"]
+        client = FakeLLMClient(text=json.dumps(payload))
         run = run_case_self_reported(case, STUB_MODEL, client)
         assert run.correct is True
         assert run.model == STUB_MODEL

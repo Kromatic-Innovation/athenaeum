@@ -170,3 +170,278 @@ def test_no_case_carries_a_usage_class_field() -> None:
     cases = _load_cases()
     for case in cases:
         assert "usage_class" not in case, case["id"]
+
+
+# ---------------------------------------------------------------------------
+# Gold-label validity (athenaeum#2341): four structural checks over every
+# case's gold label, each with its own deliberately-broken counter-example
+# fixture so the check is proven to actually reject what it claims to.
+# ---------------------------------------------------------------------------
+
+_NUMBER_RE = re.compile(r"\d+")
+
+
+def _case_names(case: dict[str, Any]) -> set[str]:
+    names = {case["target"]["name"]}
+    for record in (*case["holders"], *case["candidates"]):
+        names.add(record["name"])
+    return names
+
+
+def _normalize_text(text: str, names: set[str]) -> str:
+    """Erase names and numeric suffixes/uids so two cases that differ only
+    by which name/number the generator drew compare equal."""
+    normalized = text
+    for name in sorted(names, key=len, reverse=True):
+        normalized = normalized.replace(name, "<NAME>")
+    return _NUMBER_RE.sub("<N>", normalized)
+
+
+def _case_shape_signature(case: dict[str, Any]) -> tuple[Any, ...]:
+    """A case's structural shape with names/uids/numeric suffixes erased.
+
+    Two cases sharing a signature are "identical apart from names, uids
+    and numeric suffixes" -- the phrasing of the AC this backs. A parity
+    (``i % 2``) split that hands two such cases different gold labels,
+    with nothing in the actual inputs to tell them apart, is exactly the
+    ``_pattern_role_inbox_unrelated_domain`` defect this exists to catch
+    (athenaeum#2341).
+    """
+    names = _case_names(case)
+    checks_shape = tuple(
+        (c["check_id"], _normalize_text(c.get("label") or "", names)) for c in case["checks"]
+    )
+    return (
+        case["pattern"],
+        bool(case["holders"]),
+        bool(case["candidates"]),
+        checks_shape,
+        _normalize_text(case["value"], names),
+        _normalize_text(case["source_excerpt"], names),
+    )
+
+
+def _assert_owner_uid_is_a_case_uid(cases: list[dict[str, Any]]) -> None:
+    """(a) ``same-entity``/``other-known`` gold must name one of THIS case's
+    own holder/candidate uids -- never the target's own uid, and never a
+    uid borrowed from elsewhere."""
+    bad = []
+    for case in cases:
+        if case["gold_verdict"] not in ("same-entity", "other-known"):
+            continue
+        case_uids = {r["uid"] for r in case["holders"]} | {r["uid"] for r in case["candidates"]}
+        if case["gold_owner_uid"] not in case_uids:
+            bad.append(case["id"])
+    assert not bad, f"gold_owner_uid is not one of the case's own holder/candidate uids: {bad}"
+
+
+def _assert_identically_shaped_cases_share_a_gold_label(cases: list[dict[str, Any]]) -> None:
+    """(b) No two cases that are identical apart from names, uids and
+    numeric suffixes may carry different gold labels."""
+    by_shape: dict[tuple[Any, ...], set[tuple[str, str | None]]] = {}
+    for case in cases:
+        shape = _case_shape_signature(case)
+        by_shape.setdefault(shape, set()).add((case["gold_verdict"], case["gold_alias_relation"]))
+    conflicts = {shape: labels for shape, labels in by_shape.items() if len(labels) > 1}
+    assert not conflicts, (
+        f"cases identical apart from names/uids/numeric suffixes carry different "
+        f"gold labels: {conflicts}"
+    )
+
+
+def _assert_alias_gold_has_a_relation(cases: list[dict[str, Any]]) -> None:
+    """(c) No ``alias`` gold may be missing ``gold_alias_relation``."""
+    bad = [
+        c["id"]
+        for c in cases
+        if c["gold_verdict"] == "alias" and not c.get("gold_alias_relation")
+    ]
+    assert not bad, f"alias gold case(s) missing gold_alias_relation: {bad}"
+
+
+#: Substrings whose presence in an ``own`` case's value/excerpt means the
+#: case is actually describing an alias -- a personal alias, a nickname
+#: address, or a secondary address -- and so cannot be gold ``own``.
+_ALIAS_DESCRIBING_RE = re.compile(
+    r"nickname|personal alias|personal nickname|secondary address|shortened surname",
+    re.IGNORECASE,
+)
+
+
+def _assert_own_gold_never_describes_an_alias(cases: list[dict[str, Any]]) -> None:
+    """(d) No gold ``own`` case's value or excerpt may describe a personal
+    alias, nickname address, or secondary address."""
+    bad = []
+    for case in cases:
+        if case["gold_verdict"] != "own":
+            continue
+        text = f"{case['value']} {case['source_excerpt']}"
+        if _ALIAS_DESCRIBING_RE.search(text):
+            bad.append(case["id"])
+    assert not bad, f"gold own case value/excerpt describes an alias: {bad}"
+
+
+def test_same_entity_and_other_known_owner_uid_is_a_case_uid() -> None:
+    _assert_owner_uid_is_a_case_uid(_load_cases())
+
+
+def test_identically_shaped_cases_carry_the_same_gold_label() -> None:
+    _assert_identically_shaped_cases_share_a_gold_label(_load_cases())
+
+
+def test_alias_gold_always_carries_an_alias_relation() -> None:
+    _assert_alias_gold_has_a_relation(_load_cases())
+
+
+def test_own_gold_never_describes_an_alias() -> None:
+    _assert_own_gold_never_describes_an_alias(_load_cases())
+
+
+def _broken_case(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": "broken-000",
+        "question_class": "names-other",
+        "pattern": "broken",
+        "value": "alex.vexmoor@example.org",
+        "target": {
+            "uid": "attr-eval-9001",
+            "name": "Alex Thistlewood",
+            "type": "person",
+            "aliases": [],
+            "employer_domain_hints": [],
+        },
+        "holders": [],
+        "candidates": [],
+        "checks": [{"check_id": "C2", "uids": [], "label": "broken"}],
+        "source_excerpt": "Alex Thistlewood's broken fixture excerpt.",
+        "gold_verdict": "own",
+        "gold_owner_uid": None,
+        "gold_alias_relation": None,
+        "split": "fit",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_counter_example_inverted_former_name_shape_is_rejected() -> None:
+    """The original ``_pattern_two_surnames_former_name`` defect: a
+    ``same-entity`` case with no holder/candidate at all, and
+    ``gold_owner_uid`` set to the TARGET's own uid instead of a holder's --
+    so the owner uid can never be one of the case's own holder/candidate
+    uids."""
+    broken = _broken_case(
+        id="broken-same-entity-inverted",
+        gold_verdict="same-entity",
+        gold_owner_uid="attr-eval-9001",  # the target's own uid, not a holder's
+        holders=[],
+        candidates=[],
+    )
+    try:
+        _assert_owner_uid_is_a_case_uid([broken])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("check (a) failed to reject an inverted same-entity shape")
+
+
+def test_counter_example_owner_uid_outside_case_uids_is_rejected() -> None:
+    """``other-known`` gold pointing at a uid this case never mentions."""
+    broken = _broken_case(
+        id="broken-other-known-stray-uid",
+        gold_verdict="other-known",
+        gold_owner_uid="attr-eval-9999",
+        holders=[
+            {
+                "uid": "attr-eval-9002",
+                "name": "Jordan Vexmoor",
+                "type": "person",
+                "aliases": [],
+                "employer_domain_hints": [],
+            }
+        ],
+        candidates=[
+            {
+                "uid": "attr-eval-9002",
+                "name": "Jordan Vexmoor",
+                "type": "person",
+                "aliases": [],
+                "employer_domain_hints": [],
+            }
+        ],
+    )
+    try:
+        _assert_owner_uid_is_a_case_uid([broken])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("check (a) failed to reject an owner uid outside the case's uids")
+
+
+def test_counter_example_parity_labelled_pair_is_rejected() -> None:
+    """Two cases whose inputs are identical apart from name/uid/number --
+    the ``_pattern_role_inbox_unrelated_domain`` defect -- must not carry
+    different gold labels."""
+    case_a = _broken_case(
+        id="broken-parity-000",
+        pattern="broken_parity",
+        value="info@othercorp-0.example.org",
+        target={
+            "uid": "attr-eval-9101",
+            "name": "Alex Thistlewood",
+            "type": "person",
+            "aliases": [],
+            "employer_domain_hints": [],
+        },
+        checks=[{"check_id": "D1-role", "uids": [], "label": "role-local-part:info"}],
+        source_excerpt="Alex Thistlewood's page cites info@othercorp-0.example.org, a role inbox.",
+        gold_verdict="other-unknown",
+    )
+    case_b = _broken_case(
+        id="broken-parity-001",
+        pattern="broken_parity",
+        value="info@othercorp-1.example.org",
+        target={
+            "uid": "attr-eval-9102",
+            "name": "Jordan Vexmoor",
+            "type": "person",
+            "aliases": [],
+            "employer_domain_hints": [],
+        },
+        checks=[{"check_id": "D1-role", "uids": [], "label": "role-local-part:info"}],
+        source_excerpt="Jordan Vexmoor's page cites info@othercorp-1.example.org, a role inbox.",
+        gold_verdict="non-personal",
+    )
+    try:
+        _assert_identically_shaped_cases_share_a_gold_label([case_a, case_b])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("check (b) failed to reject a parity-labelled identical-shape pair")
+
+
+def test_counter_example_alias_missing_relation_is_rejected() -> None:
+    broken = _broken_case(
+        id="broken-alias-no-relation", gold_verdict="alias", gold_alias_relation=None
+    )
+    try:
+        _assert_alias_gold_has_a_relation([broken])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("check (c) failed to reject an alias case missing gold_alias_relation")
+
+
+def test_counter_example_own_case_describing_a_nickname_is_rejected() -> None:
+    broken = _broken_case(
+        id="broken-own-describes-nickname",
+        gold_verdict="own",
+        source_excerpt=(
+            "Alex Thistlewood prefers their personal nickname address, ace0@example.org."
+        ),
+    )
+    try:
+        _assert_own_gold_never_describes_an_alias([broken])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("check (d) failed to reject an own case describing a nickname address")
