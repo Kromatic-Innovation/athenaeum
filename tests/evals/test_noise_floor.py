@@ -989,3 +989,52 @@ def test_probes_absent_entirely_are_reported_separately() -> None:
         coverage, all_probe_ids=["pto_allowance", "relay_sync_fix", "nightly_job_drop"]
     )
     assert absent == ("relay_sync_fix", "nightly_job_drop")
+
+
+def test_spend_tolerates_a_turn_with_no_cache_counters_and_says_so() -> None:
+    """`TurnTokenUsage.cache_*` is `None` -- never 0 -- on every turn
+    persisted before athenaeum#239 recorded cache usage. Adding to `None`
+    raised `TypeError`; and silently reading the absence as a measured zero
+    would under-report spend against a dollar cap, so it is counted."""
+    record = RolloutRecord(
+        arm=Arm.NONE,
+        probe_id="pto_allowance",
+        probe_class="single_hop",
+        corpus_scale="core",
+        answer="a",
+        model="claude-haiku-4-5-20251001",
+        turn_tokens=[
+            TurnTokenUsage(
+                turn=1,
+                input_tokens=1_000_000,
+                output_tokens=0,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+            )
+        ],
+    )
+    cell = GridCell(probe="pto_allowance", arm="none", corpus_scale="core", replicate=0)
+    spend = noise_floor.compute_spend(
+        [RolloutRow(cell=cell, record=record)],
+        model_priced="claude-haiku-4-5-20251001",
+    )
+    assert spend.usd == pytest.approx(1.0)
+    assert spend.turns_without_cache_data == 1
+
+
+def test_an_unpriceable_model_gets_no_dollar_figure_rather_than_a_guess() -> None:
+    """`_rates_for_model` falls back to a blended rate for an unknown id. A
+    wrong dollar figure in a report read against a dollar cap is worse than a
+    stated absence, so the figure is withheld and the renderer says why."""
+    spend = noise_floor.compute_spend(
+        [_row_with_tokens(input_tokens=1_000_000, model="")], model_priced="unknown"
+    )
+    assert spend.usd is None
+    assert spend.input_tokens == 1_000_000
+
+    rows = [_row_with_tokens(input_tokens=1_000_000, model="")]
+    report = noise_floor.build_noise_floor_report(rows)
+    assert report.spend.usd is None
+    rendered = noise_floor.render_report(report)
+    assert "NOT PRICEABLE" in rendered
+    assert "--model-label" in rendered
