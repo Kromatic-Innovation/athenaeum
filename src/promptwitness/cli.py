@@ -30,7 +30,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -767,20 +766,13 @@ def _clear_append_only_best_effort(root: Path) -> None:
     True)`` is the actual safety net; this just makes the common case
     (protection WAS applied) a clean deletion instead of a silently-lost
     directory.
+
+    Thin wrapper over :func:`promptwitness.ledger.clear_append_only_protection_under`
+    since athenaeum#2335 moved the clear path next to the apply path it undoes,
+    so the two cannot drift apart. Kept as a name because callers (and
+    ``tests/test_promptwitness_ledger.py``) already reach for it here.
     """
-    if sys.platform == "darwin":
-        clear_cmd = ["chflags", "nouappnd"]
-    elif sys.platform.startswith("linux"):
-        clear_cmd = ["chattr", "-a"]
-    else:
-        return
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            subprocess.run([*clear_cmd, str(path)], capture_output=True, timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError):
-            pass
+    ledger.clear_append_only_protection_under(root)
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:

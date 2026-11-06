@@ -84,6 +84,10 @@ __all__ = [
     "find_oversized_fields",
     "signed_payload",
     "list_partitions",
+    "protected_paths",
+    "cleared_paths",
+    "clear_append_only_protection",
+    "clear_append_only_protection_under",
 ]
 
 SCHEMA_VERSION = 1
@@ -545,24 +549,144 @@ def _partition_name_for(ts: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _apply_append_only_protection(path: Path) -> dict[str, Any]:
+# What this process has asked the OS to do about each path's append-only
+# protection: ``True`` once it asked to protect, ``False`` once it asked to
+# clear. A path absent from the mapping is one this process never touched --
+# which is NOT the same as an unprotected one, because a ledger written by a
+# child process was registered in that child's mapping and died with it.
+#
+# Both directions are recorded on the *attempt*, not on success, and that is
+# load-bearing (athenaeum#2335). On macOS ``chflags uappnd`` succeeds for an
+# ordinary user, so the flag really is set and really does block deleting the
+# file. On Linux ``chattr +a`` needs ``CAP_LINUX_IMMUTABLE``, which an ordinary
+# CI or dev process does not hold, so the same call fails and nothing is
+# protected -- and ``chattr -a`` fails identically. A success-only mapping
+# would therefore be empty on the Linux CI runner and could not back a guard
+# that has to run there, and a success-only clear would report every Linux
+# caller as leaking something it had in fact done everything available to
+# release. Intent is identical on every platform; kernel effect is not.
+_PROTECTION_STATE: dict[Path, bool] = {}
+_PROTECTION_STATE_LOCK = threading.Lock()
+
+
+def _protection_commands(action: str) -> tuple[list[str], str] | None:
+    """The argv prefix and label for *action* (``"set"``/``"clear"``) on this
+    platform, or ``None`` where no append-only mechanism exists."""
     if sys.platform == "darwin":
-        cmd, label = ["chflags", "uappnd", str(path)], "chflags"
-    elif sys.platform.startswith("linux"):
-        cmd, label = ["chattr", "+a", str(path)], "chattr"
-    else:
+        return (["chflags", "uappnd" if action == "set" else "nouappnd"], "chflags")
+    if sys.platform.startswith("linux"):
+        return (["chattr", "+a" if action == "set" else "-a"], "chattr")
+    return None
+
+
+def _apply_append_only_protection(path: Path) -> dict[str, Any]:
+    commands = _protection_commands("set")
+    if commands is None:
         return {
             "protection": "unsupported",
             "detail": f"no append-only mechanism for {sys.platform!r}",
         }
+    prefix, label = commands
+    with _PROTECTION_STATE_LOCK:
+        _PROTECTION_STATE[path] = True
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(
+            [*prefix, str(path)], capture_output=True, text=True, timeout=5, check=False
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"protection": f"{label}:failed", "detail": str(exc)}
     if result.returncode == 0:
         return {"protection": f"{label}:applied"}
     detail = (result.stderr or result.stdout).strip()[:200]
     return {"protection": f"{label}:failed", "detail": detail}
+
+
+def protected_paths() -> frozenset[Path]:
+    """Every path :func:`append_line` has asked the OS to protect append-only
+    in this process and that no caller has cleared yet.
+
+    Intended for teardown and for leak guards: an append-only ledger partition
+    cannot be *deleted* on a host that enforces the flag, so a throwaway ledger
+    whose protection is never cleared leaves an undeletable directory behind
+    (athenaeum#2335). Because entries are recorded on the attempt rather than on
+    kernel success — see ``_PROTECTION_STATE`` — this set is identical on a Linux
+    runner that cannot enforce the flag and a macOS host that can, which is what
+    lets one portable check cover both.
+    """
+    with _PROTECTION_STATE_LOCK:
+        return frozenset(path for path, protected in _PROTECTION_STATE.items() if protected)
+
+
+def cleared_paths() -> frozenset[Path]:
+    """Every path this process has asked the OS to clear append-only protection
+    from, whether or not it was ever protected here.
+
+    The counterpart to :func:`protected_paths`, for a leak guard that must
+    distinguish "nobody ever released this" from "a caller released it directly
+    rather than leaving it for a teardown hook to find". Both are needed because
+    a caller that tampers with a ledger on purpose has to clear the flag inside
+    the test body, before the rewrite -- so by teardown there is nothing left in
+    :func:`protected_paths` to see, and only this set records that it happened
+    (athenaeum#2335).
+    """
+    with _PROTECTION_STATE_LOCK:
+        return frozenset(path for path, protected in _PROTECTION_STATE.items() if not protected)
+
+
+def clear_append_only_protection(path: Path) -> bool:
+    """Clear the append-only protection :func:`append_line` applied to *path*,
+    and drop it from :func:`protected_paths`.
+
+    Returns whether the clear command reported success — ``True`` also when
+    there was nothing to do (an unsupported platform, or *path* already gone),
+    because in both cases the file is not append-only afterwards.
+
+    *path* leaves :func:`protected_paths` either way. The registry records what
+    this library has been *asked* to unprotect, so that a caller which did
+    everything available to it is not reported as a leak on a host where the
+    clear itself cannot succeed — the mirror of why protection is registered on
+    the attempt. Best-effort and silent by construction: a missing
+    ``chattr``/``chflags`` binary must never raise into a teardown path.
+    """
+    with _PROTECTION_STATE_LOCK:
+        _PROTECTION_STATE[path] = False
+    commands = _protection_commands("clear")
+    if commands is None:
+        return True
+    prefix, _label = commands
+    if not path.exists():
+        return True
+    try:
+        result = subprocess.run(
+            [*prefix, str(path)], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def clear_append_only_protection_under(root: Path) -> int:
+    """Clear append-only protection from every file under *root*, returning how
+    many files were visited.
+
+    :func:`clear_append_only_protection` is the precise tool and should be
+    preferred; this one exists for the case the registry provably cannot cover —
+    a ledger written by a **child process**, whose protected paths were recorded
+    in that process's registry and died with it. Walking the tree is the only
+    way the parent can unprotect those before removing *root*.
+
+    Best-effort and silent, for the same reason: the caller's own
+    ``shutil.rmtree(..., ignore_errors=True)`` is the actual safety net.
+    """
+    visited = 0
+    if not root.exists():
+        return visited
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        visited += 1
+        clear_append_only_protection(path)
+    return visited
 
 
 # ---------------------------------------------------------------------------

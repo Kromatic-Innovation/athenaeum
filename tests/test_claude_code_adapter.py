@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -1060,6 +1061,40 @@ class TestAC6NoSecretLeakage:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def subprocess_witness_dir(tmp_path: Path) -> Iterator[Path]:
+    """The ledger directory the adapter subprocess writes, cleared of
+    append-only protection at teardown (athenaeum#2335).
+
+    ``promptwitness.ledger`` flags a new ledger's first partition append-only
+    (``chflags uappnd`` on macOS, ``chattr +a`` on Linux), and on macOS that
+    flag blocks *deleting* the file, so pytest cannot remove the directory
+    afterwards. The autouse teardown in
+    ``tests/fixtures/promptwitness_append_only_guard.py`` clears whatever the
+    ledger protected *in this process*, which is not these tests: ``_run_adapter``
+    runs the adapter in a CHILD process, so the protected path was recorded in
+    that child's registry and died with it. Walking the tree is the only way
+    the parent can find it. These two were the last leak the session guard
+    turned up across the full suite -- the ``.../witness`` directories
+    athenaeum#2335's ``rm_rf`` evidence named.
+
+    A fixture rather than a line at the end of each test body so the clear
+    also runs when a test FAILS, and so the no-write case is covered too: if
+    ``test_disabled_by_default_...`` ever regresses into writing a ledger, it
+    does not start leaking as well. Clearing a directory that was never
+    created is a documented no-op.
+    """
+    witness_dir = tmp_path / "witness"
+    yield witness_dir
+    sys.path.insert(0, SRC)
+    try:
+        from promptwitness import ledger as pw_ledger
+
+        pw_ledger.clear_append_only_protection_under(witness_dir)
+    finally:
+        sys.path.remove(SRC)
+
+
 class TestWitnessLedgerWiring:
     """Counter-example this defeats: an adapter that either never calls the
     witness path at all, or calls it only AFTER the ``AUTO_RECALL``/length
@@ -1067,9 +1102,9 @@ class TestWitnessLedgerWiring:
     turns those gates are designed to skip for recall purposes."""
 
     def test_disabled_by_default_writes_no_line_and_no_error_log(
-        self, tmp_path: Path
+        self, tmp_path: Path, subprocess_witness_dir: Path
     ) -> None:
-        witness_dir = tmp_path / "witness"
+        witness_dir = subprocess_witness_dir
         stdin_payload = json.dumps(
             {"prompt": "a sufficiently long test prompt", "session_id": "s"}
         )
@@ -1085,9 +1120,9 @@ class TestWitnessLedgerWiring:
         assert not (tmp_path / "witness_hook_errors.jsonl").exists()
 
     def test_enabled_writes_a_line_even_when_auto_recall_is_false(
-        self, tmp_path: Path
+        self, tmp_path: Path, subprocess_witness_dir: Path
     ) -> None:
-        witness_dir = tmp_path / "witness"
+        witness_dir = subprocess_witness_dir
         stdin_payload = json.dumps({"prompt": "whatever happens here", "session_id": "s1"})
         result = _run_adapter(
             stdin_payload,
@@ -1109,8 +1144,10 @@ class TestWitnessLedgerWiring:
             sys.path.remove(SRC)
         assert pw_ledger.list_partitions(witness_dir) != []
 
-    def test_enabled_writes_a_line_for_a_three_char_prompt(self, tmp_path: Path) -> None:
-        witness_dir = tmp_path / "witness"
+    def test_enabled_writes_a_line_for_a_three_char_prompt(
+        self, tmp_path: Path, subprocess_witness_dir: Path
+    ) -> None:
+        witness_dir = subprocess_witness_dir
         prompt = "hey"
         assert len(prompt) == 3
         stdin_payload = json.dumps({"prompt": prompt, "session_id": "s1"})
