@@ -115,11 +115,17 @@ jobs:
           DEST="docs/measurements/relayed/$LABEL"
           mkdir -p "$DEST"
           cp -v relay-out/* "$DEST"/
-          # The rendered grid report is the one artifact file worth carrying
-          # in full: the Actions artifact expires after 30 days (the same
-          # reason athenaeum#1854 committed its render in-tree).
-          find relayed -name 'north-star-*.md' -exec cp -v {} "$DEST"/ \;
-          git add "$DEST"
+          # Carry every SMALL artifact file through in full -- the rendered
+          # grid report (the Actions artifact expires after 30 days, the same
+          # reason athenaeum#1854 committed its render in-tree) and the eval
+          # summary whose token_usage is this dispatch's own spend receipt.
+          # The result store itself (*.jsonl, tens of MB of transcripts) is
+          # deliberately NOT carried: the derived summaries above are what a
+          # reader needs, and a store that size does not belong in git.
+          find relayed -type f ! -name '*.jsonl' -size -400k -exec cp -v {} "$DEST"/ \;
+          # -f: eval-summary.json is gitignored at the repo root (it is a
+          # generated artifact), and it is this dispatch's own spend receipt.
+          git add -f "$DEST"
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -m "relay: north-star run $RUN_ID outputs ($LABEL) [skip ci]"
