@@ -2765,6 +2765,125 @@ class TestAutoModePreflight:
         ]
         assert len(warnings_for_qc) == 1
 
+    def test_caching_prevents_repeat_reads_and_repeat_warnings_across_a_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """athenaeum#2220 (Seer PR review finding on PR athenaeum#2348):
+        ``attribution_enforced_classes``'s docstring claims the preflight
+        runs once per run and a demoted class logs its WARNING exactly
+        once per run. Before the cache this added, that was false:
+        ``build_attribution_context`` called it UNCONDITIONALLY on every
+        build, and real call sites (``librarian._record_correspondent_contact``,
+        the tier-3 scrub wiring in ``librarian.py``) build a fresh context
+        once per raw file inside a run-length loop while reusing the SAME
+        ``ExcludedRecordIndex`` across that whole loop (issue athenaeum#883)
+        -- so a multi-file run paid the calibration-record and
+        observe-report-ledger reads, and the WARNINGs, once per FILE.
+
+        This mirrors that real shape -- one shared index, TWO context
+        builds -- and would have failed before the cache existed: two
+        full re-reads (``load_calibration_record`` called 10 times, not
+        5) and two WARNING sets per class (10 total, not 5). The old test
+        above calls the function exactly once and therefore cannot tell a
+        once-per-call cache apart from a once-per-run one; this one can.
+        """
+        import logging
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        knowledge = tmp_path / "knowledge"
+        contacts_root = knowledge / "contacts"
+        (knowledge / "wiki").mkdir(parents=True)
+        config: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
+
+        load_calls = 0
+        real_load = pii_attribution.load_calibration_record
+
+        def _counting_load() -> dict[str, pii_attribution.CalibrationEntry]:
+            nonlocal load_calls
+            load_calls += 1
+            return real_load()
+
+        monkeypatch.setattr(pii_attribution, "load_calibration_record", _counting_load)
+
+        # Baseline: what ONE full (uncached -- no excluded_index) preflight
+        # pass costs, in `load_calibration_record` calls. Each class reads
+        # it more than once internally (the validity check and the model
+        # resolution it also needs each call it separately) -- that
+        # per-class multiplier is pre-existing and not this fix's concern;
+        # what this fix must prove is that the SECOND context build does
+        # not pay it a second time.
+        baseline_calls = load_calls
+        pii_attribution.attribution_enforced_classes(config, contacts_root)
+        one_pass_cost = load_calls - baseline_calls
+        assert one_pass_cost > 0  # sanity: the counting wrapper is live
+
+        load_calls = 0  # reset before the real two-build exercise
+        # caplog accumulates for the WHOLE test regardless of the `with
+        # at_level(...)` scope below (that context only adjusts the
+        # logger's level, it does not window which records get captured)
+        # -- clear the baseline call's own 5 warnings so they cannot be
+        # mistaken for ones the two-build exercise below produced.
+        caplog.clear()
+
+        # The exact sharing real per-file loops already do (issue
+        # athenaeum#883): ONE index, built once, threaded through every
+        # context this "run" builds.
+        idx = pii.ExcludedRecordIndex(contacts_root)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.pii_attribution"):
+            context1 = pii_attribution.build_attribution_context(
+                knowledge, config, excluded_index=idx, contacts_root=contacts_root
+            )
+            context2 = pii_attribution.build_attribution_context(
+                knowledge, config, excluded_index=idx, contacts_root=contacts_root
+            )
+
+        assert context1.enforced_classes == context2.enforced_classes == frozenset()
+
+        for question_class in pii_attribution.QUESTION_CLASSES:
+            warnings_for_qc = [
+                r for r in caplog.records if repr(question_class) in r.getMessage()
+            ]
+            assert len(warnings_for_qc) == 1, (
+                f"{question_class!r} warned {len(warnings_for_qc)} time(s) across "
+                "two context builds sharing one index; expected exactly 1"
+            )
+
+        # TWO context builds must cost exactly ONE pass's worth of reads,
+        # not two -- the second build reused the first's cached answer.
+        assert load_calls == one_pass_cost
+
+    def test_a_different_contacts_root_under_the_same_index_is_not_a_hit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Staleness guard: a cache hit requires both the resolved mode AND
+        the resolved contacts_root to match what produced the cached entry
+        -- mirroring ``_CHILD_C_INDEX_CACHE``'s stored-secret check. Reusing
+        the SAME index object across two genuinely different contacts
+        roots (an edge case, not a real call shape) must not hand back the
+        first root's answer for the second."""
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODE", "auto")
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MODEL", raising=False)
+        idx = pii.ExcludedRecordIndex(tmp_path / "shared-index-root")
+
+        first_root = tmp_path / "contacts-a"
+        second_root = tmp_path / "contacts-b"
+        first = pii_attribution.attribution_enforced_classes(
+            None, first_root, excluded_index=idx
+        )
+        second = pii_attribution.attribution_enforced_classes(
+            None, second_root, excluded_index=idx
+        )
+        # Both observe everything (fresh install), so the RESULT happens to
+        # be equal -- the real assertion is that the cache actually keyed on
+        # contacts_root, verified by checking the cache entry itself.
+        assert first == second == frozenset()
+        cached = pii_attribution._ATTRIBUTION_ENFORCED_CLASSES_CACHE[idx]
+        assert cached[1] == second_root  # the LATEST call's root, not the first's
+
 
 class TestLibrarianShadowPhase:
     def test_the_phase_is_off_by_default(self, tmp_path: Path) -> None:

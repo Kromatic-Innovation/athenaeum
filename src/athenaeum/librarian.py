@@ -6469,6 +6469,22 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         log.error("%s", exc)
         return 1
 
+    # Issue athenaeum#2220 (Seer PR review finding on PR athenaeum#2348): an
+    # unrecognized ``librarian.attribution.mode``/``ATHENAEUM_ATTRIBUTION_MODE``
+    # must fail HERE, at the same startup gate every other knob above
+    # validates at, rather than the first time a per-file
+    # ``build_attribution_context`` call resolves it deep inside the entity
+    # loop. Resolution here is otherwise thrown away (cheap: no I/O, no
+    # client) -- every real caller re-resolves it from ``ctx.config`` when it
+    # actually needs the value, exactly like the provider checks above.
+    from athenaeum.config import AttributionModeConfigError, resolve_attribution_mode
+
+    try:
+        resolve_attribution_mode(ctx.config)
+    except AttributionModeConfigError as exc:
+        log.error("%s", exc)
+        return 1
+
     # Issue athenaeum#330: fail loudly at startup if the claude-cli binary is missing,
     # instead of silently deferring every file to an rc-0 no-op run.
     preflight_err = preflight_provider(ctx.provider)

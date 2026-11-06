@@ -460,13 +460,19 @@ class AttributionContext:
     wiki_root: Path | None = None
     #: Issue athenaeum#2220 (design §9.1/§9.3): the question classes that
     #: ENFORCE under this run's resolved ``librarian.attribution.mode`` --
-    #: computed once, here, by :func:`attribution_enforced_classes`, so
-    #: every writer sharing this context sees the same decision and a
-    #: demoted ``auto`` class logs its one WARNING once per run rather than
-    #: once per writer call. Empty under ``observe``; every
-    #: :data:`QUESTION_CLASSES` member under ``enforce``. See
-    #: :func:`should_enforce_verdict`, the one place every writer consults
-    #: this field.
+    #: computed here by :func:`attribution_enforced_classes`, so every
+    #: writer sharing THIS context object sees the same decision. Empty
+    #: under ``observe``; every :data:`QUESTION_CLASSES` member under
+    #: ``enforce``. See :func:`should_enforce_verdict`, the one place
+    #: every writer consults this field.
+    #:
+    #: A demoted ``auto`` class's WARNING fires once per CALL to
+    #: :func:`attribution_enforced_classes`, not once per run, UNLESS the
+    #: caller building this context passes the same
+    #: :class:`~athenaeum.pii.ExcludedRecordIndex` object across every
+    #: context it builds in one run -- see
+    #: :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE` for which callers that
+    #: is true for today and which it is not.
     enforced_classes: frozenset[str] = frozenset()
 
 
@@ -594,7 +600,9 @@ def build_attribution_context(
         inline_elsewhere_index=inline_elsewhere_index,
         person_name_index=person_name_index,
         wiki_root=resolved_wiki_root,
-        enforced_classes=attribution_enforced_classes(config, resolved_contacts_root),
+        enforced_classes=attribution_enforced_classes(
+            config, resolved_contacts_root, excluded_index=idx
+        ),
     )
 
 
@@ -4705,36 +4713,116 @@ def attribution_class_has_valid_calibration(
     return entry.model == model and entry.prompt_sha256 == prompt_sha256
 
 
+#: Memoizes :func:`attribution_enforced_classes`'s ``auto``-mode preflight
+#: for one run (issue athenaeum#2220, Seer PR review finding on PR
+#: athenaeum#2348). Without this, the function's own docstring claim --
+#: "called once ... so every writer in one run sees the same decision and
+#: a demoted class logs its WARNING exactly once per run" -- was false:
+#: :func:`build_attribution_context` called it UNCONDITIONALLY on every
+#: build, and several real callers build a fresh context once per raw
+#: file/record inside a run-length loop
+#: (``librarian._record_correspondent_contact``, the tier-3 scrub wiring
+#: in ``librarian.py``, ``corrections.py``'s batch-file path), so a
+#: multi-file run re-read the calibration YAML and both observe-report
+#: ledgers for all five classes, and re-logged up to five WARNINGs, once
+#: PER FILE rather than once per run.
+#:
+#: Keyed on the caller's :class:`~athenaeum.pii.ExcludedRecordIndex`
+#: object IDENTITY -- the exact precedent :data:`_CHILD_C_INDEX_CACHE`
+#: already sets for :func:`_cached_child_c_indexes`, reused rather than
+#: reinvented. ``excluded_index`` is the right handle for THIS cache
+#: specifically because, unlike ``entity_index`` (``None`` whenever no
+#: wiki directory exists yet), :func:`build_attribution_context` NEVER
+#: leaves it unset: it resolves one on every call, built fresh or passed
+#: in. Every run-length loop that builds one context per file already
+#: builds ONE ``ExcludedRecordIndex`` ahead of the loop and threads it
+#: through for an unrelated reason (issue athenaeum#883: avoiding an
+#: O(corpus) rescan per file) -- this piggybacks on that SAME object
+#: rather than asking any caller to plumb a new one through. A caller that
+#: builds a fresh index per call (no loop to share one over) simply never
+#: hits the cache, exactly like :func:`_cached_child_c_indexes`'s own
+#: documented degrade path: never worse than the pre-cache cost, only
+#: sometimes not better.
+#:
+#: The stored ``(mode, contacts_root)`` pair is the staleness guard,
+#: mirroring the stored secret in :data:`_CHILD_C_INDEX_CACHE`: if either
+#: differs from what THIS call resolves, the entry is a miss, never a
+#: stale hit -- a config change under a reused index object must never
+#: return a different call's answer. A mid-run change to the CONTENT of
+#: the calibration file or the observe-report ledger is deliberately NOT
+#: detected: the whole point of a run-start preflight is "decide once,
+#: use for the whole run" (design §9.3's "checks both at run start"), so a
+#: ledger append mid-run -- e.g. this same run's own lint pass
+#: acknowledging a report -- must not retroactively change what an
+#: earlier-built context in this run already decided.
+#:
+#: A :class:`weakref.WeakKeyDictionary`, not a plain module-level dict, so
+#: this never pins an ``ExcludedRecordIndex`` the rest of the process has
+#: already let go of, and -- just as important for the test suite, which
+#: builds many contexts over many independent ``tmp_path`` roots -- never
+#: leaks a cached answer across two unrelated index objects: once an
+#: index is garbage-collected, its entry goes with it, so there is no
+#: process-global state for one test's cache to leave behind for the next.
+_ATTRIBUTION_ENFORCED_CLASSES_CACHE: (
+    "weakref.WeakKeyDictionary[pii.ExcludedRecordIndex, tuple[str, Path, frozenset[str]]]"
+) = weakref.WeakKeyDictionary()
+
+
 def attribution_enforced_classes(
     config: dict[str, Any] | None,
     contacts_root: Path,
+    *,
+    excluded_index: "pii.ExcludedRecordIndex | None" = None,
 ) -> frozenset[str]:
     """Which :data:`QUESTION_CLASSES` enforce, under the resolved attribution mode.
 
     The run-start preflight (design §9.1/§9.3, issue athenaeum#2220),
-    called once by :func:`build_attribution_context` so every writer in one
-    run sees the same decision and a demoted class logs its WARNING exactly
-    once per run:
+    intended to run once per run so every writer sharing one run sees the
+    same decision and a demoted class logs its WARNING exactly once per
+    run:
 
-    - ``"observe"`` -- no class enforces.
-    - ``"enforce"`` -- every class enforces.
+    - ``"observe"`` -- no class enforces. Cheap (no file I/O); never cached.
+    - ``"enforce"`` -- every class enforces. Cheap; never cached.
     - ``"auto"`` (the default) -- a class enforces only when BOTH
       :func:`attribution_class_has_valid_calibration` and
       :func:`attribution_class_observe_report_acknowledged` hold for it;
       otherwise it observes, and this logs one WARNING naming which of the
       two checks failed. A fresh install (no valid record, no acknowledged
       report) therefore observes every class.
+
+    **Caching (issue athenaeum#2220 fix, see
+    :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE`).** The ``auto`` branch's
+    result is memoized per *excluded_index* identity when the caller
+    passes one -- which :func:`build_attribution_context` always does,
+    with the :class:`~athenaeum.pii.ExcludedRecordIndex` it resolves for
+    its own :attr:`AttributionContext.excluded_index`. This is "once per
+    run" for exactly the calls that matter: every caller that builds one
+    context per raw file/record inside a run-length loop already shares
+    ONE index object across that whole loop (issue athenaeum#883), so the
+    expensive read and the WARNING genuinely fire once per run for those
+    call sites, not once per file. A caller with no stable index to share
+    (one built fresh per call, no run-length loop around it) gets no
+    caching here, matching :func:`_cached_child_c_indexes`'s own
+    documented limit -- never worse than before this fix, only sometimes
+    not better.
     """
     mode = config_module.resolve_attribution_mode(config)
     if mode == "observe":
         return frozenset()
     if mode == "enforce":
         return frozenset(QUESTION_CLASSES)
+    resolved_contacts_root = Path(contacts_root)
+    if excluded_index is not None:
+        cached = _ATTRIBUTION_ENFORCED_CLASSES_CACHE.get(excluded_index)
+        if cached is not None:
+            cached_mode, cached_root, cached_result = cached
+            if cached_mode == mode and cached_root == resolved_contacts_root:
+                return cached_result
     enforced: set[str] = set()
     for question_class in QUESTION_CLASSES:
         calibration_ok = attribution_class_has_valid_calibration(question_class, config)
         ack_ok = attribution_class_observe_report_acknowledged(
-            contacts_root, question_class, config
+            resolved_contacts_root, question_class, config
         )
         if calibration_ok and ack_ok:
             enforced.add(question_class)
@@ -4746,7 +4834,14 @@ def attribution_enforced_classes(
                 calibration_ok,
                 ack_ok,
             )
-    return frozenset(enforced)
+    result = frozenset(enforced)
+    if excluded_index is not None:
+        _ATTRIBUTION_ENFORCED_CLASSES_CACHE[excluded_index] = (
+            mode,
+            resolved_contacts_root,
+            result,
+        )
+    return result
 
 
 __all__ += [
