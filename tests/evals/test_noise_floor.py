@@ -22,6 +22,7 @@ import pytest
 
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import build_corpus
+from tests.evals import noise_floor
 from tests.evals.noise_floor import (
     _Z_SUM,
     POSITIVE_CONTROL_PROBE_CLASS,
@@ -46,7 +47,7 @@ from tests.evals.noise_floor import (
     report_to_json,
 )
 from tests.evals.north_star_report import RolloutRow, append_rollout_row
-from tests.evals.rollout import Arm, RolloutRecord
+from tests.evals.rollout import Arm, RolloutRecord, TurnTokenUsage
 
 CORPUS_SCALE = "core"
 # Real "core" corpus, loaded once -- same discipline as
@@ -822,3 +823,98 @@ def test_report_to_json_roundtrips_float_keyed_required_n_dict() -> None:
     json.dumps(payload)  # must not raise
     rendered = render_report(report)
     assert "Required n" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Actual spend (issue athenaeum#2309)
+# ---------------------------------------------------------------------------
+
+
+def _row_with_tokens(
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation: int = 0,
+    cache_read: int = 0,
+    harness_failure: str = "",
+    model: str = "claude-haiku-4-5-20251001",
+) -> RolloutRow:
+    record = RolloutRecord(
+        arm=Arm.NONE,
+        probe_id="pto_allowance",
+        probe_class="single_hop",
+        corpus_scale="core",
+        answer="an answer",
+        model=model,
+        harness_failure=harness_failure,
+        turn_tokens=[
+            TurnTokenUsage(
+                turn=1,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
+            )
+        ],
+    )
+    cell = GridCell(probe="pto_allowance", arm="none", corpus_scale="core", replicate=0)
+    return RolloutRow(cell=cell, record=record)
+
+
+def test_spend_prices_input_and_output_at_the_models_own_rates() -> None:
+    spend = noise_floor.compute_spend(
+        [_row_with_tokens(input_tokens=1_000_000, output_tokens=100_000)],
+        model_priced="claude-haiku-4-5-20251001",
+    )
+    # $1/MTok input, $5/MTok output.
+    assert spend.usd == pytest.approx(1.0 + 0.5)
+    assert spend.total_tokens == 1_100_000
+
+
+def test_spend_applies_the_documented_cache_multipliers() -> None:
+    spend = noise_floor.compute_spend(
+        [_row_with_tokens(cache_creation=1_000_000, cache_read=1_000_000)],
+        model_priced="claude-haiku-4-5-20251001",
+    )
+    # 1.25x on a cache write, 0.1x on a cache read, both at the INPUT rate.
+    assert spend.billable_input_tokens == pytest.approx(1_350_000)
+    assert spend.usd == pytest.approx(1.35)
+
+
+def test_spend_counts_a_harness_failed_cell_it_was_paid_for() -> None:
+    """A turn-cap kill is billed exactly like an answered cell. Dropping it
+    would under-report a capped budget, which is the wrong direction."""
+    spend = noise_floor.compute_spend(
+        [_row_with_tokens(input_tokens=500_000, harness_failure="turn_cap")],
+        model_priced="claude-haiku-4-5-20251001",
+    )
+    assert spend.rows_counted == 1
+    assert spend.usd == pytest.approx(0.5)
+
+
+def test_spend_prices_a_higher_tier_model_at_its_own_rate() -> None:
+    haiku = noise_floor.compute_spend(
+        [_row_with_tokens(input_tokens=1_000_000)],
+        model_priced="claude-haiku-4-5-20251001",
+    )
+    sonnet = noise_floor.compute_spend(
+        [_row_with_tokens(input_tokens=1_000_000, model="claude-sonnet-5")],
+        model_priced="claude-sonnet-5",
+    )
+    assert sonnet.usd == pytest.approx(3 * haiku.usd)
+
+
+def test_an_unstamped_store_is_priced_against_the_caller_supplied_label() -> None:
+    rows = [_row_with_tokens(input_tokens=1_000_000, model="")]
+    report = noise_floor.build_noise_floor_report(rows, model_label="claude-sonnet-5")
+    assert report.spend.model_priced == "claude-sonnet-5"
+    assert report.spend.usd == pytest.approx(3.0)
+
+
+def test_a_stamped_store_ignores_the_label_and_prices_what_the_rows_say() -> None:
+    """The rows are authoritative: a wrong --model-label must not be able to
+    re-price a run whose model is recorded with the data."""
+    rows = [_row_with_tokens(input_tokens=1_000_000, model="claude-haiku-4-5-20251001")]
+    report = noise_floor.build_noise_floor_report(rows, model_label="claude-sonnet-5")
+    assert report.spend.model_priced == "claude-haiku-4-5-20251001"
+    assert report.spend.usd == pytest.approx(1.0)

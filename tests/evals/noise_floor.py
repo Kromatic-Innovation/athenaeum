@@ -155,6 +155,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
+from athenaeum.models import _rates_for_model
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
 from tests.evals.containment import ResultStore
@@ -953,6 +954,84 @@ def compute_positive_control(graded: Sequence[GradedRow]) -> tuple[PositiveContr
 
 
 # ---------------------------------------------------------------------------
+# Actual spend (issue athenaeum#2309)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class SpendTotals:
+    """What a run ACTUALLY cost, summed from the rows it persisted.
+
+    Issue athenaeum#2309 caps its own dispatches in dollars and requires the
+    actual spend of every dispatch -- including a failed or partial one -- to
+    be reported. A pre-flight estimate is not that number: run 42169666857
+    tripped its own token ceiling at 1360 of 1824 cells, which means the
+    estimate was wrong in the expensive direction and only the persisted
+    rows can say by how much.
+
+    Priced per :data:`athenaeum.models._MODEL_RATES_USD_PER_MTOK` with the
+    cache multipliers that module documents (1.25x on cache writes, 0.1x on
+    cache reads), the same method ``docs/design/eval-trigger-surface.md`` §2
+    uses to price an eval dispatch. ``model_priced`` names the rate row
+    actually applied -- for an unstamped store that is the caller's
+    ``--model-label``, and the figure is only as good as that label.
+    """
+
+    model_priced: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    billable_input_tokens: float
+    usd: float
+    rows_counted: int
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+def compute_spend(
+    rows: Sequence[RolloutRow],
+    *,
+    model_priced: str,
+) -> SpendTotals:
+    """Price every persisted row's ``turn_tokens`` at *model_priced*'s rates.
+
+    Counts EVERY row, graded or harness-failed: a cell that tripped the turn
+    cap was paid for exactly like one that answered. ``cache_creation`` and
+    ``cache_read`` are billed against the INPUT rate with their documented
+    multipliers rather than ignored -- ignoring them under-reports spend,
+    which is the wrong direction for a capped budget.
+    """
+    input_rate, output_rate = _rates_for_model(model_priced)
+    plain = cache_create = cache_read = output = 0
+    for row in rows:
+        for turn in row.record.turn_tokens:
+            plain += turn.input_tokens
+            output += turn.output_tokens
+            cache_create += turn.cache_creation_input_tokens
+            cache_read += turn.cache_read_input_tokens
+    billable_input = plain + 1.25 * cache_create + 0.1 * cache_read
+    usd = (billable_input * input_rate + output * output_rate) / 1_000_000
+    return SpendTotals(
+        model_priced=model_priced,
+        input_tokens=plain,
+        output_tokens=output,
+        cache_creation_tokens=cache_create,
+        cache_read_tokens=cache_read,
+        billable_input_tokens=billable_input,
+        usd=usd,
+        rows_counted=len(rows),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level report assembly + rendering
 # ---------------------------------------------------------------------------
 
@@ -975,6 +1054,7 @@ class NoiseFloorReport:
     oracle_incorrect: tuple[OracleIncorrectProbe, ...]
     oracle_harness_failures: tuple[OracleHarnessFailure, ...]
     positive_control_unprompted_push: tuple[PositiveControlCell, ...]
+    spend: SpendTotals
 
 
 def build_noise_floor_report(
@@ -983,6 +1063,7 @@ def build_noise_floor_report(
     run_id: str | None = None,
     torn_rows: int = 0,
     duplicate_rows: int = 0,
+    model_label: str | None = None,
 ) -> NoiseFloorReport:
     """Assemble a :class:`NoiseFloorReport` from decoded result-store rows.
 
@@ -1015,6 +1096,13 @@ def build_noise_floor_report(
         oracle_incorrect=compute_oracle_incorrect(graded),
         oracle_harness_failures=compute_oracle_harness_failures(graded),
         positive_control_unprompted_push=compute_positive_control(graded),
+        # An unstamped store (every row written before athenaeum#2309's
+        # RolloutRecord.model) has no model to price against, so the caller's
+        # --model-label is used and named in the output as the thing the
+        # figure rests on. Never a silent fallback to the blended rate.
+        spend=compute_spend(
+            rows, model_priced=(provenance.model or model_label or "unknown")
+        ),
     )
 
 
@@ -1194,6 +1282,29 @@ def render_report(report: NoiseFloorReport) -> str:
             f"{pc.harness_failures} |"
         )
     lines.append("")
+    lines.append("## 6. Actual spend for this run")
+    lines.append("")
+    spend = report.spend
+    lines.append(
+        f"Priced at `{spend.model_priced}` rates with the cache multipliers "
+        "`athenaeum.models` documents (1.25x on a cache write, 0.1x on a cache "
+        "read), over EVERY persisted row -- a cell that tripped the turn cap "
+        "was paid for exactly like one that answered."
+    )
+    lines.append("")
+    lines.append(
+        "| rows counted | input | cache write | cache read | output | billable input | USD |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    lines.append(
+        f"| {spend.rows_counted} | {spend.input_tokens:,} | "
+        f"{spend.cache_creation_tokens:,} | {spend.cache_read_tokens:,} | "
+        f"{spend.output_tokens:,} | {spend.billable_input_tokens:,.0f} | "
+        f"${spend.usd:.2f} |"
+    )
+    lines.append("")
+    lines.append(f"Total tokens: {spend.total_tokens:,}.")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -1236,6 +1347,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "run id) -- stamped into the output header only, never used to filter rows"
         ),
     )
+    parser.add_argument(
+        "--model-label",
+        default=None,
+        help=(
+            "which model to PRICE an unstamped store against (issue athenaeum#2309). "
+            "Ignored when the rows carry their own model, which is the authoritative "
+            "source; used only for a store written before RolloutRecord.model existed, "
+            "and named in the output so the spend figure is only ever as good as the "
+            "label it rests on."
+        ),
+    )
     parser.add_argument("--out", required=True, type=Path, help="markdown report output path")
     parser.add_argument(
         "--json-out", required=True, type=Path, help="machine-readable JSON output path"
@@ -1256,6 +1378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=args.run_id,
             torn_rows=diagnostics.torn,
             duplicate_rows=diagnostics.duplicates,
+            model_label=args.model_label,
         )
     except ProvenanceMismatchError as exc:
         print(f"noise_floor: refusing to measure -- {exc}", file=sys.stderr)

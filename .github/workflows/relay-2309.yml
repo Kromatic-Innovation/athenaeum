@@ -46,6 +46,10 @@ jobs:
               value = str(req[key])
               assert value and "\n" not in value, (key, value)
               print(f"{key}={value}")
+          # Optional: which model to PRICE an unstamped store against.
+          label = str(req.get("model_label", ""))
+          assert "\n" not in label, label
+          print(f"model_label={label}")
           PY
 
       - name: Download the north-star artifact
@@ -83,6 +87,8 @@ jobs:
           cat relay-out/manifest.md
 
       - name: Render the noise-floor summary from the result store
+        env:
+          MODEL_LABEL: ${{ steps.req.outputs.model_label }}
         # The analyser is committed on the measurement branch (issue
         # athenaeum#2309). Guarded so an early relay -- dispatched before the
         # analyser lands -- still ships the manifest and the rendered report.
@@ -92,14 +98,33 @@ jobs:
             echo "::notice::tests/evals/noise_floor.py not present on this ref -- skipping the derived summary"
             exit 0
           fi
-          STORE="$(find relayed -name 'north-star-store*.jsonl' ! -name '*.phase2.jsonl' | head -1)"
+          # Named EXACTLY, not globbed: the artifact also carries
+          # `north-star-store-vector.jsonl.preflight.jsonl` (the pre-flight
+          # probe's own 8 rows), which a `north-star-store*.jsonl` glob
+          # matches and `head -1` can pick ahead of the real store -- the
+          # first relay of run 42169666857 measured those 8 rows and
+          # reported them as the whole grid.
+          STORE=""
+          for candidate in \
+            relayed/north-star-store-vector.jsonl \
+            relayed/north-star-store.jsonl; do
+            if [ -f "$candidate" ]; then STORE="$candidate"; break; fi
+          done
           if [ -z "$STORE" ]; then
             echo "::warning::no result store in the artifact -- skipping the derived summary"
             exit 0
           fi
+          # --model-label prices a store written before athenaeum#2309's
+          # RolloutRecord.model stamp; it is IGNORED when the rows carry
+          # their own model, which is authoritative.
+          MODEL_LABEL_FLAG=()
+          if [ -n "${MODEL_LABEL:-}" ]; then
+            MODEL_LABEL_FLAG=(--model-label "$MODEL_LABEL")
+          fi
           python -m tests.evals.noise_floor \
             --store "$STORE" \
             --run-id "${{ steps.req.outputs.run_id }}" \
+            "${MODEL_LABEL_FLAG[@]}" \
             --out "relay-out/noise-floor-${{ steps.req.outputs.label }}.md" \
             --json-out "relay-out/noise-floor-${{ steps.req.outputs.label }}.json"
 
