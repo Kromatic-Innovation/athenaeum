@@ -333,6 +333,18 @@ def test_hook_timeout_on_one_arm_does_not_abort_the_grid(tmp_path: Path) -> None
             answer="stub native grep answer",
         )
 
+    def _stub_push_sections_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=rollout_module.Arm.PUSH_SECTIONS_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub push-sections-pull answer",
+            recall_called=False,
+        )
+
     records = run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -346,6 +358,7 @@ def test_hook_timeout_on_one_arm_does_not_abort_the_grid(tmp_path: Path) -> None
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
         native_index_runner=_stub_native_index_runner,
         native_grep_runner=_stub_native_grep_runner,
+        push_sections_pull_runner=_stub_push_sections_pull_runner,
     )
 
     # Every arm still produced a record -- no exception escaped the grid.
@@ -358,6 +371,7 @@ def test_hook_timeout_on_one_arm_does_not_abort_the_grid(tmp_path: Path) -> None
         "pull",
         "native_index",
         "native_grep",
+        "push_sections_pull",
     }
     assert records["push_breadcrumb"].harness_failure is not None
     assert "TimeoutExpired" in records["push_breadcrumb"].harness_failure

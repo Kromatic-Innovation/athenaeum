@@ -64,7 +64,12 @@ def _probe(probe_id: str):
 # ---------------------------------------------------------------------------
 
 
-def test_arm_enumeration_has_exactly_eight_arms() -> None:
+def test_arm_enumeration_has_exactly_nine_arms() -> None:
+    """Issue athenaeum#2310 appended a ninth arm (PUSH_SECTIONS_PULL) --
+    this is the same tripwire issue athenaeum#1725 updated when it appended
+    the previous two (NATIVE_INDEX/NATIVE_GREP): a deliberate, visible
+    update to the exhaustive enumeration, not scope creep against an
+    unrelated arm."""
     assert set(ALL_ARMS) == {
         Arm.NONE,
         Arm.PUSH_PAGES_UPPER_BOUND,
@@ -74,13 +79,15 @@ def test_arm_enumeration_has_exactly_eight_arms() -> None:
         Arm.PULL,
         Arm.NATIVE_INDEX,
         Arm.NATIVE_GREP,
+        Arm.PUSH_SECTIONS_PULL,
     }
-    assert len(ALL_ARMS) == 8
+    assert len(ALL_ARMS) == 9
     # str-subclass so an arm round-trips through GridCell.arm (a plain str).
     assert Arm("push_pages_upper_bound") is Arm.PUSH_PAGES_UPPER_BOUND
     assert Arm.PULL.value == "pull"
     # Appended, not interleaved -- the pre-athenaeum#1725 six-arm order is a
-    # prefix of the current eight-arm order.
+    # prefix of the eight-arm order, which is itself a prefix of the
+    # current nine-arm order.
     assert ALL_ARMS[:6] == (
         Arm.NONE,
         Arm.PUSH_PAGES_UPPER_BOUND,
@@ -89,7 +96,8 @@ def test_arm_enumeration_has_exactly_eight_arms() -> None:
         Arm.ORACLE,
         Arm.PULL,
     )
-    assert ALL_ARMS[6:] == (Arm.NATIVE_INDEX, Arm.NATIVE_GREP)
+    assert ALL_ARMS[6:8] == (Arm.NATIVE_INDEX, Arm.NATIVE_GREP)
+    assert ALL_ARMS[8:] == (Arm.PUSH_SECTIONS_PULL,)
 
 
 def test_native_arms_round_trip_through_arm_value() -> None:
@@ -712,7 +720,7 @@ def test_materialize_native_memory_writes_nothing_outside_root(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) -> None:
+def test_run_probe_all_arms_dispatches_all_nine_arms_offline(tmp_path: Path) -> None:
     session = EvalSession()
     client = FakeLLMClient(
         response=make_llm_response(
@@ -765,6 +773,18 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
             answer="stub native grep answer",
         )
 
+    def _stub_push_sections_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.PUSH_SECTIONS_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub push-sections-pull answer",
+            recall_called=False,
+        )
+
     records = run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -778,6 +798,7 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
         native_index_runner=_stub_native_index_runner,
         native_grep_runner=_stub_native_grep_runner,
+        push_sections_pull_runner=_stub_push_sections_pull_runner,
     )
 
     assert set(records) == {
@@ -789,6 +810,7 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
         "pull",
         "native_index",
         "native_grep",
+        "push_sections_pull",
     }
     for arm_value, record in records.items():
         assert record.arm.value == arm_value
@@ -800,6 +822,7 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
         assert record.search_backend == "keyword"
     assert records["pull"].answer == "stub pull answer"
     assert records["pull"].recall_called is False  # a legitimate, recorded choice
+    assert records["push_sections_pull"].answer == "stub push-sections-pull answer"
     assert records["push_breadcrumb_pull"].answer == "stub breadcrumb-pull answer"
     assert records["native_index"].answer == "stub native index answer"
     assert records["native_grep"].answer == "stub native grep answer"
@@ -885,6 +908,17 @@ def test_run_probe_all_arms_vector_backend_builds_fts5_alongside_vector(
             answer="stub native grep answer",
         )
 
+    def _stub_push_sections_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.PUSH_SECTIONS_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub push-sections-pull answer",
+        )
+
     records = run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -898,6 +932,7 @@ def test_run_probe_all_arms_vector_backend_builds_fts5_alongside_vector(
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
         native_index_runner=_stub_native_index_runner,
         native_grep_runner=_stub_native_grep_runner,
+        push_sections_pull_runner=_stub_push_sections_pull_runner,
     )
 
     cache_dir = tmp_path / "cache"
@@ -960,6 +995,15 @@ def test_run_probe_all_arms_native_arms_get_dedicated_subdirectories(tmp_path: P
             answer="d",
         )
 
+    def _stub_push_sections_pull_runner(probe, knowledge_root, cache_dir, corpus_scale, **kwargs):
+        return RolloutRecord(
+            arm=Arm.PUSH_SECTIONS_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="e",
+        )
+
     run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -973,6 +1017,7 @@ def test_run_probe_all_arms_native_arms_get_dedicated_subdirectories(tmp_path: P
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
         native_index_runner=_capturing_native_index_runner,
         native_grep_runner=_capturing_native_grep_runner,
+        push_sections_pull_runner=_stub_push_sections_pull_runner,
     )
 
     assert seen_roots["native_index"] == tmp_path / "native_index"
@@ -1056,6 +1101,21 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
             answer="stub native grep answer",
         )
 
+    # Stubbed for the identical reason the two native runners above are
+    # (issue athenaeum#2310): with no override, mode="cli" falls through to
+    # the REAL run_push_sections_pull, which spawns a genuine `claude -p`.
+    def _stub_push_sections_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        seen["push_sections_pull_knowledge_root"] = knowledge_root
+        return RolloutRecord(
+            arm=Arm.PUSH_SECTIONS_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub push-sections-pull answer",
+        )
+
     run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -1069,6 +1129,7 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
         native_index_runner=_stub_native_index_runner,
         native_grep_runner=_stub_native_grep_runner,
+        push_sections_pull_runner=_stub_push_sections_pull_runner,
     )
 
     # The knowledge root is the PARENT of the materialized wiki tree, and the
@@ -1077,6 +1138,9 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
     assert seen["knowledge_root"] == tmp_path
     assert seen["breadcrumb_knowledge_root"] == tmp_path
     assert seen["breadcrumb_pull_knowledge_root"] == tmp_path
+    # PUSH_SECTIONS_PULL matches PULL/PUSH_BREADCRUMB_PULL's own choice
+    # (issue athenaeum#2310): the knowledge root, not the wiki root.
+    assert seen["push_sections_pull_knowledge_root"] == tmp_path
     assert (seen["knowledge_root"] / "wiki").is_dir()
     assert any((seen["knowledge_root"] / "wiki").glob("*.md"))
     assert not (seen["knowledge_root"] / "wiki" / "wiki").exists()

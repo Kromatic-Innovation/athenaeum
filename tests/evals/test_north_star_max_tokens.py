@@ -50,11 +50,13 @@ from tests.evals.rollout_session import ROLLOUT_TOKEN_CEILING
 #: exercise the TOKEN ceiling is never actually stopped by the USD one.
 GENEROUS_MAX_SPEND = "100.0"
 
-#: ``--scale small`` is 24 cells, so main's pre-flight projects
-#: 24 * 5,150 = 123,600 tokens. Any test that wants to reach the MID-GRID
-#: ceiling must sit above that, or the pre-flight refuses first and the run
-#: never starts (which is a different property, tested separately below).
-SMALL_GRID_PROJECTION = 24 * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
+#: ``--scale small`` is 27 cells (issue athenaeum#2310 grew ``ALL_ARMS`` from
+#: eight to nine, so the pre-existing 3-probes * 8-arms = 24 grew to
+#: 3 * 9 = 27), so main's pre-flight projects 27 * 5,150 = 139,050 tokens.
+#: Any test that wants to reach the MID-GRID ceiling must sit above that, or
+#: the pre-flight refuses first and the run never starts (which is a
+#: different property, tested separately below).
+SMALL_GRID_PROJECTION = 27 * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
 
 #: Above the projection, below one group's stub spend (200,000) -- so the
 #: run starts and then trips at the first group boundary.
@@ -465,17 +467,18 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: 2736 cells (57 probes -- athenaeum#2303 grows
+    test reaches: 3078 cells (57 probes -- athenaeum#2303 grows
     `unprompted_push` from 3 to 12 probes, nine new, on top of athenaeum#1839's
-    45 -> 48) at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per MTok) is
-    2736 * $0.00855 = $23.3928.
+    45 -> 48 -- times 9 arms, up from 8: issue athenaeum#2310 appended
+    PUSH_SECTIONS_PULL to ``ALL_ARMS``) at 4,300 in / 850 out on Haiku 4.5
+    ($1/$5 per MTok) is 3078 * $0.00855 = $26.3169.
     Cross-checked against :func:`expected_full_grid_cells`, derived from the
     live probe count, rather than trusted on the literal alone.
     ``--max-tokens`` stays at 20,000,000 (unchanged from athenaeum#1781):
-    projected tokens for 2736 cells is 14,131,600 (~5,150/cell estimate),
+    projected tokens for 3078 cells is 15,851,700 (~5,150/cell estimate),
     still comfortably under the ceiling -- no bump needed."""
     assert (
-        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 2736
+        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 3078
     ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
     assert (
         north_star_cli.main(
@@ -502,9 +505,9 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
         == 0
     )
     out = capsys.readouterr().out
-    assert "cells=2736" in out
+    assert "cells=3078" in out
     priced = float(out.split("estimated=$")[1].split()[0])
-    assert 23.35 < priced < 23.45, out
+    assert 26.25 < priced < 26.40, out
 
 
 def test_the_estimate_names_its_source_run() -> None:
