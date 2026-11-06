@@ -50,6 +50,10 @@ jobs:
           label = str(req.get("model_label", ""))
           assert "\n" not in label, label
           print(f"model_label={label}")
+          # Optional: a SECOND run whose store is merged into the first's.
+          run_id_2 = str(req.get("run_id_2", ""))
+          assert "\n" not in run_id_2, run_id_2
+          print(f"run_id_2={run_id_2}")
           PY
 
       - name: Download the north-star artifact
@@ -59,6 +63,41 @@ jobs:
           run-id: ${{ steps.req.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: relayed
+
+      - name: Download a second run's artifact and merge the stores
+        # A grid that stops early leaves its gap to a SECOND dispatch, and the
+        # noise floor has to be computed over both stores at once -- separate
+        # stores cannot give a paired per-probe comparison. The reader
+        # de-duplicates by cell key with the last row winning
+        # (north_star_report.load_rollout_rows_and_diagnostics), so
+        # concatenation is the merge: any cell both runs happen to carry
+        # resolves to the later one rather than double-counting.
+        if: steps.req.outputs.run_id_2 != ''
+        env:
+          RUN_ID_2: ${{ steps.req.outputs.run_id_2 }}
+          ARTIFACT: ${{ steps.req.outputs.artifact }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p relayed2
+          gh run download "$RUN_ID_2" -R "$GITHUB_REPOSITORY" \
+            -n "$ARTIFACT" -D relayed2
+          for name in north-star-store-vector.jsonl north-star-store.jsonl; do
+            if [ -f "relayed2/$name" ] && [ -f "relayed/$name" ]; then
+              echo "merging relayed2/$name ($(wc -l < "relayed2/$name") rows) into relayed/$name ($(wc -l < "relayed/$name") rows)"
+              cat "relayed2/$name" >> "relayed/$name"
+              echo "merged: $(wc -l < "relayed/$name") rows"
+            elif [ -f "relayed2/$name" ]; then
+              mv "relayed2/$name" "relayed/$name"
+            fi
+          done
+          # The second run's own rendered report is kept beside the first's,
+          # never merged into it: two renders over two stores are two
+          # measurements, and only the derived summary pools them.
+          for md in relayed2/north-star-*.md; do
+            [ -f "$md" ] || continue
+            mv "$md" "relayed/$(basename "${md%.md}")-run2.md"
+          done
 
       - name: Set up Python 3.13
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
