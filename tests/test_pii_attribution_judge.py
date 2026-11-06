@@ -457,6 +457,22 @@ class TestCalibrationRecordLoader:
         assert entry.question_class == "held-elsewhere"
         assert entry.passes is True
 
+    def test_entry_from_dict_defaults_measured_true_when_field_absent(self) -> None:
+        """issue athenaeum#2342: `measured` is a new optional field. Every
+        record shipped before this issue omits it entirely -- the reader
+        must keep accepting those rows and must not treat "absent" as
+        "not measured"."""
+        raw = _valid_entry_dict()
+        assert "measured" not in raw
+        entry = pii_attribution._calibration_entry_from_dict(raw)
+        assert entry.measured is True
+
+    def test_entry_from_dict_respects_measured_false(self) -> None:
+        raw = _valid_entry_dict()
+        raw["measured"] = False
+        entry = pii_attribution._calibration_entry_from_dict(raw)
+        assert entry.measured is False
+
 
 class TestJudgeNeverTouchesUsageClass:
     def test_judge_never_touches_the_pii_writer_module(
