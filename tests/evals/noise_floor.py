@@ -87,20 +87,27 @@ athenaeum#2310 AC5: "a noise floor is only readable against ONE
 model+corpus+grader triple"). Two honesty notes this module's own callers
 must not paper over:
 
-* ``RolloutRecord`` (``tests/evals/rollout.py``) carries no dedicated
-  ``model`` field. The four cli-mode arms (PULL, PUSH_BREADCRUMB_PULL,
-  NATIVE_GREP, NATIVE_INDEX) capture a full ``claude -p
-  --output-format stream-json`` transcript, whose own wire format DOES
-  stamp a ``model`` key (the ``system``/``init`` event, mirrored on every
-  ``assistant`` event's ``message.model`` -- verified against
-  ``tests/evals/data/rollout/pull_stream_spike.jsonl``), so this module
-  reads it from there. The four api-mode arms (NONE, PUSH_PAGES_UPPER_BOUND,
-  PUSH_BREADCRUMB, ORACLE) record no such transcript shape at all (see
-  ``run_none`` et al. in ``tests/evals/rollout.py``) -- their model
-  identity is asserted only by "one CLI dispatch passes one ``--model`` to
-  every arm it runs", never independently verified per row. This module
-  surfaces that gap explicitly (:attr:`Provenance.model_unverified_arms`)
-  rather than silently trusting it.
+* ``RolloutRecord.model`` (issue athenaeum#2309, added to
+  ``tests/evals/rollout.py`` by a sibling lane working the same issue,
+  stamped once per probe in ``run_probe_all_arms`` for every arm) is the
+  authoritative per-row model field this module reads via
+  :func:`_effective_model`. A store written BEFORE that field existed
+  decodes every row's ``model`` as ``""`` ("unstamped") -- for exactly
+  that case, :func:`_effective_model` falls back to
+  :func:`_model_from_transcript`, which reads the ``claude -p
+  --output-format stream-json`` wire format's own ``model`` key (the
+  ``system``/``init`` event, mirrored on every ``assistant`` event's
+  ``message.model`` -- verified against
+  ``tests/evals/data/rollout/pull_stream_spike.jsonl``). That fallback
+  only ever reaches the four cli-mode arms (PULL, PUSH_BREADCRUMB_PULL,
+  NATIVE_GREP, NATIVE_INDEX); the four api-mode arms (NONE,
+  PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB, ORACLE) carry no transcript
+  shape to fall back to (see ``run_none`` et al.), so a pre-field store's
+  api-mode rows have no recoverable model at all. This module surfaces
+  that residual gap explicitly (:attr:`Provenance.model_unverified_arms`)
+  rather than silently trusting "one CLI dispatch passes one ``--model``
+  to every arm it runs" -- the gap :func:`_effective_model`'s fallback
+  cannot close for those rows.
 * ``grader_revision`` and ``git_sha`` are properties of the CODE computing
   THIS report, not of the code that produced the stored rows (the same
   convention ``north_star_report.build_report`` already uses for its own
@@ -210,16 +217,20 @@ class Provenance:
     to. See the module docstring's "Provenance is asserted, never assumed"
     section for what each field actually verifies versus merely echoes."""
 
-    #: The one model every cli-mode row's transcript agrees on, or ``None``
-    #: when the store has no cli-mode row to read it from at all (every row
-    #: pre-dates ``tests/evals/rollout.py``'s stream-json transcript shape,
-    #: or the store contains only api-mode arms).
+    #: The one model every row's :func:`_effective_model` agrees on
+    #: (preferring the authoritative ``RolloutRecord.model`` field, see
+    #: that function's docstring), or ``None`` when no row in the store
+    #: carries one at all (every row pre-dates ``RolloutRecord.model`` AND
+    #: carries no cli-mode transcript to fall back to).
     model: str | None
     #: Arms present in *rows* whose rows carry NO per-row model evidence
-    #: (every api-mode arm) -- sorted, deduplicated. Non-empty on a real
-    #: north-star grid store, which always runs api-mode arms alongside
-    #: cli-mode ones; this is not an error, it is the gap this module
-    #: refuses to paper over.
+    #: at all -- sorted, deduplicated. Empty on any store written after
+    #: issue athenaeum#2309's ``RolloutRecord.model`` field landed (every
+    #: arm is stamped by ``run_probe_all_arms``); non-empty only for a
+    #: pre-field store whose api-mode rows have no transcript to fall back
+    #: to either. Kept rather than deleted now that the common case is
+    #: empty: a non-empty value here is exactly the gap this module
+    #: refuses to paper over, on whichever store still has it.
     model_unverified_arms: tuple[str, ...]
     #: The one ``search_backend`` value across every row that carries one.
     #: ``None`` (never an error) when every row predates that field or
@@ -245,15 +256,15 @@ class Provenance:
 
 
 def _model_from_transcript(record: RolloutRecord) -> str | None:
-    """Best-effort model identity read off *record*'s own transcript (see
-    the module docstring's provenance section for why this is the ONLY
-    place a model name can be read from today). Checks the ``system``/
-    ``init`` event's top-level ``model`` key first (present once, at
-    ``transcript[0]``, for every cli-mode arm), then falls back to any
-    ``assistant`` event's ``message.model`` -- both are the same value on
-    every real transcript, but a hand-built test transcript need only
-    supply one. Returns ``None`` for any transcript that carries neither
-    (every api-mode arm, and an empty transcript)."""
+    """Best-effort model identity read off *record*'s own transcript --
+    the FALLBACK path, used only when ``record.model`` is unset (see
+    :func:`_effective_model`). Checks the ``system``/``init`` event's
+    top-level ``model`` key first (present once, at ``transcript[0]``, for
+    every cli-mode arm), then falls back to any ``assistant`` event's
+    ``message.model`` -- both are the same value on every real transcript,
+    but a hand-built test transcript need only supply one. Returns
+    ``None`` for any transcript that carries neither (every api-mode arm
+    on a pre-``RolloutRecord.model`` store, and an empty transcript)."""
     for event in record.transcript:
         if not isinstance(event, dict):
             continue
@@ -268,20 +279,46 @@ def _model_from_transcript(record: RolloutRecord) -> str | None:
     return None
 
 
+def _effective_model(record: RolloutRecord) -> str | None:
+    """The model *record* actually ran under, preferring the authoritative
+    ``RolloutRecord.model`` field (issue athenaeum#2309: a sibling lane
+    working the same issue added this field directly to
+    ``tests/evals/rollout.py``, stamped once per probe in
+    ``run_probe_all_arms`` beside ``llm_provider`` -- so every arm's row,
+    api-mode included, now carries it). Falls back to
+    :func:`_model_from_transcript` ONLY when ``record.model`` is the empty
+    string -- ``RolloutRecord.model``'s own default/back-compat value for
+    "unstamped": every row persisted before that field existed, and every
+    record built directly without going through ``run_probe_all_arms``.
+    The fallback still reaches only cli-mode rows; an api-mode row from a
+    pre-field store has no recoverable model at all and this returns
+    ``None`` for it."""
+    return record.model or _model_from_transcript(record)
+
+
 def assert_provenance(rows: Sequence[RolloutRow]) -> Provenance:
     """Read provenance off *rows*, refusing (:class:`ProvenanceMismatchError`)
-    when the per-row fields that genuinely can disagree -- ``model``
-    (where derivable) and ``search_backend`` -- do. Never raises for
+    when the per-row fields that genuinely can disagree -- ``model`` and
+    ``search_backend`` -- do. Never raises for
     ``grader_revision``/``git_sha``/``corpus_digests``: those are current-
     code properties this function echoes, not row data it compares (see
-    the module docstring)."""
+    the module docstring).
+
+    Deliberately a direct, local mismatch check (mirroring
+    ``north_star_report._pooled_floor_value``'s RAISING discipline) rather
+    than a reuse of that module's own ``_pooled_model`` -- this issue's own
+    acceptance criterion (AC5) is "exit non-zero naming the disagreement",
+    where ``_pooled_model`` instead renders a soft ``"MIXED: a, b"`` string
+    for its own report (a legitimate but DIFFERENT policy choice for a
+    dimensional report that can still say something useful about mixed
+    data; a noise floor's MDE/required-n numbers cannot)."""
     models: set[str] = set()
     unverified_arms: set[str] = set()
     backends: set[str] = set()
     scales: set[str] = set()
     for row in rows:
         scales.add(row.record.corpus_scale)
-        model = _model_from_transcript(row.record)
+        model = _effective_model(row.record)
         if model is not None:
             models.add(model)
         else:
@@ -292,9 +329,9 @@ def assert_provenance(rows: Sequence[RolloutRow]) -> Provenance:
     if len(models) > 1:
         raise ProvenanceMismatchError(
             f"noise_floor.assert_provenance: rows carry differing model values "
-            f"{sorted(models)!r} (read from cli-mode transcripts) -- a noise floor "
-            "is only readable against ONE model+corpus+grader triple (athenaeum#2310 "
-            "AC5). Split the store or dispatch one model at a time."
+            f"{sorted(models)!r} -- a noise floor is only readable against ONE "
+            "model+corpus+grader triple (athenaeum#2310 AC5). Split the store or "
+            "dispatch one model at a time."
         )
     if len(backends) > 1:
         raise ProvenanceMismatchError(
@@ -996,13 +1033,13 @@ def render_report(report: NoiseFloorReport) -> str:
     lines.append("")
     lines.append(f"- run_id: {report.run_id or 'n/a'}")
     lines.append(f"- generated: {report.generated}")
-    lines.append(f"- model: {p.model or 'n/a (no cli-mode row in store)'}")
+    lines.append(f"- model: {p.model or 'n/a (unstamped store, no recoverable model)'}")
     if p.model_unverified_arms:
         lines.append(
             "  - model NOT independently verified for arms: "
             + ", ".join(p.model_unverified_arms)
-            + " (api-mode rows carry no per-row model field -- asserted via the "
-            "single dispatch invocation, not read from the row)"
+            + " (pre-athenaeum#2309 store rows with no RolloutRecord.model and no "
+            "cli-mode transcript to fall back to)"
         )
     lines.append(f"- search_backend: {p.search_backend or 'n/a'}")
     lines.append(

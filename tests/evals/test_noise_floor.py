@@ -29,6 +29,7 @@ from tests.evals.noise_floor import (
     GradedRow,
     MDEResult,
     ProvenanceMismatchError,
+    _effective_model,
     _model_from_transcript,
     assert_provenance,
     build_noise_floor_report,
@@ -73,6 +74,7 @@ def _row(
     transcript: list[dict] | None = None,
     harness_failure: str | None = None,
     search_backend: str | None = "vector",
+    model: str = "",
 ) -> RolloutRow:
     record = RolloutRecord(
         arm=arm,
@@ -83,6 +85,7 @@ def _row(
         transcript=transcript if transcript is not None else [],
         harness_failure=harness_failure,
         search_backend=search_backend,
+        model=model,
     )
     cell = GridCell(probe=probe_id, arm=arm.value, corpus_scale=corpus_scale, replicate=replicate)
     return RolloutRow(cell=cell, record=record)
@@ -162,6 +165,66 @@ def test_model_from_transcript_none_for_api_mode_push_shape() -> None:
     assert _model_from_transcript(record) is None
 
 
+def test_effective_model_prefers_authoritative_rollout_record_field() -> None:
+    """Issue athenaeum#2309: a sibling lane added ``RolloutRecord.model``,
+    stamped for every arm (api-mode included) by ``run_probe_all_arms``.
+    When present, it must win over any transcript-derived guess -- even
+    one that disagrees, which should never happen on real data but must
+    not silently flip the answer if it does."""
+    record = RolloutRecord(
+        arm=Arm.PULL,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="x",
+        model="claude-haiku-4-5-20251001",
+        transcript=[{"type": "system", "subtype": "init", "model": "claude-opus-4-6"}],
+    )
+    assert _effective_model(record) == "claude-haiku-4-5-20251001"
+
+
+def test_effective_model_covers_api_mode_arm_via_rollout_record_field() -> None:
+    """The exact gap this field closes: an api-mode arm (NONE here) has no
+    transcript to fall back to, but now carries ``model`` directly."""
+    record = RolloutRecord(
+        arm=Arm.NONE,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="x",
+        model="claude-haiku-4-5-20251001",
+        transcript=[{"system": "...", "user": "...", "answer": "x"}],
+    )
+    assert _effective_model(record) == "claude-haiku-4-5-20251001"
+
+
+def test_effective_model_falls_back_to_transcript_on_unstamped_record() -> None:
+    """``model`` defaults to ``""`` -- unstamped, for a pre-athenaeum#2309
+    store -- which must fall back to the transcript, not read as a real
+    empty-string model value."""
+    record = RolloutRecord(
+        arm=Arm.PULL,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="x",
+        transcript=[{"type": "system", "subtype": "init", "model": "claude-haiku-4-5-20251001"}],
+    )
+    assert record.model == ""
+    assert _effective_model(record) == "claude-haiku-4-5-20251001"
+
+
+def test_effective_model_none_when_unstamped_and_no_transcript() -> None:
+    record = RolloutRecord(
+        arm=Arm.NONE,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="x",
+    )
+    assert _effective_model(record) is None
+
+
 # ---------------------------------------------------------------------------
 # Provenance refusal (athenaeum#2310 AC5)
 # ---------------------------------------------------------------------------
@@ -191,6 +254,30 @@ def test_assert_provenance_happy_path_echoes_triple_and_flags_unverified_arms() 
     assert provenance.corpus_digests[CORPUS_SCALE] == _CORPUS.fingerprint()
     assert provenance.grader_revision
     assert provenance.git_sha
+
+
+def test_assert_provenance_no_unverified_arms_when_rows_carry_rollout_record_model() -> None:
+    """Issue athenaeum#2309's own closing of the gap: on a store where every
+    row (api-mode included) carries the real ``RolloutRecord.model`` field,
+    ``model_unverified_arms`` must be EMPTY -- the gap the earlier
+    transcript-only fallback could not close for api-mode rows."""
+    cli = _row(
+        arm=Arm.PULL,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        search_backend="vector",
+        model="claude-haiku-4-5-20251001",
+    )
+    api = _row(
+        arm=Arm.NONE,
+        probe_id=PTO_PROBE_ID,
+        probe_class="single_hop",
+        search_backend="vector",
+        model="claude-haiku-4-5-20251001",
+    )
+    provenance = assert_provenance([cli, api])
+    assert provenance.model == "claude-haiku-4-5-20251001"
+    assert provenance.model_unverified_arms == ()
 
 
 def test_assert_provenance_refuses_model_mismatch() -> None:
