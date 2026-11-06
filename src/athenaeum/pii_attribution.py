@@ -1316,26 +1316,53 @@ def scrub_compiled_contact_tokens(
     as the target, regardless of the verdict's disposition (unlike the other
     four writers, which only park a non-``pass`` verdict, this writer has no
     "file it on the record" path at all in observe mode, so a ``pass`` token
-    would otherwise vanish with no trace). It is then parked via
-    :func:`park_suspect` as a **shadow** suspect (design §10.2: "In observe
-    mode, every token is parked as a shadow entry" — unlike the other
-    writers' ``shadow=not is_d1_narrow(verdict)``, this writer removes the
-    token from the body unconditionally regardless of disposition, so there
-    is no enforce-vs-observe distinction for the shadow flag to encode until
-    the enforce child (athenaeum#2220) adds the "file a pass on the
-    subject's record" path design §10.2 describes).
+    would otherwise vanish with no trace).
+
+    **Issue athenaeum#2220 adds the enforce path design §10.2 describes, with
+    one all-or-nothing gate** (:data:`QUESTION_CLASSES` all in
+    :attr:`AttributionContext.enforced_classes`, i.e. every class enforced —
+    unconditional under a literal ``enforce``, and reachable under ``auto``
+    only once every class has independently cleared calibration+ack): a
+    ``pass`` token has no question class of its own for a PARTIAL ``auto``
+    to gate against, so this writer only ever leaves observe behaviour for
+    the fully-measured case, never a half-enforced one.
+
+    - **Not fully enforced** (``observe``, or ``auto`` with any class still
+      unmeasured): unchanged from before this issue. Every token — any
+      disposition — is parked via :func:`park_suspect` as a **shadow**
+      suspect (design §10.2: "In observe mode, every token is parked as a
+      shadow entry"), and nothing is ever filed on a record.
+    - **Fully enforced:** a ``pass`` token is instead FILED on the
+      subject's own record via :func:`athenaeum.pii.record_contact_value`
+      with :data:`athenaeum.pii.USAGE_CLASS_UNCLASSIFIED` — never
+      ``observed``, because this writer only ever confirmed the
+      deterministic checks found no reason to suspect the token, not that
+      the note actually named it as the subject's own. A non-``pass``
+      verdict is parked via :func:`park_suspect`, with its candidates, so
+      re-attribution can later file it on its real owner —
+      :func:`should_enforce_verdict` decides the shadow flag exactly as it
+      does for the other four writers (D1-narrow non-shadow in every mode;
+      D1-domain shadow in every mode, design §17 decision 3; any other
+      suspect non-shadow because every class is enforced here by
+      construction).
     """
-    tokens = pii.find_inline_emails(body) + pii.find_inline_phones(body)
-    if not tokens:
+    email_tokens = pii.find_inline_emails(body)
+    phone_tokens = pii.find_inline_phones(body)
+    tagged_tokens = [(t, "emails") for t in email_tokens] + [
+        (t, "phones") for t in phone_tokens
+    ]
+    if not tagged_tokens:
         return body, []
 
     name_pii_values = (
         set(pii.name_field_pii_values({"name": target_name})) if target_name else set()
     )
+    # Issue athenaeum#2220: see the docstring's "all-or-nothing gate" above.
+    full_enforce = context.enforced_classes == frozenset(QUESTION_CLASSES)
 
     scrubbed = body
     removed: list[str] = []
-    for token in tokens:
+    for token, record_field in tagged_tokens:
         if token in name_pii_values:
             continue
         verdict = check_contact_attribution(
@@ -1347,21 +1374,34 @@ def scrub_compiled_contact_tokens(
             writer=WRITER_PROSE_COMPILE,
             context=context,
         )
-        park_suspect(
-            context,
-            token,
-            verdict,
-            target_uid=subject_uid,
-            target_name=target_name,
-            writer=WRITER_PROSE_COMPILE,
-            source_ref=source_ref,
-            # NOT `shadow=not is_d1_narrow(verdict)` (the other four writers'
-            # convention) — design §10.2 states shadow=True unconditionally
-            # for THIS writer, and prose-compile never files a value onto a
-            # record regardless of disposition, so there is no
-            # enforce-vs-shadow distinction here to encode yet (athenaeum#2216).
-            shadow=True,
-        )
+        if full_enforce and verdict.disposition == DISPOSITION_PASS:
+            pii.record_contact_value(
+                context.contacts_root,
+                token,
+                uid=subject_uid,
+                name=target_name,
+                usage_class=pii.USAGE_CLASS_UNCLASSIFIED,
+                field=record_field,
+                source=source_ref if source_ref is not None else "",
+                observed_at=now_iso(),
+            )
+        else:
+            # Not fully enforced: unconditional shadow=True, byte-identical
+            # to this writer's pre-athenaeum#2220 behaviour (the design's
+            # "every token is parked as a shadow entry" in observe mode).
+            # Fully enforced: the shared per-verdict decision every other
+            # writer already uses.
+            shadow = True if not full_enforce else not should_enforce_verdict(verdict, context)
+            park_suspect(
+                context,
+                token,
+                verdict,
+                target_uid=subject_uid,
+                target_name=target_name,
+                writer=WRITER_PROSE_COMPILE,
+                source_ref=source_ref,
+                shadow=shadow,
+            )
         scrubbed = scrubbed.replace(token, "")
         removed.append(token)
 

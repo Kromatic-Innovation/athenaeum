@@ -724,3 +724,106 @@ class TestScrubCompiledContactTokens:
         assert meta["writer"] == pii_attribution.WRITER_PROSE_COMPILE
         assert meta["target_uid"] == "uid-subject"
         assert meta["shadow"] is True
+
+
+class TestScrubCompiledContactTokensEnforceMode:
+    """Issue athenaeum#2220: the prose-compile scrub's enforce branch
+    (design §10.2). Every class enforced (the all-or-nothing gate — see
+    the function's own docstring) files a ``pass`` token on the subject as
+    ``unclassified`` instead of merely parking it, and parks a suspect
+    token non-shadow with its candidates instead of shadow."""
+
+    ENFORCE_CONFIG: dict[str, object] = {
+        "storage": {"mapping": {"pii": "excluded"}},
+        "librarian": {"attribution": {"mode": "enforce"}},
+    }
+
+    def _suspect_path(
+        self,
+        context: pii_attribution.AttributionContext,
+        value: str,
+        target_uid: str,
+    ) -> Path:
+        key = pii_attribution.value_key_for(context, value)
+        return (
+            context.contacts_root
+            / pii_attribution.ATTRIBUTION_SUSPECTS_DIRNAME
+            / f"{key}-{target_uid}.md"
+        )
+
+    def test_pass_token_is_filed_as_unclassified_not_parked(self, tmp_path: Path) -> None:
+        context = _context(tmp_path, config=self.ENFORCE_CONFIG)
+        body = "No existing holder, so this is a plain pass: new@example.org."
+        scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="Subject Person",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert removed == ["new@example.org"]
+        assert "new@example.org" not in scrubbed
+
+        records = pii.resolve_contact_records(context.contacts_root, "new@example.org")
+        assert len(records) == 1
+        meta = pii.read_bounce_record(records[0])
+        entry = next(
+            e
+            for e in pii.contact_classification_entries(meta)
+            if pii.normalize_identifier(str(e.get("identifier", ""))) == "new@example.org"
+        )
+        assert entry["usage_class"] == pii.USAGE_CLASS_UNCLASSIFIED
+
+        # Never parked -- it was actually filed, not merely observed.
+        path = self._suspect_path(context, "new@example.org", "uid-subject")
+        assert not path.exists()
+
+    def test_suspect_token_is_parked_non_shadow_with_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        context = _context(tmp_path, config=self.ENFORCE_CONFIG)
+        body = "Reach the team at info@vendor.example.org about scheduling."
+        _scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="Subject Person",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert removed == ["info@vendor.example.org"]
+        path = self._suspect_path(context, "info@vendor.example.org", "uid-subject")
+        assert path.exists()
+        meta, _ = pii.parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["disposition"] == "suspect"
+
+        # Not filed on any record -- awaiting re-attribution.
+        assert (
+            pii.resolve_contact_records(context.contacts_root, "info@vendor.example.org")
+            == []
+        )
+
+    def test_d1_narrow_token_still_withheld_and_non_shadow(self, tmp_path: Path) -> None:
+        """D1-narrow was already enforced in every mode (athenaeum#2210); this
+        pins that the all-or-nothing enforce gate does not change it."""
+        context = _context(tmp_path, config=self.ENFORCE_CONFIG)
+        body = "Automated notice from noreply@example.org, disregard."
+        _scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="Subject Person",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert removed == ["noreply@example.org"]
+        path = self._suspect_path(context, "noreply@example.org", "uid-subject")
+        assert path.exists()
+        meta, _ = pii.parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["disposition"] == "non-personal"
+        assert (
+            pii.resolve_contact_records(context.contacts_root, "noreply@example.org") == []
+        )
