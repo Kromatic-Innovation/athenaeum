@@ -159,6 +159,7 @@ from athenaeum.models import _rates_for_model
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
 from tests.evals.containment import ResultStore
+from tests.evals.north_star_cli import DEFAULT_PROBES
 from tests.evals.north_star_report import (
     DEFAULT_VERDICT_ARM,
     GRADER_REVISION,
@@ -954,6 +955,88 @@ def compute_positive_control(graded: Sequence[GradedRow]) -> tuple[PositiveContr
 
 
 # ---------------------------------------------------------------------------
+# Grid coverage (issue athenaeum#2309)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class ProbeCoverage:
+    """How complete one probe's cells are, against the axes the store itself
+    shows were requested.
+
+    A grid that stops early (run 42169666857 tripped its token ceiling at
+    1360 of 1824 cells) does not stop uniformly: workers take
+    ``(probe, corpus_scale, replicate)`` groups concurrently, so the missing
+    cells are NOT a clean tail of the probe order. Reading the gap off the
+    cell count alone -- "1360 of 1824, so the last 15 probes" -- is wrong,
+    and in run 42169666857 it was wrong in the way that matters: the gap
+    swallowed the whole ``unprompted_push`` class, the one class the epic's
+    first condition is read on.
+
+    This is what makes the gap nameable, so a second dispatch can ask for
+    exactly the missing cells rather than re-paying for cells already in
+    hand -- whose duplicate rows would corrupt every count here.
+    """
+
+    probe_id: str
+    probe_class: str
+    cells_present: int
+    cells_expected: int
+    missing: tuple[tuple[str, int, str], ...]  # (corpus_scale, replicate, arm)
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing
+
+
+def compute_coverage(rows: Sequence[RolloutRow]) -> tuple[ProbeCoverage, ...]:
+    """Per-probe cell coverage, against the cross product of the scales,
+    replicates and arms the store ITSELF carries.
+
+    The expected axes are read from the data rather than from the CLI's
+    defaults on purpose: a deliberately scoped dispatch (a probe subset, one
+    scale) must not be reported as mostly missing because the full grid is
+    bigger than what was asked for.
+    """
+    scales = sorted({row.record.corpus_scale for row in rows})
+    replicates = sorted({row.cell.replicate for row in rows})
+    arms = sorted({row.record.arm.value for row in rows})
+    classes: dict[str, str] = {}
+    present: dict[str, set[tuple[str, int, str]]] = defaultdict(set)
+    for row in rows:
+        classes.setdefault(row.record.probe_id, row.record.probe_class)
+        present[row.record.probe_id].add(
+            (row.record.corpus_scale, row.cell.replicate, row.record.arm.value)
+        )
+    expected = [(sc, rep, arm) for sc in scales for rep in replicates for arm in arms]
+    out: list[ProbeCoverage] = []
+    for probe_id in sorted(present):
+        have = present[probe_id]
+        missing = tuple(cell for cell in expected if cell not in have)
+        out.append(
+            ProbeCoverage(
+                probe_id=probe_id,
+                probe_class=classes[probe_id],
+                cells_present=len(have),
+                cells_expected=len(expected),
+                missing=missing,
+            )
+        )
+    return tuple(out)
+
+
+def probes_absent_entirely(
+    coverage: Sequence[ProbeCoverage], *, all_probe_ids: Sequence[str]
+) -> tuple[str, ...]:
+    """Probe ids with NO row at all -- invisible to :func:`compute_coverage`,
+    which can only see probes the store mentions. *all_probe_ids* is the set
+    the dispatch asked for (``north_star_cli.DEFAULT_PROBES`` for a full
+    grid)."""
+    seen = {c.probe_id for c in coverage}
+    return tuple(probe for probe in all_probe_ids if probe not in seen)
+
+
+# ---------------------------------------------------------------------------
 # Actual spend (issue athenaeum#2309)
 # ---------------------------------------------------------------------------
 
@@ -1055,6 +1138,8 @@ class NoiseFloorReport:
     oracle_harness_failures: tuple[OracleHarnessFailure, ...]
     positive_control_unprompted_push: tuple[PositiveControlCell, ...]
     spend: SpendTotals
+    coverage: tuple[ProbeCoverage, ...]
+    probes_absent: tuple[str, ...]
 
 
 def build_noise_floor_report(
@@ -1079,6 +1164,7 @@ def build_noise_floor_report(
     gradable = _gradable(graded)
     n_harness_failures = sum(1 for g in graded if g.harness_failure)
     mde_results = compute_mde(graded)
+    coverage = compute_coverage(rows)
     return NoiseFloorReport(
         run_id=run_id,
         generated=now_iso(),
@@ -1101,6 +1187,8 @@ def build_noise_floor_report(
         # --model-label is used and named in the output as the thing the
         # figure rests on. Never a silent fallback to the blended rate.
         spend=compute_spend(rows, model_priced=(provenance.model or model_label or "unknown")),
+        coverage=coverage,
+        probes_absent=probes_absent_entirely(coverage, all_probe_ids=DEFAULT_PROBES),
     )
 
 
@@ -1280,7 +1368,39 @@ def render_report(report: NoiseFloorReport) -> str:
             f"{pc.harness_failures} |"
         )
     lines.append("")
-    lines.append("## 6. Actual spend for this run")
+    lines.append("## 6. Grid coverage")
+    lines.append("")
+    incomplete = [c for c in report.coverage if not c.complete]
+    lines.append(
+        f"{len(report.coverage)} probes have at least one row; "
+        f"{len(report.coverage) - len(incomplete)} are complete across every "
+        f"(scale, replicate, arm) this store carries. "
+        f"{len(report.probes_absent)} probes have no row at all."
+    )
+    lines.append("")
+    if report.probes_absent:
+        lines.append("Absent entirely (no row at all):")
+        lines.append("")
+        lines.append("| probe_id |")
+        lines.append("|---|")
+        for probe_id in report.probes_absent:
+            lines.append(f"| `{probe_id}` |")
+        lines.append("")
+    if incomplete:
+        lines.append("Partially covered:")
+        lines.append("")
+        lines.append("| probe_id | class | cells | missing (scale/replicate/arm) |")
+        lines.append("|---|---|---|---|")
+        for c in incomplete:
+            shown = ", ".join(f"{sc}/{rep}/{arm}" for sc, rep, arm in c.missing[:6])
+            if len(c.missing) > 6:
+                shown += f", +{len(c.missing) - 6} more"
+            lines.append(
+                f"| `{c.probe_id}` | {c.probe_class} | "
+                f"{c.cells_present}/{c.cells_expected} | {shown} |"
+            )
+        lines.append("")
+    lines.append("## 7. Actual spend for this run")
     lines.append("")
     spend = report.spend
     lines.append(

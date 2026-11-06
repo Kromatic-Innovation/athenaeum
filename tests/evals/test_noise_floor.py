@@ -918,3 +918,74 @@ def test_a_stamped_store_ignores_the_label_and_prices_what_the_rows_say() -> Non
     report = noise_floor.build_noise_floor_report(rows, model_label="claude-sonnet-5")
     assert report.spend.model_priced == "claude-haiku-4-5-20251001"
     assert report.spend.usd == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Grid coverage (issue athenaeum#2309)
+# ---------------------------------------------------------------------------
+
+
+def _cov_row(probe: str, scale: str, replicate: int, arm: Arm) -> RolloutRow:
+    record = RolloutRecord(
+        arm=arm,
+        probe_id=probe,
+        probe_class="unprompted_push" if probe.startswith("relay") else "single_hop",
+        corpus_scale=scale,
+        answer="an answer",
+        model="claude-haiku-4-5-20251001",
+    )
+    cell = GridCell(probe=probe, arm=arm.value, corpus_scale=scale, replicate=replicate)
+    return RolloutRow(cell=cell, record=record)
+
+
+def test_coverage_calls_a_fully_covered_probe_complete() -> None:
+    rows = [
+        _cov_row("pto_allowance", scale, rep, arm)
+        for scale in ("core", "medium")
+        for rep in (0, 1)
+        for arm in (Arm.NONE, Arm.ORACLE)
+    ]
+    (coverage,) = noise_floor.compute_coverage(rows)
+    assert coverage.complete
+    assert coverage.cells_present == coverage.cells_expected == 8
+
+
+def test_coverage_names_the_exact_missing_cells_not_a_count() -> None:
+    """A partial grid's gap is what a second dispatch has to ask for. A
+    count cannot be dispatched; a (scale, replicate, arm) list can."""
+    rows = [
+        _cov_row("pto_allowance", scale, rep, arm)
+        for scale in ("core", "medium")
+        for rep in (0, 1)
+        for arm in (Arm.NONE, Arm.ORACLE)
+    ]
+    rows += [_cov_row("onboarding_length", "core", 0, Arm.NONE)]
+    by_probe = {c.probe_id: c for c in noise_floor.compute_coverage(rows)}
+    partial = by_probe["onboarding_length"]
+    assert not partial.complete
+    assert partial.cells_present == 1
+    assert ("core", 0, "oracle") in partial.missing
+    assert ("medium", 1, "none") in partial.missing
+    assert ("core", 0, "none") not in partial.missing
+
+
+def test_coverage_expectation_follows_the_store_not_the_full_grid() -> None:
+    """A deliberately scoped dispatch -- one scale, one replicate -- must not
+    read as mostly missing just because the full grid is bigger."""
+    rows = [_cov_row("pto_allowance", "core", 0, arm) for arm in (Arm.NONE, Arm.ORACLE)]
+    (coverage,) = noise_floor.compute_coverage(rows)
+    assert coverage.complete
+    assert coverage.cells_expected == 2
+
+
+def test_probes_absent_entirely_are_reported_separately() -> None:
+    """compute_coverage can only see probes the store mentions: a class the
+    grid never reached at all is invisible to it. That is exactly what
+    happened to unprompted_push in run 42169666857, and it is the gap that
+    matters most -- the epic's first condition is read on that class."""
+    rows = [_cov_row("pto_allowance", "core", 0, Arm.NONE)]
+    coverage = noise_floor.compute_coverage(rows)
+    absent = noise_floor.probes_absent_entirely(
+        coverage, all_probe_ids=["pto_allowance", "relay_sync_fix", "nightly_job_drop"]
+    )
+    assert absent == ("relay_sync_fix", "nightly_job_drop")
