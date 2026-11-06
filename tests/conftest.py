@@ -772,4 +772,11 @@ def wiki_dir(tmp_path: Path) -> Path:
 # for why: a sibling lane is concurrently editing the content above for an
 # unrelated hermeticity issue). Do not add anything else below this line
 # that isn't part of that guard.
-pytest_plugins = ["tests.fixtures.default_root_guard"]
+# athenaeum#2335 adds a second entry to this same list rather than a block of
+# its own above: `pytest_plugins` may be declared only once per conftest, and
+# the appended-block note above is about not interleaving unrelated FIXTURES
+# with the athenaeum#2183 guard, which a plugin registration does not do.
+pytest_plugins = [
+    "tests.fixtures.default_root_guard",
+    "tests.fixtures.promptwitness_append_only_guard",
+]

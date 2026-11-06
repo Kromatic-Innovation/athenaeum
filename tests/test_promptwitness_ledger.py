@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import types
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -344,13 +345,37 @@ def _concurrent_worker(ledger_dir: str, i: int) -> None:
     )
 
 
+@pytest.fixture
+def child_written_ledger_dir(tmp_path: Path) -> Iterator[Path]:
+    """A ledger directory whose partition a CHILD process will create, cleared
+    of append-only protection at teardown (athenaeum#2335).
+
+    The autouse teardown in ``tests/fixtures/promptwitness_append_only_guard.py``
+    clears whatever ``promptwitness.ledger`` protected *in this process*, which
+    covers every other test here. It cannot cover this one: the genesis line --
+    and therefore the ``chflags uappnd`` / ``chattr +a`` call -- happens inside a
+    forked worker, so the path was recorded in that child's registry and died
+    with it. Walking the tree is the only way the parent can find it, which is
+    what :func:`promptwitness.ledger.clear_append_only_protection_under` is for.
+
+    A fixture rather than a line at the end of the test body so the clear also
+    runs when the test FAILS -- the case that otherwise leaves an undeletable
+    directory behind precisely when someone is debugging.
+    """
+    yield tmp_path
+    ledger.clear_append_only_protection_under(tmp_path)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only concurrency test (AC)")
 class TestEightConcurrentAppenders:
-    def test_produces_a_strictly_linear_contiguous_chain(self, tmp_path: Path) -> None:
+    def test_produces_a_strictly_linear_contiguous_chain(
+        self, child_written_ledger_dir: Path
+    ) -> None:
+        ledger_dir = child_written_ledger_dir
         n = 8
         procs = [
             multiprocessing.get_context("fork").Process(
-                target=_concurrent_worker, args=(str(tmp_path), i)
+                target=_concurrent_worker, args=(str(ledger_dir), i)
             )
             for i in range(n)
         ]
@@ -361,10 +386,10 @@ class TestEightConcurrentAppenders:
         for p in procs:
             assert p.exitcode == 0, f"appender process exited {p.exitcode}"
 
-        v = ledger.verify_chain(tmp_path)
+        v = ledger.verify_chain(ledger_dir)
         assert v.ok
         assert v.lines_checked == n
-        seqs = sorted(line.seq for line in ledger.iter_lines(tmp_path))
+        seqs = sorted(line.seq for line in ledger.iter_lines(ledger_dir))
         assert seqs == list(range(1, n + 1))
 
 
