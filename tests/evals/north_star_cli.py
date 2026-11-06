@@ -1300,6 +1300,18 @@ _ARM_AXIS_PLACEHOLDER: tuple[str, ...] = ("_all_arms",)
 
 def _build_cells(args: argparse.Namespace) -> list[GridCell]:
     probes = args.probes.split(",") if args.probes else list(DEFAULT_PROBES)
+    # Issue athenaeum#2309: validated HERE, before any spend, for the same
+    # reason the unknown-scale check below is -- `--probes` is now reachable
+    # from a workflow input (`north_star_probes`), and a probe subset is how
+    # a replicated or higher-tier grid is kept inside a stated USD cap. A
+    # typo'd id used to build cells for a probe that does not exist and only
+    # fail deep inside a rollout, after paying for the cells ahead of it.
+    unknown_probes = [p for p in probes if p not in DEFAULT_PROBES]
+    if unknown_probes:
+        raise ValueError(
+            f"unknown probe id(s) {unknown_probes!r} in --probes; "
+            f"known: {sorted(DEFAULT_PROBES)}"
+        )
     if args.corpus_scales:
         corpus_scales = args.corpus_scales.split(",")
     elif args.search_backend == "vector":
