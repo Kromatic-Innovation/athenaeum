@@ -3597,6 +3597,92 @@ class TestAttributionSeamWiring:
         assert not suspects_dir.exists() or list(suspects_dir.glob("*.md")) == []
 
 
+class TestEnforceModeEscalatesASuspectValue:
+    """Issue athenaeum#2220: under `enforce`, a non-D1-narrow suspect value
+    is escalated (not applied) and parked non-shadow; under `observe` the
+    same value is filed exactly as ``TestAttributionSeamWiring`` already
+    pins for a suspect verdict."""
+
+    #: Role local part (D1-role -> SUSPECT, question class
+    #: ``role-unmatched``), not D1-narrow -- the case this issue adds.
+    _ROLE_ADDRESS = "info@vendor.example.org"
+
+    def _config(self, mode: str) -> dict:
+        return {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "emails": {"shape": "list", "writers": ["delivery-monitor"]}
+                    },
+                    "sensitive_fields": {"emails": "pii"},
+                },
+                "attribution": {"mode": mode},
+            },
+            "storage": {"mapping": {"pii": "excluded"}},
+        }
+
+    def _add(
+        self, tmp_path: Path, value: str, *, config: dict, attribution_context: object
+    ) -> "CorrectionRecordResult":
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-alex"},
+            "op": "add",
+            "field": "emails",
+            "value": value,
+            "source": "api:delivery-monitor:2026-10-29",
+            "observed_at": "2026-10-29T00:00:00Z",
+        }
+        return process_correction_record(
+            record,
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+            attribution_context=attribution_context,
+            dry_run=False,
+        )
+
+    def test_enforce_mode_escalates_and_parks_non_shadow(self, tmp_path: Path) -> None:
+        config = self._config("enforce")
+        context = pii_attribution.build_attribution_context(tmp_path, config)
+        result = self._add(
+            tmp_path, self._ROLE_ADDRESS, config=config, attribution_context=context
+        )
+        assert result.disposition == "escalated"
+        assert result.reason == "attribution-suspect"
+        excluded_record = tmp_path / "excluded" / "person-alex.md"
+        if excluded_record.exists():
+            meta = pii.read_bounce_record(excluded_record)
+            assert self._ROLE_ADDRESS not in (meta.get("emails") or [])
+
+        suspects = list((context.contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["disposition"] == "suspect"
+
+    def test_observe_mode_still_files_the_suspect_value(self, tmp_path: Path) -> None:
+        config = self._config("observe")
+        context = pii_attribution.build_attribution_context(tmp_path, config)
+        result = self._add(
+            tmp_path, self._ROLE_ADDRESS, config=config, attribution_context=context
+        )
+        assert result.disposition == "routed-elsewhere", result.reason
+        excluded_record = tmp_path / "excluded" / "person-alex.md"
+        meta = pii.read_bounce_record(excluded_record)
+        assert self._ROLE_ADDRESS in (meta.get("emails") or [])
+
+        suspects = list((context.contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta2, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta2["shadow"] is True
+        assert meta2["disposition"] == "suspect"
+
+
 def test_value_key_treats_dates_and_iso_strings_alike() -> None:
     from datetime import datetime
 

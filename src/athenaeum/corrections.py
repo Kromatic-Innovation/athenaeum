@@ -1687,6 +1687,7 @@ def process_correction_record(
                 writer=pii_attribution.WRITER_CORRECTION_ADD,
                 context=attribution_context,
             )
+            withheld = pii_attribution.should_enforce_verdict(av_verdict, attribution_context)
             if av_verdict.disposition != pii_attribution.DISPOSITION_PASS:
                 pii_attribution.park_suspect(
                     attribution_context,
@@ -1696,7 +1697,7 @@ def process_correction_record(
                     target_name=entity_name,
                     writer=pii_attribution.WRITER_CORRECTION_ADD,
                     source_ref=source,
-                    shadow=not pii_attribution.is_d1_narrow(av_verdict),
+                    shadow=not withheld,
                 )
             if pii_attribution.is_d1_narrow(av_verdict):
                 # D1-narrow is enforced in every mode (design §9.1): the
@@ -1707,6 +1708,14 @@ def process_correction_record(
                 # mistake an enforced non-personal value for that case and
                 # report "applied".
                 verdict, reason = "attribution-non-personal", "attribution-non-personal"
+            elif withheld:
+                # Issue athenaeum#2220: a non-D1-narrow suspect withheld
+                # under `enforce`/an `auto`-enforced class. Escalated
+                # rather than filed — design's acceptance criterion for
+                # this writer names the exact (disposition, reason) pair.
+                # Same DISTINCT-token reasoning as the branch above: this
+                # must also be decided before the `just_created` shortcut.
+                verdict, reason = "attribution-suspect", "attribution-suspect"
     else:  # op == "remove"
         existing_list = read_meta.get(write_field)
         present = isinstance(existing_list, list) and any(
@@ -1738,6 +1747,12 @@ def process_correction_record(
         # non-personal value is never mistaken for "the create write
         # already covered this field".
         return _result("noop", reason)
+    if verdict == "attribution-suspect":
+        # Issue athenaeum#2220: a suspect value withheld under the
+        # resolved attribution mode. Escalated, not applied — also
+        # reported before the `just_created` shortcut below, for the same
+        # reason as the branch above.
+        return _result("escalated", reason)
 
     if just_created and verdict == "noop":
         # The record's own field/value happens to equal what the create

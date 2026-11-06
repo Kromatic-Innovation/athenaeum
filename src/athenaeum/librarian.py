@@ -1949,6 +1949,7 @@ def _record_correspondent_contact(
             writer=pii_attribution.WRITER_OBSERVED_CONTACT,
             context=attribution_context,
         )
+        withheld = pii_attribution.should_enforce_verdict(av_verdict, attribution_context)
         if av_verdict.disposition != pii_attribution.DISPOSITION_PASS:
             pii_attribution.park_suspect(
                 attribution_context,
@@ -1958,14 +1959,18 @@ def _record_correspondent_contact(
                 target_name=entity.name,
                 writer=pii_attribution.WRITER_OBSERVED_CONTACT,
                 source_ref=raw.ref,
-                shadow=not pii_attribution.is_d1_narrow(av_verdict),
+                shadow=not withheld,
             )
-        if pii_attribution.is_d1_narrow(av_verdict):
-            # Enforced in every mode (design §9.1): never mint, never
-            # classify — this writer's write primitive is not even called.
+        if withheld:
+            # Withheld under the resolved attribution mode (design §9.1,
+            # issue athenaeum#2220): D1-narrow in every mode, or — under
+            # `enforce`/an `auto`-enforced class — any other suspect
+            # verdict. Never mint, never classify: this writer's write
+            # primitive is not even called.
             log.info(
-                "  Correspondent address for %s (uid %s) is a D1-narrow "
-                "non-personal identifier; not recorded (issue athenaeum#2210)",
+                "  Correspondent address for %s (uid %s) is withheld under "
+                "the current attribution mode; not recorded (issue "
+                "athenaeum#2220)",
                 entity.name,
                 entity.uid,
             )
