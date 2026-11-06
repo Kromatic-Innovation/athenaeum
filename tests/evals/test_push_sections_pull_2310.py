@@ -150,11 +150,17 @@ def test_a_page_whose_first_section_alone_exceeds_the_budget_is_dropped_entirely
     assert context == ""
 
 
-def test_budget_exhausted_on_the_top_page_stops_the_whole_pack(tmp_path: Path) -> None:
-    """Truncation stops the WHOLE pack, not just the page it happened on:
-    a lower-ranked page's content must never appear after the point a
-    higher-ranked page's content already exhausted the budget, even if the
-    lower-ranked page's own content would easily fit alone."""
+def test_a_page_whose_header_does_not_fit_ends_the_pack(tmp_path: Path) -> None:
+    """Stop condition 1: the budget is exactly the top page's full size, so
+    the next page's HEADER alone does not fit and the pack ends — a
+    lower-ranked page's content does not appear even though it would easily
+    fit on its own.
+
+    Renamed from ``..._stops_the_whole_pack`` (Seer review of PR
+    athenaeum#2352): that name claimed this proved truncation ends the
+    pack, which it never exercised and which is not what the code does —
+    see ``test_a_truncated_page_leaves_the_remaining_budget_to_lower_ranked_pages``.
+    """
     wiki_root = tmp_path / "wiki"
     top_section = _section_body("Zebra Main", "zebra query filler line.", 3)
     _write_page(wiki_root, "a-top.md", uid="page-top", name="Top", body=top_section)
@@ -329,3 +335,59 @@ def test_push_sections_pull_api_offers_both_recall_and_read_entity_and_serves_re
 # enumeration test gained the ninth member), which is the SAME mechanical
 # update issue athenaeum#1725 made to the identical call sites when IT
 # appended two arms, not a change to any other arm's behavior.
+
+
+def test_a_truncated_page_leaves_the_remaining_budget_to_lower_ranked_pages(
+    tmp_path: Path,
+) -> None:
+    """Stop condition 3, pinned: a page that fits PARTIALLY is truncated and
+    packing CONTINUES to the next ranked page with the budget that is left.
+
+    This is the invariant the function's docstring originally denied (Seer
+    review of PR athenaeum#2352 caught the mismatch). It is pinned by a test
+    rather than only described, because the arm was MEASURED under this
+    behaviour -- `docs/measurements/routed-section-arm-2026-11-06.md`
+    reads this code, so a later "fix" to the stricter stop-the-whole-pack
+    variant must break a test and be a deliberate, re-measured change.
+    """
+    wiki_root = tmp_path / "wiki"
+    # Top-ranked page: two sections, the second of which will not fit.
+    top_first = "## First\n\nzebra query zebra query zebra query.\n"
+    top_second = "## Second\n\n" + ("zebra padding line.\n" * 40)
+    _write_page(wiki_root, "a-top.md", uid="page-top", name="Top", body=top_first + top_second)
+    # Lower-ranked page (fewer query terms), small enough to fit in the tail.
+    small = "## Small\n\nzebra tiny.\n"
+    _write_page(wiki_root, "b-bottom.md", uid="page-bottom", name="Bottom", body=small)
+
+    top_header = "**Uid:** page-top\n**Name:** Top\n"
+    bottom_header = "**Uid:** page-bottom\n**Name:** Bottom\n"
+    # Room for the top page's FIRST section only, plus all of the small page.
+    budget = len((top_header + top_first + bottom_header + small).encode("utf-8"))
+
+    context = build_push_sections_context(
+        wiki_root,
+        "zebra query",
+        cache_dir=tmp_path / "cache",
+        search_backend="keyword",
+        byte_budget=budget,
+        top_k=5,
+    )
+
+    assert "page-top" in context
+    assert "First" in context
+    # Truncated at the section boundary: the oversized second section is out.
+    assert "Second" not in context
+    # ...and the lower-ranked page got the remaining budget.
+    assert "page-bottom" in context
+    assert "Small" in context
+    # The budget governs page CONTENT. The inter-page separator this function
+    # joins blocks with is not counted against it, so the returned string can
+    # exceed `byte_budget` by 8 bytes per page boundary -- bounded, stated in
+    # the docstring, and pinned here rather than left for a reader to discover
+    # (the sibling guard against exactly this error exists one level down, on
+    # the WITHIN-page join; this is the level it was not applied to).
+    separator = "\n\n---\n\n"
+    blocks = context.split(separator)
+    assert len(blocks) == 2
+    assert sum(len(b.encode("utf-8")) for b in blocks) <= budget
+    assert len(context.encode("utf-8")) <= budget + len(separator.encode("utf-8"))

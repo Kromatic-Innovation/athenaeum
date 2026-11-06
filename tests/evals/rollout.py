@@ -2105,16 +2105,47 @@ def build_push_sections_context(
 
     **A page over budget is never injected whole.** Sections are packed
     page by page in RANK order, and in document order within a page,
-    against one running byte total — never re-ordered and never a
-    skip-ahead best-fit pack (a lower-ranked page's small section is never
-    injected ahead of a higher-ranked page's content). The moment the next
-    whole section would exceed *byte_budget*, packing stops immediately —
-    for the rest of that page AND every page ranked after it. A page whose
-    full body fits is injected in full; one that does not is TRUNCATED to
-    its leading whole sections, at the section boundary where the budget
-    ran out — or, if not even its first section fits in what remains of
-    the budget, DROPPED entirely. Either way, no section is ever cut
-    mid-text, and no page is ever injected whole past the budget.
+    against one running byte total — never re-ordered, and never a
+    skip-ahead best-fit pack *within* a page. A page whose full body fits
+    is injected in full; one that does not is TRUNCATED to its leading
+    whole sections, at the section boundary where the budget ran out. No
+    section is ever cut mid-text and no page is ever injected whole past
+    the budget.
+
+    **Exactly three stop conditions, and they are not the same.** Stated
+    precisely because an earlier version of this docstring claimed a
+    stronger invariant than the code has (Seer review of PR
+    athenaeum#2352), and the arm was MEASURED under the code:
+
+    1. A page whose *header* does not fit in what remains ends the pack.
+    2. A page not even one of whose sections fits ends the pack — see the
+       comment at that branch: packing a lower-ranked page's section after
+       this one's best section was refused would place lower-ranked
+       content past the point the budget actually ran out.
+    3. A page some but not all of whose sections fit is truncated, and
+       packing CONTINUES to the next ranked page with whatever budget is
+       left. A small section from a lower-ranked page can therefore be
+       injected after a higher-ranked page was truncated — a greedy fill
+       that spends the whole budget rather than stranding its tail.
+
+    **The budget governs page CONTENT, and the inter-page separator is
+    outside it.** Blocks are joined with an 8-byte separator that is never
+    counted against *byte_budget*, so the returned string can exceed the
+    budget by 8 bytes per page boundary (at most 32 at ``top_k=5``, i.e.
+    0.7% of ``PUSH_SECTIONS_BYTE_BUDGET``). The guard against precisely
+    this error exists one level down, on the WITHIN-page join (see the
+    comment there); it was not applied at this level. Left as it is and
+    stated here rather than silently corrected, because the arm was
+    MEASURED with this behaviour and the correction would change the
+    delivered payload after the fact.
+
+    Condition 3 is the one the earlier wording denied. The stricter
+    variant (stop the whole pack on any truncation) is a legitimate
+    alternative design, NOT measured by
+    ``docs/measurements/routed-section-arm-2026-11-06.md``: that reading
+    describes this code. ``test_a_truncated_page_leaves_the_remaining_
+    budget_to_lower_ranked_pages`` pins the behaviour so it cannot drift
+    back to the docstring silently.
 
     Each page's block opens with ``**Uid:** <uid>`` on its own line — the
     exact marker ``tests.evals.metrics._UID_LINE`` parses (the same marker
