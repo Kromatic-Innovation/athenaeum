@@ -308,6 +308,45 @@ def wilson_lower_bound(successes: int, n: int, *, confidence: float = 0.95) -> f
     return wilson_interval(successes, n, confidence=confidence)[0]
 
 
+def wilson_lower_bound_one_sided(successes: int, n: int, *, confidence: float = 0.95) -> float:
+    """One-sided Wilson score lower bound (athenaeum#2344).
+
+    The pass bar only ever cares about a FLOOR on accuracy -- there is no
+    symmetric upper-bound question being asked -- so it should be read off
+    a one-sided confidence bound, not sliced out of the two-sided interval
+    :func:`wilson_lower_bound` returns. The two-sided bound at ``confidence``
+    answers "what accuracy range covers the true value with ``confidence``
+    probability, split equally on both tails"; this function answers "what
+    accuracy floor does the true value exceed with ``confidence``
+    probability, all the uncertainty mass on the one tail that matters" --
+    a strictly looser (higher) floor for the same ``confidence`` and the
+    same observed ``(successes, n)``, which is exactly why 52/52 clears a
+    0.95 floor here (~0.9505) but not under :func:`wilson_lower_bound`
+    (below 0.95) -- see
+    ``TestWilsonLowerBoundOneSided.test_two_sided_bound_is_below_floor_at_the_same_n``
+    in ``tests/test_attribution_metrics.py`` for that counter-example.
+
+    The one-tailed z-score for ``confidence=0.95`` is ``1.6449`` (the 95th
+    percentile of the standard normal), vs. the two-tailed ``1.96`` -- the
+    only arithmetic difference from :func:`wilson_interval`'s lower half.
+    ``n <= 0`` is handled exactly like :func:`wilson_interval`: no evidence,
+    so the floor is ``0.0`` (that function's lower half of ``(0.0, 1.0)``).
+    """
+    if n <= 0:
+        return 0.0
+    z = NormalDist().inv_cdf(confidence)
+    phat = successes / n
+    denom = 1 + z * z / n
+    center = phat + z * z / (2 * n)
+    margin = z * ((phat * (1 - phat) + z * z / (4 * n)) / n) ** 0.5
+    lower = (center - margin) / denom
+    # Same floating-point-cancellation clamp as wilson_interval's lower half
+    # (see the comment there) -- phat == 0 or 1 is where the architecture-
+    # dependent sqrt residual would otherwise show up.
+    lower = min(max(0.0, lower), phat)
+    return lower
+
+
 def auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
     """AUROC of ``scores`` ranking ``labels`` (``True`` = correct).
 

@@ -10,7 +10,10 @@
 # `n_fit`/`n_holdout`, `dataset_sha256` and `prompt_sha256` ARE real: they
 # describe this record's fallback model, the actual fit/held-out split
 # sizes in the committed corpus, and the actual sha256 of that corpus and
-# of the shipped judge prompt, respectively.
+# of the shipped judge prompt, respectively. `measured: false` (issue
+# athenaeum#2342) marks every row below as exactly this "never ran"
+# stub, not a genuine measured failure -- see
+# `tests.evals.attribution_eval.to_calibration_entries`'s own two shapes.
 #
 # In `auto` mode (design §9), every class with `passes: false` stays
 # `observe` -- no class here is recommended for any tier until a live run
@@ -23,77 +26,82 @@
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 36
-  n_holdout: 24
+  n_fit: 78
+  n_holdout: 52
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
+  measured: false
 - question_class: names-other
   model: claude-haiku-4-5-20251001
   prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 54
-  n_holdout: 36
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
+  measured: false
 - question_class: source-context
   model: claude-haiku-4-5-20251001
   prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 54
-  n_holdout: 36
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
+  measured: false
 - question_class: non-person-target
   model: claude-haiku-4-5-20251001
   prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 36
-  n_holdout: 24
+  n_fit: 78
+  n_holdout: 52
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
+  measured: false
 - question_class: role-unmatched
   model: claude-haiku-4-5-20251001
   prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
-  n_fit: 72
-  n_holdout: 48
+  n_fit: 79
+  n_holdout: 53
   holdout_accuracy_above: 0.0
   holdout_wilson_lb: 0.0
   ece: null
   auroc: null
   abstain_share: 0.0
-  dataset_sha256: 1476f2cc1e72941b3546e28b652d712b035b71aab68a2ca879d9db1359e88f9e
+  dataset_sha256: bd6994cb9a2d12f894608fae7ab21cddb35bee03f86a2dea4c450dfdf8457016
   measured_at: unmeasured
   passes: false
+  measured: false
