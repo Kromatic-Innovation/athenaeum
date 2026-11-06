@@ -8690,3 +8690,112 @@ def resolve_witness_ledger_enabled(config: dict[str, Any] | None) -> bool:
             if isinstance(raw, bool):
                 return raw
     return False
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2330 (TG2): config surface for the trust-graph pairwise
+# source-override edges `athenaeum.trust_graph.compare_sources` consults.
+# No caller is wired in this slice (TG3/`corrections.py`, TG4/`resolutions.py`
+# are later slices, per the issue's "Out of scope") -- these two resolvers
+# exist so the knobs have a documented, discoverable home ahead of that
+# wiring, the same "resolver lands before its caller" shape the six
+# `receipt_anchor` resolvers above have ahead of athenaeum#2040. Appended at
+# the end of this file per this module's own stated convention just above
+# (a shared end-of-file append point lets concurrent lanes' diffs merge
+# without conflict; athenaeum#2158 made the same point for its own block).
+#
+# `athenaeum.trust_graph` is imported lazily, inside each resolver body,
+# rather than at module scope: this module's `select = ["E", ...]` ruff
+# config flags a non-top-of-file module-level import (E402), and adding a
+# new top-level import here would mean editing the shared import block at
+# the head of this file instead of only appending -- exactly the merge-
+# conflict surface the end-of-file convention exists to avoid.
+# ---------------------------------------------------------------------------
+
+
+def resolve_source_trust_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the trust-graph pairwise-override feature flag (issue
+    athenaeum#2330). DEFAULT ``False``.
+
+    ``librarian.source_trust_enabled``. Yaml only, no env override -- an
+    operator overriding source precedence for a domain is a deliberate,
+    reviewed change to evidence ranking, not an emergency knob. Non-bool
+    yaml values fall back to the default, same policy as
+    :func:`resolve_witness_attestation_enabled`. No seed in ``_DEFAULTS``
+    (issue athenaeum#231). This is the flag the (not-yet-wired) TG3/TG4
+    callers will gate on before consulting `source_trust_edges` at all --
+    this slice adds no caller, so the flag currently has no effect on any
+    existing behaviour.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("source_trust_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_source_trust_edges(config: dict[str, Any] | None) -> tuple[Any, ...]:
+    """Resolve the operator-declared pairwise source-trust edges (issue
+    athenaeum#2330) that `athenaeum.trust_graph.compare_sources` consults.
+    DEFAULT ``()`` (empty tuple).
+
+    ``librarian.source_trust_edges`` -- a list of mappings, each shaped::
+
+        domain: {entity_type: ..., field: ..., evidence_kind: ...}
+        over: "<type>[:<ref>]"
+        under: "<type>[:<ref>]"
+        note: "<optional operator commentary>"
+
+    Each returned element is an ``athenaeum.trust_graph.SourceTrustEdge``.
+
+    Yaml only. Defensive at the TOP level only: a missing or non-list
+    ``librarian.source_trust_edges`` silently resolves to the empty tuple,
+    the same policy every other resolver in this module uses for an absent
+    knob. Each PRESENT entry, by contrast, is FAIL-LOUD: it is parsed by
+    :func:`athenaeum.trust_graph.parse_edge`, which raises
+    :class:`athenaeum.trust_graph.TrustGraphConfigError` (a ``ValueError``
+    subclass) on a malformed edge -- a non-dict entry, an ``api`` selector
+    with no ``:ref``, or a ``domain.evidence_kind`` outside
+    :data:`athenaeum.trust_graph.EVIDENCE_KINDS` -- exactly the "never
+    silently drop a typo in an evidence-ranking knob" policy
+    :class:`ReceiptAnchorConfigError` states above for anchoring adapters.
+    This resolver deliberately does NOT catch that exception: an operator
+    error here changes which source wins a conflict, so it must surface
+    loudly at config load, never get swallowed into "as if the edge were
+    never declared".
+
+    Also runs the load-time lint the issue requires: once every entry
+    parses, :func:`athenaeum.trust_graph.find_contradictory_edges` finds
+    any two edges that contradict each other (``A over B`` and ``B over A``)
+    in an overlapping domain, and this resolver logs one ``logger.warning``
+    per contradictory pair, naming both edges' positions and descriptions.
+    The lint only warns -- it never raises and never drops an edge;
+    ``compare_sources`` itself is what resolves a live contradiction to
+    ``incomparable`` at comparison time (the actual correctness guarantee),
+    so this warning is purely an early, load-time heads-up for the
+    operator who wrote the contradiction. No seed in ``_DEFAULTS`` (issue
+    athenaeum#231).
+    """
+    from athenaeum import trust_graph
+
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            raw = _librarian.get("source_trust_edges")
+    if not isinstance(raw, list):
+        return ()
+    edges = tuple(trust_graph.parse_edge(entry) for entry in raw)
+    for i, j in trust_graph.find_contradictory_edges(edges):
+        logger.warning(
+            "librarian.source_trust_edges: edge[%d] (%s) contradicts edge[%d] "
+            "(%s) in an overlapping domain -- compare_sources will resolve "
+            "any claim both apply to as 'incomparable'",
+            i,
+            edges[i].describe(),
+            j,
+            edges[j].describe(),
+        )
+    return edges
