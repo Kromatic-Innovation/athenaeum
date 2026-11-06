@@ -34,9 +34,22 @@ Covers:
   ``calibration_session`` fixture — a shared :mod:`tests.evals.harness`
   type this module deliberately does not reach into; it stays covered by
   reading the diff in ``test_attribution_eval.py``, not by a test here.)
+- ``run_case_agreement_k3``'s ``on_call`` hook — issue athenaeum#2342's
+  raw-fixture collision fix: three agreement-K3 calls under one
+  unchanging :meth:`tests.evals.harness.RecordingClient.start_case` stamp
+  all write to the SAME ``recorded_path(layer, case_id)``
+  (:func:`tests.evals.harness.save_recorded` keys on layer+case_id only),
+  so only the last of the three raw responses ever survives on disk.
+  ``on_call`` lets the live test re-stamp before each of the ``k`` calls
+  instead; this module proves it fires once per call with ``k`` distinct
+  stamps, is optional (no return-value or call-count change when
+  omitted), and that the self-reported path (one call per case) was never
+  affected.
 """
 
 from __future__ import annotations
+
+import random
 
 import pytest
 
@@ -61,6 +74,7 @@ from tests.evals.attribution_eval import (
     render_class_report_line,
     require_some_class_passes,
     run_case_agreement_k3,
+    run_case_self_reported,
     self_reported_auroc_or_reason,
     summarize_classes,
     to_calibration_entries,
@@ -457,3 +471,64 @@ class TestRenderClassReportLine:
         assert "model-a" not in rendered[1]
         joined = "\n".join(rendered)
         assert joined.count("\n") == len(reports) - 1
+
+
+class TestAgreementK3DistinctRecordingStamps:
+    """issue athenaeum#2342: :func:`tests.evals.harness.save_recorded`
+    writes to ``recorded_path(layer, case_id)`` — a path keyed on the
+    case id ONLY. :func:`run_case_agreement_k3` makes :data:`AGREEMENT_K`
+    separate ``judge_contact_attribution`` calls; a caller that stamps
+    one case id for all of them (one
+    :meth:`~tests.evals.harness.RecordingClient.start_case` call before
+    the loop, the live test's old shape) sends all ``k`` raw responses to
+    the SAME path, so only the last survives on disk. ``on_call`` fires
+    before each of the ``k`` calls so a caller can re-stamp per call
+    instead.
+    """
+
+    def test_k3_calls_get_k_distinct_stamps(self) -> None:
+        case = _case_for_class("held-elsewhere")
+        client = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+        stamps: list[str] = []
+        run_case_agreement_k3(
+            case,
+            "m1",
+            client,
+            on_call=lambda i: stamps.append(f"agree__m1__{case['id']}__k{i}"),
+        )
+        assert len(stamps) == AGREEMENT_K
+        assert len(set(stamps)) == AGREEMENT_K  # all distinct -- the bug was 1
+        assert len(client.calls) == AGREEMENT_K
+
+    def test_on_call_fires_once_per_call_in_order(self) -> None:
+        case = _case_for_class("held-elsewhere")
+        client = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+        seen: list[int] = []
+        run_case_agreement_k3(case, "m1", client, on_call=seen.append)
+        assert seen == list(range(AGREEMENT_K))
+
+    def test_on_call_is_optional_and_does_not_change_return_value_or_call_count(
+        self,
+    ) -> None:
+        case = _case_for_class("held-elsewhere")
+        client_a = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+        client_b = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+
+        run_without_hook = run_case_agreement_k3(
+            case, "m1", client_a, rng=random.Random("fixed-seed")
+        )
+        run_with_hook = run_case_agreement_k3(
+            case,
+            "m1",
+            client_b,
+            rng=random.Random("fixed-seed"),
+            on_call=lambda i: None,
+        )
+        assert run_without_hook == run_with_hook
+        assert len(client_a.calls) == len(client_b.calls) == AGREEMENT_K
+
+    def test_self_reported_path_makes_one_call_and_is_unaffected(self) -> None:
+        case = _case_for_class("held-elsewhere")
+        client = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+        run_case_self_reported(case, "m1", client)
+        assert len(client.calls) == 1

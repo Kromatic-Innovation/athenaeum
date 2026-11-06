@@ -50,7 +50,7 @@ import os
 import random
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -354,6 +354,7 @@ def run_case_agreement_k3(
     k: int = AGREEMENT_K,
     usage: TokenUsage | None = None,
     rng: random.Random | None = None,
+    on_call: Callable[[int], None] | None = None,
 ) -> CaseRun:
     """*k* permuted-candidate-order runs of *case*; score = share agreeing
     with the majority verdict (design §6.5's signal 2).
@@ -361,6 +362,18 @@ def run_case_agreement_k3(
     The newer models reject sampling parameters, so a temperature cannot
     be set — permuting ``question.candidates`` between calls is what makes
     the ``k`` calls independent (design §6.5).
+
+    *on_call* (issue athenaeum#2342, optional — no behaviour change for a
+    caller that omits it): invoked with the 0-based call index BEFORE each
+    of the ``k`` calls. A caller recording raw responses passes something
+    like ``lambda i: client.start_case(f"agree__{model}__{case['id']}__k{i}")``
+    so each call gets its own recording stamp — without this, all ``k``
+    calls share the single case id the caller set via
+    :meth:`tests.evals.harness.RecordingClient.start_case` before invoking
+    this function, and :func:`tests.evals.harness.save_recorded` writes
+    all ``k`` responses to the SAME ``recorded_path(layer, case_id)``, so
+    only the last of the three survives on disk. This return value and
+    token accounting are unaffected either way.
     """
     _assert_attribution_model_not_env_pinned()
     rng = rng or random.Random(f"{case['id']}:{model}")
@@ -369,7 +382,9 @@ def run_case_agreement_k3(
 
     verdicts: list[str] = []
     first_judgement: AttributionJudgement | None = None
-    for _ in range(k):
+    for i in range(k):
+        if on_call is not None:
+            on_call(i)
         shuffled = list(base_question.candidates)
         rng.shuffle(shuffled)
         permuted = dataclasses.replace(base_question, candidates=tuple(shuffled))

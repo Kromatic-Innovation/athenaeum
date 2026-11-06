@@ -161,13 +161,33 @@ def test_attribution_calibration_eval(
             if needs_agreement_k3(self_fit):
                 agreement_fit = []
                 for case in fit_cases:
-                    client.start_case(f"agree__{model}__{case['id']}")
-                    agreement_fit.append(run_case_agreement_k3(case, model, client))
+                    # issue athenaeum#2342: a distinct recording stamp per
+                    # K3 call (not one `start_case` for all three) --
+                    # otherwise all three raw responses land on the same
+                    # `recorded_path` and only the last survives on disk.
+                    agreement_fit.append(
+                        run_case_agreement_k3(
+                            case,
+                            model,
+                            client,
+                            on_call=lambda i, case=case: client.start_case(
+                                f"agree__{model}__{case['id']}__k{i}"
+                            ),
+                        )
+                    )
                     client.end_case()
                 agreement_holdout = []
                 for case in holdout_cases:
-                    client.start_case(f"agree__{model}__{case['id']}")
-                    agreement_holdout.append(run_case_agreement_k3(case, model, client))
+                    agreement_holdout.append(
+                        run_case_agreement_k3(
+                            case,
+                            model,
+                            client,
+                            on_call=lambda i, case=case: client.start_case(
+                                f"agree__{model}__{case['id']}__k{i}"
+                            ),
+                        )
+                    )
                     client.end_case()
 
                 for run in agreement_fit + agreement_holdout:
