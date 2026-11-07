@@ -272,7 +272,7 @@ class ReceiptEntry:
     NO PLAINTEXT: every field is either a digest, an origin coordinate, or a
     channel label. Never the claim text, never the utterance text.
 
-    **Schema v2 (issue athenaeum#2158, additive).** The seven ``witness_*``/
+    **Schema v2 (issue athenaeum#2158, additive).** The ``witness_*``/
     ``transcript_*`` fields below are new and all default to ``None`` — a
     v1 line on disk (written before this issue) has none of them, and
     :meth:`from_dict` reconstructs it with every one ``None``, which is
@@ -280,8 +280,24 @@ class ReceiptEntry:
     attestation (e.g. a non-``user-stated`` channel). ``witness_miss`` is
     one of :data:`athenaeum.witness_attestation.MISS_REASONS` (with its
     ``:``-suffixed variants) when the channel is ``"user-stated"`` and
-    attestation was attempted; ``None`` on a ``"witnessed"`` hit and on
-    every channel attestation never looks at.
+    attestation was attempted; ``None`` on an ordinary ``"witnessed"`` hit
+    and on every channel attestation never looks at.
+
+    **Signature verification (issue athenaeum#2333, additive within v2 —
+    no schema bump).** ``witness_strength_verified`` and
+    ``witness_anchor_source`` are two MORE additive fields, same
+    treatment: absent (``None``) on a v1 receipt, and on any receipt
+    attestation never attempted. ``witness_strength`` keeps its ORIGINAL,
+    self-asserted meaning unchanged (``line.key.strength``, unverified);
+    ``witness_strength_verified`` is the new, verified figure, and
+    ``witness_anchored`` is likewise preserved unchanged for compatibility
+    — ``witness_anchor_source`` is the new field that tells a consumer
+    whether that ``True`` means anything (``"local-clock"`` means no, see
+    :mod:`athenaeum.witness_attestation`). A receipt's ``witness_miss`` can
+    now be set to ``"witness-strength-mismatch:<claimed>"`` on a
+    ``"witnessed"`` (hit) receipt, not only on an unwitnessed one — see
+    :class:`athenaeum.witness_attestation.AttestationOutcome`'s own
+    docstring for why that is additive rather than a behaviour change.
     """
 
     origin_scope: str
@@ -301,6 +317,8 @@ class ReceiptEntry:
     witness_miss: str | None = None
     transcript_origin: str | None = None
     transcript_entrypoint: str | None = None
+    witness_strength_verified: str | None = None
+    witness_anchor_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -321,6 +339,8 @@ class ReceiptEntry:
             "witness_miss": self.witness_miss,
             "transcript_origin": self.transcript_origin,
             "transcript_entrypoint": self.transcript_entrypoint,
+            "witness_strength_verified": self.witness_strength_verified,
+            "witness_anchor_source": self.witness_anchor_source,
         }
 
     @classmethod
@@ -341,6 +361,8 @@ class ReceiptEntry:
             witness_miss=d.get("witness_miss"),
             transcript_origin=d.get("transcript_origin"),
             transcript_entrypoint=d.get("transcript_entrypoint"),
+            witness_strength_verified=d.get("witness_strength_verified"),
+            witness_anchor_source=d.get("witness_anchor_source"),
             recorded_at=str(d.get("recorded_at", "")),
             schema_version=int(d.get("schema_version", SCHEMA_VERSION)),
         )
@@ -495,6 +517,12 @@ class ReceiptRun:
     *config* omitted, the historical default), :attr:`attestation_index`
     stays ``None`` and the witness ledger directory is never even
     resolved, let alone read — zero added I/O on the flag-off path.
+
+    **Signature verification (issue athenaeum#2333).** The SAME *config*
+    is threaded into :meth:`~athenaeum.witness_attestation.
+    AttestationIndex.load`, which resolves ``librarian.witness.keys`` from
+    it — one config dict, one read, no second resolution path to drift
+    from this one.
     """
 
     def __init__(self, wiki_root: Path, *, config: dict[str, Any] | None = None) -> None:
@@ -507,7 +535,7 @@ class ReceiptRun:
         self.attestation_index: witness_attestation.AttestationIndex | None = None
         if self.witness_attestation_enabled:
             self.attestation_index = witness_attestation.AttestationIndex.load(
-                witness_attestation.resolve_default_witness_dir()
+                witness_attestation.resolve_default_witness_dir(), config=config
             )
         d = ledger_dir(self.wiki_root)
         if not d.is_dir():
@@ -930,6 +958,12 @@ def write_receipt_for_origin(
         transcript_origin=transcript_origin_kind,
         transcript_entrypoint=(
             witness_outcome.transcript_entrypoint if witness_outcome is not None else None
+        ),
+        witness_strength_verified=(
+            witness_outcome.witness_strength_verified if witness_outcome is not None else None
+        ),
+        witness_anchor_source=(
+            witness_outcome.witness_anchor_source if witness_outcome is not None else None
         ),
     )
     append_receipt(wiki_root, entry, lock=lock, sealer=sealer, run=run)

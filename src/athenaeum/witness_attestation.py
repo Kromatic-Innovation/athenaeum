@@ -53,9 +53,12 @@ human-and-interactive (``transcript_origin == "human"`` and
    (absent fails);
 9. the transcript record's ``isSidechain`` is not ``True``.
 
-Each failing condition reports exactly one of the eleven
+Each failing condition reports exactly one of the fixed
 :data:`MISS_REASONS` values — never more than one per call, so a reason is
 always individually attributable to the single condition that produced it.
+One exception, additive (issue athenaeum#2333): ``witness-strength-mismatch``
+can be reported ALONGSIDE a hit rather than in place of one — see
+:class:`AttestationOutcome`'s own docstring.
 
 Layering: L2. Imports :mod:`promptwitness` (``ledger``, ``canon``,
 ``harness.claude_code``) and :mod:`athenaeum.config`, nothing heavier — no
@@ -105,7 +108,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from re import compile as _compile
+from typing import Any
 
+from athenaeum import config as config_mod
 from promptwitness import canon, ledger
 from promptwitness.harness import claude_code
 
@@ -120,10 +125,12 @@ __all__ = [
     "resolve_default_witness_dir",
 ]
 
-#: The exact eleven-value miss vocabulary (issue athenaeum#2158). A
-#: ``kind-not-human:<kind>``, ``channel-not-interactive:<ch>`` or
-#: ``transcript-promptsource:<value>`` reason carries a ``:``-suffixed
-#: value not enumerated here — this set lists only the fixed prefixes/values.
+#: The fixed miss vocabulary (issue athenaeum#2158; extended by issue
+#: athenaeum#2333's ``witness-strength-mismatch``). A
+#: ``kind-not-human:<kind>``, ``channel-not-interactive:<ch>``,
+#: ``transcript-promptsource:<value>`` or ``witness-strength-mismatch:
+#: <claimed-strength>`` reason carries a ``:``-suffixed value not
+#: enumerated here — this set lists only the fixed prefixes/values.
 MISS_REASONS: frozenset[str] = frozenset(
     {
         "ledger-absent",
@@ -137,6 +144,7 @@ MISS_REASONS: frozenset[str] = frozenset(
         "transcript-promptsource",
         "sidechain",
         "flag-off",
+        "witness-strength-mismatch",
     }
 )
 
@@ -165,11 +173,40 @@ class AttestationOutcome:
     """The result of one :func:`attest` call.
 
     On a hit, every ``witness_*`` field is populated and ``miss_reason`` is
-    ``None``. On a miss, ``miss_reason`` is one of the eleven
-    :data:`MISS_REASONS`-shaped values and every ``witness_*`` field is
-    ``None``. ``transcript_entrypoint`` is populated whenever a witness
-    line was found, hit or miss (see the module docstring's "Reversible
-    default" note) — it is the one field that can be non-``None`` on a miss.
+    ``None`` — EXCEPT for the one case below. On a miss, ``miss_reason`` is
+    one of the fixed :data:`MISS_REASONS`-shaped values and every
+    ``witness_*`` field is ``None``. ``transcript_entrypoint`` is populated
+    whenever a witness line was found, hit or miss (see the module
+    docstring's "Reversible default" note) — it is the one field that can
+    be non-``None`` on a miss.
+
+    **Signature-strength verification (issue athenaeum#2333, additive).**
+    ``witness_strength`` stays exactly what it always was — the line's
+    SELF-ASSERTED ``key.strength``, unverified. ``witness_strength_verified``
+    is the NEW, verified figure: ``"none"`` unless the line's signature
+    verifies under a key registered in ``librarian.witness.keys`` whose own
+    registered strength is at least the claimed ``witness_strength`` (see
+    :meth:`AttestationIndex.verified_strength`). ``witness_anchor_source``
+    is the best non-``local-clock`` source among the anchor lines covering
+    this line's sequence, or ``"local-clock"`` when only the mandatory
+    fallback covers it, or ``None`` when nothing anchors it at all (see
+    :meth:`AttestationIndex.anchor_source`) — consumers must treat
+    ``"local-clock"`` as NOT anchored.
+
+    ``miss_reason`` is the ONE field that can be non-``None`` on a HIT:
+    when ``witness_strength`` claims a non-``"none"`` strength that the key
+    registry cannot substantiate (unregistered key, invalid signature, or a
+    registered strength below the claim), ``witness_strength_verified``
+    downgrades to ``"none"`` and ``miss_reason`` carries
+    ``"witness-strength-mismatch:<claimed-strength>"`` — ``hit`` stays
+    ``True`` (provenance still attested normally; only the cryptographic
+    strength claim did not hold up) and every other ``witness_*`` field
+    populates exactly as it would on an unremarkable hit. This is what lets
+    a never-configured key registry (the default: ``librarian.witness.keys``
+    is empty) report every unregistered-key line as an INCIDENT without
+    silently flipping it from a hit to a miss — the attestation's whole
+    point (provenance: did a human type this) is orthogonal to whether its
+    optional signing claim can be substantiated.
     """
 
     hit: bool
@@ -179,6 +216,8 @@ class AttestationOutcome:
     witness_anchored: bool | None = None
     miss_reason: str | None = None
     transcript_entrypoint: str | None = None
+    witness_strength_verified: str | None = None
+    witness_anchor_source: str | None = None
 
 
 class AttestationIndex:
@@ -203,6 +242,9 @@ class AttestationIndex:
         first_break_seq: int | None,
         anchored_through: Mapping[str, int],
         first_break_prev_seq: int | None = None,
+        registered_strengths: Mapping[str, str] | None = None,
+        invalid_signature_seqs: frozenset[int] = frozenset(),
+        anchor_records: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None,
     ) -> None:
         self._ledger_index = ledger_index
         self.ledger_present = ledger_present
@@ -210,18 +252,51 @@ class AttestationIndex:
         self.first_break_seq = first_break_seq
         self.first_break_prev_seq = first_break_prev_seq
         self._anchored_through: dict[str, int] = dict(anchored_through)
+        #: ``{key_id: registered strength}`` (issue athenaeum#2333) — only for
+        #: keys :func:`athenaeum.config.resolve_witness_keys` accepted
+        #: (valid base64, exactly 32 bytes, in-vocabulary strength). Keys by
+        #: this map's membership are the SAME keys passed as
+        #: :func:`~promptwitness.ledger.verify_chain`'s ``public_keys``.
+        self._registered_strengths: dict[str, str] = dict(registered_strengths or {})
+        #: ``seq`` of every signed line whose key WAS supplied to
+        #: ``verify_chain`` but whose signature did not verify against it
+        #: (:attr:`promptwitness.ledger.ChainVerification.
+        #: invalid_signature_seqs`) — tampering/forgery, never "unknown key".
+        self._invalid_signature_seqs: frozenset[int] = invalid_signature_seqs
+        #: ``{ledger_id: ((subject_seq, source, status), ...)}`` — every
+        #: ``kind == "anchor"`` line's own ``extra.attestation`` payload,
+        #: collected in the SAME scan :meth:`load` already runs for
+        #: ``anchored_through`` (issue athenaeum#2333, no added I/O).
+        self._anchor_records: dict[str, tuple[tuple[int, str, str], ...]] = dict(
+            anchor_records or {}
+        )
 
     @classmethod
-    def load(cls, witness_dir: Path) -> AttestationIndex:
+    def load(cls, witness_dir: Path, *, config: dict[str, Any] | None = None) -> AttestationIndex:
         """Build the index: one :class:`~promptwitness.ledger.LedgerIndex`
         pass, one :func:`~promptwitness.ledger.verify_chain` pass, one
         anchor-coverage pass — each a single read per existing partition,
         and none of the three scales with how many memories this run
-        processes (issue athenaeum#2158's read-budget AC)."""
+        processes (issue athenaeum#2158's read-budget AC).
+
+        **Signature verification (issue athenaeum#2333, additive).**
+        *config* resolves the operator-declared key registry
+        (:func:`athenaeum.config.resolve_witness_keys`, ``librarian.
+        witness.keys``) into the ``public_keys`` map
+        :func:`~promptwitness.ledger.verify_chain` already accepts. With
+        *config* omitted or the registry empty (today's universal default),
+        ``public_keys`` is ``None`` — :func:`~promptwitness.ledger.
+        verify_chain`'s own documented "no signature checking" default, so
+        this is a strictly additive change: nothing about ``chain_ok``,
+        ``first_break_seq`` or any EXISTING caller's behaviour moves.
+        """
         partitions = ledger.list_partitions(witness_dir)
         ledger_index = ledger.LedgerIndex.build(witness_dir)
-        verification = ledger.verify_chain(witness_dir)
+        registered = config_mod.resolve_witness_keys(config)
+        public_keys = {key_id: entry["public_key"] for key_id, entry in registered.items()}
+        verification = ledger.verify_chain(witness_dir, public_keys=public_keys or None)
         anchored_through: dict[str, int] = {}
+        anchor_records: dict[str, list[tuple[int, str, str]]] = {}
         for line in ledger.iter_lines(witness_dir):
             if line.kind != "anchor":
                 continue
@@ -235,6 +310,8 @@ class AttestationIndex:
             seq = int(match.group("seq"))
             if seq > anchored_through.get(lid, -1):
                 anchored_through[lid] = seq
+            source, status = _anchor_source_and_status(line)
+            anchor_records.setdefault(lid, []).append((seq, source, status))
         return cls(
             ledger_index=ledger_index,
             ledger_present=bool(partitions),
@@ -242,6 +319,9 @@ class AttestationIndex:
             first_break_seq=verification.first_break_seq,
             anchored_through=anchored_through,
             first_break_prev_seq=verification.first_break_prev_seq,
+            registered_strengths={k: v["strength"] for k, v in registered.items()},
+            invalid_signature_seqs=frozenset(verification.invalid_signature_seqs),
+            anchor_records={k: tuple(v) for k, v in anchor_records.items()},
         )
 
     def lookup(
@@ -276,6 +356,91 @@ class AttestationIndex:
         be able to mutate this index's state, hence the copy.
         """
         return dict(self._anchored_through)
+
+    def verified_strength(self, line: ledger.WitnessLine) -> str:
+        """Effective signing strength for *line* (issue athenaeum#2333).
+
+        ``"none"`` unless *line*'s signature verifies under a key
+        registered (``librarian.witness.keys``) with a registered strength
+        at least *line*'s own CLAIMED strength (``line.key.strength``) —
+        the issue's "none unless the signature verifies under a key whose
+        registered strength is at least the claimed strength" rule exactly.
+        A claim of ``"none"`` (the common case: no key provider signed the
+        line at all) is trivially satisfied and returns ``"none"`` with no
+        lookup. Never raises: an unrecognized claimed or registered
+        strength string, or a key id ``verify_chain`` was never asked to
+        check, is treated as unverifiable, same as "no key".
+        """
+        claimed = line.key.strength
+        if claimed == "none" or claimed not in config_mod.WITNESS_KEY_STRENGTHS:
+            return "none"
+        if line.sig is None:
+            return "none"
+        key_id = line.key.id
+        if not isinstance(key_id, str) or key_id not in self._registered_strengths:
+            return "none"
+        if line.seq in self._invalid_signature_seqs:
+            return "none"
+        registered = self._registered_strengths[key_id]
+        if registered not in config_mod.WITNESS_KEY_STRENGTHS:
+            return "none"
+        strengths = config_mod.WITNESS_KEY_STRENGTHS
+        if strengths.index(registered) < strengths.index(claimed):
+            return "none"
+        return claimed
+
+    def anchor_source(self, ledger_id: str, seq: int) -> str | None:
+        """Best non-``local-clock`` source among the anchor lines covering
+        *seq* (issue athenaeum#2333).
+
+        ``None`` when nothing anchors *seq* at all (mirrors
+        :meth:`is_anchored`'s own coverage rule: any anchor subject whose
+        own ``seq`` is ``>= seq``). ``"local-clock"`` when only the
+        mandatory, always-present fallback anchorer covers it. Otherwise
+        the non-``local-clock`` source with ``status == "complete"`` is
+        preferred over a pending/failed one; ties break on the most
+        recently recorded covering anchor, then lexicographically by
+        source name, for a deterministic single answer.
+        """
+        covering = [rec for rec in self._anchor_records.get(ledger_id, ()) if rec[0] >= seq]
+        if not covering:
+            return None
+        non_local = [rec for rec in covering if rec[1] != "local-clock"]
+        pool = non_local if non_local else covering
+        complete = [rec for rec in pool if rec[2] == "complete"]
+        chosen_pool = complete if complete else pool
+        best = min(chosen_pool, key=lambda rec: (-rec[0], rec[1]))
+        return best[1]
+
+
+def _anchor_source_and_status(line: ledger.WitnessLine) -> tuple[str, str]:
+    """``(source, status)`` for one ``kind == "anchor"`` line (issue
+    athenaeum#2333).
+
+    Reads the ``attestation`` payload ``promptwitness.cli``'s
+    ``_append_anchor_line`` records verbatim (``Attestation.to_dict()``:
+    ``source``/``status``/``claimed_time``/``proof_path``/``detail``).
+    ``detail.verify_source`` — never populated by any shipped writer today
+    (``promptwitness verify``'s ``VerifyResult`` is printed to stdout, not
+    persisted to the ledger) — overrides ``source`` when a FUTURE writer
+    ever does persist it, per the issue's "and the verify_source where
+    available" hedge. Falls back to ``("local-clock", "")`` for a
+    malformed or pre-athenaeum#2150 anchor line — the weakest source,
+    never a crash.
+    """
+    attestation = line.extra.get("attestation") if isinstance(line.extra, Mapping) else None
+    if not isinstance(attestation, Mapping):
+        return "local-clock", ""
+    raw_source = attestation.get("source")
+    source = raw_source if isinstance(raw_source, str) and raw_source else "local-clock"
+    raw_status = attestation.get("status")
+    status = raw_status if isinstance(raw_status, str) else ""
+    detail = attestation.get("detail")
+    if isinstance(detail, Mapping):
+        raw_verify_source = detail.get("verify_source")
+        if isinstance(raw_verify_source, str) and raw_verify_source:
+            source = raw_verify_source
+    return source, status
 
 
 def _log_miss(
@@ -431,6 +596,24 @@ def attest(
     if transcript_is_sidechain:
         return miss("sidechain", line, entrypoint)
 
+    # Issue athenaeum#2333: signature-strength verification is orthogonal to
+    # provenance -- a mismatch is reported as an INCIDENT alongside the hit,
+    # never by turning the hit into a miss (see AttestationOutcome's own
+    # docstring for why: the default, empty key registry must not silently
+    # flip every already-hit line to a miss).
+    claimed_strength = line.key.strength
+    verified_strength = index.verified_strength(line)
+    mismatch_reason: str | None = None
+    if claimed_strength != "none" and verified_strength == "none":
+        mismatch_reason = f"witness-strength-mismatch:{claimed_strength}"
+        _log_miss(
+            mismatch_reason,
+            witness_ref=f"{line.ledger_id}:{line.seq}",
+            origin_session_id=origin_session_id,
+            entrypoint=entrypoint,
+            transcript_origin_kind=transcript_origin_kind,
+        )
+
     return AttestationOutcome(
         hit=True,
         witness_tag=witness_tag,
@@ -438,4 +621,7 @@ def attest(
         witness_strength=line.key.strength,
         witness_anchored=index.is_anchored(line.ledger_id, line.seq),
         transcript_entrypoint=entrypoint,
+        miss_reason=mismatch_reason,
+        witness_strength_verified=verified_strength,
+        witness_anchor_source=index.anchor_source(line.ledger_id, line.seq),
     )

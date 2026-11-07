@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for athenaeum.witness_attestation (issue athenaeum#2158).
+"""Tests for athenaeum.witness_attestation (issue athenaeum#2158; signature
+verification and anchor source added by issue athenaeum#2333).
 
-Covers the eleven-condition hit rule, the eleven-value miss vocabulary (one
-reason per forgery pin, never more than one), the exactly-one-WARNING
-logging contract (including the provenance-incident variant), and
-``AttestationIndex.load``'s read-budget/anchor-coverage behaviour.
+Covers the eleven-condition hit rule, the fixed miss vocabulary (one reason
+per forgery pin, never more than one), the exactly-one-WARNING logging
+contract (including the provenance-incident variant), ``AttestationIndex.
+load``'s read-budget/anchor-coverage behaviour, and (athenaeum#2333)
+``AttestationIndex.verified_strength``/``anchor_source`` plus the
+hit-with-incident ``witness-strength-mismatch`` shape.
 ``tests/test_transcript_receipts.py`` covers the INTEGRATION through
 ``write_receipt_for_origin``/``write_receipts_for_files`` (receipt schema,
 flag-off byte-identity, the gate regression pin, v1 parse/never-rewrite).
@@ -12,16 +15,22 @@ flag-off byte-identity, the gate regression pin, v1 parse/never-rewrite).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from athenaeum.witness_attestation import MISS_REASONS, AttestationIndex, attest
 from promptwitness import canon, ledger
 from promptwitness.harness import claude_code
+from promptwitness.signing import derive_key_id
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -88,6 +97,63 @@ def _single_partition(d: Path) -> Path:
     names = ledger.list_partitions(d)
     assert len(names) == 1
     return d / names[0]
+
+
+@dataclass
+class _StubKeyProvider:
+    """A ``promptwitness.ledger.KeyProviderLike``-shaped stub (issue
+    athenaeum#2333 tests only): a REAL, in-memory-only Ed25519 keypair that
+    can CLAIM any strength label — the shipped adapters only ever claim
+    ``"software-file"``/``"os-keystore"``/``"none"``, but these tests
+    exercise the claimed-vs-registered COMPARISON, not which adapter
+    produced the claim, so a stub lets a fixture match the issue's own
+    ``os-keystore``/``hardware-presence`` wording exactly. Never writes a
+    PEM anywhere — ``public_key()`` uses ``Encoding.Raw``/``PublicFormat.
+    Raw``, never ``private_bytes``, so no key material (public or private)
+    ever takes PEM shape in this process."""
+
+    signer: Ed25519PrivateKey
+    claimed_strength: str
+
+    def key_id(self) -> str:
+        return derive_key_id(self.public_key(), "ed25519")
+
+    def algorithm(self) -> str:
+        return "ed25519"
+
+    def strength(self) -> str:
+        return self.claimed_strength
+
+    def presence_required(self) -> bool:
+        return False
+
+    def sign(self, payload: bytes) -> bytes:
+        return bytes(self.signer.sign(payload))
+
+    def public_key(self) -> bytes:
+        return self.signer.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def _stub_provider(claimed_strength: str) -> _StubKeyProvider:
+    return _StubKeyProvider(Ed25519PrivateKey.generate(), claimed_strength)
+
+
+def _registry_config(provider: _StubKeyProvider, *, registered_strength: str) -> dict[str, Any]:
+    """A ``librarian.witness.keys`` config dict registering *provider*'s
+    public key at *registered_strength* — the exact shape
+    ``athenaeum.config.resolve_witness_keys`` reads."""
+    return {
+        "librarian": {
+            "witness": {
+                "keys": {
+                    provider.key_id(): {
+                        "public_key": base64.b64encode(provider.public_key()).decode("ascii"),
+                        "strength": registered_strength,
+                    }
+                }
+            }
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +300,10 @@ class TestSlashCommandHit:
 
 
 # ---------------------------------------------------------------------------
-# The eleven forgery pins — each isolates exactly one failing condition.
+# The eleven original forgery pins — each isolates exactly one failing
+# condition. The twelfth miss reason, `witness-strength-mismatch`, is NOT
+# a forgery pin in this sense: it is reported alongside a HIT, not instead
+# of one (see TestWitnessStrengthVerification below).
 # ---------------------------------------------------------------------------
 
 
@@ -406,6 +475,7 @@ class TestForgeryPins:
             "transcript-promptsource:x",
             "sidechain",
             "flag-off",
+            "witness-strength-mismatch:os-keystore",
         ):
             prefix = reason.split(":", 1)[0]
             assert prefix in MISS_REASONS
@@ -634,3 +704,303 @@ class TestChainIntactThroughBoundary:
         outcome = attest(AttestationIndex.load(tmp_path), **_good_attest_kwargs())  # type: ignore[arg-type]
         assert not outcome.hit
         assert outcome.miss_reason == "chain-broken"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2333 (TG5) — signature-strength verification
+# ---------------------------------------------------------------------------
+
+
+class TestWitnessStrengthVerification:
+    def test_unsigned_line_verifies_as_none_with_no_incident(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The common case today (no key provider at all): claimed
+        strength is already ``"none"``, so no registry lookup happens and
+        no incident is logged."""
+        _append_turn(tmp_path)
+        index = AttestationIndex.load(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.witness_attestation"):
+            outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength == "none"
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason is None
+        assert caplog.records == []
+
+    def test_out_of_vocabulary_claimed_strength_is_unverifiable(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Defensive branch: a claimed strength that is not even in
+        :data:`~athenaeum.config.WITNESS_KEY_STRENGTHS` (corrupt/foreign
+        ledger data) is treated as unverifiable, same as "no key" -- never
+        an ``IndexError``/``ValueError`` from the strength-ordering
+        lookup."""
+        provider = _stub_provider("quantum-teleportation")  # not a real tier
+        _append_turn(tmp_path, key_provider=provider)
+        config = _registry_config(provider, registered_strength="os-keystore")
+        index = AttestationIndex.load(tmp_path, config=config)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.witness_attestation"):
+            outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason == "witness-strength-mismatch:quantum-teleportation"
+
+    def test_claimed_nonnone_strength_with_no_signature_is_unverifiable(
+        self, tmp_path: Path
+    ) -> None:
+        """Defensive branch: a line whose ``key.strength`` claims something
+        other than ``"none"`` but carries no ``sig`` at all (malformed/
+        tampered raw ledger data -- the real writer never produces this
+        combination, per :class:`~promptwitness.ledger.KeyInfo`'s own
+        docstring) is still treated as unverifiable rather than raising."""
+        provider = _stub_provider("os-keystore")
+        _append_turn(tmp_path, key_provider=provider)
+        partition = _single_partition(tmp_path)
+        lines = _read_partition_lines(partition)
+        obj = json.loads(lines[0])
+        del obj["sig"]  # strength still claims "os-keystore"
+        lines[0] = canon.canonical_json(obj)
+        partition.write_bytes(b"\n".join(lines) + b"\n")
+
+        config = _registry_config(provider, registered_strength="os-keystore")
+        index = AttestationIndex.load(tmp_path, config=config)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason == "witness-strength-mismatch:os-keystore"
+
+    def test_unregistered_key_downgrades_to_none_with_incident(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC: a line claiming ``os-keystore`` strength, signed by a key
+        no operator ever registered, yields verified strength ``"none"``
+        and an incident -- while the attestation itself is STILL a hit
+        (provenance is unaffected)."""
+        provider = _stub_provider("os-keystore")
+        _append_turn(tmp_path, key_provider=provider)
+        index = AttestationIndex.load(tmp_path)  # no config => empty registry
+        with caplog.at_level(logging.WARNING, logger="athenaeum.witness_attestation"):
+            outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength == "os-keystore"  # self-asserted field: unchanged
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason == "witness-strength-mismatch:os-keystore"
+        records = [r for r in caplog.records if r.name == "athenaeum.witness_attestation"]
+        assert len(records) == 1
+        assert "witness-strength-mismatch:os-keystore" in records[0].getMessage()
+
+    def test_registered_key_at_or_above_claimed_strength_keeps_the_claim(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC: a line whose signature verifies under a registered key
+        whose registered strength is AT LEAST the claimed strength keeps
+        its strength -- no incident."""
+        provider = _stub_provider("os-keystore")
+        _append_turn(tmp_path, key_provider=provider)
+        config = _registry_config(provider, registered_strength="os-keystore")
+        index = AttestationIndex.load(tmp_path, config=config)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.witness_attestation"):
+            outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "os-keystore"
+        assert outcome.miss_reason is None
+        assert caplog.records == []
+
+    def test_registered_key_strictly_above_claimed_strength_keeps_the_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """"At least" means a registered key can be STRONGER than what a
+        line claims, too -- still no mismatch."""
+        provider = _stub_provider("software-file")
+        _append_turn(tmp_path, key_provider=provider)
+        config = _registry_config(provider, registered_strength="hardware-presence")
+        index = AttestationIndex.load(tmp_path, config=config)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "software-file"
+        assert outcome.miss_reason is None
+
+    def test_claimed_strength_above_registered_downgrades_with_incident(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC: a claimed strength ABOVE the registered strength yields
+        ``"none"`` and an incident, even though the key IS registered and
+        the signature itself verifies fine."""
+        provider = _stub_provider("hardware-presence")
+        _append_turn(tmp_path, key_provider=provider)
+        config = _registry_config(provider, registered_strength="os-keystore")
+        index = AttestationIndex.load(tmp_path, config=config)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.witness_attestation"):
+            outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason == "witness-strength-mismatch:hardware-presence"
+        records = [r for r in caplog.records if r.name == "athenaeum.witness_attestation"]
+        assert len(records) == 1
+
+    def test_invalid_signature_under_a_registered_key_downgrades_with_incident(
+        self, tmp_path: Path
+    ) -> None:
+        """A registered key whose signature does NOT verify (tampered
+        ``sig``) is treated exactly like an unregistered key -- never as a
+        chain break (the hash chain itself is untouched)."""
+        provider = _stub_provider("os-keystore")
+        _append_turn(tmp_path, key_provider=provider)
+        partition = _single_partition(tmp_path)
+        lines = _read_partition_lines(partition)
+        obj = json.loads(lines[0])
+        # Flip the signature to another validly-base64 value -- the chain
+        # hash is computed over the signed payload, not `sig` itself, so
+        # this does not break the chain.
+        obj["sig"] = base64.b64encode(b"\x00" * 64).decode("ascii")
+        lines[0] = canon.canonical_json(obj)
+        partition.write_bytes(b"\n".join(lines) + b"\n")
+
+        config = _registry_config(provider, registered_strength="os-keystore")
+        index = AttestationIndex.load(tmp_path, config=config)
+        assert index.chain_ok is True
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.hit
+        assert outcome.witness_strength_verified == "none"
+        assert outcome.miss_reason == "witness-strength-mismatch:os-keystore"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2333 (TG5) — anchor source
+# ---------------------------------------------------------------------------
+
+
+def _anchor(tmp_path: Path, line: ledger.WitnessLine, *, source: str, status: str) -> None:
+    ledger.append_line(
+        tmp_path,
+        kind="anchor",
+        harness="claude-code",
+        harness_version="",
+        hook_version="promptwitness 0.1.0",
+        extra={
+            "subject": f"witness:{line.ledger_id}:{line.seq}",
+            "digest": line.line_hash(),
+            "op": "anchor",
+            "attestation": {
+                "source": source,
+                "status": status,
+                "claimed_time": "2026-01-01T00:00:00Z",
+                "proof_path": None,
+                "detail": {},
+            },
+        },
+    )
+
+
+class TestWitnessAnchorSource:
+    def test_not_anchored_at_all_is_none(self, tmp_path: Path) -> None:
+        _append_turn(tmp_path)
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchored is False
+        assert outcome.witness_anchor_source is None
+
+    def test_local_clock_only_anchor_is_local_clock_and_not_anchored_for_consumers(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: a local-clock-only anchor yields ``witness_anchor_source ==
+        "local-clock"``, which consumers must treat as NOT anchored (the
+        boolean ``witness_anchored`` stays ``True`` for compatibility; the
+        NEW field is what tells a consumer not to trust it)."""
+        line = _append_turn(tmp_path)
+        _anchor(tmp_path, line, source="local-clock", status="complete")
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchored is True
+        assert outcome.witness_anchor_source == "local-clock"
+
+    def test_non_local_clock_source_is_preferred_over_local_clock(self, tmp_path: Path) -> None:
+        line = _append_turn(tmp_path)
+        _anchor(tmp_path, line, source="local-clock", status="complete")
+        _anchor(tmp_path, line, source="opentimestamps", status="complete")
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchor_source == "opentimestamps"
+
+    def test_pending_non_local_clock_still_beats_complete_local_clock(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-``local-clock`` source, even PENDING, is still preferred
+        over ``local-clock`` -- ``local-clock`` is the weakest source
+        regardless of the other source's completion status."""
+        line = _append_turn(tmp_path)
+        _anchor(tmp_path, line, source="local-clock", status="complete")
+        _anchor(tmp_path, line, source="opentimestamps", status="pending")
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchor_source == "opentimestamps"
+
+    def test_complete_source_preferred_over_pending_among_non_local_clock(
+        self, tmp_path: Path
+    ) -> None:
+        line = _append_turn(tmp_path)
+        _anchor(tmp_path, line, source="local-clock", status="complete")
+        _anchor(tmp_path, line, source="rfc3161:tsa.example", status="pending")
+        _anchor(tmp_path, line, source="opentimestamps", status="complete")
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchor_source == "opentimestamps"
+
+    def test_a_later_anchor_pass_still_covers_an_earlier_line(self, tmp_path: Path) -> None:
+        """The anchor subject names the LATEST line at anchor time; an
+        earlier line (seq 1) is still covered by a later pass (anchoring
+        seq 2) -- the same coverage rule :meth:`is_anchored` already uses,
+        now shared by `anchor_source`."""
+        line1 = _append_turn(tmp_path, prompt_id="p1", turn=0)
+        line2 = _append_turn(tmp_path, prompt_id="p2", turn=1)
+        _anchor(tmp_path, line2, source="opentimestamps", status="complete")
+        index = AttestationIndex.load(tmp_path)
+        assert index.is_anchored(line1.ledger_id, line1.seq)
+        assert index.anchor_source(line1.ledger_id, line1.seq) == "opentimestamps"
+
+    def test_verify_source_in_detail_overrides_source_where_available(
+        self, tmp_path: Path
+    ) -> None:
+        """The issue's "and the verify_source where available" hedge: a
+        FUTURE writer that persists ``detail.verify_source`` wins over the
+        plain ``source`` label -- never shipped today, but defensively
+        honoured."""
+        line = _append_turn(tmp_path)
+        ledger.append_line(
+            tmp_path,
+            kind="anchor",
+            harness="claude-code",
+            harness_version="",
+            hook_version="promptwitness 0.1.0",
+            extra={
+                "subject": f"witness:{line.ledger_id}:{line.seq}",
+                "digest": line.line_hash(),
+                "op": "anchor",
+                "attestation": {
+                    "source": "opentimestamps",
+                    "status": "complete",
+                    "claimed_time": "2026-01-01T00:00:00Z",
+                    "proof_path": None,
+                    "detail": {"verify_source": "block-explorer:example.com"},
+                },
+            },
+        )
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchor_source == "block-explorer:example.com"
+
+    def test_malformed_anchor_line_falls_back_to_local_clock(self, tmp_path: Path) -> None:
+        line = _append_turn(tmp_path)
+        ledger.append_line(
+            tmp_path,
+            kind="anchor",
+            harness="claude-code",
+            harness_version="",
+            hook_version="promptwitness 0.1.0",
+            extra={"subject": f"witness:{line.ledger_id}:{line.seq}"},  # no "attestation" at all
+        )
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
+        assert outcome.witness_anchored is True
+        assert outcome.witness_anchor_source == "local-clock"

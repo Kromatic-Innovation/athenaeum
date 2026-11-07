@@ -637,9 +637,12 @@ class TestRepairBackfillWitnessedBranch:
         calls: list[Path] = []
         real_load = witness_attestation.AttestationIndex.load
 
-        def counting_load(witness_dir_arg: Path) -> object:
+        def counting_load(witness_dir_arg: Path, **kwargs: object) -> object:
+            # Issue athenaeum#2333: `load` grew a keyword-only `config`
+            # parameter; accept and forward it so this stub's signature
+            # does not drift from the real one it stands in for.
             calls.append(witness_dir_arg)
-            return real_load(witness_dir_arg)
+            return real_load(witness_dir_arg, **kwargs)
 
         monkeypatch.setattr(
             witness_attestation.AttestationIndex, "load", staticmethod(counting_load)

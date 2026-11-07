@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum receipts attest-readout`` and :mod:`athenaeum.witness_readout`
-(issue athenaeum#2160, epic athenaeum#2144).
+(issue athenaeum#2160, epic athenaeum#2144; ``witness-strength-mismatch``
+added to the vocabulary by issue athenaeum#2333).
 
 What is under test, acceptance criterion by acceptance criterion:
 
 * :class:`TestEveryMissReason` — a fixture receipt ledger carrying ONE
-  example of each of the eleven
-  :data:`athenaeum.witness_attestation.MISS_REASONS` reasons produces the
+  example of each
+  :data:`athenaeum.witness_attestation.MISS_REASONS` reason produces the
   exact expected counts in BOTH renderings, and lists every non-``flag-off``
   miss as an incident (AC1).
 * :class:`TestExitCode` — clean -> ``0``; each of the three incident sources
@@ -51,6 +52,7 @@ from athenaeum.witness_readout import (
     INCIDENT_HOOK_ERROR,
     INCIDENT_PROVENANCE_MISS,
     INCIDENT_SESSION_CLOSE_DEFICIT,
+    INCIDENT_STRENGTH_MISMATCH,
     build_readout,
     render_text,
 )
@@ -62,9 +64,13 @@ MONTH = "2026-10"
 #: would still be a leaked digest.
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 
-#: The eleven reasons, three of them with a `:`-suffixed value attached the
-#: way `witness_attestation.attest` attaches one, so the bucketing rule is
-#: exercised rather than assumed.
+#: Every declared :data:`MISS_REASONS` value, one example each -- four of
+#: them with a `:`-suffixed value attached the way `witness_attestation.
+#: attest` attaches one, so the bucketing rule is exercised rather than
+#: assumed. `witness-strength-mismatch` (issue athenaeum#2333) is included
+#: here even though it is reported alongside a HIT, not instead of one
+#: (:class:`AttestationOutcome`'s own docstring) -- this fixture only cares
+#: about `witness_miss` bucketing, which does not distinguish the two.
 EVERY_REASON: tuple[str, ...] = (
     "ledger-absent",
     "no-entry",
@@ -77,6 +83,7 @@ EVERY_REASON: tuple[str, ...] = (
     "transcript-promptsource:absent",
     "sidechain",
     "flag-off",
+    "witness-strength-mismatch:os-keystore",
 )
 
 
@@ -335,17 +342,32 @@ class TestEveryMissReason:
             world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
         )
 
-        assert summary.user_stated_total == 11
+        assert summary.user_stated_total == 12
         assert summary.witnessed_total == 2
         assert summary.witnessed_by_tag == {"slash-args": 1, "typed": 1}
-        assert summary.miss_counts == {bucket: 1 for bucket in MISS_REASONS}
+        # `witness-strength-mismatch` is a MISS_REASONS value but NOT a miss
+        # (issue athenaeum#2333) -- it never lands in miss_counts.
+        assert summary.miss_counts == {
+            bucket: 1 for bucket in MISS_REASONS if bucket != INCIDENT_STRENGTH_MISMATCH
+        }
         assert sum(summary.miss_counts.values()) == 11
 
-        # Ten incidents: every reason except `flag-off`.
+        # Ten provenance-miss incidents: every reason except `flag-off`
+        # (not an incident) and `witness-strength-mismatch` (its own class).
         provenance = [i for i in summary.incidents if i.incident_class == INCIDENT_PROVENANCE_MISS]
         assert len(provenance) == 10
-        assert {i.reason for i in provenance} == set(EVERY_REASON) - {"flag-off"}
+        assert {i.reason for i in provenance} == set(EVERY_REASON) - {
+            "flag-off",
+            "witness-strength-mismatch:os-keystore",
+        }
         assert "flag-off" not in {i.reason for i in summary.incidents}
+
+        # And exactly one strength-mismatch incident, never double-counted
+        # as a miss, never flagged a false negative (nothing was missed).
+        strength = [i for i in summary.incidents if i.incident_class == INCIDENT_STRENGTH_MISMATCH]
+        assert len(strength) == 1
+        assert strength[0].reason == "witness-strength-mismatch:os-keystore"
+        assert strength[0].likely_false_negative is False
 
     def test_json_and_text_carry_the_same_numbers(self, world: dict[str, Path]) -> None:
         self._ledger(world)
@@ -355,24 +377,34 @@ class TestEveryMissReason:
         payload = summary.to_dict()
         text = render_text(summary)
 
-        assert payload["user_stated_total"] == 11
+        assert payload["user_stated_total"] == 12
         assert payload["witnessed_total"] == 2
         assert payload["witnessed_by_tag"] == {"slash-args": 1, "typed": 1}
-        assert payload["miss_counts"] == {bucket: 1 for bucket in MISS_REASONS}
-        assert len(payload["incidents"]) == 10
-        assert payload["incident_class_counts"] == {INCIDENT_PROVENANCE_MISS: 10}
+        assert payload["miss_counts"] == {
+            bucket: 1 for bucket in MISS_REASONS if bucket != INCIDENT_STRENGTH_MISMATCH
+        }
+        # 11 total incidents: 10 provenance-miss + 1 strength-mismatch.
+        assert len(payload["incidents"]) == 11
+        assert payload["incident_class_counts"] == {
+            INCIDENT_PROVENANCE_MISS: 10,
+            INCIDENT_STRENGTH_MISMATCH: 1,
+        }
         assert payload["ok"] is False
 
-        assert "user-stated:      11" in text
+        assert "user-stated:      12" in text
         assert "witnessed:        2" in text
         assert "misses:           11" in text
-        assert "incidents: 10" in text
+        assert "incidents: 11" in text
         for reason in EVERY_REASON:
             if reason == "flag-off":
                 continue
             assert f"reason={reason}" in text
-        # And every bucket's own count line is present in the breakdown.
+        # And every MISS bucket's own count line is present in the
+        # breakdown -- `witness-strength-mismatch` is NOT a miss bucket,
+        # so it is deliberately excluded from this loop.
         for bucket in MISS_REASONS:
+            if bucket == INCIDENT_STRENGTH_MISMATCH:
+                continue
             assert f"    {bucket}: 1" in text
 
     def test_cli_emits_both_renderings(
@@ -385,14 +417,93 @@ class TestEveryMissReason:
         rc = main(["receipts", "attest-readout", "--path", str(world["knowledge"]), "--json"])
         assert rc == INCIDENT_EXIT
         payload = json.loads(capsys.readouterr().out)
-        assert payload["user_stated_total"] == 11
-        assert len(payload["incidents"]) == 10
+        assert payload["user_stated_total"] == 12
+        assert len(payload["incidents"]) == 11
 
         rc = main(["receipts", "attest-readout", "--path", str(world["knowledge"])])
         assert rc == INCIDENT_EXIT
         text = capsys.readouterr().out
-        assert "user-stated:      11" in text
-        assert "incidents: 10" in text
+        assert "user-stated:      12" in text
+        assert "incidents: 11" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2333 (TG5 review, Seer finding 1) — a strength-mismatch
+# receipt is a HIT with an incident, never a miss, never a false negative.
+# ---------------------------------------------------------------------------
+
+
+class TestStrengthMismatchPartitionsFromMiss:
+    """Pins the exact shape Seer flagged: a ``"witnessed"`` receipt whose
+    ``witness_miss`` is ``witness-strength-mismatch:<claimed>`` must raise
+    its own incident, but must NOT also land in ``miss_counts`` (that would
+    double-count one receipt as both witnessed and missed), and must NOT be
+    flagged ``likely_false_negative`` even when its ``transcript_origin``/
+    ``transcript_entrypoint`` are the exact human+cli shape that DOES flag a
+    real miss -- nothing was missed here, so that flag would be a false
+    statement."""
+
+    def _mismatch_receipt(self, world: dict[str, Path]) -> None:
+        _receipt(
+            world["wiki"],
+            digest=_digest(1),
+            channel="witnessed",
+            witness_tag="typed",
+            witness_ref="pw-0123456789abcdef:9",
+            witness_miss="witness-strength-mismatch:os-keystore",
+            transcript_origin="human",
+            transcript_entrypoint="cli",
+        )
+
+    def test_raises_its_own_incident_class(self, world: dict[str, Path]) -> None:
+        self._mismatch_receipt(world)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert len(summary.incidents) == 1
+        incident = summary.incidents[0]
+        assert incident.incident_class == INCIDENT_STRENGTH_MISMATCH
+        assert incident.reason == "witness-strength-mismatch:os-keystore"
+        assert summary.ok is False
+
+    def test_is_not_also_counted_as_a_miss(self, world: dict[str, Path]) -> None:
+        self._mismatch_receipt(world)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.miss_counts == {}
+        assert sum(summary.miss_counts.values()) == 0
+
+    def test_is_counted_as_witnessed_not_user_stated(self, world: dict[str, Path]) -> None:
+        self._mismatch_receipt(world)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.witnessed_total == 1
+        assert summary.user_stated_total == 0
+
+    def test_is_never_flagged_a_false_negative(self, world: dict[str, Path]) -> None:
+        """The receipt's own transcript_origin/transcript_entrypoint are
+        the EXACT shape (human + cli) that flags a real miss -- pinned here
+        so that shape alone is proven NOT sufficient once the incident
+        class is strength-mismatch rather than provenance-miss."""
+        self._mismatch_receipt(world)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.incidents[0].likely_false_negative is False
+
+    def test_incident_class_counts_and_text_agree(self, world: dict[str, Path]) -> None:
+        self._mismatch_receipt(world)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.incident_class_counts() == {INCIDENT_STRENGTH_MISMATCH: 1}
+        text = render_text(summary)
+        assert f"  {INCIDENT_STRENGTH_MISMATCH}: 1" in text
+        assert "reason=witness-strength-mismatch:os-keystore" in text
+        assert "LIKELY-FALSE-NEGATIVE" not in text
+        assert "misses:           0" in text
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +603,7 @@ class TestNoPlaintext:
         # Positive control: the fixture really does carry 64-hex digests, so
         # a clean assert below is evidence of filtering, not of empty input.
         assert _HEX64.search(_digest(3))
-        assert summary.user_stated_total == 11
+        assert summary.user_stated_total == 12
         assert not _HEX64.search(text), _HEX64.search(text)
         assert not _HEX64.search(payload), _HEX64.search(payload)
 
