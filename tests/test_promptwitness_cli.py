@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ``promptwitness`` console script (athenaeum#2147,
-athenaeum#2149, athenaeum#2150, athenaeum#2151, athenaeum#2152).
+athenaeum#2149, athenaeum#2150, athenaeum#2151, athenaeum#2152,
+athenaeum#2153).
 
 The ``keygen --provider os-keystore`` path is exercised end to end in
 ``tests/test_promptwitness_os_keystore.py``, which already owns the fake
-keystore; what lives here is the parser shape.
+keystore; the ``keygen --provider secure-enclave`` path is likewise
+exercised end to end in ``tests/test_promptwitness_secure_enclave.py``,
+which owns the fake Swift-helper stub (``_write_fake_helper``, imported
+below) -- what lives here for both is the parser shape, plus one
+end-to-end smoke class per provider for the CLI's own JSON reporting.
 
 The ``TestUpgradeFindingsRegression`` and ``TestDigestForSubjectInvariant``
 classes near the bottom are regression coverage for PR athenaeum#2168 review
@@ -23,6 +28,7 @@ import pytest
 from promptwitness import anchor as anchor_mod
 from promptwitness import canon, cli, ledger
 from tests.test_promptwitness_anchor import _install_fake_opentimestamps
+from tests.test_promptwitness_secure_enclave import _write_fake_helper
 
 
 class TestBuildParser:
@@ -65,6 +71,23 @@ class TestBuildParser:
             ["keygen", "--provider", "os-keystore", "--keystore-backend", backend]
         )
         assert args.keystore_backend == backend
+
+    def test_keygen_accepts_secure_enclave_provider(self) -> None:
+        args = cli.build_parser().parse_args(["keygen", "--provider", "secure-enclave"])
+        assert args.provider == "secure-enclave"
+        assert args.se_helper is None
+
+    def test_keygen_accepts_se_helper_override(self, tmp_path: Path) -> None:
+        args = cli.build_parser().parse_args(
+            [
+                "keygen",
+                "--provider",
+                "secure-enclave",
+                "--se-helper",
+                str(tmp_path / "promptwitness-se"),
+            ]
+        )
+        assert args.se_helper == str(tmp_path / "promptwitness-se")
 
     def test_keygen_rejects_an_unknown_provider(self) -> None:
         with pytest.raises(SystemExit):
@@ -126,6 +149,137 @@ class TestKeygenCommand:
         first_bytes = key_path.read_bytes()
         assert cli.main(["keygen", "--key-path", str(key_path), "--force"]) == 0
         assert key_path.read_bytes() != first_bytes
+
+
+class TestKeygenCliSecureEnclave:
+    """``promptwitness keygen --provider secure-enclave`` (athenaeum#2153),
+    against the real fake-helper executable
+    ``tests/test_promptwitness_secure_enclave.py`` owns -- the behavioural
+    cases (failure modes, warnings, argv hygiene) live there; this is the
+    CLI's own JSON-reporting contract, alongside the existing os-keystore
+    coverage in ``tests/test_promptwitness_os_keystore.py``'s
+    ``TestKeygenCliOsKeystore``.
+    """
+
+    def test_reports_the_key_path_and_strength(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        helper = _write_fake_helper(tmp_path)
+        key_path = tmp_path / "keys" / "se.key"
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "secure-enclave",
+                "--se-helper",
+                str(helper),
+                "--key-path",
+                str(key_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["key_path"] == str(key_path)
+        assert payload["strength"] == "hardware-nonexportable"
+        assert payload["algorithm"] == "ecdsa-p256-sha256"
+        assert payload["key_id"].startswith("ecdsa-p256-sha256:")
+
+    def test_prints_no_key_material_on_stdout_or_stderr(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        helper = _write_fake_helper(tmp_path)
+        key_path = tmp_path / "se.key"
+        argv = [
+            "keygen",
+            "--provider",
+            "secure-enclave",
+            "--se-helper",
+            str(helper),
+            "--key-path",
+            str(key_path),
+        ]
+        assert cli.main(argv) == 0
+        raw_scalar = key_path.read_bytes().hex()
+        captured = capfd.readouterr()
+        for stream in (captured.out, captured.err):
+            assert raw_scalar not in stream
+
+    def test_refuses_an_existing_key_and_exits_1(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        helper = _write_fake_helper(tmp_path)
+        key_path = tmp_path / "se.key"
+        argv = [
+            "keygen",
+            "--provider",
+            "secure-enclave",
+            "--se-helper",
+            str(helper),
+            "--key-path",
+            str(key_path),
+        ]
+        assert cli.main(argv) == 0
+        first = json.loads(capfd.readouterr().out)["key_id"]
+        assert cli.main(argv) == 1
+        err = capfd.readouterr().err
+        assert "already exists" in json.loads(err)["error"]
+        # And the existing key is untouched.
+        assert cli.main([*argv, "--force"]) == 0
+        second = json.loads(capfd.readouterr().out)["key_id"]
+        assert first != second
+
+    def test_force_rotates_the_key(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        helper = _write_fake_helper(tmp_path)
+        key_path = tmp_path / "se.key"
+        argv = [
+            "keygen",
+            "--provider",
+            "secure-enclave",
+            "--se-helper",
+            str(helper),
+            "--key-path",
+            str(key_path),
+        ]
+        assert cli.main(argv) == 0
+        first = json.loads(capfd.readouterr().out)["key_id"]
+        assert cli.main([*argv, "--force"]) == 0
+        second = json.loads(capfd.readouterr().out)["key_id"]
+        assert first != second
+
+    def test_an_unreachable_helper_exits_1_with_a_json_error(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "secure-enclave",
+                "--se-helper",
+                str(tmp_path / "does-not-exist"),
+                "--key-path",
+                str(tmp_path / "se.key"),
+            ]
+        )
+        assert rc == 1
+        captured = capfd.readouterr()
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert "not installed" in payload["error"]
+        assert payload["key_path"] == str(tmp_path / "se.key")
+
+    def test_the_software_file_path_is_unchanged(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """A regression floor for the default: adding a third tier must
+        not move an existing operator's key or change what keygen reports
+        for the first two."""
+        key_path = tmp_path / "k.pem"
+        assert cli.main(["keygen", "--key-path", str(key_path)]) == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["strength"] == "software-file"
+        assert "se_helper" not in payload
 
 
 class TestStatusCommand:
