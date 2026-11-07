@@ -299,8 +299,10 @@ hashes with SHA-256 internally before signing, matching
 `cryptography`'s `ec.ECDSA(hashes.SHA256())` exactly, so
 `promptwitness.signing.verify_signature` can check a Secure Enclave
 signature the same way it checks an Ed25519 one. The public key is
-CryptoKit's own raw X9.63 uncompressed point (`0x04 || X || Y`, 65 bytes),
-base64 on the wire; a signature is the DER encoding of the ECDSA pair —
+CryptoKit's `x963Representation` — the X9.63 uncompressed point
+(`0x04 || X || Y`, 65 bytes), base64 on the wire, and specifically not
+its `rawRepresentation`, which drops the `0x04` tag the Python side's
+`from_encoded_point` requires; a signature is the DER encoding of the ECDSA pair —
 both sides of the pipe (the Swift helper and the Python adapter) must
 agree on this byte-for-byte, or every derived `key_id` silently changes.
 
