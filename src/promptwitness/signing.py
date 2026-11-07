@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """``KeyProvider`` protocol, the key-strength vocabulary, and the ``none`` /
 ``software-file`` / ``os-keystore`` signing adapters (athenaeum#2150,
-athenaeum#2152).
+athenaeum#2152). :func:`resolve_key_provider` also selects
+``"secure-enclave"`` (athenaeum#2153) — that adapter itself lives in the
+sibling :mod:`promptwitness.secure_enclave` module, not here; see its
+module docstring for why it is a sibling rather than a subpackage.
 
 Layering: L1.5 (depends on :mod:`promptwitness.canon` and
 :mod:`promptwitness.ledger`, stdlib otherwise). Standard library only at
@@ -24,11 +27,13 @@ at all, which is the whole point of the ``key_provider=None`` default
 
 **Key-strength vocabulary**, weakest to strongest: ``none`` <
 ``software-file`` < ``os-keystore`` < ``hardware-nonexportable`` <
-``hardware-presence``. The first three have adapters here; the hardware
-adapters (athenaeum#2153, athenaeum#2154) are separate issues.
-``hardware-presence`` is a seam only — operator ruling 1 builds no
-presence-gated adapter, so every adapter shipped here returns
-``presence_required() == False``.
+``hardware-presence``. The first three have adapters here;
+``hardware-nonexportable`` now has one too, on macOS, in the sibling
+:mod:`promptwitness.secure_enclave` module (athenaeum#2153) — a
+TPM-backed adapter for the same tier, on a different platform, is still
+to come (athenaeum#2154). ``hardware-presence`` is a seam only — operator
+ruling 1 builds no presence-gated adapter, so every adapter shipped here
+(and :mod:`secure_enclave`'s) returns ``presence_required() == False``.
 
 **``os-keystore`` protects the key AT REST and nothing else** — see
 :class:`OsKeystoreKeyProvider`. The seed is encrypted by the OS, so a stolen
@@ -99,8 +104,11 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 #: Weakest to strongest (athenaeum#2144 epic body). ``none``,
-#: ``software-file`` and ``os-keystore`` have adapters in this module; the
-#: two hardware tiers do not yet.
+#: ``software-file`` and ``os-keystore`` have adapters in this module;
+#: ``hardware-nonexportable`` has an adapter too, in the sibling
+#: :mod:`promptwitness.secure_enclave` module (athenaeum#2153, macOS
+#: Secure Enclave) — a TPM-backed adapter for the same tier is still to
+#: come (athenaeum#2154). ``hardware-presence`` is a seam only (ruling 1).
 STRENGTHS: tuple[str, ...] = (
     "none",
     "software-file",
@@ -110,6 +118,13 @@ STRENGTHS: tuple[str, ...] = (
 )
 
 _SOFTWARE_FILE_ALGORITHM = "ed25519"
+
+#: :data:`promptwitness.secure_enclave.ALGORITHM`, duplicated as a literal
+#: rather than imported: importing :mod:`promptwitness.secure_enclave` at
+#: module scope here would make the dependency two-way (that module
+#: already imports this one). Kept in sync with a parity assertion in
+#: ``tests/test_promptwitness_secure_enclave.py`` instead.
+_ECDSA_P256_ALGORITHM = "ecdsa-p256-sha256"
 
 
 @runtime_checkable
@@ -152,26 +167,48 @@ def verify_signature(
 ) -> bool:
     """``True`` iff *signature* over *payload* verifies under *public_key_raw*.
 
-    Lazy ``cryptography`` import — never at module level. Only
-    ``"ed25519"`` is implemented (the only algorithm either shipped adapter
-    produces); any other algorithm name returns ``False`` rather than
-    raising, since an unrecognized algorithm cannot be verified either way.
+    Lazy ``cryptography`` import — never at module level. Two algorithms
+    are implemented: ``"ed25519"`` (the ``software-file`` / ``os-keystore``
+    adapters) and ``"ecdsa-p256-sha256"`` (the ``secure-enclave`` adapter,
+    athenaeum#2153 — *public_key_raw* is the raw X9.63 uncompressed P-256
+    point, *signature* is DER, matching exactly what the Swift helper and
+    :mod:`promptwitness.secure_enclave` both produce). Any other algorithm
+    name returns ``False`` rather than raising, since an unrecognized
+    algorithm cannot be verified either way.
     """
-    if algorithm != _SOFTWARE_FILE_ALGORITHM:
-        return False
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError:
-        return False
-    try:
-        Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, payload)
-    except InvalidSignature:
-        return False
-    except ValueError:
-        # Malformed public key bytes (wrong length, etc.) -- not verifiable.
-        return False
-    return True
+    if algorithm == _SOFTWARE_FILE_ALGORITHM:
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        except ImportError:
+            return False
+        try:
+            Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, payload)
+        except InvalidSignature:
+            return False
+        except ValueError:
+            # Malformed public key bytes (wrong length, etc.) -- not verifiable.
+            return False
+        return True
+    if algorithm == _ECDSA_P256_ALGORITHM:
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import ec
+        except ImportError:
+            return False
+        try:
+            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), public_key_raw
+            )
+            public_key.verify(signature, payload, ec.ECDSA(hashes.SHA256()))
+        except InvalidSignature:
+            return False
+        except ValueError:
+            # Malformed public key bytes or signature -- not verifiable.
+            return False
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1184,7 @@ def resolve_key_provider(
     provider: str | None = None,
     key_path: str | os.PathLike[str] | None = None,
     keystore_backend: str | None = None,
+    se_helper: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> ledger.KeyProviderLike | None:
     """Resolve a key provider from config, the ``PROMPTWITNESS_KEY_PROVIDER``
@@ -1166,10 +1204,21 @@ def resolve_key_provider(
     shows up later as an unsigned line plus one warning, which is the whole
     point of the degrade path.
 
+    ``"secure-enclave"`` (athenaeum#2153) builds a
+    :class:`promptwitness.secure_enclave.SecureEnclaveKeyProvider` over the
+    Swift helper :func:`promptwitness.secure_enclave.resolve_helper_path`
+    resolves (``se_helper`` argument > ``PROMPTWITNESS_SE_HELPER`` env >
+    ``"promptwitness-se"`` on ``PATH``) and the key-blob path
+    :func:`promptwitness.secure_enclave.resolve_key_path` resolves (the
+    same ``key_path`` argument / ``PROMPTWITNESS_SE_KEY_PATH`` env /
+    ledger-dir-default idiom ``"software-file"`` uses above). Like
+    ``"os-keystore"``, construction never touches the helper or the
+    enclave: an unavailable Secure Enclave shows up later as an unsigned
+    line plus one warning, never a resolution-time failure.
+
     Raises :class:`ValueError` for any other unrecognized provider name
-    (``hardware-nonexportable``/``hardware-presence`` are real vocabulary
-    entries but have no adapter yet — athenaeum#2153, athenaeum#2154 add
-    those).
+    (``hardware-presence`` is a real vocabulary entry but has no adapter —
+    operator ruling 1 builds no presence-gated adapter at all).
     """
     environ = env if env is not None else os.environ
     name = provider if provider is not None else environ.get("PROMPTWITNESS_KEY_PROVIDER")
@@ -1182,9 +1231,24 @@ def resolve_key_provider(
         return OsKeystoreKeyProvider(
             resolve_keystore_backend(harness, backend=keystore_backend, env=environ)
         )
+    if name == "secure-enclave":
+        # Function-local import, not a module-level one: `secure_enclave`
+        # imports THIS module (for `derive_key_id` / `ledger.KeyUnavailable`
+        # / `_run_keystore_tool`), so importing it back at module scope
+        # here would make the dependency two-way. Deferring it to inside
+        # this branch keeps the direction one-way: `signing` depends on
+        # nothing new, `secure_enclave` depends on `signing` -- the same
+        # function-local-import discipline this module already applies to
+        # `cryptography` and `ctypes`.
+        from promptwitness import secure_enclave
+
+        return secure_enclave.SecureEnclaveKeyProvider(
+            helper_path=secure_enclave.resolve_helper_path(override=se_helper, env=environ),
+            key_path=secure_enclave.resolve_key_path(harness, override=key_path, env=environ),
+        )
     raise ValueError(
         f"unknown PROMPTWITNESS_KEY_PROVIDER {name!r}; shipped adapters are "
-        "'none', 'software-file' and 'os-keystore'"
+        "'none', 'software-file', 'os-keystore' and 'secure-enclave'"
     )
 
 
