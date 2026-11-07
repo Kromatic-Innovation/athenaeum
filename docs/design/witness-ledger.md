@@ -368,13 +368,21 @@ uncompressed public point (`0x04 || X || Y`) and a DER ECDSA signature —
 so `promptwitness.signing.verify_signature` and
 `ledger._verify_line_signature` (both already dispatch
 `ecdsa-p256-sha256`) verify a TPM line with no change on either side.
-Unlike the Secure Enclave tier, NEITHER backend's native signature output
-is DER: .NET's `ECDsaCng.SignHash` returns the IEEE P1363 raw `r || s`
-pair, and `tpm2_sign --format plain` is (by inference, not confirmed
-documentation — see the module docstring's numbered assumptions)
-believed to return the same shape. Both therefore convert through one
-shared helper, `promptwitness.tpm._raw_rs_signature_to_der`, before the
-signature ever leaves this module. The public key side differs by
+Unlike the Secure Enclave tier, neither backend's native signature output
+is reliably DER: .NET's `ECDsaCng.SignHash` returns the IEEE P1363 raw
+`r || s` pair, and `tpm2_sign --format plain`'s byte layout is simply not
+documented — `tpm2-tools`' own manual says only "the plain signature data
+as defined by the used cryptographic algorithm". Rather than bet on the
+likeliest reading, both backends go through one shared helper,
+`promptwitness.tpm._normalize_signature_to_der`, which **accepts either**
+a 64-byte raw `r || s` pair or a DER SEQUENCE (they are trivially
+distinguishable) and refuses anything else. So the Linux path is correct
+whichever encoding real hardware produces, and the test suite covers both
+shapes end to end rather than only the assumed one. This is the lesson of
+athenaeum#2153, which shipped a public-key encoding mistake twice,
+invisible to a suite whose fake tool encoded the same wrong assumption:
+where an unverifiable assumption can be replaced by a cheap runtime
+discrimination, replace it. The public key side differs by
 platform: the Linux backend gets a PEM from `tpm2_readpublic -f pem` and
 converts it with ordinary `cryptography` PEM parsing; the Windows
 backend's own PowerShell script assembles the X9.63 point directly from
@@ -389,14 +397,15 @@ hardware signature and non-exportability checks are **athenaeum#2240**,
 not this slice — every test here runs against a fake `tpm2-tools` suite
 and a fake `powershell`, never a real TPM or Windows host. Several
 specific assumptions this adapter makes about `tpm2-tools`' and CNG's
-real behaviour — the exact byte layout `tpm2_sign --format plain`
-produces, which `tpm2-tools` exit code (if any) reliably means "no
+real behaviour — which `tpm2-tools` exit code (if any) reliably means "no
 object at this handle yet", `tpm2_create -c`'s direct-context-load
 capability, and whether the managed `ECDsaCng` wrapper behaves cleanly
 against the real "Microsoft Platform Crypto Provider" KSP — are spelled
 out, numbered, and NOT presented as fact in `promptwitness.tpm`'s own
 module docstring; athenaeum#2240 is where each gets checked against real
-hardware.
+hardware. (The signature byte layout was on that list too, and is no
+longer: the tolerant normalization above removed it as a correctness
+risk rather than documenting it.)
 
 Selection: `PROMPTWITNESS_KEY_PROVIDER=tpm`, then
 `PROMPTWITNESS_TPM_BACKEND` (`tpm2-tools` | `windows-platform-crypto`,

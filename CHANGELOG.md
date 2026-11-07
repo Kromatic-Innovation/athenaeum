@@ -59,8 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CNG's "Microsoft Platform Crypto Provider"). Both normalize to the same
   wire contract the Secure Enclave adapter already uses — the 65-byte
   X9.63 uncompressed public point and a DER signature — including a new
-  shared `_raw_rs_signature_to_der` conversion, since neither backend's
-  native signature output is DER the way the Swift helper's already was.
+  shared `_normalize_signature_to_der`, since neither backend's native
+  signature output is reliably DER the way the Swift helper's already was.
+  That helper **accepts either** a 64-byte raw `r || s` pair or a DER
+  SEQUENCE and refuses anything else, because `tpm2_sign --format plain`'s
+  byte layout is undocumented: the two shapes are trivially
+  distinguishable, so the Linux path is correct whichever one real
+  hardware produces, and both are covered end to end rather than only the
+  assumed one.
   Every subprocess call reuses `signing._run_keystore_tool`'s existing
   discipline: fixed argv, a detached session, a bounded timeout, and the
   payload never on argv (the TPM-sign path writes it to a private,
@@ -78,7 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Several real-TPM/CNG behaviours could not be verified without
     hardware and are called out as explicit, numbered assumptions in
     `promptwitness.tpm`'s own module docstring** rather than presented as
-    fact: `tpm2_sign --format plain`'s exact byte layout; which
+    fact (the signature byte layout was on that list and is no longer —
+    the tolerant normalization above removed it as a correctness risk
+    rather than documenting it): which
     `tpm2-tools` exit code (if any) reliably means "no object at this
     handle yet" (its own docs give no code dedicated to that distinction,
     unlike the os-keystore/secure-enclave adapters); `tpm2_create -c`'s
