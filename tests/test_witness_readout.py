@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum receipts attest-readout`` and :mod:`athenaeum.witness_readout`
-(issue athenaeum#2160, epic athenaeum#2144).
+(issue athenaeum#2160, epic athenaeum#2144; ``witness-strength-mismatch``
+added to the vocabulary by issue athenaeum#2333).
 
 What is under test, acceptance criterion by acceptance criterion:
 
 * :class:`TestEveryMissReason` — a fixture receipt ledger carrying ONE
-  example of each of the eleven
-  :data:`athenaeum.witness_attestation.MISS_REASONS` reasons produces the
+  example of each
+  :data:`athenaeum.witness_attestation.MISS_REASONS` reason produces the
   exact expected counts in BOTH renderings, and lists every non-``flag-off``
   miss as an incident (AC1).
 * :class:`TestExitCode` — clean -> ``0``; each of the three incident sources
@@ -62,9 +63,13 @@ MONTH = "2026-10"
 #: would still be a leaked digest.
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 
-#: The eleven reasons, three of them with a `:`-suffixed value attached the
-#: way `witness_attestation.attest` attaches one, so the bucketing rule is
-#: exercised rather than assumed.
+#: Every declared :data:`MISS_REASONS` value, one example each -- four of
+#: them with a `:`-suffixed value attached the way `witness_attestation.
+#: attest` attaches one, so the bucketing rule is exercised rather than
+#: assumed. `witness-strength-mismatch` (issue athenaeum#2333) is included
+#: here even though it is reported alongside a HIT, not instead of one
+#: (:class:`AttestationOutcome`'s own docstring) -- this fixture only cares
+#: about `witness_miss` bucketing, which does not distinguish the two.
 EVERY_REASON: tuple[str, ...] = (
     "ledger-absent",
     "no-entry",
@@ -77,6 +82,7 @@ EVERY_REASON: tuple[str, ...] = (
     "transcript-promptsource:absent",
     "sidechain",
     "flag-off",
+    "witness-strength-mismatch:os-keystore",
 )
 
 
@@ -335,15 +341,15 @@ class TestEveryMissReason:
             world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
         )
 
-        assert summary.user_stated_total == 11
+        assert summary.user_stated_total == 12
         assert summary.witnessed_total == 2
         assert summary.witnessed_by_tag == {"slash-args": 1, "typed": 1}
         assert summary.miss_counts == {bucket: 1 for bucket in MISS_REASONS}
-        assert sum(summary.miss_counts.values()) == 11
+        assert sum(summary.miss_counts.values()) == 12
 
-        # Ten incidents: every reason except `flag-off`.
+        # Eleven incidents: every reason except `flag-off`.
         provenance = [i for i in summary.incidents if i.incident_class == INCIDENT_PROVENANCE_MISS]
-        assert len(provenance) == 10
+        assert len(provenance) == 11
         assert {i.reason for i in provenance} == set(EVERY_REASON) - {"flag-off"}
         assert "flag-off" not in {i.reason for i in summary.incidents}
 
@@ -355,18 +361,18 @@ class TestEveryMissReason:
         payload = summary.to_dict()
         text = render_text(summary)
 
-        assert payload["user_stated_total"] == 11
+        assert payload["user_stated_total"] == 12
         assert payload["witnessed_total"] == 2
         assert payload["witnessed_by_tag"] == {"slash-args": 1, "typed": 1}
         assert payload["miss_counts"] == {bucket: 1 for bucket in MISS_REASONS}
-        assert len(payload["incidents"]) == 10
-        assert payload["incident_class_counts"] == {INCIDENT_PROVENANCE_MISS: 10}
+        assert len(payload["incidents"]) == 11
+        assert payload["incident_class_counts"] == {INCIDENT_PROVENANCE_MISS: 11}
         assert payload["ok"] is False
 
-        assert "user-stated:      11" in text
+        assert "user-stated:      12" in text
         assert "witnessed:        2" in text
-        assert "misses:           11" in text
-        assert "incidents: 10" in text
+        assert "misses:           12" in text
+        assert "incidents: 11" in text
         for reason in EVERY_REASON:
             if reason == "flag-off":
                 continue
@@ -385,14 +391,14 @@ class TestEveryMissReason:
         rc = main(["receipts", "attest-readout", "--path", str(world["knowledge"]), "--json"])
         assert rc == INCIDENT_EXIT
         payload = json.loads(capsys.readouterr().out)
-        assert payload["user_stated_total"] == 11
-        assert len(payload["incidents"]) == 10
+        assert payload["user_stated_total"] == 12
+        assert len(payload["incidents"]) == 11
 
         rc = main(["receipts", "attest-readout", "--path", str(world["knowledge"])])
         assert rc == INCIDENT_EXIT
         text = capsys.readouterr().out
-        assert "user-stated:      11" in text
-        assert "incidents: 10" in text
+        assert "user-stated:      12" in text
+        assert "incidents: 11" in text
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +498,7 @@ class TestNoPlaintext:
         # Positive control: the fixture really does carry 64-hex digests, so
         # a clean assert below is evidence of filtering, not of empty input.
         assert _HEX64.search(_digest(3))
-        assert summary.user_stated_total == 11
+        assert summary.user_stated_total == 12
         assert not _HEX64.search(text), _HEX64.search(text)
         assert not _HEX64.search(payload), _HEX64.search(payload)
 
