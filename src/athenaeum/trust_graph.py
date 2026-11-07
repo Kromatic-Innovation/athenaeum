@@ -146,6 +146,25 @@ class _Selector:
     raw: str
 
     def matches(self, source_type: str, source_ref: str) -> bool:
+        """EXACT ref equality, not a prefix check -- deliberately (Seer
+        finding, PR athenaeum#2356). `provenance.parse_source` treats the
+        ENTIRE remainder after the first colon as one opaque ref, so
+        ``api:apollo:2026-05-07`` parses to ``ref="apollo:2026-05-07"``, not
+        a vendor-plus-date pair -- that shape is real and common in the
+        live corpus (date-suffixed `api:` refs). A selector naming just
+        ``api:apollo`` is therefore a DIFFERENT, shorter ref, and
+        `parse_source` itself has no notion under which it and
+        ``api:apollo:2026-05-07`` are "the same source"; this method's
+        exact-equality compare already matches on that same (type, ref)
+        normalization on both sides (see `_safe_source_type_ref`), which is
+        the narrowest change available. Widening it to a prefix/sub-segment
+        match would make a selector reach claims the operator never named,
+        the opposite of the safe direction, and the issue asks only for
+        "optionally narrowed to `type:ref`" -- not prefix semantics. An
+        operator who wants to scope an edge to one specific dated pull
+        writes that exact ref as the selector (fully supported; see
+        `tests/test_trust_graph.py::TestSelectorMatchesDatedRefs`).
+        """
         if self.type != source_type:
             return False
         if self.ref is None:
@@ -310,23 +329,58 @@ def _parse_domain_key(
     return frozenset(normalized)
 
 
+#: The only keys a `librarian.source_trust_edges` entry may carry.
+_EDGE_KEYS: frozenset[str] = frozenset({"domain", "over", "under", "note"})
+
+#: The only keys an edge's `domain` mapping may carry.
+_DOMAIN_KEYS: frozenset[str] = frozenset({"entity_type", "field", "evidence_kind"})
+
+
+def _reject_unknown_keys(raw: dict[str, Any], *, allowed: frozenset[str], where: str) -> None:
+    """Raise on any key in *raw* outside *allowed*.
+
+    An unrecognized key is NOT defensively ignored here, unlike most of
+    this module's value-shape checks: a misspelled key (``feild`` for
+    ``field``, ``evidence_kinds`` for ``evidence_kind``) would otherwise
+    vanish silently, and "absent key means any" would then treat the
+    dimension the operator meant to constrain as a wildcard -- silently
+    WIDENING what the edge overrides, the exact direction this module's
+    docstring says must never happen quietly (the same reasoning that
+    already rejects an out-of-vocabulary `evidence_kind` *value* at load
+    time; a misspelled *key* deserves the same strictness as a bad value).
+    """
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise TrustGraphConfigError(
+            f"source_trust_edges: {where} has unrecognized key(s) {unknown!r} "
+            f"(allowed: {sorted(allowed)!r}) -- a misspelled key would "
+            f"otherwise silently fall back to 'any', widening the edge's scope"
+        )
+
+
 def parse_edge(raw: Any) -> SourceTrustEdge:
     """Parse and validate one `librarian.source_trust_edges` list entry.
 
     Raises :class:`TrustGraphConfigError` on any malformed shape --
     :func:`athenaeum.config.resolve_source_trust_edges` lets this propagate
     (config validation rejects a bad edge at load time, per the issue's
-    acceptance criteria) rather than dropping it silently.
+    acceptance criteria) rather than dropping it silently. This includes
+    an unrecognized key at either the edge level (anything other than
+    ``domain``/``over``/``under``/``note``) or the ``domain`` level
+    (anything other than ``entity_type``/``field``/``evidence_kind``) --
+    see :func:`_reject_unknown_keys`.
     """
     if not isinstance(raw, dict):
         raise TrustGraphConfigError(
             f"source_trust_edges: each entry must be a mapping, got {raw!r}"
         )
+    _reject_unknown_keys(raw, allowed=_EDGE_KEYS, where="an edge")
     domain_raw = raw.get("domain", {})
     if not isinstance(domain_raw, dict):
         raise TrustGraphConfigError(
             f"source_trust_edges: domain must be a mapping, got {domain_raw!r}"
         )
+    _reject_unknown_keys(domain_raw, allowed=_DOMAIN_KEYS, where="an edge's domain")
     domain = SourceTrustDomain(
         entity_type=_parse_domain_key(
             domain_raw.get("entity_type"), key="entity_type", vocabulary=None

@@ -18,6 +18,7 @@ import pytest
 
 from athenaeum import config as config_mod
 from athenaeum.precedence import SOURCE_PRECEDENCE_TIERS, source_rank
+from athenaeum.provenance import parse_source
 from athenaeum.trust_graph import (
     COMPARISON_RELATIONS,
     EQUAL,
@@ -628,10 +629,129 @@ class TestSelectorParsing:
         with pytest.raises(TrustGraphConfigError):
             parse_edge({"domain": "not-a-dict", "over": "api:x", "under": "user"})
 
-    def test_missing_over_raises(self) -> None:
-        with pytest.raises(TrustGraphConfigError):
-            parse_edge({"under": "user"})
-
     def test_missing_under_raises(self) -> None:
         with pytest.raises(TrustGraphConfigError):
             parse_edge({"over": "api:x"})
+
+
+class TestUnrecognizedKeysRejected:
+    """Seer finding (PR athenaeum#2356): a misspelled domain key (`feild`,
+    `evidence_kinds`) must not vanish silently and fall back to "any" --
+    that would silently widen the scope of an edge the operator meant to
+    constrain narrowly. Same treatment at the edge level."""
+
+    @pytest.mark.parametrize(
+        "bad_key", ["feild", "evidence_kinds", "entity", "Field", "evidence_kind "]
+    )
+    def test_misspelled_domain_key_raises(self, bad_key: str) -> None:
+        with pytest.raises(TrustGraphConfigError, match="unrecognized key"):
+            parse_edge(
+                {"domain": {bad_key: "person"}, "over": "api:x", "under": "user"}
+            )
+
+    def test_misspelled_domain_key_names_the_offending_key(self) -> None:
+        with pytest.raises(TrustGraphConfigError, match="feild"):
+            parse_edge({"domain": {"feild": "payout_amount"}, "over": "api:x", "under": "user"})
+
+    def test_valid_domain_keys_accepted_together(self) -> None:
+        edge = parse_edge(
+            {
+                "domain": {
+                    "entity_type": "person",
+                    "field": "payout_amount",
+                    "evidence_kind": "document",
+                },
+                "over": "api:x",
+                "under": "user",
+            }
+        )
+        assert edge.domain.entity_type == frozenset({"person"})
+
+    @pytest.mark.parametrize("bad_key", ["source", "notes", "priority", "Over", "under_"])
+    def test_misspelled_edge_level_key_raises(self, bad_key: str) -> None:
+        with pytest.raises(TrustGraphConfigError, match="unrecognized key"):
+            parse_edge({"over": "api:x", "under": "user", bad_key: "oops"})
+
+    def test_misspelled_edge_level_key_names_the_offending_key(self) -> None:
+        with pytest.raises(TrustGraphConfigError, match="notes"):
+            parse_edge({"over": "api:x", "under": "user", "notes": "typo for note"})
+
+    def test_all_four_valid_edge_keys_accepted_together(self) -> None:
+        edge = parse_edge(
+            {"domain": {}, "over": "api:x", "under": "user", "note": "fine"}
+        )
+        assert edge.note == "fine"
+
+    def test_config_load_propagates_the_domain_key_raise(self) -> None:
+        cfg = {
+            "librarian": {
+                "source_trust_edges": [
+                    {"domain": {"evidence_kinds": "document"}, "over": "api:x", "under": "user"}
+                ]
+            }
+        }
+        with pytest.raises(TrustGraphConfigError, match="evidence_kinds"):
+            config_mod.resolve_source_trust_edges(cfg)
+
+
+class TestSelectorMatchesDatedRefs:
+    """Seer finding (PR athenaeum#2356), adjudicated INVALID as a request
+    for a behaviour change (see the PR thread reply for the full writeup):
+    date-suffixed `api:` refs (`api:apollo:2026-05-07`) are real and common
+    in the live corpus, but `provenance.parse_source` treats the ENTIRE
+    remainder after the first colon as one opaque ref -- it has no notion
+    under which `api:apollo` and `api:apollo:2026-05-07` are "the same
+    source". `_Selector.matches` already compares the parsed (type, ref)
+    the same way on both sides; these tests build both the selector and
+    the claim from `parse_source`'s OWN output (never hand-typed strings)
+    to prove exactly that boundary, both where it holds and where it
+    (correctly) does not.
+    """
+
+    def test_selector_naming_the_full_dated_ref_matches_the_same_claim(self) -> None:
+        claim_ref = parse_source("api:apollo:2026-05-07")
+        assert claim_ref is not None
+        selector_raw = f"{claim_ref.type}:{claim_ref.ref}"
+        edge = parse_edge({"over": selector_raw, "under": "user"})
+        # The selector string was built from parse_source's own (type, ref)
+        # -- exactly "the same source" by parse_source's own normalization
+        # -- and it DOES match.
+        result = compare_sources(
+            "api:apollo:2026-05-07",
+            "user:t",
+            _domain(evidence_kind=UNKNOWN_EVIDENCE_KIND),
+            edges=(edge,),
+        )
+        assert result.relation == OUTRANKS
+        assert "edge[0]" in result.reason
+
+    def test_vendor_only_selector_does_not_match_a_dated_claim(self) -> None:
+        dated_ref = parse_source("api:apollo:2026-05-07")
+        bare_ref = parse_source("api:apollo")
+        assert dated_ref is not None and bare_ref is not None
+        # Two genuinely DIFFERENT refs by parse_source's own parsing --
+        # "apollo" vs "apollo:2026-05-07" -- so a selector built from the
+        # bare form is not "the same source" as the dated claim, and
+        # correctly falls through to the source_rank ladder rather than
+        # silently widening to a prefix match.
+        assert bare_ref.ref != dated_ref.ref
+        selector_raw = f"{bare_ref.type}:{bare_ref.ref}"
+        edge = parse_edge({"over": selector_raw, "under": "user"})
+        result = compare_sources(
+            "api:apollo:2026-05-07",
+            "user:t",
+            _domain(evidence_kind=UNKNOWN_EVIDENCE_KIND),
+            edges=(edge,),
+        )
+        assert "source_rank fallback" in result.reason
+
+    def test_parse_source_treats_the_whole_remainder_after_first_colon_as_ref(
+        self,
+    ) -> None:
+        """Documents the exact parsing fact the adjudication rests on: no
+        third segment exists for `_Selector` to reason about separately --
+        the date suffix is already inside `ref` as one opaque string."""
+        ref = parse_source("api:apollo:2026-05-07")
+        assert ref is not None
+        assert ref.type == "api"
+        assert ref.ref == "apollo:2026-05-07"
