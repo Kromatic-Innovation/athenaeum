@@ -439,6 +439,28 @@ class TestGenerateSignVerifyRoundTrip:
         assert a.key_id() != b.key_id()
 
 
+class TestVerifySignatureEcdsaP256:
+    """``signing.verify_signature``'s ``"ecdsa-p256-sha256"`` branch,
+    exercised directly -- the happy path (verify / tamper-detect) is
+    already covered above through a real sign/verify round trip; this
+    covers the two error paths neither of those tests reaches."""
+
+    def test_malformed_public_key_is_not_verifiable(self) -> None:
+        """Wrong-length bytes can never decode as an X9.63 point --
+        `ec.EllipticCurvePublicKey.from_encoded_point` raises `ValueError`,
+        which must not escape as a bare exception."""
+        assert not signing.verify_signature(
+            b"payload", b"not-a-real-signature", b"\x00" * 10, "ecdsa-p256-sha256"
+        )
+
+    def test_unknown_algorithm_is_not_verifiable(self) -> None:
+        """An algorithm name that matches neither shipped adapter falls
+        through to the final `return False`, not an exception."""
+        assert not signing.verify_signature(
+            b"payload", b"sig", b"\x04" + b"\x00" * 64, "some-other-algorithm"
+        )
+
+
 # ---------------------------------------------------------------------------
 # AC2: the payload (and any key material) never appears on argv
 # ---------------------------------------------------------------------------

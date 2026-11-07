@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from promptwitness import anchor as anchor_mod
-from promptwitness import canon, cli, ledger
+from promptwitness import canon, cli, ledger, secure_enclave
 from tests.test_promptwitness_anchor import _install_fake_opentimestamps
 from tests.test_promptwitness_secure_enclave import _write_fake_helper
 
@@ -268,6 +268,44 @@ class TestKeygenCliSecureEnclave:
         payload = json.loads(captured.err)
         assert "not installed" in payload["error"]
         assert payload["key_path"] == str(tmp_path / "se.key")
+
+    def test_a_readback_failure_after_a_successful_store_exits_1_honestly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """The key IS stored by then (`generate_secure_enclave_key` already
+        read it back once internally before returning), so the CLI's own,
+        separate `provider.key_id()` call failing afterward must say so
+        rather than letting a traceback imply nothing happened -- mirrors
+        `tests/test_promptwitness_os_keystore.py`'s
+        ``TestKeygenCliReportsAReadBackFailureHonestly``.
+        """
+        key_path = tmp_path / "se.key"
+        key_path.write_bytes(b"\x01" * 32)
+        broken_provider = secure_enclave.SecureEnclaveKeyProvider(
+            helper_path=tmp_path / "does-not-exist", key_path=key_path
+        )
+        monkeypatch.setattr(
+            secure_enclave,
+            "generate_secure_enclave_key",
+            lambda helper, key, replace=False: broken_provider,
+        )
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "secure-enclave",
+                "--se-helper",
+                str(tmp_path / "unused"),
+                "--key-path",
+                str(key_path),
+            ]
+        )
+        assert rc == 1
+        captured = capfd.readouterr()
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert "stored but could not be read back" in payload["error"]
+        assert payload["key_path"] == str(key_path)
 
     def test_the_software_file_path_is_unchanged(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
