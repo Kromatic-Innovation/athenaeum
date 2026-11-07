@@ -274,14 +274,27 @@ def _pem_public_key_to_x963(pem_bytes: bytes) -> bytes:
     """Convert a PEM-encoded EC public key (``tpm2_readpublic -f pem``'s
     output) to the X9.63 uncompressed point. Ordinary ``cryptography`` PEM
     parsing -- not a guess, unlike the signature-format assumptions above.
-    Lazy import, matching every other adapter in this package.
+    Lazy import, matching every other adapter in this package -- and, like
+    ``OsKeystoreKeyProvider._load_private_key``, an ABSENT
+    ``cryptography`` is a degrade, not a traceback: this package is
+    installable without the ``witness-sign`` extra, so a missing wheel
+    must reach the caller as :class:`ledger.KeyUnavailable` (an unsigned
+    line) rather than an ``ImportError`` escaping into a hook.
     """
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        PublicFormat,
-        load_pem_public_key,
-    )
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+            load_pem_public_key,
+        )
+    except ImportError as exc:
+        signing._warn_key_unavailable_once(
+            "promptwitness: the 'cryptography' package is not installed "
+            "(install the 'witness-sign' extra) -- signing lines unsigned for "
+            "the rest of this process"
+        )
+        raise ledger.KeyUnavailable("cryptography is not installed") from exc
 
     try:
         key = load_pem_public_key(pem_bytes)
@@ -435,21 +448,28 @@ class Tpm2ToolsBackend:
         hierarchy seed and template) primary, and persist it at
         :attr:`handle`.
 
-        ``force=True`` first attempts to evict whatever already occupies
+        ``force=True`` has to evict whatever already occupies
         :attr:`handle` -- a persistent handle cannot be overwritten without
-        first clearing it (ASSUMPTION #2's bounded-risk note describes the
-        TPM-enforced side of this same fact). A handle that was already
-        empty makes this clear attempt fail harmlessly; that failure is
+        first being cleared (ASSUMPTION #2's bounded-risk note describes
+        the TPM-enforced side of this same fact). A handle that was already
+        empty makes that clear attempt fail harmlessly; the failure is
         swallowed, mirroring every other adapter's ``--force`` contract of
         "I know, do it anyway" rather than re-running the full existence
         probe.
+
+        **The evict happens LAST, immediately before the persist, not
+        first.** Seer review on PR athenaeum#2359 caught the obvious
+        ordering -- evict, then build the new key -- and it is wrong in a
+        way that matters for a key nothing can restore: the three
+        generation calls (``tpm2_createprimary``, ``tpm2_create``, and
+        reading the result back) can each fail or time out, and in the
+        obvious order any of them leaves the operator with the old key
+        destroyed and no new key persisted. Building the new key object in
+        the TPM first costs nothing -- an unpersisted object is discarded
+        when its context file goes -- and shrinks the window in which no
+        usable key exists to the evict/persist pair, which is irreducible:
+        the TPM offers no atomic replace-at-handle.
         """
-        if force:
-            with contextlib.suppress(ledger.KeyUnavailable):
-                self._run(
-                    ["tpm2_evictcontrol", "-C", "o", "-c", self.handle],
-                    action="clear the existing persistent handle",
-                )
         with tempfile.TemporaryDirectory(prefix="promptwitness-tpm2-") as tmp:
             tmp_path = Path(tmp)
             primary_ctx = tmp_path / "primary.ctx"
@@ -488,6 +508,14 @@ class Tpm2ToolsBackend:
                 ],
                 action="create the signing key",
             )
+            # Only now, with the replacement key already built inside the
+            # TPM, is the old one cleared -- see the docstring.
+            if force:
+                with contextlib.suppress(ledger.KeyUnavailable):
+                    self._run(
+                        ["tpm2_evictcontrol", "-C", "o", "-c", self.handle],
+                        action="clear the existing persistent handle",
+                    )
             self._run(
                 ["tpm2_evictcontrol", "-C", "o", "-c", str(key_ctx), self.handle],
                 action="persist the signing key",

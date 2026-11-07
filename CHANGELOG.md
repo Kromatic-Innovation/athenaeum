@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Non-exportable, not presence-gated.** A signature proves the line
     was signed on this physical device; `presence_required()` is `False`
     (operator ruling 1), exactly as `secure_enclave`'s adapter is.
+  - **`--force` rotation clears the old persistent handle LAST**, after
+    the replacement key already exists inside the TPM and immediately
+    before the persist. A TPM offers no atomic replace-at-handle, so some
+    window is irreducible; the obvious order (clear, then build) makes
+    every generation step a chance to leave the operator with the old key
+    destroyed and no new one, and nothing can restore a non-exportable
+    key. The ordering is pinned by a test on the real argv sequence.
   - **Several real-TPM/CNG behaviours could not be verified without
     hardware and are called out as explicit, numbered assumptions in
     `promptwitness.tpm`'s own module docstring** rather than presented as

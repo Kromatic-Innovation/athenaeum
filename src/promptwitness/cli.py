@@ -482,12 +482,21 @@ def _keygen_tpm(args: argparse.Namespace) -> int:
     an existing key, and an unreachable TPM/backend -- report a one-line
     JSON error on stderr and exit 1 rather than raising, never overwriting
     a non-exportable signing key that cannot be recovered if destroyed."""
-    backend = tpm.resolve_tpm_backend(
-        args.harness,
-        backend=args.tpm_backend,
-        key_id=args.tpm_key_id,
-        powershell_path=args.tpm_powershell,
-    )
+    try:
+        backend = tpm.resolve_tpm_backend(
+            args.harness,
+            backend=args.tpm_backend,
+            key_id=args.tpm_key_id,
+            powershell_path=args.tpm_powershell,
+        )
+    except ValueError as exc:
+        # An unrecognized backend NAME. `--tpm-backend` is `choices=`-bound,
+        # so this is reachable through PROMPTWITNESS_TPM_BACKEND, which
+        # argparse never sees -- the same reason `_keygen_os_keystore`
+        # wraps `resolve_keystore_backend`. A bad env var deserves the JSON
+        # error line every other failure here gets, not a traceback.
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
     try:
         provider = tpm.generate_tpm_key(backend, replace=bool(args.force))
     except FileExistsError as exc:

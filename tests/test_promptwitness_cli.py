@@ -378,6 +378,22 @@ class TestKeygenCliTpm:
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
         return store_dir
 
+    def test_a_bad_backend_env_var_is_a_json_error_not_a_traceback(
+        self, tpm2_env: Path, monkeypatch: pytest.MonkeyPatch,
+        capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """`--tpm-backend` is `choices=`-bound, so an unrecognized backend
+        name can only arrive through the env var argparse never sees.
+        `_keygen_os_keystore` already wraps its resolver's `ValueError` for
+        exactly this reason; this pins that `_keygen_tpm` does too, rather
+        than letting a typo'd env var reach the operator as a traceback."""
+        monkeypatch.setenv("PROMPTWITNESS_TPM_BACKEND", "not-a-real-backend")
+        rc = cli.main(["keygen", "--provider", "tpm", "--harness", "claude-code"])
+        assert rc == 1
+        err = capfd.readouterr().err
+        assert "not-a-real-backend" in err
+        assert json.loads(err.strip())["error"]
+
     def test_reports_the_backend_and_strength(
         self, tpm2_env: Path, capfd: pytest.CaptureFixture[str]
     ) -> None:

@@ -25,6 +25,7 @@ fixtures).
 from __future__ import annotations
 
 import base64
+import builtins
 import hashlib
 import json
 import logging
@@ -889,6 +890,69 @@ class TestLinuxFailureModes:
         _append_turn(ledger_dir, provider)
         _append_turn(ledger_dir, provider)
         assert ledger.verify_chain(ledger_dir).ok
+
+
+class TestCryptographyMissingDegrades:
+    def test_absent_cryptography_is_key_unavailable_not_import_error(
+        self, tpm2_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """This package installs without the ``witness-sign`` extra, so a
+        missing ``cryptography`` must reach the caller as an unsigned line
+        (``ledger.KeyUnavailable``), never as an ``ImportError`` escaping
+        into a per-prompt hook. Same import-site patch
+        ``tests/test_promptwitness_signing.py`` uses, since the library IS
+        installed in dev and CI.
+        """
+        provider = tpm.generate_tpm_key(tpm.Tpm2ToolsBackend(handle="0x810100e1"))
+
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "cryptography" or name.startswith("cryptography."):
+                raise ImportError("simulated: cryptography is not installed")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with pytest.raises(ledger.KeyUnavailable, match="not installed"):
+            provider.public_key()
+
+
+class TestForceRotationEvictsLast:
+    def test_the_old_key_is_cleared_only_after_the_new_one_exists(
+        self, tpm2_env: Path, recorder: RecordingSubprocess
+    ) -> None:
+        """Ordering, pinned -- a persistent handle has no atomic replace.
+
+        The obvious order (clear the handle, then build the replacement)
+        leaves the operator with the old key destroyed and no new key if
+        any generation step fails, and nothing can restore a
+        non-exportable key. So the clear must come after
+        `tpm2_create`, immediately before the persist. Asserted on the
+        real argv sequence rather than by reading the source, so a
+        reorder is a failing test rather than a silent regression.
+        """
+        handle = "0x810100c1"
+        backend = tpm.Tpm2ToolsBackend(handle=handle)
+        tpm.generate_tpm_key(backend)
+        recorder.calls.clear()
+
+        tpm.generate_tpm_key(backend, replace=True)
+
+        tools = [c.argv[0] for c in recorder.calls]
+        # The clear and the persist are both tpm2_evictcontrol; the clear
+        # is the one WITHOUT a trailing handle argument after -c.
+        evicts = [i for i, c in enumerate(recorder.calls) if c.argv[0] == "tpm2_evictcontrol"]
+        assert len(evicts) == 2, f"expected a clear and a persist, got {tools}"
+        clear_at, persist_at = evicts
+        assert recorder.calls[clear_at].argv[-1] == handle
+        assert recorder.calls[persist_at].argv[-1] == handle
+        assert "tpm2_create" in tools
+        create_at = tools.index("tpm2_create")
+        assert create_at < clear_at, (
+            f"the handle was cleared before the replacement key was built: {tools}"
+        )
+        assert clear_at < persist_at
 
 
 class TestSignNeverClaimsTheKeyIsAbsent:
