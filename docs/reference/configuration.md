@@ -3539,6 +3539,74 @@ accumulates.
 only counts verdict-ledger entries whose ``at`` timestamp falls within
 this many days of "now".
 
+### `resolve_source_trust_edges`
+
+- **YAML path:** `librarian.source_trust_edges`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the operator-declared pairwise source-trust edges that `athenaeum.trust_graph.compare_sources` consults.
+DEFAULT ```` (empty tuple).
+
+``librarian.source_trust_edges`` -- a list of mappings, each shaped:
+```
+domain: {entity_type: ..., field: ..., evidence_kind: ...}
+over: "<type>[:<ref>]"
+under: "<type>[:<ref>]"
+note: "<optional operator commentary>"
+```
+
+Each returned element is an ``athenaeum.trust_graph.SourceTrustEdge``.
+
+Yaml only. Defensive at the TOP level only: a missing or non-list
+``librarian.source_trust_edges`` silently resolves to the empty tuple,
+the same policy every other resolver in this module uses for an absent
+knob. Each PRESENT entry, by contrast, is FAIL-LOUD: it is parsed by
+`athenaeum.trust_graph.parse_edge`, which raises
+`athenaeum.trust_graph.TrustGraphConfigError` (a ``ValueError``
+subclass) on a malformed edge -- a non-dict entry, an ``api`` selector
+with no ``:ref``, or a ``domain.evidence_kind`` outside
+`athenaeum.trust_graph.EVIDENCE_KINDS` -- exactly the "never
+silently drop a typo in an evidence-ranking knob" policy
+`ReceiptAnchorConfigError` states above for anchoring adapters.
+This resolver deliberately does NOT catch that exception: an operator
+error here changes which source wins a conflict, so it must surface
+loudly at config load, never get swallowed into "as if the edge were
+never declared".
+
+Also runs the load-time lint the issue requires: once every entry
+parses, `athenaeum.trust_graph.find_contradictory_edges` finds
+any two edges that contradict each other (``A over B`` and ``B over A``)
+in an overlapping domain, and this resolver logs one ``logger.warning``
+per contradictory pair, naming both edges' positions and descriptions.
+The lint only warns -- it never raises and never drops an edge;
+``compare_sources`` itself is what resolves a live contradiction to
+``incomparable`` at comparison time (the actual correctness guarantee),
+so this warning is purely an early, load-time heads-up for the
+operator who wrote the contradiction. No seed in ``_DEFAULTS``.
+
+### `resolve_source_trust_enabled`
+
+- **YAML path:** `librarian.source_trust_enabled`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the trust-graph pairwise-override feature flag. DEFAULT ``False``.
+
+``librarian.source_trust_enabled``. Yaml only, no env override -- an
+operator overriding source precedence for a domain is a deliberate,
+reviewed change to evidence ranking, not an emergency knob. Non-bool
+yaml values fall back to the default, same policy as
+`resolve_witness_attestation_enabled`. No seed in ``_DEFAULTS``
+This is the flag the (not-yet-wired) TG3/TG4
+callers will gate on before consulting `source_trust_edges` at all --
+this slice adds no caller, so the flag currently has no effect on any
+existing behaviour.
+
 ### `resolve_standing_state_claim_kinds`
 
 - **YAML path:** `librarian.standing_state_claim_kinds`
