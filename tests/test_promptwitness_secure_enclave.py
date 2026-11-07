@@ -20,6 +20,7 @@ vars only -- never a hardcoded machine-specific home-directory literal
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import subprocess
 import sys
@@ -243,6 +244,32 @@ def _nonzero_helper(tmp_path: Path) -> Path:
     return path
 
 
+def _untagged_pubkey_helper(tmp_path: Path) -> Path:
+    """The fake helper, REGRESSED to CryptoKit's ``.rawRepresentation``.
+
+    The negative control for the one encoding mistake this module exists
+    to prevent: ``rawRepresentation`` is the bare 64-byte ``X || Y`` pair,
+    ``x963Representation`` the same coordinates behind a ``0x04`` tag, and
+    the two property names differ by nothing else. Shipping the untagged
+    form was a real defect on this branch before it was caught by reading
+    the Swift source -- not a hypothetical -- and it is invisible to every
+    other test here, because they all run the one CORRECT stub. Without a
+    guard, the untagged form yields a wrong-but-stable ``key_id``, a
+    ``sign`` that still succeeds, and a ``verify_signature`` that returns
+    ``False`` exactly as a TAMPERED signature does, so the two become
+    indistinguishable.
+    """
+    path = tmp_path / "fake-untagged-se"
+    regressed = _STUB_SOURCE.replace(
+        'return base64.b64encode(pub).decode("ascii")',
+        'return base64.b64encode(pub[1:]).decode("ascii")',
+    )
+    assert regressed != _STUB_SOURCE, "the regression patch did not apply"
+    path.write_text(regressed, encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
 def _hanging_helper(tmp_path: Path) -> Path:
     """A real, executable script that reads stdin forever -- used to
     exercise the timeout path without relying on a mock."""
@@ -417,6 +444,23 @@ class TestGenerateSignVerifyRoundTrip:
         )
         assert provider.key_id().startswith("ecdsa-p256-sha256:")
 
+    def test_key_id_matches_an_independently_computed_digest(
+        self, helper: Path, tmp_path: Path
+    ) -> None:
+        """An external oracle for the key_id shape, not
+        :func:`signing.derive_key_id` under a second name.
+
+        ``tests/test_promptwitness_signing.py``'s ``TestDeriveKeyIdParity``
+        binds the ed25519 case to ``athenaeum.receipt_sealers``' own
+        implementation; there is no such second implementation for this
+        algorithm, so the digest is spelled out here instead.
+        """
+        provider = secure_enclave.generate_secure_enclave_key(helper, tmp_path / "se.key")
+        expected = (
+            "ecdsa-p256-sha256:" + hashlib.sha256(provider.public_key()).hexdigest()[:16]
+        )
+        assert provider.key_id() == expected
+
     def test_round_trip_through_append_line_and_verify_chain(
         self, helper: Path, tmp_path: Path
     ) -> None:
@@ -515,6 +559,70 @@ class TestArgvHygiene:
 # subclass), never a crash, never a bare exception type the caller cannot
 # recognize.
 # ---------------------------------------------------------------------------
+
+
+class TestWireFormatRegressionIsLoud:
+    """The encoding agreement is enforced, not merely documented.
+
+    Every other test in this file runs the one CORRECT stub, so none of
+    them can see a helper that emits the wrong public-key encoding. These
+    use :func:`_untagged_pubkey_helper` -- the real, executable negative
+    control -- to prove the adapter REFUSES it rather than deriving a
+    wrong-but-stable ``key_id`` from it.
+    """
+
+    def test_untagged_64_byte_point_is_refused(
+        self, tmp_path: Path, recorder: RecordingSubprocess
+    ) -> None:
+        key_path = tmp_path / "se.key"
+        key_path.write_bytes(b"\x01" * 32)
+        provider = secure_enclave.SecureEnclaveKeyProvider(
+            helper_path=_untagged_pubkey_helper(tmp_path), key_path=key_path
+        )
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
+            provider.public_key()
+        assert "64 bytes" in str(excinfo.value)
+        # Not the absent-key class: the helper answered, it just answered
+        # in the wrong encoding -- that is a malfunction, not "no key".
+        assert not isinstance(excinfo.value, signing.KeystoreItemAbsent)
+
+    def test_key_id_refuses_rather_than_returning_a_wrong_stable_value(
+        self, tmp_path: Path, recorder: RecordingSubprocess
+    ) -> None:
+        """The specific silent failure the guard exists for: without it,
+        ``key_id`` would succeed and simply be wrong forever."""
+        key_path = tmp_path / "se.key"
+        key_path.write_bytes(b"\x01" * 32)
+        provider = secure_enclave.SecureEnclaveKeyProvider(
+            helper_path=_untagged_pubkey_helper(tmp_path), key_path=key_path
+        )
+        with pytest.raises(ledger.KeyUnavailable):
+            provider.key_id()
+
+    def test_the_negative_control_is_not_vacuous(self, tmp_path: Path) -> None:
+        """A floor on the control itself: the regressed stub really does
+        emit 64 untagged bytes, so a passing test above is not an artifact
+        of a stub that failed for some unrelated reason."""
+        key_path = tmp_path / "se.key"
+        key_path.write_bytes(b"\x01" * 32)
+        completed = subprocess.run(
+            [str(_untagged_pubkey_helper(tmp_path)), "pubkey", "--key-file", str(key_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        raw = base64.b64decode(completed.stdout.strip(), validate=True)
+        assert len(raw) == 64
+        assert raw[0:1] != b"\x04"
+
+
+class TestAlgorithmConstantParity:
+    def test_signing_private_constant_matches_this_module(self) -> None:
+        """``signing._ECDSA_P256_ALGORITHM`` is a deliberate duplicate of
+        :data:`secure_enclave.ALGORITHM` (importing this module at
+        ``signing``'s scope would make the dependency two-way). Its own
+        comment promises this assertion exists; this is it."""
+        assert signing._ECDSA_P256_ALGORITHM == secure_enclave.ALGORITHM
 
 
 class TestHelperFailureModes:

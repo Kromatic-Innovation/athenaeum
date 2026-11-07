@@ -109,6 +109,14 @@ STRENGTH = "hardware-nonexportable"
 #: alive.
 _TIMEOUT_DEFAULT: float = signing._KEYSTORE_TIMEOUT_DEFAULT
 
+#: The X9.63 uncompressed-point encoding the helper and this adapter agree
+#: on (see the module docstring): a one-byte tag followed by the two 32-byte
+#: P-256 coordinates. Asserted on every read in
+#: :meth:`SecureEnclaveKeyProvider._public_key_bytes`, because the failure
+#: mode of getting it wrong is silent.
+_X963_UNCOMPRESSED_TAG = b"\x04"
+_X963_POINT_LEN = 65
+
 #: The helper's documented "no key file yet" exit code
 #: (``tools/promptwitness-se/Sources/promptwitness-se/main.swift``'s
 #: ``ExitCode.noKey``). Every other non-zero exit means the helper itself
@@ -249,7 +257,7 @@ class SecureEnclaveKeyProvider:
     def _public_key_bytes(self) -> bytes:
         encoded = self._run("pubkey", input_bytes=None)
         try:
-            return base64.b64decode(encoded.strip(), validate=True)
+            raw = base64.b64decode(encoded.strip(), validate=True)
         except (ValueError, TypeError) as exc:
             signing._warn_key_unavailable_once(
                 "promptwitness: the secure-enclave helper's pubkey output "
@@ -259,6 +267,28 @@ class SecureEnclaveKeyProvider:
             raise ledger.KeyUnavailable(
                 "secure-enclave: helper pubkey output is not base64"
             ) from exc
+        # The one enforcement point for the encoding agreement the module
+        # docstring describes. Without it, a helper that regressed to
+        # CryptoKit's ``.rawRepresentation`` (the untagged 64-byte
+        # ``X || Y``) would be accepted silently: ``key_id`` would simply
+        # change to a different, wrong-but-stable value, ``sign`` would
+        # keep succeeding, and the ONLY symptom would be
+        # :func:`signing.verify_signature` returning ``False`` -- which is
+        # also what a tampered signature looks like, so the two would be
+        # indistinguishable. A wire-format regression must announce itself
+        # as one.
+        if len(raw) != _X963_POINT_LEN or raw[0:1] != _X963_UNCOMPRESSED_TAG:
+            signing._warn_key_unavailable_once(
+                "promptwitness: the secure-enclave helper's pubkey output is "
+                f"{len(raw)} bytes, not a {_X963_POINT_LEN}-byte X9.63 "
+                "uncompressed point -- signing lines unsigned for the rest "
+                "of this process"
+            )
+            raise ledger.KeyUnavailable(
+                f"secure-enclave: helper pubkey output is {len(raw)} bytes, "
+                f"not a {_X963_POINT_LEN}-byte X9.63 uncompressed point"
+            )
+        return raw
 
     def key_id(self) -> str:
         return signing.derive_key_id(self._public_key_bytes(), ALGORITHM)
