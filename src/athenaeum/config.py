@@ -56,6 +56,7 @@ shared parse and is unaffected by this policy.
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import logging
@@ -8690,3 +8691,107 @@ def resolve_witness_ledger_enabled(config: dict[str, Any] | None) -> bool:
             if isinstance(raw, bool):
                 return raw
     return False
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2333 (TG5): `librarian.witness.keys` -- the operator-declared
+# witness-signing key registry. Appended here, at the end of the file, per
+# this module's own established convention (see the `librarian.receipt_
+# anchor.*` block above) of giving a concurrently-landing lane's resolver its
+# own append point so two lanes' diffs don't collide on the same hunk.
+#
+# NAMING NOTE (recorded for the lane report): today's witness config is
+# FLAT -- `librarian.witness_attestation_enabled` / `librarian.
+# witness_ledger_enabled` above -- there is no existing `librarian.
+# witness.*` nested family. Issue athenaeum#2333 names `librarian.witness.keys`
+# explicitly, so this resolver INTRODUCES that nested family rather than
+# joining one that already existed; the two flat keys are left exactly as
+# they are (no migration asked for, none performed).
+# ---------------------------------------------------------------------------
+
+
+#: The signing-key strength vocabulary, weakest to strongest (issue
+#: athenaeum#2333). Duplicated from `promptwitness.signing.STRENGTHS` rather
+#: than imported: this module has no `promptwitness` import today, and
+#: `athenaeum.witness_attestation` (the sole consumer of this tuple) is
+#: under an explicit out-of-scope line in athenaeum#2333 forbidding any NEW
+#: `promptwitness` import beyond what it already uses. Same "duplicate +
+#: bind with a parity test" discipline `promptwitness.signing.derive_key_id`
+#: documents against `athenaeum.receipt_sealers.derive_key_id` -- see
+#: `tests/test_witness_keys_config.py::test_strengths_match_promptwitness_signing`.
+WITNESS_KEY_STRENGTHS: tuple[str, ...] = (
+    "none",
+    "software-file",
+    "os-keystore",
+    "hardware-nonexportable",
+    "hardware-presence",
+)
+
+
+def resolve_witness_keys(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve the operator-declared witness-signing key registry at
+    ``librarian.witness.keys`` (issue athenaeum#2333, TG5). DEFAULT ``{}``.
+
+    .. code-block:: yaml
+
+        librarian:
+          witness:
+            keys:
+              ed25519:abcdef0123456789:
+                public_key: "<standard base64 of the raw 32-byte Ed25519 public key>"
+                strength: os-keystore
+
+    Each entry's ``public_key`` is standard base64 of the RAW public-key
+    bytes :func:`promptwitness.ledger.verify_chain`'s own ``public_keys``
+    parameter expects -- never PEM, never OpenSSH wire format -- the same
+    encoding :mod:`promptwitness.signing` already uses for its own on-disk
+    key-seed storage. ``strength`` must be one of
+    :data:`WITNESS_KEY_STRENGTHS`; this is the key's REGISTERED strength,
+    independent of (and the yardstick for) whatever strength a ledger line
+    signed by it claims -- see :meth:`athenaeum.witness_attestation.
+    AttestationIndex.verified_strength`.
+
+    Yaml only -- a signing-key registry is not an emergency override, same
+    reasoning as :func:`resolve_authority_grant_implications` -- and
+    strictly defensive, per-entry: a ``key_id`` that is not a non-empty
+    string, a value that is not a mapping, a ``public_key`` that is
+    missing / not a string / not valid base64 / not exactly 32 bytes once
+    decoded, or a ``strength`` outside :data:`WITNESS_KEY_STRENGTHS` drops
+    that ONE entry rather than the whole map (or raising) -- one operator
+    typo must not silently disable every OTHER registered key. Default
+    ``{}``: with no declared keys, every witness-ledger signature verifies
+    against nothing, which is :func:`promptwitness.ledger.verify_chain`'s
+    own documented "no signature checking" default -- i.e. this resolver
+    returning empty changes nothing about today's behaviour.
+    """
+    if not isinstance(config, dict):
+        return {}
+    librarian = config.get("librarian")
+    if not isinstance(librarian, dict):
+        return {}
+    witness = librarian.get("witness")
+    if not isinstance(witness, dict):
+        return {}
+    raw = witness.get("keys")
+    if not isinstance(raw, dict):
+        return {}
+    keys: dict[str, dict[str, Any]] = {}
+    for key_id, entry in raw.items():
+        if not isinstance(key_id, str) or not key_id.strip():
+            continue
+        if not isinstance(entry, dict):
+            continue
+        raw_public_key = entry.get("public_key")
+        strength = entry.get("strength")
+        if not isinstance(raw_public_key, str) or not raw_public_key.strip():
+            continue
+        if not isinstance(strength, str) or strength not in WITNESS_KEY_STRENGTHS:
+            continue
+        try:
+            public_key = base64.b64decode(raw_public_key, validate=True)
+        except (ValueError, TypeError):
+            continue
+        if len(public_key) != 32:
+            continue
+        keys[key_id.strip()] = {"public_key": public_key, "strength": strength}
+    return keys

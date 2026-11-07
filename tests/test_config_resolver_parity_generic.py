@@ -196,11 +196,21 @@ _GENERIC_HELPER_SIGNATURE = frozenset(
 )
 # Issue athenaeum#2075: the two list/mapping-valued quarantine knobs are covered
 # directly in tests/test_quarantine_retry_2075.py.
+#
+# Issue athenaeum#2333: `librarian.witness.keys` maps key_id -> {public_key,
+# strength} -- a dict whose VALUES are themselves structured objects with
+# named fields the resolver requires literally ("public_key"/"strength").
+# No sentinel in `_SENTINEL_VALUES` ever spells those exact field names, so
+# every candidate this generic prober can construct is rejected by the
+# resolver's own defensive validation and reads identically to "never read
+# the key" -- same shape gap as `resolve_model_rates` above, same
+# treatment. Covered directly by tests/test_witness_keys_config.py.
 _STRUCTURED_CONTAINER_VALUE = frozenset(
     {
         "resolve_model_rates",
         "resolve_quarantine_retry_delays_days",
         "resolve_raw_file_max_api_calls_by_source",
+        "resolve_witness_keys",
     }
 )
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
