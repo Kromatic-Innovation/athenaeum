@@ -25,18 +25,31 @@ run appears in either rendering.
 2. the ``witnessed`` total, split by ``witness_tag`` (``typed`` /
    ``slash-args``);
 3. misses broken down by reason — bucketed by the prefix BEFORE the first
-   ``":"``, because three of the eleven
+   ``":"``, because several of the
    :data:`athenaeum.witness_attestation.MISS_REASONS` values carry a
    ``:``-suffixed value (``kind-not-human:<kind>``,
    ``channel-not-interactive:<ch>``, ``transcript-promptsource:<value>``)
    and an unbucketed breakdown would have unboundedly many keys;
-4. provenance incidents — every miss other than ``flag-off``, each with its
+4. provenance incidents — every MISS other than ``flag-off``, each with its
    full reason, its session and its ``witness_ref``. A miss whose receipt
    carries ``transcript_origin == "human"`` and
    ``transcript_entrypoint == "cli"`` is flagged ``likely_false_negative``:
    both fields are persisted on the receipt itself as of schema v2
    (:class:`athenaeum.transcript_receipts.ReceiptEntry`), so this flag is
-   read from the permitted sources with no derivation;
+   read from the permitted sources with no derivation. **Not** a HIT's own
+   ``witness-strength-mismatch`` reason (issue athenaeum#2333) — see (4a);
+4a. strength-mismatch incidents — a ``"witnessed"`` (hit) receipt whose
+   ``witness_miss`` is ``witness-strength-mismatch:<claimed>``
+   (:class:`athenaeum.witness_attestation.AttestationOutcome`'s one
+   documented exception) is its OWN incident class
+   (:data:`INCIDENT_STRENGTH_MISMATCH`), counted toward neither
+   ``miss_counts`` nor ``witnessed``'s sibling miss bucket, and never
+   flagged ``likely_false_negative`` — nothing was missed, a hit's signing
+   claim just did not verify at the level it claimed. Keeping it out of (3)
+   and (4) is what keeps "witnessed" and "missed" partitioning cleanly: a
+   receipt is in exactly one of those two buckets, and a strength mismatch
+   is an orthogonal THIRD fact about a receipt that IS in the "witnessed"
+   bucket;
 5. the unsigned-line count (``WitnessLine.sig is None``) and the anchor
    coverage, both from the witness index;
 6. the ``witness_hook_errors.jsonl`` count broken down by error class, each
@@ -147,6 +160,7 @@ __all__ = [
     "INCIDENT_HOOK_ERROR",
     "INCIDENT_PROVENANCE_MISS",
     "INCIDENT_SESSION_CLOSE_DEFICIT",
+    "INCIDENT_STRENGTH_MISMATCH",
     "Incident",
     "ReadoutSummary",
     "build_readout",
@@ -154,7 +168,9 @@ __all__ = [
 ]
 
 #: Incident class: a receipt whose ``witness_miss`` is anything other than
-#: ``flag-off``. One incident per receipt (ruling 10 — every miss is an
+#: ``flag-off`` OR a ``witness-strength-mismatch:*`` reason (that one is
+#: :data:`INCIDENT_STRENGTH_MISMATCH` instead — see the module docstring's
+#: point 4a). One incident per receipt (ruling 10 — every miss is an
 #: incident, there is no rate).
 INCIDENT_PROVENANCE_MISS = "provenance-miss"
 
@@ -169,11 +185,23 @@ INCIDENT_HOOK_ERROR = "hook-error"
 #: for why this is NOT ``turns - turns_witnessed``.
 INCIDENT_SESSION_CLOSE_DEFICIT = "session-close-deficit"
 
+#: Incident class (issue athenaeum#2333): a ``"witnessed"`` (HIT) receipt
+#: whose claimed signing strength could not be substantiated against the
+#: registered key registry. Deliberately NOT :data:`INCIDENT_PROVENANCE_MISS`
+#: — that class means "no attestation was found"; this one fires on a
+#: receipt that attested FINE and merely carries an unverifiable strength
+#: claim. Keeping the two separate is what keeps ``witnessed_total`` and
+#: ``miss_counts`` partitioning a run's receipts cleanly instead of letting
+#: one receipt land in both, and keeps ``likely_false_negative`` (a claim
+#: about a MISS) from ever being asserted of a hit.
+INCIDENT_STRENGTH_MISMATCH = "witness-strength-mismatch"
+
 #: Every incident class, in the order the readout renders them.
 INCIDENT_CLASSES: tuple[str, ...] = (
     INCIDENT_PROVENANCE_MISS,
     INCIDENT_HOOK_ERROR,
     INCIDENT_SESSION_CLOSE_DEFICIT,
+    INCIDENT_STRENGTH_MISMATCH,
 )
 
 #: The hook-error ledger's filename under the resolved cache dir. Same
@@ -232,12 +260,16 @@ def _read_jsonl_tolerant(path: Path) -> list[dict[str, Any]]:
 
 
 def _reason_bucket(reason: str) -> str:
-    """The stable breakdown key for a miss reason.
+    """The stable breakdown key for a miss/strength reason.
 
-    Three of the eleven :data:`athenaeum.witness_attestation.MISS_REASONS`
-    values carry a ``:``-suffixed value, so the prefix before the first
-    ``":"`` is the only bucketing that keeps the breakdown's key set
-    bounded and comparable night to night.
+    Several :data:`athenaeum.witness_attestation.MISS_REASONS` values carry
+    a ``:``-suffixed value, so the prefix before the first ``":"`` is the
+    only bucketing that keeps the breakdown's key set bounded and
+    comparable night to night. ``witness-strength-mismatch:<claimed>``
+    buckets to ``witness-strength-mismatch`` by the same rule, which is
+    exactly :data:`INCIDENT_STRENGTH_MISMATCH`'s own value -- see
+    :func:`_receipt_side`'s branch for why that bucket is routed to its
+    own incident class rather than :data:`INCIDENT_PROVENANCE_MISS`.
     """
     return reason.split(":", 1)[0]
 
@@ -255,12 +287,13 @@ def _in_window(month: str, since: str | None) -> bool:
 
 @dataclass(frozen=True)
 class Incident:
-    """One incident, in one of the three :data:`INCIDENT_CLASSES`.
+    """One incident, in one of the :data:`INCIDENT_CLASSES`.
 
-    ``count`` is 1 for a provenance miss (one receipt, one incident) and the
-    class/session total for a hook-error class or a session-close deficit.
-    Carries no digest and no text — ``reason`` is an enum label, ``session``
-    an origin session id, ``witness_ref`` a ``<ledger_id>:<seq>`` coordinate.
+    ``count`` is 1 for a provenance miss or a strength mismatch (one
+    receipt, one incident) and the class/session total for a hook-error
+    class or a session-close deficit. Carries no digest and no text —
+    ``reason`` is an enum label, ``session`` an origin session id,
+    ``witness_ref`` a ``<ledger_id>:<seq>`` coordinate.
     """
 
     incident_class: str
@@ -434,6 +467,23 @@ def _receipt_side(
         if not reason:
             continue
         bucket = _reason_bucket(reason)
+        # Issue athenaeum#2333: a strength-mismatch reason can land on a
+        # HIT (`channel == "witnessed"`), already counted above. It is a
+        # real incident, but NOT a miss -- routing it into `miss_counts`
+        # would double-count the receipt (witnessed AND missed) and
+        # `likely_false_negative` would assert something FALSE about a
+        # receipt where nothing was missed. Give it its own incident class
+        # instead, and skip the miss-side bookkeeping entirely.
+        if bucket == INCIDENT_STRENGTH_MISMATCH:
+            incidents.append(
+                Incident(
+                    incident_class=INCIDENT_STRENGTH_MISMATCH,
+                    reason=reason,
+                    session=entry.origin_session_id,
+                    witness_ref=entry.witness_ref,
+                )
+            )
+            continue
         miss_counts[bucket] = miss_counts.get(bucket, 0) + 1
         if bucket == _NOT_AN_INCIDENT:
             continue
