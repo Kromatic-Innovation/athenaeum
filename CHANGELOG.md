@@ -34,8 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (raw X9.63 public key, DER signature), alongside the existing
     `"ed25519"` one.
   - A new, separate `.github/workflows/promptwitness-se-macos.yml` builds
-    the helper unsigned on `macos-latest` and asserts the "Secure Enclave
-    unavailable" failure path a GitHub-hosted runner always hits; it is
+    the helper unsigned on `macos-latest` and smoke-tests it against that
+    runner's own enclave (measured: `macos-latest` has a usable one, so CI
+    verifies a real signature with `openssl` and nothing else), falling back
+    to asserting the clean-degrade contract on a runner without one. It is
     deliberately excluded from the `ci-required` aggregate, same rationale
     as `ci.yml`'s own `docs-uv-install-path` job.
   - Codesigning, notarization, the real-device signature check, the

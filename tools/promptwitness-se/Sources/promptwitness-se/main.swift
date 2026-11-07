@@ -31,11 +31,14 @@
 //   adapter derives, with no error to signal it.
 // - Every failure path prints one line to stderr and exits non-zero;
 //   nothing here ever crashes or exits 0 on failure.
-//   `SecureEnclave.isAvailable == false` (always true on a GitHub-hosted
-//   macOS CI runner, which is a VM with no Secure Enclave) is itself one
-//   such failure, not a crash -- that is what lets
-//   .github/workflows/promptwitness-se-macos.yml assert a clean, unsigned
-//   build and a clean failure path without ever touching a real enclave.
+//   `SecureEnclave.isAvailable == false` is itself one such failure, not a
+//   crash. MEASURED, because the first revision of this file assumed
+//   otherwise: a GitHub-hosted `macos-latest` runner DOES have a usable
+//   Secure Enclave -- `create` exits 0 there and returns a real 65-byte
+//   X9.63 point -- so .github/workflows/promptwitness-se-macos.yml
+//   exercises the real path on CI and keeps the degrade assertions for a
+//   runner image that later drops enclave access. Either way nothing is
+//   signed or notarized (athenaeum#2239).
 
 import CryptoKit
 import Foundation

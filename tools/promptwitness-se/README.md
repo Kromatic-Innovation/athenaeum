@@ -52,5 +52,7 @@ second-Mac uselessness check, and latency measurement are **athenaeum#2239**,
 not this tool. This helper builds and runs unsigned; CI
 (`.github/workflows/promptwitness-se-macos.yml`) proves only that it
 builds and that every subcommand fails cleanly (non-zero exit, one-line
-stderr diagnostic, never a crash) on a runner with no Secure Enclave —
-which is every GitHub-hosted macOS runner today.
+stderr diagnostic, never a crash) on a machine with no Secure Enclave.
+A GitHub-hosted `macos-latest` runner, measured, DOES have a usable one,
+so CI exercises the real create/sign/pubkey path and keeps the
+degrade assertions for a runner image that later drops it.
