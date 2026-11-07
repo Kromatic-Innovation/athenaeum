@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -604,12 +605,16 @@ class TestWitnessAttestationIntegration:
         original_bytes = (v1_line + "\n").encode("utf-8")
         partition.write_bytes(original_bytes)
 
-        # Still parses, with every new field defaulting to None.
+        # Still parses, with every new field defaulting to None -- the v1
+        # shape "reads as unverified" (issue athenaeum#2333 AC): neither new
+        # field claims any strength or anchor source for it.
         [parsed] = iter_receipts(wiki)
         assert parsed.schema_version == 1
         assert parsed.witness_tag is None
         assert parsed.witness_miss is None
         assert parsed.transcript_origin is None
+        assert parsed.witness_strength_verified is None
+        assert parsed.witness_anchor_source is None
 
         # A run over a DIFFERENT, unrelated claim must not touch the v1 line.
         pr = tmp_path / "projects"
@@ -627,6 +632,186 @@ class TestWitnessAttestationIntegration:
             )
         assert entry is not None
         assert partition.read_bytes()[: len(original_bytes)] == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2333 (TG5): signature verification + anchor source,
+# end to end through write_receipt_for_origin.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubSigningProvider:
+    """Minimal ``KeyProviderLike``-shaped stub, local to this file (issue
+    athenaeum#2333 tests only) — a real, in-memory-only Ed25519 keypair that
+    can claim any strength label. Never writes a PEM: ``public_key()`` uses
+    ``Encoding.Raw``/``PublicFormat.Raw``."""
+
+    private_key: Any
+    claimed_strength: str
+
+    def key_id(self) -> str:
+        from promptwitness.signing import derive_key_id
+
+        return derive_key_id(self.public_key(), "ed25519")
+
+    def algorithm(self) -> str:
+        return "ed25519"
+
+    def strength(self) -> str:
+        return self.claimed_strength
+
+    def presence_required(self) -> bool:
+        return False
+
+    def sign(self, payload: bytes) -> bytes:
+        return bytes(self.private_key.sign(payload))
+
+    def public_key(self) -> bytes:
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        return self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def _stub_signing_provider(claimed_strength: str) -> _StubSigningProvider:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    return _StubSigningProvider(Ed25519PrivateKey.generate(), claimed_strength)
+
+
+class TestWitnessSignatureVerificationIntegration:
+    def test_unregistered_key_still_upgrades_channel_but_flags_an_incident(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: a claimed-strength line signed by a key no operator ever
+        registered still attests (provenance succeeds, channel upgrades to
+        ``witnessed``), but the receipt carries the incident."""
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        provider = _stub_signing_provider("os-keystore")
+        _append_witness_turn(witness_dir, _text=text, key_provider=provider)
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        config = {"librarian": {"witness_attestation_enabled": True}}  # no witness.keys
+        run = ReceiptRun(wiki, config=config)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.channel == "witnessed"
+        assert entry.witness_strength == "os-keystore"
+        assert entry.witness_strength_verified == "none"
+        assert entry.witness_miss == "witness-strength-mismatch:os-keystore"
+
+    def test_registered_key_verifies_and_carries_no_incident(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        provider = _stub_signing_provider("os-keystore")
+        _append_witness_turn(witness_dir, _text=text, key_provider=provider)
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        import base64
+
+        config = {
+            "librarian": {
+                "witness_attestation_enabled": True,
+                "witness": {
+                    "keys": {
+                        provider.key_id(): {
+                            "public_key": base64.b64encode(provider.public_key()).decode(
+                                "ascii"
+                            ),
+                            "strength": "os-keystore",
+                        }
+                    }
+                },
+            }
+        }
+        run = ReceiptRun(wiki, config=config)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.channel == "witnessed"
+        assert entry.witness_strength_verified == "os-keystore"
+        assert entry.witness_miss is None
+
+    def test_witness_anchored_preserved_with_local_clock_only_anchor_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: ``witness_anchored`` is preserved for compatibility; a
+        local-clock-only anchor additionally yields
+        ``witness_anchor_source == "local-clock"``."""
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        line = _append_witness_turn(witness_dir, _text=text)
+        ledger.append_line(
+            witness_dir,
+            kind="anchor",
+            harness="claude-code",
+            harness_version="",
+            hook_version="promptwitness 0.1.0",
+            extra={
+                "subject": f"witness:{line.ledger_id}:{line.seq}",
+                "digest": line.line_hash(),
+                "op": "anchor",
+                "attestation": {
+                    "source": "local-clock",
+                    "status": "complete",
+                    "claimed_time": "2026-01-01T00:00:00Z",
+                    "proof_path": None,
+                    "detail": {},
+                },
+            },
+        )
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        config = {"librarian": {"witness_attestation_enabled": True}}
+        run = ReceiptRun(wiki, config=config)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.witness_anchored is True  # preserved, unchanged meaning
+        assert entry.witness_anchor_source == "local-clock"  # NOT anchored, per consumers
 
 
 # ---------------------------------------------------------------------------

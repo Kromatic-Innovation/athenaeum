@@ -587,7 +587,10 @@ def backfill_sources(
     # flag-off path costs exactly what it did before this issue.
     attestation_index: AttestationIndex | None = None
     if resolve_witness_attestation_enabled(config):
-        attestation_index = AttestationIndex.load(resolve_default_witness_dir())
+        # Issue athenaeum#2333: thread the SAME config through so
+        # `librarian.witness.keys` resolves identically to intake's own
+        # `transcript_receipts.ReceiptRun` -- one resolution path.
+        attestation_index = AttestationIndex.load(resolve_default_witness_dir(), config=config)
 
     acted = 0
     for path in _iter_auto_memory_files(auto_memory_root):
