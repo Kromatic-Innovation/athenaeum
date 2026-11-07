@@ -515,31 +515,69 @@ class TestWireFormatRegressionIsRefused:
 # ---------------------------------------------------------------------------
 
 
-class TestRawRsSignatureToDer:
-    def test_known_vector_round_trips_through_der(self) -> None:
+class TestNormalizeSignatureToDer:
+    """Both accepted input shapes, and the rejection of anything else.
+
+    `tpm2_sign -f plain`'s byte layout is undocumented and unverifiable
+    without a TPM (ASSUMPTION 1 in `tpm.py`), so the module accepts either
+    raw `r || s` or already-DER rather than betting on one. These tests
+    are what make that claim true rather than aspirational.
+    """
+
+    def _key_and_der(self) -> tuple[object, bytes]:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        priv = ec.generate_private_key(ec.SECP256R1())
+        return priv, priv.sign(b"payload", ec.ECDSA(hashes.SHA256()))
+
+    def test_raw_rs_round_trips_through_der(self) -> None:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
-        priv = ec.generate_private_key(ec.SECP256R1())
-        der_sig = priv.sign(b"payload", ec.ECDSA(hashes.SHA256()))
+        priv, der_sig = self._key_and_der()
         r, s = decode_dss_signature(der_sig)
         raw = r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
-        converted = tpm._raw_rs_signature_to_der(raw, backend_name="test")
+        converted = tpm._normalize_signature_to_der(raw, backend_name="test")
         assert converted == der_sig
         # And the converted DER signature genuinely verifies.
-        priv.public_key().verify(converted, b"payload", ec.ECDSA(hashes.SHA256()))
+        priv.public_key().verify(  # type: ignore[attr-defined]
+            converted, b"payload", ec.ECDSA(hashes.SHA256())
+        )
 
-    def test_wrong_length_raises_key_unavailable(self) -> None:
-        with pytest.raises(ledger.KeyUnavailable):
-            tpm._raw_rs_signature_to_der(b"\x00" * 10, backend_name="test")
+    def test_already_der_passes_through_and_still_verifies(self) -> None:
+        """The other half of the tolerance: if `tpm2_sign -f plain` turns
+        out to emit DER, the adapter is correct with no change."""
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        priv, der_sig = self._key_and_der()
+        converted = tpm._normalize_signature_to_der(der_sig, backend_name="test")
+        assert converted == der_sig
+        priv.public_key().verify(  # type: ignore[attr-defined]
+            converted, b"payload", ec.ECDSA(hashes.SHA256())
+        )
+
+    def test_a_der_sequence_that_does_not_decode_is_refused(self) -> None:
+        """A leading 0x30 is not enough -- the body is decoded, so a tool
+        that mis-encodes an integer fails here rather than handing the
+        ledger a signature that will never verify."""
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
+            tpm._normalize_signature_to_der(b"\x30\x07not-der", backend_name="test")
+        assert "DER" in str(excinfo.value)
+
+    def test_neither_shape_is_refused(self) -> None:
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
+            tpm._normalize_signature_to_der(b"\x01" * 10, backend_name="test")
+        assert "neither" in str(excinfo.value)
 
     def test_all_zero_r_and_s_round_trips(self) -> None:
         """A boundary case: r=0, s=0 is not a valid signature but must not
         crash the conversion itself -- DER encoding of (0, 0) is well
         defined even though no real signature would ever be this."""
-        converted = tpm._raw_rs_signature_to_der(b"\x00" * 64, backend_name="test")
+        converted = tpm._normalize_signature_to_der(b"\x00" * 64, backend_name="test")
         assert isinstance(converted, bytes)
 
 
@@ -674,6 +712,37 @@ class TestLinuxGenerateSignVerifyRoundTrip:
     def test_sign_and_verify(self, tpm2_env: Path) -> None:
         backend = tpm.Tpm2ToolsBackend(handle="0x81010099")
         provider = tpm.generate_tpm_key(backend)
+        signature = provider.sign(b"payload")
+        assert signing.verify_signature(
+            b"payload", signature, provider.public_key(), "ecdsa-p256-sha256"
+        )
+        assert not signing.verify_signature(
+            b"other", signature, provider.public_key(), "ecdsa-p256-sha256"
+        )
+
+    def test_sign_and_verify_when_the_tool_emits_der_instead(
+        self, tpm2_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half of ASSUMPTION 1's neutralization, end to end.
+
+        `tpm2_sign -f plain`'s byte layout is undocumented, so
+        `_normalize_signature_to_der` accepts raw `r || s` OR DER. The
+        default fake emits raw; this one emits DER, through the SAME real
+        backend and the SAME real verifier -- so whichever encoding real
+        hardware produces, there is a passing end-to-end test for it, not
+        just a unit test of the helper.
+        """
+        sign_tool = tpm2_env.parent / "bin" / "tpm2_sign"
+        source = sign_tool.read_text(encoding="utf-8")
+        der_source = source.replace(
+            'Path(sig_out).write_bytes(r.to_bytes(32, "big") + s.to_bytes(32, "big"))',
+            "Path(sig_out).write_bytes(der_sig)",
+        )
+        assert der_source != source, "the DER-emitting patch did not apply"
+        sign_tool.write_text(der_source, encoding="utf-8")
+        sign_tool.chmod(0o700)
+
+        provider = tpm.generate_tpm_key(tpm.Tpm2ToolsBackend(handle="0x810100a1"))
         signature = provider.sign(b"payload")
         assert signing.verify_signature(
             b"payload", signature, provider.public_key(), "ecdsa-p256-sha256"

@@ -66,9 +66,10 @@ athenaeum#2153) verify a TPM line with no change on either side:
   exactly (including its executable negative control): a backend that
   regressed to an untagged 64-byte point must be refused, not silently
   accepted into a wrong-but-stable ``key_id``.
-- **Signature: DER.** Neither backend's natural output is DER (see the
-  ASSUMPTIONS below), so both convert through the SAME
-  :func:`_raw_rs_signature_to_der` helper -- the one piece of real,
+- **Signature: DER.** Windows' natural output is raw ``r || s`` and the
+  Linux tool's is undocumented (see ASSUMPTION 1 below), so both go
+  through the SAME :func:`_normalize_signature_to_der` helper, which
+  accepts either shape -- the one piece of real,
   shared conversion logic this module adds beyond
   :mod:`promptwitness.secure_enclave`'s precedent, because that module's
   Swift helper already emitted DER directly and never needed one.
@@ -77,19 +78,22 @@ athenaeum#2153) verify a TPM line with no change on either side:
 for athenaeum#2240's real-hardware signature/non-exportability checks --
 read every item below before trusting this adapter against a real TPM):**
 
-1. **``tpm2_sign -f plain``'s exact byte layout for an ECDSA signature.**
-   ``tpm2-tools``' own docs (``man/common/signature.md``) say only that
-   ``plain`` "output[s] the plain signature data as defined by the used
-   cryptographic algorithm" -- they do not spell out byte order or
-   padding. This module ASSUMES that is the IEEE P1363 raw ``r || s``
-   pair, zero-padded to 32 bytes each (the natural reading of the TPM
-   2.0 spec's ``TPMS_SIGNATURE_ECDSA`` structure, which is exactly
-   ``{hash, signatureR, signatureS}``), and feeds it through the same
-   :func:`_raw_rs_signature_to_der` conversion the Windows backend uses.
-   If real hardware disagrees (for example, a leading sign byte or a
-   different coordinate order), every Linux TPM signature this adapter
-   produces would fail to verify, loudly, from the very first test
-   against real hardware -- never silently.
+1. **``tpm2_sign -f plain``'s exact byte layout for an ECDSA signature --
+   NEUTRALIZED, not merely documented.** ``tpm2-tools``' own docs
+   (``man/common/signature.md``) say only that ``plain`` "output[s] the
+   plain signature data as defined by the used cryptographic algorithm";
+   they do not spell out byte order or padding, and a build lane has no
+   TPM to settle it with. Rather than bet on the likeliest reading (the
+   IEEE P1363 raw ``r || s`` pair, zero-padded to 32 bytes each -- the
+   natural reading of the TPM 2.0 spec's ``TPMS_SIGNATURE_ECDSA``
+   structure, which is exactly ``{hash, signatureR, signatureS}``),
+   :func:`_normalize_signature_to_der` ACCEPTS EITHER that or an
+   already-DER signature, which are trivially distinguishable (64 bytes
+   exactly, versus a length-checked ``0x30`` SEQUENCE). So this item is no
+   longer a correctness risk on either reading; what remains for
+   athenaeum#2240 is only the residual possibility of a THIRD encoding
+   nobody here anticipated, which would fail loudly on the first real
+   signature rather than verify incorrectly.
 2. **Exit code 1 as the "no key at this handle yet" signal for
    ``tpm2_readpublic``.** Verified directly from ``tpm2-tools``' own
    ``man/common/returns.md``: exit codes are ``0`` success, ``1`` "general
@@ -272,26 +276,63 @@ def _pem_public_key_to_x963(pem_bytes: bytes) -> bytes:
     return key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
 
 
-def _raw_rs_signature_to_der(raw: bytes, *, backend_name: str) -> bytes:
-    """Convert an IEEE P1363 raw ``r || s`` ECDSA signature pair -- what
-    .NET's ``ECDsaCng.SignHash`` returns, and (ASSUMPTION #1 in the module
-    docstring) what ``tpm2_sign --format plain`` is believed to return --
-    into the DER encoding :func:`signing.verify_signature` and
-    ``ledger._verify_line_signature`` both require. The one piece of real
-    shared conversion logic both backends in this module need; lazy
-    ``cryptography`` import.
-    """
-    expected_len = 2 * _P256_COORDINATE_LEN
-    if len(raw) != expected_len:
-        raise ledger.KeyUnavailable(
-            f"{backend_name}: signature is {len(raw)} bytes, not "
-            f"{expected_len} raw r||s bytes"
-        )
-    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+def _normalize_signature_to_der(raw: bytes, *, backend_name: str) -> bytes:
+    """Return *raw* as a DER-encoded ECDSA signature, accepting EITHER the
+    IEEE P1363 raw ``r || s`` pair or an already-DER signature.
 
-    r = int.from_bytes(raw[:_P256_COORDINATE_LEN], "big")
-    s = int.from_bytes(raw[_P256_COORDINATE_LEN:], "big")
-    return encode_dss_signature(r, s)
+    :func:`signing.verify_signature` and ``ledger._verify_line_signature``
+    both require DER. .NET's ``ECDsaCng.SignHash`` returns raw ``r || s``,
+    so a conversion is needed at least for Windows.
+
+    **Why this accepts both, rather than asserting the one it expects.**
+    ASSUMPTION #1 in the module docstring is that ``tpm2_sign -f plain``
+    emits raw ``r || s``. The tool's own documentation does not say, and a
+    build lane cannot settle it: there is no TPM here. The two candidate
+    encodings are, however, trivially distinguishable -- a P-256 raw pair
+    is exactly 64 bytes, and a DER signature is a SEQUENCE (leading
+    ``0x30``) whose declared length matches its own size -- so the
+    assumption does not have to be load-bearing at all. Accepting both
+    costs a dozen lines and makes the Linux path correct whichever
+    encoding real hardware turns out to produce.
+
+    That choice is deliberate, and it is the lesson of the sibling
+    adapter: athenaeum#2153 shipped a public-key encoding mistake twice,
+    invisible to a test suite whose fake tool encoded the same wrong
+    assumption, and only a real device would have failed. Where an
+    unverifiable assumption can be replaced by a cheap runtime
+    discrimination, replace it.
+
+    Anything that is neither shape is :class:`ledger.KeyUnavailable` --
+    a tool whose output this module cannot interpret must say so loudly
+    rather than hand a malformed signature to the ledger.
+    """
+    from cryptography.hazmat.primitives.asymmetric.utils import (
+        decode_dss_signature,
+        encode_dss_signature,
+    )
+
+    if len(raw) == 2 * _P256_COORDINATE_LEN:
+        r = int.from_bytes(raw[:_P256_COORDINATE_LEN], "big")
+        s = int.from_bytes(raw[_P256_COORDINATE_LEN:], "big")
+        return encode_dss_signature(r, s)
+    if raw[0:1] == b"\x30":
+        # A DER SEQUENCE. Round-trip it through decode/encode rather than
+        # trusting the leading byte: that both VALIDATES the structure
+        # (a malformed body raises here, not later inside the verifier)
+        # and re-emits a canonical encoding, so a tool that pads or
+        # mis-encodes an integer cannot leak through.
+        try:
+            r, s = decode_dss_signature(raw)
+        except Exception as exc:  # any decode failure means "unusable", not a crash
+            raise ledger.KeyUnavailable(
+                f"{backend_name}: signature starts as a DER SEQUENCE but does not "
+                "decode as one"
+            ) from exc
+        return encode_dss_signature(r, s)
+    raise ledger.KeyUnavailable(
+        f"{backend_name}: signature is {len(raw)} bytes and is neither a "
+        f"{2 * _P256_COORDINATE_LEN}-byte raw r||s pair nor a DER SEQUENCE"
+    )
 
 
 def _b64decode_wire(encoded: bytes, *, backend_name: str, what: str) -> bytes:
@@ -435,7 +476,7 @@ class Tpm2ToolsBackend:
         in a private per-call temporary directory and the PATH -- never
         the payload bytes -- goes on argv. ``-f plain`` is ASSUMPTION #1;
         its raw ``r || s`` output is converted to DER by
-        :func:`_raw_rs_signature_to_der`.
+        :func:`_normalize_signature_to_der`.
         """
         with tempfile.TemporaryDirectory(prefix="promptwitness-tpm2-") as tmp:
             tmp_path = Path(tmp)
@@ -463,7 +504,7 @@ class Tpm2ToolsBackend:
                 absent_returncodes=_LINUX_READPUBLIC_ABSENT_RETURNCODES,
             )
             raw_sig = sig_path.read_bytes()
-        return _raw_rs_signature_to_der(raw_sig, backend_name=self.name())
+        return _normalize_signature_to_der(raw_sig, backend_name=self.name())
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +666,7 @@ class WindowsPlatformCryptoBackend:
     def sign(self, payload: bytes) -> bytes:
         encoded = self._run("sign", input_bytes=payload)
         raw_sig = _b64decode_wire(encoded, backend_name=self.name(), what="signature")
-        return _raw_rs_signature_to_der(raw_sig, backend_name=self.name())
+        return _normalize_signature_to_der(raw_sig, backend_name=self.name())
 
 
 # ---------------------------------------------------------------------------
