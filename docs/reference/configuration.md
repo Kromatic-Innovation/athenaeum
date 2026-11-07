@@ -3886,6 +3886,49 @@ malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
 non-numeric yaml value falls back to the default; ``0`` or negative yaml
 disables the floor.
 
+### `resolve_witness_keys`
+
+- **YAML path:** `librarian.witness.keys`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the operator-declared witness-signing key registry at
+``librarian.witness.keys`` (TG5). DEFAULT ``{}``.
+
+```yaml
+librarian:
+  witness:
+    keys:
+      ed25519:abcdef0123456789:
+        public_key: "<standard base64 of the raw 32-byte Ed25519 public key>"
+        strength: os-keystore
+```
+
+Each entry's ``public_key`` is standard base64 of the RAW public-key
+bytes `promptwitness.ledger.verify_chain`'s own ``public_keys``
+parameter expects -- never PEM, never OpenSSH wire format -- the same
+encoding `promptwitness.signing` already uses for its own on-disk
+key-seed storage. ``strength`` must be one of
+`WITNESS_KEY_STRENGTHS`; this is the key's REGISTERED strength,
+independent of (and the yardstick for) whatever strength a ledger line
+signed by it claims -- see `athenaeum.witness_attestation.
+AttestationIndex.verified_strength`.
+
+Yaml only -- a signing-key registry is not an emergency override, same
+reasoning as `resolve_authority_grant_implications` -- and
+strictly defensive, per-entry: a ``key_id`` that is not a non-empty
+string, a value that is not a mapping, a ``public_key`` that is
+missing / not a string / not valid base64 / not exactly 32 bytes once
+decoded, or a ``strength`` outside `WITNESS_KEY_STRENGTHS` drops
+that ONE entry rather than the whole map (or raising) -- one operator
+typo must not silently disable every OTHER registered key. Default
+``{}``: with no declared keys, every witness-ledger signature verifies
+against nothing, which is `promptwitness.ledger.verify_chain`'s
+own documented "no signature checking" default -- i.e. this resolver
+returning empty changes nothing about today's behaviour.
+
 ### `resolve_witness_attestation_enabled`
 
 - **YAML path:** `librarian.witness_attestation_enabled`

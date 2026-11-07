@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Witness-ledger signature verification against operator-declared keys,
+  and a real anchor source instead of a bare boolean (issue athenaeum#2333,
+  TG5).** A new `librarian.witness.keys` yaml map (`{<key_id>: {public_key,
+  strength}}`, introducing a `librarian.witness.*` nested family alongside
+  the existing flat `librarian.witness_attestation_enabled` /
+  `librarian.witness_ledger_enabled` keys) registers operator-trusted
+  public keys and their strength. `AttestationIndex.load` now passes this
+  registry to `promptwitness.ledger.verify_chain`, and `attest()` records
+  the result as a new, additive `witness_strength_verified` field: `"none"`
+  unless the line's signature verifies under a registered key whose own
+  registered strength is at least the line's claimed strength. A claim
+  that cannot be substantiated (unregistered key, invalid signature, or a
+  claim above the registered strength) does NOT turn a hit into a miss —
+  provenance and signing strength are orthogonal — but it does surface as
+  a new `witness-strength-mismatch:<claimed>` incident through the
+  existing athenaeum#2158 miss-reason vocabulary and one-WARNING-per-event
+  path. A new `witness_anchor_source` field records the best non-
+  `local-clock` source among the anchor lines covering a line's sequence
+  (`"local-clock"` when only the mandatory fallback covers it, `None` when
+  nothing anchors it) — consumers must treat `"local-clock"` as NOT
+  anchored. Both fields are additive on `ReceiptEntry` schema v2 (no
+  version bump); `witness_strength` and `witness_anchored` keep their
+  original, self-asserted/compatibility meanings unchanged, and v1
+  receipts still parse and read as unverified. No `src/promptwitness/`
+  edits and no new `promptwitness` imports.
+
 - **`recall` now returns raw notes saved via `remember` before the first
   compile has run, with no LLM call (issue athenaeum#2313).**
   `recall.extra_intake_roots`'s default gains `raw/claude-session` alongside
