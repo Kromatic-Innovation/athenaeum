@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import subprocess
 import sys
@@ -476,6 +477,68 @@ class TestGenerateSignVerifyRoundTrip:
         assert result.ok
         assert result.signed_lines == 1
         assert result.unverified_signed_lines == 0
+        # The load-bearing assertion, and the one this test originally
+        # lacked: `ok` reports the HASH CHAIN only, and an unverifiable
+        # signature lands here, not in `unverified_signed_lines` (the key
+        # id WAS registered above). Without this line the test passed
+        # while `verify_chain` was reporting this valid line as a forgery
+        # -- see ledger._verify_line_signature.
+        assert result.invalid_signature_seqs == ()
+
+    def test_verify_chain_reports_a_tampered_se_line_as_invalid(
+        self, helper: Path, tmp_path: Path
+    ) -> None:
+        """The positive control for the assertion above: when the line IS
+        edited, `invalid_signature_seqs` must fill -- otherwise a green
+        `== ()` would prove only that the field is never populated."""
+        provider = secure_enclave.generate_secure_enclave_key(helper, tmp_path / "se.key")
+        ledger_dir = tmp_path / "ledger"
+        _append_turn(ledger_dir, provider)
+        path = next(ledger_dir.rglob("*.jsonl"))
+        raw = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        raw["prompt_chars"] = raw["prompt_chars"] + 1
+        path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+        result = ledger.verify_chain(
+            ledger_dir, public_keys={provider.key_id(): provider.public_key()}
+        )
+        assert result.invalid_signature_seqs != ()
+
+    def test_verify_chain_cannot_check_an_algorithm_it_does_not_dispatch(
+        self, helper: Path, tmp_path: Path
+    ) -> None:
+        """Documents the limitation that made this bug possible.
+
+        `_verify_line_signature` answers False for an algorithm it does
+        not implement, and `verify_chain` files that answer under
+        `invalid_signature_seqs` -- the "someone edited the ledger"
+        field. So a future adapter left out of the dispatch does not
+        degrade to "unverified"; it produces a FORGERY CLAIM against
+        valid lines, which is exactly what athenaeum#2153's Secure
+        Enclave lines got until the dispatch learned their algorithm.
+        Asserted here on a line whose `alg` is rewritten to an algorithm
+        that will never exist, so the shape is pinned without waiting for
+        a real future adapter to re-discover it.
+        """
+        provider = secure_enclave.generate_secure_enclave_key(helper, tmp_path / "se.key")
+        ledger_dir = tmp_path / "ledger"
+        _append_turn(ledger_dir, provider)
+        path = next(ledger_dir.rglob("*.jsonl"))
+        raw = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert raw["key"]["alg"] == "ecdsa-p256-sha256", (
+            "the fixture no longer signs with the algorithm this test is about"
+        )
+        # Re-sign nothing: only the declared algorithm changes, so the
+        # signature itself is still the genuine one the enclave produced.
+        raw["key"]["alg"] = "sha3-512-nonexistent"
+        path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+        result = ledger.verify_chain(
+            ledger_dir, public_keys={provider.key_id(): provider.public_key()}
+        )
+        assert result.invalid_signature_seqs != (), (
+            "an undispatched algorithm is reported as a forgery, not as unverified -- "
+            "if this ever becomes (), the distinction was fixed and this test should "
+            "assert the new, better behaviour instead"
+        )
 
     def test_two_keys_produce_different_ids(self, helper: Path, tmp_path: Path) -> None:
         a = secure_enclave.generate_secure_enclave_key(helper, tmp_path / "a.key")

@@ -135,11 +135,20 @@ func loadPrivateKey(path: String) -> SecureEnclave.P256.Signing.PrivateKey {
     }
 }
 
-// Atomic write at mode 0600: write to a sibling temp file, then move it
-// into place. Same discipline `signing.generate_and_write_key` uses on the
-// Python side, and for the identical reason -- a half-written key blob is
-// a destroyed signing key, and every line it ever signed becomes
-// permanently unverifiable with no copy anywhere to restore from.
+// Atomic write at mode 0600: write to a sibling temp file, then rename it
+// over the destination. Same discipline `signing.generate_and_write_key`
+// uses on the Python side, and for the identical reason -- a half-written
+// key blob is a destroyed signing key, and every line it ever signed
+// becomes permanently unverifiable with no copy anywhere to restore from.
+//
+// The last step is POSIX `rename(2)`, not `FileManager.moveItem`. Seer
+// review on PR athenaeum#2358 caught the difference and it is not
+// cosmetic: `moveItem` FAILS if the destination exists, so the obvious
+// shape is to `removeItem` first -- which opens a window where the old key
+// is gone and the new one is not yet in place, and a crash inside it
+// destroys a non-exportable key with no copy anywhere. `rename(2)`
+// replaces the destination atomically on every filesystem macOS supports,
+// so no such window exists.
 func writeKeyFileAtomically(_ data: Data, to path: String) {
     let directory = (path as NSString).deletingLastPathComponent
     let tmpPath = path + ".new-\(ProcessInfo.processInfo.processIdentifier)"
@@ -153,13 +162,14 @@ func writeKeyFileAtomically(_ data: Data, to path: String) {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: tmpPath
         )
-        if FileManager.default.fileExists(atPath: path) {
-            try FileManager.default.removeItem(atPath: path)
-        }
-        try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
     } catch {
         try? FileManager.default.removeItem(atPath: tmpPath)
         fail("could not write key file at \(path): \(error)", code: .failure)
+    }
+    if rename(tmpPath, path) != 0 {
+        let reason = String(cString: strerror(errno))
+        try? FileManager.default.removeItem(atPath: tmpPath)
+        fail("could not move the new key file into place at \(path): \(reason)", code: .failure)
     }
 }
 
