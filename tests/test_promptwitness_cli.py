@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ``promptwitness`` console script (athenaeum#2147,
 athenaeum#2149, athenaeum#2150, athenaeum#2151, athenaeum#2152,
-athenaeum#2153).
+athenaeum#2153, athenaeum#2154).
 
 The ``keygen --provider os-keystore`` path is exercised end to end in
 ``tests/test_promptwitness_os_keystore.py``, which already owns the fake
 keystore; the ``keygen --provider secure-enclave`` path is likewise
 exercised end to end in ``tests/test_promptwitness_secure_enclave.py``,
 which owns the fake Swift-helper stub (``_write_fake_helper``, imported
-below) -- what lives here for both is the parser shape, plus one
-end-to-end smoke class per provider for the CLI's own JSON reporting.
+below); ``keygen --provider tpm`` is exercised end to end in
+``tests/test_promptwitness_tpm.py``, which owns the fake ``tpm2-tools``
+suite (``write_fake_tpm2_tools``, imported below) -- what lives here for
+all three is the parser shape, plus one end-to-end smoke class per
+provider for the CLI's own JSON reporting.
 
 The ``TestUpgradeFindingsRegression`` and ``TestDigestForSubjectInvariant``
 classes near the bottom are regression coverage for PR athenaeum#2168 review
@@ -19,6 +22,7 @@ findings 1 and 2 (athenaeum#2151) -- see each test's docstring.
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -26,9 +30,10 @@ from pathlib import Path
 import pytest
 
 from promptwitness import anchor as anchor_mod
-from promptwitness import canon, cli, ledger, secure_enclave
+from promptwitness import canon, cli, ledger, secure_enclave, tpm
 from tests.test_promptwitness_anchor import _install_fake_opentimestamps
 from tests.test_promptwitness_secure_enclave import _write_fake_helper
+from tests.test_promptwitness_tpm import write_fake_tpm2_tools
 
 
 class TestBuildParser:
@@ -88,6 +93,41 @@ class TestBuildParser:
             ]
         )
         assert args.se_helper == str(tmp_path / "promptwitness-se")
+
+    def test_keygen_accepts_tpm_provider(self) -> None:
+        args = cli.build_parser().parse_args(["keygen", "--provider", "tpm"])
+        assert args.provider == "tpm"
+        assert args.tpm_backend is None
+        assert args.tpm_key_id is None
+        assert args.tpm_powershell is None
+
+    @pytest.mark.parametrize("backend", ["tpm2-tools", "windows-platform-crypto"])
+    def test_keygen_accepts_every_tpm_backend(self, backend: str) -> None:
+        args = cli.build_parser().parse_args(
+            ["keygen", "--provider", "tpm", "--tpm-backend", backend]
+        )
+        assert args.tpm_backend == backend
+
+    def test_keygen_accepts_tpm_key_id_and_powershell_overrides(self, tmp_path: Path) -> None:
+        args = cli.build_parser().parse_args(
+            [
+                "keygen",
+                "--provider",
+                "tpm",
+                "--tpm-key-id",
+                "0x81010099",
+                "--tpm-powershell",
+                str(tmp_path / "pwsh"),
+            ]
+        )
+        assert args.tpm_key_id == "0x81010099"
+        assert args.tpm_powershell == str(tmp_path / "pwsh")
+
+    def test_keygen_rejects_an_unknown_tpm_backend(self) -> None:
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(
+                ["keygen", "--provider", "tpm", "--tpm-backend", "quantum-dongle"]
+            )
 
     def test_keygen_rejects_an_unknown_provider(self) -> None:
         with pytest.raises(SystemExit):
@@ -318,6 +358,186 @@ class TestKeygenCliSecureEnclave:
         payload = json.loads(capfd.readouterr().out)
         assert payload["strength"] == "software-file"
         assert "se_helper" not in payload
+
+
+class TestKeygenCliTpm:
+    """``promptwitness keygen --provider tpm`` (athenaeum#2154), against
+    the real fake ``tpm2-tools`` suite ``tests/test_promptwitness_tpm.py``
+    owns -- the behavioural cases (failure modes, warnings, argv hygiene)
+    live there; this is the CLI's own JSON-reporting contract, alongside
+    the existing os-keystore / secure-enclave coverage above.
+    """
+
+    @pytest.fixture
+    def tpm2_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        bin_dir = tmp_path / "bin"
+        write_fake_tpm2_tools(bin_dir)
+        store_dir = tmp_path / "tpm-store"
+        store_dir.mkdir()
+        monkeypatch.setenv("FAKE_TPM2_STORE", str(store_dir))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        return store_dir
+
+    def test_a_bad_backend_env_var_is_a_json_error_not_a_traceback(
+        self, tpm2_env: Path, monkeypatch: pytest.MonkeyPatch,
+        capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """`--tpm-backend` is `choices=`-bound, so an unrecognized backend
+        name can only arrive through the env var argparse never sees.
+        `_keygen_os_keystore` already wraps its resolver's `ValueError` for
+        exactly this reason; this pins that `_keygen_tpm` does too, rather
+        than letting a typo'd env var reach the operator as a traceback."""
+        monkeypatch.setenv("PROMPTWITNESS_TPM_BACKEND", "not-a-real-backend")
+        rc = cli.main(["keygen", "--provider", "tpm", "--harness", "claude-code"])
+        assert rc == 1
+        err = capfd.readouterr().err
+        assert "not-a-real-backend" in err
+        assert json.loads(err.strip())["error"]
+
+    def test_reports_the_backend_and_strength(
+        self, tpm2_env: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "tpm",
+                "--tpm-backend",
+                "tpm2-tools",
+                "--tpm-key-id",
+                "0x81010050",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["tpm_backend"] == "tpm2-tools"
+        assert payload["strength"] == "hardware-nonexportable"
+        assert payload["algorithm"] == "ecdsa-p256-sha256"
+        assert payload["key_id"].startswith("ecdsa-p256-sha256:")
+
+    def test_prints_no_key_material_on_stdout_or_stderr(
+        self, tpm2_env: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = [
+            "keygen",
+            "--provider",
+            "tpm",
+            "--tpm-backend",
+            "tpm2-tools",
+            "--tpm-key-id",
+            "0x81010051",
+        ]
+        assert cli.main(argv) == 0
+        raw_scalar = next(tpm2_env.iterdir()).read_bytes().hex()
+        captured = capfd.readouterr()
+        for stream in (captured.out, captured.err):
+            assert raw_scalar not in stream
+
+    def test_refuses_an_existing_key_and_exits_1(
+        self, tpm2_env: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = [
+            "keygen",
+            "--provider",
+            "tpm",
+            "--tpm-backend",
+            "tpm2-tools",
+            "--tpm-key-id",
+            "0x81010052",
+        ]
+        assert cli.main(argv) == 0
+        first = json.loads(capfd.readouterr().out)["key_id"]
+        assert cli.main(argv) == 1
+        err = capfd.readouterr().err
+        assert "already exists" in json.loads(err)["error"]
+        assert cli.main([*argv, "--force"]) == 0
+        second = json.loads(capfd.readouterr().out)["key_id"]
+        assert first != second
+
+    def test_force_rotates_the_key(
+        self, tpm2_env: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = [
+            "keygen",
+            "--provider",
+            "tpm",
+            "--tpm-backend",
+            "tpm2-tools",
+            "--tpm-key-id",
+            "0x81010053",
+        ]
+        assert cli.main(argv) == 0
+        first = json.loads(capfd.readouterr().out)["key_id"]
+        assert cli.main([*argv, "--force"]) == 0
+        second = json.loads(capfd.readouterr().out)["key_id"]
+        assert first != second
+
+    def test_an_unreachable_backend_exits_1_with_a_json_error(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "tpm",
+                "--tpm-backend",
+                "tpm2-tools",
+                "--tpm-key-id",
+                "0x81010054",
+            ]
+        )
+        assert rc == 1
+        captured = capfd.readouterr()
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert "not installed" in payload["error"]
+        assert payload["tpm_backend"] == "tpm2-tools"
+
+    def test_a_readback_failure_after_a_successful_store_exits_1_honestly(
+        self, tpm2_env: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """The key IS created by then (`generate_tpm_key` already read it
+        back once internally before returning), so the CLI's own, separate
+        `provider.key_id()` call failing afterward must say so rather than
+        letting a traceback imply nothing happened -- mirrors
+        ``TestKeygenCliSecureEnclave``'s own equivalent test."""
+        backend = tpm.Tpm2ToolsBackend(handle="0x81010055")
+        tpm.generate_tpm_key(backend)
+        broken_provider = tpm.TpmKeyProvider(
+            tpm.Tpm2ToolsBackend(handle="does-not-exist-handle")
+        )
+        monkeypatch.setattr(
+            tpm, "generate_tpm_key", lambda backend, replace=False: broken_provider
+        )
+        rc = cli.main(
+            [
+                "keygen",
+                "--provider",
+                "tpm",
+                "--tpm-backend",
+                "tpm2-tools",
+                "--tpm-key-id",
+                "0x81010056",
+            ]
+        )
+        assert rc == 1
+        captured = capfd.readouterr()
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert "created but could not be read back" in payload["error"]
+        assert payload["tpm_backend"] == "tpm2-tools"
+
+    def test_the_software_file_path_is_unchanged(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """A regression floor for the default: adding a fourth tier must
+        not move an existing operator's key or change what keygen reports
+        for the first two."""
+        key_path = tmp_path / "k.pem"
+        assert cli.main(["keygen", "--key-path", str(key_path)]) == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["strength"] == "software-file"
+        assert "tpm_backend" not in payload
 
 
 class TestStatusCommand:

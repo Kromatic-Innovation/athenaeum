@@ -46,6 +46,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     A TPM-backed adapter for the same `hardware-nonexportable` tier is
     separate, still-to-come work (athenaeum#2154).
 
+- **`promptwitness` TPM key adapter, non-exportable, on Linux and Windows
+  (issue athenaeum#2154, part of the prompt-witness-ledger epic,
+  athenaeum#2144).** A new `promptwitness.tpm.TpmKeyProvider` (algorithm
+  `ecdsa-p256-sha256`, strength `hardware-nonexportable`) covers the same
+  tier `promptwitness.secure_enclave` covers on macOS, over TWO backends
+  behind a `TpmBackend` protocol: `Tpm2ToolsBackend` on Linux (through
+  `tpm2-tools`'s `tpm2_createprimary`/`tpm2_create`/`tpm2_evictcontrol` to
+  persist a key at a fixed persistent handle, then `tpm2_readpublic`/
+  `tpm2_sign` to use it) and `WindowsPlatformCryptoBackend` on Windows (a
+  PowerShell child process, running a fixed script this module owns, over
+  CNG's "Microsoft Platform Crypto Provider"). Both normalize to the same
+  wire contract the Secure Enclave adapter already uses — the 65-byte
+  X9.63 uncompressed public point and a DER signature — including a new
+  shared `_normalize_signature_to_der`, since neither backend's native
+  signature output is reliably DER the way the Swift helper's already was.
+  That helper **accepts either** a 64-byte raw `r || s` pair or a DER
+  SEQUENCE and refuses anything else, because `tpm2_sign --format plain`'s
+  byte layout is undocumented: the two shapes are trivially
+  distinguishable, so the Linux path is correct whichever one real
+  hardware produces, and both are covered end to end rather than only the
+  assumed one.
+  Every subprocess call reuses `signing._run_keystore_tool`'s existing
+  discipline: fixed argv, a detached session, a bounded timeout, and the
+  payload never on argv (the TPM-sign path writes it to a private,
+  mode-0600 temp file instead of stdin — `tpm2_sign`'s message argument is
+  a file, not a stdin stream; only the file PATH, never the payload
+  bytes, reaches argv). Select it with `PROMPTWITNESS_KEY_PROVIDER=tpm`
+  (backend override `PROMPTWITNESS_TPM_BACKEND`, key-identifier override
+  `PROMPTWITNESS_TPM_KEY_ID`, PowerShell path override
+  `PROMPTWITNESS_TPM_POWERSHELL`); create the key with `promptwitness
+  keygen --provider tpm`, which refuses to replace an existing key without
+  `--force`, same as every other tier.
+  - **Non-exportable, not presence-gated.** A signature proves the line
+    was signed on this physical device; `presence_required()` is `False`
+    (operator ruling 1), exactly as `secure_enclave`'s adapter is.
+  - **`--force` rotation clears the old persistent handle LAST**, after
+    the replacement key already exists inside the TPM and immediately
+    before the persist. A TPM offers no atomic replace-at-handle, so some
+    window is irreducible; the obvious order (clear, then build) makes
+    every generation step a chance to leave the operator with the old key
+    destroyed and no new one, and nothing can restore a non-exportable
+    key. The ordering is pinned by a test on the real argv sequence.
+  - **Several real-TPM/CNG behaviours could not be verified without
+    hardware and are called out as explicit, numbered assumptions in
+    `promptwitness.tpm`'s own module docstring** rather than presented as
+    fact (the signature byte layout was on that list and is no longer —
+    the tolerant normalization above removed it as a correctness risk
+    rather than documenting it): which
+    `tpm2-tools` exit code (if any) reliably means "no object at this
+    handle yet" (its own docs give no code dedicated to that distinction,
+    unlike the os-keystore/secure-enclave adapters) — an inference scoped
+    to `tpm2_readpublic` ONLY, since `Tpm2ToolsBackend.sign` deliberately
+    classifies no exit code as absent: claiming it there would report
+    `key.error: "KeystoreItemAbsent"` ("you never created a key") for a
+    key that exists whose signing attempt failed for an unrelated reason,
+    and a confident wrong diagnosis in an audit trail is worse than a
+    vague true one; `tpm2_create -c`'s
+    direct-context-load capability ("TPM support varies" per its own
+    docs); and whether the managed `ECDsaCng` wrapper behaves cleanly
+    against the real "Microsoft Platform Crypto Provider" KSP specifically.
+    Real-hardware signature and non-exportability checks against these
+    split off to **athenaeum#2240** (operator ruling, mirroring how
+    athenaeum#2239 split off of athenaeum#2153).
+
 - **Witness-ledger signature verification against operator-declared keys,
   and a real anchor source instead of a bare boolean (issue athenaeum#2333,
   TG5).** A new `librarian.witness.keys` yaml map (`{<key_id>: {public_key,

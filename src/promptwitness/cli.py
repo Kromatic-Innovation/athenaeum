@@ -1,30 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 """``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
 athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2153,
-athenaeum#2157, athenaeum#2155).
+athenaeum#2154, athenaeum#2157, athenaeum#2155).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
 :mod:`promptwitness.canon`, :mod:`promptwitness.signing`,
-:mod:`promptwitness.secure_enclave`, :mod:`promptwitness.anchor`,
-:mod:`promptwitness.anchor_rfc3161`, :mod:`promptwitness.verify` and
-:mod:`promptwitness.demo`). Standard library only at import time; no
-``athenaeum`` import, and no ``cryptography`` or ``opentimestamps`` import
-either — :mod:`promptwitness.signing` and :mod:`promptwitness.anchor` each
-import their optional dependency lazily, inside the functions that need
-it, so importing this module costs nothing on an install without the
-``witness-sign`` / ``witness-anchor`` extras. :mod:`promptwitness.anchor_rfc3161`
-shells out to ``openssl`` rather than importing a third-party library, so
-it carries no such extra; :mod:`promptwitness.secure_enclave` shells out
-to a separately-built Swift binary for the same reason and carries none
-either.
+:mod:`promptwitness.secure_enclave`, :mod:`promptwitness.tpm`,
+:mod:`promptwitness.anchor`, :mod:`promptwitness.anchor_rfc3161`,
+:mod:`promptwitness.verify` and :mod:`promptwitness.demo`). Standard
+library only at import time; no ``athenaeum`` import, and no
+``cryptography`` or ``opentimestamps`` import either — :mod:`promptwitness.signing`
+and :mod:`promptwitness.anchor` each import their optional dependency
+lazily, inside the functions that need it, so importing this module costs
+nothing on an install without the ``witness-sign`` / ``witness-anchor``
+extras. :mod:`promptwitness.anchor_rfc3161` shells out to ``openssl``
+rather than importing a third-party library, so it carries no such extra;
+:mod:`promptwitness.secure_enclave` and :mod:`promptwitness.tpm` shell out
+to a separately-built Swift binary / ``tpm2-tools`` / PowerShell for the
+same reason and carry none either.
 
 ``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
-``--provider os-keystore`` by athenaeum#2152 and ``--provider
-secure-enclave`` by athenaeum#2153), ``hook claude-code`` (athenaeum#2149),
-``anchor`` (athenaeum#2151, extended with the optional RFC 3161 second
-source by athenaeum#2157), ``verify`` and ``demo`` (athenaeum#2155) are
-all implemented here. Each was added the same way: by registering another
-subparser in :func:`build_parser`, in this module.
+``--provider os-keystore`` by athenaeum#2152, ``--provider secure-enclave``
+by athenaeum#2153, and ``--provider tpm`` by athenaeum#2154), ``hook
+claude-code`` (athenaeum#2149), ``anchor`` (athenaeum#2151, extended with
+the optional RFC 3161 second source by athenaeum#2157), ``verify`` and
+``demo`` (athenaeum#2155) are all implemented here. Each was added the
+same way: by registering another subparser in :func:`build_parser`, in
+this module.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from promptwitness import __version__, anchor_rfc3161, canon, ledger, secure_enclave, signing
+from promptwitness import __version__, anchor_rfc3161, canon, ledger, secure_enclave, signing, tpm
 from promptwitness import anchor as anchor_mod
 from promptwitness import demo as demo_mod
 from promptwitness import verify as verify_mod
@@ -91,11 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keygen.add_argument(
         "--provider",
-        choices=["software-file", "os-keystore", "secure-enclave"],
+        choices=["software-file", "os-keystore", "secure-enclave", "tpm"],
         default="software-file",
         help="Where to keep the key: a PEM file on disk, the OS keystore "
-        "(encrypted at rest; your own session can still read it), or a "
-        "macOS Secure Enclave (non-exportable; no user-presence check).",
+        "(encrypted at rest; your own session can still read it), a "
+        "macOS Secure Enclave, or a TPM (both hardware-nonexportable; "
+        "neither checks user presence).",
     )
     keygen.add_argument(
         "--keystore-backend",
@@ -117,6 +120,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the promptwitness-se Swift helper path for --provider "
         "secure-enclave (else PROMPTWITNESS_SE_HELPER, else 'promptwitness-se' "
         "on PATH).",
+    )
+    keygen.add_argument(
+        "--tpm-backend",
+        choices=list(tpm.TPM_BACKENDS),
+        default=None,
+        help="TPM backend to use with --provider tpm (else "
+        "PROMPTWITNESS_TPM_BACKEND, else this platform's).",
+    )
+    keygen.add_argument(
+        "--tpm-key-id",
+        default=None,
+        help="Override the TPM key identifier for --provider tpm: a "
+        "persistent object handle for tpm2-tools, or a CNG key-container "
+        "name for windows-platform-crypto (else PROMPTWITNESS_TPM_KEY_ID, "
+        "else a per-backend default).",
+    )
+    keygen.add_argument(
+        "--tpm-powershell",
+        default=None,
+        help="Override the powershell(.exe) path for --tpm-backend "
+        "windows-platform-crypto (else PROMPTWITNESS_TPM_POWERSHELL, else "
+        "'powershell' on PATH).",
     )
     keygen.add_argument(
         "--force",
@@ -296,11 +321,16 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     carries ``keystore_backend`` in its place. ``--provider secure-enclave``
     (athenaeum#2153) drives the ``promptwitness-se`` Swift helper instead;
     its payload carries ``key_path`` (the opaque key-blob file, not a PEM)
-    like the default path does."""
+    like the default path does. ``--provider tpm`` (athenaeum#2154) drives
+    a TPM backend instead; its payload carries ``tpm_backend``/``key_id``
+    in place of ``key_path``, since neither TPM backend has a key file of
+    its own."""
     if args.provider == "os-keystore":
         return _keygen_os_keystore(args)
     if args.provider == "secure-enclave":
         return _keygen_secure_enclave(args)
+    if args.provider == "tpm":
+        return _keygen_tpm(args)
     key_path = signing.resolve_key_path(args.harness, override=args.key_path)
     if key_path.exists():
         if not args.force:
@@ -438,6 +468,67 @@ def _keygen_secure_enclave(args: argparse.Namespace) -> int:
         return 1
     payload: dict[str, Any] = {
         "key_path": str(key_path),
+        "key_id": key_id,
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _keygen_tpm(args: argparse.Namespace) -> int:
+    """The ``--provider tpm`` half of :func:`_cmd_keygen` (athenaeum#2154).
+    Mirrors :func:`_keygen_secure_enclave`'s shape: both failure modes --
+    an existing key, and an unreachable TPM/backend -- report a one-line
+    JSON error on stderr and exit 1 rather than raising, never overwriting
+    a non-exportable signing key that cannot be recovered if destroyed."""
+    try:
+        backend = tpm.resolve_tpm_backend(
+            args.harness,
+            backend=args.tpm_backend,
+            key_id=args.tpm_key_id,
+            powershell_path=args.tpm_powershell,
+        )
+    except ValueError as exc:
+        # An unrecognized backend NAME. `--tpm-backend` is `choices=`-bound,
+        # so this is reachable through PROMPTWITNESS_TPM_BACKEND, which
+        # argparse never sees -- the same reason `_keygen_os_keystore`
+        # wraps `resolve_keystore_backend`. A bad env var deserves the JSON
+        # error line every other failure here gets, not a traceback.
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    try:
+        provider = tpm.generate_tpm_key(backend, replace=bool(args.force))
+    except FileExistsError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    except ledger.KeyUnavailable as exc:
+        print(
+            json.dumps(
+                {"error": str(exc), "tpm_backend": backend.name()}, sort_keys=True
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        key_id = provider.key_id()
+    except ledger.KeyUnavailable as exc:
+        # The key IS created at this point (`generate_tpm_key` already
+        # read it back once before returning), so say so rather than
+        # letting a traceback imply nothing happened.
+        print(
+            json.dumps(
+                {
+                    "error": f"the key was created but could not be read back: {exc}",
+                    "tpm_backend": backend.name(),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    payload: dict[str, Any] = {
+        "tpm_backend": backend.name(),
         "key_id": key_id,
         "algorithm": provider.algorithm(),
         "strength": provider.strength(),

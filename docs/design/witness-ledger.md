@@ -109,6 +109,7 @@ identifiers.
 | `promptwitness.harness.claude_code` | Hook stdin/env → `TurnEvent`; wrapper table; channel detection; transcript reader | athenaeum#2149 |
 | `promptwitness.signing` | `KeyProvider` protocol and adapters (`none`, `software-file`, `os-keystore`) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
 | `promptwitness.secure_enclave` | `SecureEnclaveKeyProvider` (`hardware-nonexportable`, macOS Secure Enclave, through the `tools/promptwitness-se/` Swift helper) | athenaeum#2153 |
+| `promptwitness.tpm` | `TpmKeyProvider` (`hardware-nonexportable`, Linux `tpm2-tools` / Windows CNG "Microsoft Platform Crypto Provider") | athenaeum#2154 |
 | `promptwitness.anchor` | `Anchorer` protocol; `LocalClockAnchorer`, `OpenTimestampsAnchorer`, `Rfc3161Anchorer` | athenaeum#2151, athenaeum#2157 |
 | `promptwitness.verify` / `.demo` | Per-turn verdicts; static HTML demo | athenaeum#2155 |
 
@@ -330,8 +331,92 @@ a real-device signature check, the second-Mac uselessness check (proving
 a copied key file is useless on a different machine), and latency
 measurement are all **athenaeum#2239**, a separate, `~operator` issue —
 this slice ships the adapter and an unsigned CI build only.
-`hardware-nonexportable`'s other platform, TPM, is a separate adapter
-still to come (athenaeum#2154).
+`hardware-nonexportable`'s other platform, TPM, is covered by the next
+subsection (athenaeum#2154).
+
+#### The TPM tier (athenaeum#2154)
+
+**What it protects, stated plainly: that the line was signed on THIS
+PHYSICAL DEVICE, and nothing else** — the same claim the Secure Enclave
+tier above makes, on different hardware. A TPM-backed key's private part
+never leaves the TPM in either backend below; only a signature or the
+public key ever crosses the process boundary, so a signature here proves
+exactly as much (and no more) as a Secure Enclave signature does.
+
+**It does not prove a human was present.** `presence_required()` is
+`False`, exactly like every other adapter in this package:
+[ruling 1](#5-operator-rulings-2026-10-28) declined per-signature user
+presence, so any process running as this user's session — including a
+misaligned or prompt-injected model — can still ask the TPM for a
+signature indistinguishable from the hook's.
+
+`promptwitness.tpm.TpmKeyProvider` is ONE provider over TWO backends
+behind a `TpmBackend` protocol (mirrors `promptwitness.signing`'s own
+`OsKeystoreKeyProvider` + `KeystoreBackend` split, since this tier —
+unlike Secure Enclave — has two platforms to share one set of
+signing-behaviour tests across):
+
+| Platform | Backend | Mechanism |
+|---|---|---|
+| Linux | `Tpm2ToolsBackend` | `tpm2-tools`: `tpm2_createprimary` + `tpm2_create` + `tpm2_evictcontrol` to persist a new ECC P-256 key at a fixed persistent handle; `tpm2_readpublic` / `tpm2_sign` to use it |
+| Windows | `WindowsPlatformCryptoBackend` | A PowerShell child process running a fixed script (owned by `promptwitness.tpm`, never caller-influenced text) against CNG's "Microsoft Platform Crypto Provider", via `CngKey.Create`/`Open` and `ECDsaCng` |
+
+**The encoding agreement, and the one place this tier adds real work
+beyond the Secure Enclave tier.** Both backends normalize to the exact
+same wire contract the Secure Enclave tier uses — the 65-byte X9.63
+uncompressed public point (`0x04 || X || Y`) and a DER ECDSA signature —
+so `promptwitness.signing.verify_signature` and
+`ledger._verify_line_signature` (both already dispatch
+`ecdsa-p256-sha256`) verify a TPM line with no change on either side.
+Unlike the Secure Enclave tier, neither backend's native signature output
+is reliably DER: .NET's `ECDsaCng.SignHash` returns the IEEE P1363 raw
+`r || s` pair, and `tpm2_sign --format plain`'s byte layout is simply not
+documented — `tpm2-tools`' own manual says only "the plain signature data
+as defined by the used cryptographic algorithm". Rather than bet on the
+likeliest reading, both backends go through one shared helper,
+`promptwitness.tpm._normalize_signature_to_der`, which **accepts either**
+a 64-byte raw `r || s` pair or a DER SEQUENCE (they are trivially
+distinguishable) and refuses anything else. So the Linux path is correct
+whichever encoding real hardware produces, and the test suite covers both
+shapes end to end rather than only the assumed one. This is the lesson of
+athenaeum#2153, which shipped a public-key encoding mistake twice,
+invisible to a suite whose fake tool encoded the same wrong assumption:
+where an unverifiable assumption can be replaced by a cheap runtime
+discrimination, replace it. The public key side differs by
+platform: the Linux backend gets a PEM from `tpm2_readpublic -f pem` and
+converts it with ordinary `cryptography` PEM parsing; the Windows
+backend's own PowerShell script assembles the X9.63 point directly from
+`ECDsaCng.ExportParameters(false)` and emits it already tagged. Either
+way, `TpmKeyProvider` enforces the 65-byte/`0x04`-tag shape on every
+read, exactly as `SecureEnclaveKeyProvider` does — a backend that
+regressed to an untagged point is refused, not silently accepted into a
+wrong-but-stable `key_id`.
+
+**What this tier does NOT cover, and what is genuinely unverified.** Real
+hardware signature and non-exportability checks are **athenaeum#2240**,
+not this slice — every test here runs against a fake `tpm2-tools` suite
+and a fake `powershell`, never a real TPM or Windows host. Several
+specific assumptions this adapter makes about `tpm2-tools`' and CNG's
+real behaviour — which `tpm2-tools` exit code (if any) reliably means "no
+object at this handle yet", `tpm2_create -c`'s direct-context-load
+capability, and whether the managed `ECDsaCng` wrapper behaves cleanly
+against the real "Microsoft Platform Crypto Provider" KSP — are spelled
+out, numbered, and NOT presented as fact in `promptwitness.tpm`'s own
+module docstring; athenaeum#2240 is where each gets checked against real
+hardware. (The signature byte layout was on that list too, and is no
+longer: the tolerant normalization above removed it as a correctness
+risk rather than documenting it.)
+
+Selection: `PROMPTWITNESS_KEY_PROVIDER=tpm`, then
+`PROMPTWITNESS_TPM_BACKEND` (`tpm2-tools` | `windows-platform-crypto`,
+default by platform), `PROMPTWITNESS_TPM_KEY_ID` (a persistent object
+handle for `tpm2-tools`, default a fixed handle in the platform
+persistent range; a CNG key-container name for
+`windows-platform-crypto`, default namespaced by harness) and
+`PROMPTWITNESS_TPM_POWERSHELL` (override the `powershell` path; Windows
+only). Create the key with `promptwitness keygen --provider tpm`; like
+every other tier, it refuses to replace an existing key without
+`--force`.
 
 ### Anchoring
 
@@ -502,8 +587,11 @@ These replace the open questions the design pass raised.
   the signed `tools/promptwitness-se/` Swift helper; blocked by
   athenaeum#2150). Codesigning, notarization and every real-device check
   split off to athenaeum#2239 (~operator) by operator ruling Q9.
-- athenaeum#2154 — TPM key adapter, the same `hardware-nonexportable` tier
-  on a different platform, still to come (~operator).
+- **athenaeum#2154 — TPM key adapter** (the same `hardware-nonexportable`
+  tier, through `tpm2-tools` on Linux and the CNG "Microsoft Platform
+  Crypto Provider" on Windows; blocked by athenaeum#2150). Real-hardware
+  signature and non-exportability checks split off to athenaeum#2240
+  (~operator), the same way athenaeum#2239 split off of athenaeum#2153.
 - athenaeum#2151 — anchoring: `Anchorer`, local-clock, OpenTimestamps,
   block-explorer verification (blocked by athenaeum#2147).
 - athenaeum#2156 — periodic in-session and SessionEnd anchoring, local ledger
