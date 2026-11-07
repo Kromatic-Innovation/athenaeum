@@ -111,6 +111,17 @@ read every item below before trusting this adapter against a real TPM):**
    persistent handle TPM itself enforces -- ``tpm2_evictcontrol`` cannot
    silently clobber an object already resident at a handle -- so the
    worst case is a loud failed ``create()``, never silent data loss.
+
+   **The inference is scoped to ``tpm2_readpublic`` ONLY, and the code
+   enforces that scope.** :meth:`Tpm2ToolsBackend.sign` passes no
+   ``absent_returncodes`` at all, so a ``tpm2_sign`` failure is always a
+   plain :class:`ledger.KeyUnavailable`. Reusing the inference there
+   would have bought nothing (no decision needs the distinction on a
+   signing call) and cost real accuracy: a transient session/policy/PCR
+   failure would reach the ledger line as
+   ``key.error: "KeystoreItemAbsent"`` -- "you never created a key" --
+   about a key that is perfectly fine. In an audit trail a confident
+   wrong diagnosis is worse than a vague true one.
 3. **``tpm2_create``'s ``-c`` direct-load.** ``tpm2-tools`` docs say ``-c``
    lets ``tpm2_create`` hand back an already-loaded context "without
    requiring a separate ``tpm2_load`` step, though TPM support for this
@@ -125,7 +136,16 @@ read every item below before trusting this adapter against a real TPM):**
    need the raw ``CngKeyBlobFormat.EccPublicBlob`` export instead; this
    module uses the higher-level wrapper for a simpler, more auditable
    script and flags the lower-level fallback as a known follow-up.
-5. **``tpm2_sign``'s message argument is a FILE, not stdin.** Unlike every
+5. **``ECParameters.Q.X``/``Q.Y`` are exactly 32 bytes each.**
+   :data:`_POWERSHELL_SCRIPT`'s ``Write-PointBase64`` copies a fixed 32
+   bytes from each coordinate into the X9.63 point. .NET fixes coordinate
+   length for a named curve, so this holds by convention for P-256 -- but
+   it is a convention, not something this repo can test, and a shorter
+   array would make ``[System.Array]::Copy`` throw (caught, exit 1, loud)
+   rather than silently emit a malformed point. Listed for completeness:
+   lower risk than items 1-4, and the 65-byte/``0x04`` enforcement in
+   :meth:`TpmKeyProvider._public_key_bytes` is the backstop either way.
+6. **``tpm2_sign``'s message argument is a FILE, not stdin.** Unlike every
    other backend in this package, ``tpm2-tools``' own docs do not document
    stdin support (``-``) for ``tpm2_sign``'s positional message argument --
    only file paths are demonstrated. Guessing stdin support and being
@@ -291,7 +311,13 @@ def _normalize_signature_to_der(raw: bytes, *, backend_name: str) -> bytes:
     encodings are, however, trivially distinguishable -- a P-256 raw pair
     is exactly 64 bytes, and a DER signature is a SEQUENCE (leading
     ``0x30``) whose declared length matches its own size -- so the
-    assumption does not have to be load-bearing at all. Accepting both
+    assumption does not have to be load-bearing at all. "Trivially
+    distinguishable" is a practical claim, not a literal one: a DER
+    signature whose ``r`` and ``s`` both happen to lose several leading
+    zero bytes could in principle be exactly 64 bytes and be read as a
+    raw pair. That needs roughly 2^-30-scale luck per signature, and the
+    failure mode is a signature that does not verify -- loud -- never one
+    that verifies wrongly. Accepting both
     costs a dozen lines and makes the Linux path correct whichever
     encoding real hardware turns out to produce.
 
@@ -365,7 +391,7 @@ class Tpm2ToolsBackend:
     secret (public key material, or opaque wrapped-key context blobs that
     are useless without this exact TPM), except the signing payload
     (see :meth:`sign`'s own note on why that one DOES touch disk, per
-    ASSUMPTION #5 in the module docstring).
+    ASSUMPTION #6 in the module docstring).
     """
 
     def __init__(self, *, handle: str, timeout: float = _TIMEOUT_DEFAULT) -> None:
@@ -472,7 +498,7 @@ class Tpm2ToolsBackend:
         """DER-encoded ECDSA signature over *payload*.
 
         ``tpm2_sign``'s message argument is a file path, not a stdin
-        stream (ASSUMPTION #5): *payload* is written to a mode-0600 file
+        stream (ASSUMPTION #6): *payload* is written to a mode-0600 file
         in a private per-call temporary directory and the PATH -- never
         the payload bytes -- goes on argv. ``-f plain`` is ASSUMPTION #1;
         its raw ``r || s`` output is converted to DER by
@@ -501,7 +527,25 @@ class Tpm2ToolsBackend:
                     str(message_path),
                 ],
                 action="sign",
-                absent_returncodes=_LINUX_READPUBLIC_ABSENT_RETURNCODES,
+                # NO absent_returncodes here, deliberately. ASSUMPTION #2
+                # buys the right to read exit 1 as "no object at this
+                # handle" for a bare `tpm2_readpublic`, where that is the
+                # dominant cause and the classification feeds a decision
+                # that NEEDS it (whether `generate_tpm_key` may overwrite).
+                # `tpm2_sign` has neither property: exit 1 is "general
+                # non-specific error" and a signing call can fail for
+                # session, policy or PCR-state reasons that have nothing
+                # to do with the key's existence, and nothing here needs
+                # the distinction -- a failed sign is "cannot sign right
+                # now" either way. Claiming absence would put
+                # `key.error: "KeystoreItemAbsent"` on the ledger line,
+                # which tells an operator "you never created a key" about
+                # a key that is fine. In an audit trail, a confident
+                # wrong diagnosis is worse than a vague true one. (The
+                # secure-enclave adapter DOES classify absence on sign,
+                # and may: its helper is this repo's own code with a
+                # dedicated exit code, not an inference about a
+                # third-party tool.)
             )
             raw_sig = sig_path.read_bytes()
         return _normalize_signature_to_der(raw_sig, backend_name=self.name())

@@ -891,6 +891,50 @@ class TestLinuxFailureModes:
         assert ledger.verify_chain(ledger_dir).ok
 
 
+class TestSignNeverClaimsTheKeyIsAbsent:
+    """`tpm2_sign` exit 1 is NOT read as "no key at this handle".
+
+    ASSUMPTION #2 buys the right to read exit 1 as "absent" for a bare
+    `tpm2_readpublic`, where the classification feeds a decision that
+    needs it (whether `generate_tpm_key` may overwrite). Reusing that
+    inference on a signing call would put
+    `key.error: "KeystoreItemAbsent"` on a ledger line -- "you never
+    created a key" -- for a key that exists and whose signing attempt
+    failed for some unrelated session/policy/PCR reason. These tests pin
+    that `sign` makes no such claim.
+    """
+
+    def test_sign_failure_at_exit_1_is_plain_key_unavailable(
+        self, tpm2_env: Path
+    ) -> None:
+        provider = tpm.generate_tpm_key(tpm.Tpm2ToolsBackend(handle="0x810100b1"))
+        # The key genuinely exists; only `tpm2_sign` fails, with the same
+        # exit code `tpm2_readpublic` uses for "no object at this handle".
+        sign_tool = tpm2_env.parent / "bin" / "tpm2_sign"
+        sign_tool.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            "sys.stderr.write('policy session required\\n')\nsys.exit(1)\n",
+            encoding="utf-8",
+        )
+        sign_tool.chmod(0o700)
+
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
+            provider.sign(b"payload")
+        assert not isinstance(excinfo.value, signing.KeystoreItemAbsent), (
+            "a tpm2_sign failure was reported as 'you never created a key'"
+        )
+
+    def test_readpublic_at_exit_1_is_still_the_absent_subclass(
+        self, tpm2_env: Path
+    ) -> None:
+        """The other side of the scope line: the inference still applies
+        where it was argued for, so the test above is pinning a
+        distinction rather than the absence of one."""
+        backend = tpm.Tpm2ToolsBackend(handle="0x810100b2")
+        with pytest.raises(signing.KeystoreItemAbsent):
+            backend.public_key()
+
+
 class TestLinuxArgvHygiene:
     def test_sign_payload_is_never_on_argv(
         self, tpm2_env: Path, recorder: RecordingSubprocess
@@ -991,6 +1035,23 @@ class TestWindowsFailureModes:
         with pytest.raises(ledger.KeyUnavailable):
             backend.sign(b"payload")
 
+    def test_generic_nonzero_exit_is_not_the_absent_subclass(self, tmp_path: Path) -> None:
+        """Symmetry with the Linux side: only the script's OWN dedicated
+        absent code means absent; a generic failure must not."""
+        failing = tmp_path / "fake-failing-powershell"
+        failing.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            "sys.stderr.write('boom\\n')\nsys.exit(1)\n",
+            encoding="utf-8",
+        )
+        failing.chmod(0o700)
+        backend = tpm.WindowsPlatformCryptoBackend(
+            key_name="pw-generic-failure", powershell_path=failing
+        )
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
+            backend.public_key()
+        assert not isinstance(excinfo.value, signing.KeystoreItemAbsent)
+
     def test_malformed_output_is_key_unavailable(self, tmp_path: Path) -> None:
         bad = tmp_path / "fake-garbage-powershell"
         bad.write_text(f"#!{sys.executable}\nprint('not-base64!!')\n", encoding="utf-8")
@@ -1072,8 +1133,13 @@ class TestOneWarningPerProcess:
         for item in store.iterdir():
             item.unlink()
         caplog.set_level(logging.WARNING, logger="promptwitness.signing")
-        with pytest.raises(signing.KeystoreItemAbsent):
+        # `ledger.KeyUnavailable`, not `signing.KeystoreItemAbsent`: a
+        # `tpm2_sign` failure never claims the key is absent, even when
+        # the handle really is empty, because exit 1 cannot tell the two
+        # apart -- see TestSignNeverClaimsTheKeyIsAbsent.
+        with pytest.raises(ledger.KeyUnavailable) as excinfo:
             provider.sign(b"payload")
+        assert not isinstance(excinfo.value, signing.KeystoreItemAbsent)
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert "tpm2-tools" in warnings[0].getMessage()

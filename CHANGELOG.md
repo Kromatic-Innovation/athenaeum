@@ -89,7 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rather than documenting it): which
     `tpm2-tools` exit code (if any) reliably means "no object at this
     handle yet" (its own docs give no code dedicated to that distinction,
-    unlike the os-keystore/secure-enclave adapters); `tpm2_create -c`'s
+    unlike the os-keystore/secure-enclave adapters) — an inference scoped
+    to `tpm2_readpublic` ONLY, since `Tpm2ToolsBackend.sign` deliberately
+    classifies no exit code as absent: claiming it there would report
+    `key.error: "KeystoreItemAbsent"` ("you never created a key") for a
+    key that exists whose signing attempt failed for an unrelated reason,
+    and a confident wrong diagnosis in an audit trail is worse than a
+    vague true one; `tpm2_create -c`'s
     direct-context-load capability ("TPM support varies" per its own
     docs); and whether the managed `ECDsaCng` wrapper behaves cleanly
     against the real "Microsoft Platform Crypto Provider" KSP specifically.
