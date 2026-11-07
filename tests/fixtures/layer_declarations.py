@@ -75,6 +75,7 @@ MODULE_LAYER: dict[str, int] = {
     "models": 1,           # models.py: "It is the L1 hub"
     "precedence": 1,
     "provenance": 1,
+    "trust_graph": 1,
     # issue athenaeum#1905: renders one packaged prompt line from a
     # {type: count} map. Stdlib-only (importlib.resources) by
     # construction -- athenaeum.context imports it at module scope
