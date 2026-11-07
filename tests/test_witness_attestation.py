@@ -112,7 +112,7 @@ class _StubKeyProvider:
     Raw``, never ``private_bytes``, so no key material (public or private)
     ever takes PEM shape in this process."""
 
-    private_key: Ed25519PrivateKey
+    signer: Ed25519PrivateKey
     claimed_strength: str
 
     def key_id(self) -> str:
@@ -128,10 +128,10 @@ class _StubKeyProvider:
         return False
 
     def sign(self, payload: bytes) -> bytes:
-        return bytes(self.private_key.sign(payload))
+        return bytes(self.signer.sign(payload))
 
     def public_key(self) -> bytes:
-        return self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return self.signer.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
 def _stub_provider(claimed_strength: str) -> _StubKeyProvider:

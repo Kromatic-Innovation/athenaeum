@@ -647,7 +647,7 @@ class _StubSigningProvider:
     can claim any strength label. Never writes a PEM: ``public_key()`` uses
     ``Encoding.Raw``/``PublicFormat.Raw``."""
 
-    private_key: Any
+    signer: Any
     claimed_strength: str
 
     def key_id(self) -> str:
@@ -665,12 +665,12 @@ class _StubSigningProvider:
         return False
 
     def sign(self, payload: bytes) -> bytes:
-        return bytes(self.private_key.sign(payload))
+        return bytes(self.signer.sign(payload))
 
     def public_key(self) -> bytes:
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-        return self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return self.signer.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
 def _stub_signing_provider(claimed_strength: str) -> _StubSigningProvider:
