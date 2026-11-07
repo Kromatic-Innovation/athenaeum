@@ -1,0 +1,129 @@
+name: promptwitness-se (macOS, unsigned build)
+
+# athenaeum#2153: a non-exportable Secure Enclave key adapter for
+# promptwitness, reached through tools/promptwitness-se/, a SwiftPM package
+# built on CryptoKit's `SecureEnclave.P256.Signing.PrivateKey`. No macOS CI
+# job existed anywhere in this repo before this one.
+#
+# Deliberately its own workflow file, NOT folded into ci.yml, and NOT added
+# to ci-required's `needs:` list -- same rationale ci.yml's own
+# `docs-uv-install-path` job states for itself: a macOS runner is scarce,
+# expensive minutes on a platform this repo otherwise never touches, and a
+# transient runner/toolchain blip here must never block every PR merge or
+# main promotion. A real build regression still shows up as a visible red
+# check on any PR that touches this tool.
+#
+# No signing identity, no secret, no entitlement: `swift build`'s default
+# (unsigned, ad-hoc) output is exactly what this job exercises -- AC1.
+# Codesigning and notarization are athenaeum#2239, not here.
+#
+# Path filter covers the one directory this tool lives in, plus this
+# workflow file's own path -- unlike embedding-pr.yml's deliberate
+# self-exclusion (that guard predates every file it covers, so a
+# self-reference would spuriously fire on the PR that introduces it), this
+# workflow and tools/promptwitness-se/ are being ADDED together in the same
+# PR, so including the workflow path here is exactly what makes THIS PR
+# itself exercise the new job rather than merging unverified.
+#
+# Third-party actions pinned to the same full commit SHA ci.yml uses, for
+# supply-chain hygiene.
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'tools/promptwitness-se/**'
+      - '.github/workflows/promptwitness-se-macos.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'tools/promptwitness-se/**'
+      - '.github/workflows/promptwitness-se-macos.yml'
+  workflow_dispatch:
+
+# Least-privilege default, matching ci.yml's own convention -- this job
+# only checks out the repo and runs a local build/CLI smoke test.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build promptwitness-se (unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: swift --version
+        run: swift --version
+
+      - name: Build (debug, unsigned, no dependency resolution needed)
+        working-directory: tools/promptwitness-se
+        run: swift build
+
+      - name: --help exits 0 and prints usage
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          OUT="$(.build/debug/promptwitness-se --help)"
+          echo "$OUT"
+          echo "$OUT" | grep -qi 'promptwitness-se'
+
+      # The GitHub-hosted macOS runner is a VM with no Secure Enclave, so
+      # `SecureEnclave.isAvailable` is false here -- this is exactly the
+      # environment the tool's "never crash, never exit 0, always a clear
+      # stderr line" contract exists for. The real-device signature check,
+      # the second-Mac uselessness check and latency measurement are
+      # explicitly out of scope here (athenaeum#2239); this job proves only
+      # that the unavailable-enclave path behaves as documented.
+      - name: create/sign/pubkey fail cleanly with no Secure Enclave present
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          BIN=.build/debug/promptwitness-se
+          KEYFILE="$RUNNER_TEMP/se-key.blob"
+
+          set +e
+          "$BIN" create --key-file "$KEYFILE" 2>create.err
+          RC=$?
+          set -e
+          echo "create exit: $RC"; cat create.err
+          test "$RC" -ne 0
+          test -s create.err
+          test ! -e "$KEYFILE"
+
+          set +e
+          "$BIN" pubkey --key-file "$KEYFILE" 2>pubkey.err
+          RC=$?
+          set -e
+          echo "pubkey exit: $RC"; cat pubkey.err
+          test "$RC" -ne 0
+          test -s pubkey.err
+
+          set +e
+          printf 'payload' | "$BIN" sign --key-file "$KEYFILE" 2>sign.err
+          RC=$?
+          set -e
+          echo "sign exit: $RC"; cat sign.err
+          test "$RC" -ne 0
+          test -s sign.err
+
+      - name: unknown subcommand and missing --key-file are usage errors (exit 64)
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          BIN=.build/debug/promptwitness-se
+
+          set +e
+          "$BIN" bogus-subcommand 2>bogus.err
+          RC=$?
+          set -e
+          echo "bogus subcommand exit: $RC"; cat bogus.err
+          test "$RC" -eq 64
+
+          set +e
+          "$BIN" sign 2>nokeyfile.err
+          RC=$?
+          set -e
+          echo "sign with no --key-file exit: $RC"; cat nokeyfile.err
+          test "$RC" -eq 64
