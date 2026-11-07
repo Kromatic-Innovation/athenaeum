@@ -3920,14 +3920,26 @@ Yaml only -- a signing-key registry is not an emergency override, same
 reasoning as `resolve_authority_grant_implications` -- and
 strictly defensive, per-entry: a ``key_id`` that is not a non-empty
 string, a value that is not a mapping, a ``public_key`` that is
-missing / not a string / not valid base64 / not exactly 32 bytes once
-decoded, or a ``strength`` outside `WITNESS_KEY_STRENGTHS` drops
-that ONE entry rather than the whole map (or raising) -- one operator
-typo must not silently disable every OTHER registered key. Default
-``{}``: with no declared keys, every witness-ledger signature verifies
-against nothing, which is `promptwitness.ledger.verify_chain`'s
-own documented "no signature checking" default -- i.e. this resolver
-returning empty changes nothing about today's behaviour.
+missing / not a string / not valid base64 (leading/trailing whitespace
+stripped first -- a yaml scalar commonly carries it, and it must not
+turn a correctly-declared key into a dropped one) / not exactly 32
+bytes once decoded, or a ``strength`` outside
+`WITNESS_KEY_STRENGTHS` drops that ONE entry rather than the
+whole map (or raising) -- one operator typo must not silently disable
+every OTHER registered key. Default ``{}``: with no declared keys,
+every witness-ledger signature verifies against nothing, which is
+`promptwitness.ledger.verify_chain`'s own documented "no
+signature checking" default -- i.e. this resolver returning empty
+changes nothing about today's behaviour.
+
+**Every per-entry drop is LOUD** (``logger.warning``, naming the
+``key_id``), matching this module's own malformed-value policy (see
+the module docstring's "Malformed-env-value policy" -- the same
+WARN-and-fall-back posture applied here to a malformed YAML entry
+rather than a malformed env var). An operator who declares a key that
+silently fails to register, with every line it signs reading back as
+unverified and no log line anywhere explaining why, cannot fix what
+they cannot see.
 
 ### `resolve_witness_attestation_enabled`
 
