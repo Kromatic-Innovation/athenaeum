@@ -21,7 +21,9 @@ material is written anywhere, committed or not.
 from __future__ import annotations
 
 import base64
+import logging
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
@@ -116,20 +118,14 @@ class TestDefensiveParsing:
         assert resolve_witness_keys(config) == {}
 
     def test_entry_missing_strength_is_dropped(self) -> None:
-        config = {
-            "librarian": {
-                "witness": {"keys": {"k1": {"public_key": _raw_public_key_b64()}}}
-            }
-        }
+        config = {"librarian": {"witness": {"keys": {"k1": {"public_key": _raw_public_key_b64()}}}}}
         assert resolve_witness_keys(config) == {}
 
     def test_entry_with_unknown_strength_is_dropped(self) -> None:
         config = {
             "librarian": {
                 "witness": {
-                    "keys": {
-                        "k1": {"public_key": _raw_public_key_b64(), "strength": "quantum"}
-                    }
+                    "keys": {"k1": {"public_key": _raw_public_key_b64(), "strength": "quantum"}}
                 }
             }
         }
@@ -139,9 +135,7 @@ class TestDefensiveParsing:
         config = {
             "librarian": {
                 "witness": {
-                    "keys": {
-                        "k1": {"public_key": "not!base64!!", "strength": "os-keystore"}
-                    }
+                    "keys": {"k1": {"public_key": "not!base64!!", "strength": "os-keystore"}}
                 }
             }
         }
@@ -175,9 +169,7 @@ class TestDefensiveParsing:
     def test_empty_key_id_is_dropped(self) -> None:
         config = {
             "librarian": {
-                "witness": {
-                    "keys": {"": {"public_key": _raw_public_key_b64(), "strength": "none"}}
-                }
+                "witness": {"keys": {"": {"public_key": _raw_public_key_b64(), "strength": "none"}}}
             }
         }
         assert resolve_witness_keys(config) == {}
@@ -185,9 +177,119 @@ class TestDefensiveParsing:
     def test_non_string_key_id_is_dropped(self) -> None:
         config = {
             "librarian": {
-                "witness": {
-                    "keys": {1: {"public_key": _raw_public_key_b64(), "strength": "none"}}
-                }
+                "witness": {"keys": {1: {"public_key": _raw_public_key_b64(), "strength": "none"}}}
             }
         }
         assert resolve_witness_keys(config) == {}
+
+
+class TestTrailingWhitespaceAndLoudDrops:
+    """Review finding (PR athenaeum#2357, Seer): a yaml scalar commonly
+    carries trailing whitespace, and a declared key that silently fails to
+    register is a worse failure than one that is visibly rejected."""
+
+    def test_public_key_with_trailing_whitespace_still_registers(self) -> None:
+        """Before the fix, `base64.b64decode(raw_public_key, validate=True)`
+        on an UNSTRIPPED value raises on a trailing newline/space -- exactly
+        what a yaml block/folded scalar commonly carries -- so a correctly
+        declared key silently never registered."""
+        pub_b64 = _raw_public_key_b64()
+        for padded in (pub_b64 + "\n", pub_b64 + " ", f"  {pub_b64}  \n", pub_b64 + "\r\n"):
+            config = {
+                "librarian": {
+                    "witness": {"keys": {"k1": {"public_key": padded, "strength": "os-keystore"}}}
+                }
+            }
+            resolved = resolve_witness_keys(config)
+            assert set(resolved) == {"k1"}, repr(padded)
+            assert resolved["k1"]["public_key"] == base64.b64decode(pub_b64)
+
+    def test_non_string_key_id_warns_naming_it(self, caplog: pytest.LogCaptureFixture) -> None:
+        config = {
+            "librarian": {
+                "witness": {"keys": {1: {"public_key": _raw_public_key_b64(), "strength": "none"}}}
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        assert any("librarian.witness.keys" in r.getMessage() for r in caplog.records)
+
+    def test_entry_not_a_mapping_warns_naming_the_key_id(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = {"librarian": {"witness": {"keys": {"bad-entry": "not-a-mapping"}}}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("bad-entry" in m for m in messages)
+
+    def test_missing_public_key_warns_naming_the_key_id(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = {"librarian": {"witness": {"keys": {"no-pubkey": {"strength": "os-keystore"}}}}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("no-pubkey" in m for m in messages)
+
+    def test_unknown_strength_warns_naming_the_key_id_and_value(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = {
+            "librarian": {
+                "witness": {
+                    "keys": {
+                        "bad-strength": {
+                            "public_key": _raw_public_key_b64(),
+                            "strength": "quantum",
+                        }
+                    }
+                }
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("bad-strength" in m and "quantum" in m for m in messages)
+
+    def test_non_base64_public_key_warns_naming_the_key_id(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = {
+            "librarian": {
+                "witness": {"keys": {"bad-b64": {"public_key": "not!base64!!", "strength": "none"}}}
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("bad-b64" in m for m in messages)
+
+    def test_wrong_length_key_warns_naming_the_key_id_and_byte_count(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        short = base64.b64encode(b"short").decode("ascii")
+        config = {
+            "librarian": {
+                "witness": {"keys": {"too-short": {"public_key": short, "strength": "none"}}}
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolve_witness_keys(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("too-short" in m and "5" in m for m in messages)
+
+    def test_well_formed_entry_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        config = {
+            "librarian": {
+                "witness": {
+                    "keys": {
+                        "fine": {"public_key": _raw_public_key_b64(), "strength": "os-keystore"}
+                    }
+                }
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            resolved = resolve_witness_keys(config)
+        assert set(resolved) == {"fine"}
+        assert caplog.records == []

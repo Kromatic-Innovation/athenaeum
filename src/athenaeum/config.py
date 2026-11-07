@@ -8755,14 +8755,26 @@ def resolve_witness_keys(config: dict[str, Any] | None) -> dict[str, dict[str, A
     reasoning as :func:`resolve_authority_grant_implications` -- and
     strictly defensive, per-entry: a ``key_id`` that is not a non-empty
     string, a value that is not a mapping, a ``public_key`` that is
-    missing / not a string / not valid base64 / not exactly 32 bytes once
-    decoded, or a ``strength`` outside :data:`WITNESS_KEY_STRENGTHS` drops
-    that ONE entry rather than the whole map (or raising) -- one operator
-    typo must not silently disable every OTHER registered key. Default
-    ``{}``: with no declared keys, every witness-ledger signature verifies
-    against nothing, which is :func:`promptwitness.ledger.verify_chain`'s
-    own documented "no signature checking" default -- i.e. this resolver
-    returning empty changes nothing about today's behaviour.
+    missing / not a string / not valid base64 (leading/trailing whitespace
+    stripped first -- a yaml scalar commonly carries it, and it must not
+    turn a correctly-declared key into a dropped one) / not exactly 32
+    bytes once decoded, or a ``strength`` outside
+    :data:`WITNESS_KEY_STRENGTHS` drops that ONE entry rather than the
+    whole map (or raising) -- one operator typo must not silently disable
+    every OTHER registered key. Default ``{}``: with no declared keys,
+    every witness-ledger signature verifies against nothing, which is
+    :func:`promptwitness.ledger.verify_chain`'s own documented "no
+    signature checking" default -- i.e. this resolver returning empty
+    changes nothing about today's behaviour.
+
+    **Every per-entry drop is LOUD** (``logger.warning``, naming the
+    ``key_id``), matching this module's own malformed-value policy (see
+    the module docstring's "Malformed-env-value policy" -- the same
+    WARN-and-fall-back posture applied here to a malformed YAML entry
+    rather than a malformed env var). An operator who declares a key that
+    silently fails to register, with every line it signs reading back as
+    unverified and no log line anywhere explaining why, cannot fix what
+    they cannot see.
     """
     if not isinstance(config, dict):
         return {}
@@ -8778,20 +8790,53 @@ def resolve_witness_keys(config: dict[str, Any] | None) -> dict[str, dict[str, A
     keys: dict[str, dict[str, Any]] = {}
     for key_id, entry in raw.items():
         if not isinstance(key_id, str) or not key_id.strip():
+            logger.warning(
+                "librarian.witness.keys: key id %r is not a non-empty string -- dropping "
+                "(issue athenaeum#2333)",
+                key_id,
+            )
             continue
         if not isinstance(entry, dict):
+            logger.warning(
+                "librarian.witness.keys[%r]: entry is not a mapping -- dropping (issue "
+                "athenaeum#2333)",
+                key_id,
+            )
             continue
         raw_public_key = entry.get("public_key")
         strength = entry.get("strength")
         if not isinstance(raw_public_key, str) or not raw_public_key.strip():
+            logger.warning(
+                "librarian.witness.keys[%r]: public_key is missing or empty -- dropping "
+                "(issue athenaeum#2333)",
+                key_id,
+            )
             continue
         if not isinstance(strength, str) or strength not in WITNESS_KEY_STRENGTHS:
+            logger.warning(
+                "librarian.witness.keys[%r]: strength %r is not one of %s -- dropping "
+                "(issue athenaeum#2333)",
+                key_id,
+                strength,
+                list(WITNESS_KEY_STRENGTHS),
+            )
             continue
         try:
-            public_key = base64.b64decode(raw_public_key, validate=True)
+            public_key = base64.b64decode(raw_public_key.strip(), validate=True)
         except (ValueError, TypeError):
+            logger.warning(
+                "librarian.witness.keys[%r]: public_key is not valid base64 -- dropping "
+                "(issue athenaeum#2333)",
+                key_id,
+            )
             continue
         if len(public_key) != 32:
+            logger.warning(
+                "librarian.witness.keys[%r]: public_key decodes to %d bytes, expected "
+                "32 -- dropping (issue athenaeum#2333)",
+                key_id,
+                len(public_key),
+            )
             continue
         keys[key_id.strip()] = {"public_key": public_key, "strength": strength}
     return keys
