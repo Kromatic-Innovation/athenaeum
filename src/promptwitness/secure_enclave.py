@@ -56,9 +56,16 @@ already a :class:`ledger.KeyUnavailable` subclass, so every existing
 degrade path keeps working with no special case.
 
 **Encoding agreement with the Swift helper (load-bearing).** The public
-key is CryptoKit's own ``.rawRepresentation`` — the uncompressed X9.63
-point (``0x04 || X || Y``, 65 bytes for P-256) — base64-encoded on the
-helper's stdout, by both its ``create`` and ``pubkey`` subcommands. A
+key is CryptoKit's ``.x963Representation`` — the uncompressed X9.63 point
+(``0x04 || X || Y``, 65 bytes for P-256) — base64-encoded on the helper's
+stdout, by both its ``create`` and ``pubkey`` subcommands. Specifically
+NOT CryptoKit's ``.rawRepresentation``, which is the bare 64-byte
+``X || Y`` pair with no leading ``0x04`` tag:
+:func:`signing.verify_signature` rebuilds the key with
+``EllipticCurvePublicKey.from_encoded_point``, which accepts only the
+tagged form, so the untagged one would fail every verification on a real
+device while the fake helper the tests run against (which emits the
+tagged form) stayed green. A
 signature is the DER encoding of the ECDSA signature
 (``P256.Signing.ECDSASignature.derRepresentation``), raw bytes on stdout.
 Both sides must agree byte-for-byte: a mismatch would silently change
@@ -271,8 +278,8 @@ class SecureEnclaveKeyProvider:
         return self._run("sign", input_bytes=payload)
 
     def public_key(self) -> bytes:
-        """The raw X9.63 uncompressed point (65 bytes for P-256) —
-        CryptoKit's ``.rawRepresentation``, base64-decoded from the
+        """The X9.63 uncompressed point (65 bytes for P-256) —
+        CryptoKit's ``.x963Representation``, base64-decoded from the
         helper's stdout. Must stay byte-identical to what the Swift
         helper encodes; see the module docstring's "encoding agreement"
         note — a mismatch silently changes every derived ``key_id``.

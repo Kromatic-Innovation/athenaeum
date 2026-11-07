@@ -22,8 +22,9 @@
 //   initializer call, in `cmdCreate` below, is the one line in this file
 //   that decides that question.
 // - `sign` reads the payload from stdin to EOF and writes a DER-encoded
-//   signature to stdout; `create` and `pubkey` write the base64 raw X9.63
-//   public-key point (`.rawRepresentation`) to stdout, byte-identical
+//   signature to stdout; `create` and `pubkey` write the base64 X9.63
+//   uncompressed public-key point (`.x963Representation`) to stdout,
+//   byte-identical
 //   encodings either way. Both must stay byte-identical to what
 //   `src/promptwitness/secure_enclave.py` expects on its side of the
 //   pipe -- a mismatch would silently change every `key_id` the Python
@@ -159,22 +160,39 @@ func writeKeyFileAtomically(_ data: Data, to path: String) {
     }
 }
 
-// The raw X9.63 uncompressed point (`0x04 || X || Y`, 65 bytes for P-256),
+// The X9.63 uncompressed point (`0x04 || X || Y`, 65 bytes for P-256),
 // base64-encoded -- must stay byte-identical to what
 // `src/promptwitness/secure_enclave.py`'s `_public_key_bytes` expects.
 // `create` and `pubkey` print it the same way so the Python adapter never
 // needs to know which subcommand produced it.
+//
+// `x963Representation`, NOT `rawRepresentation`: CryptoKit's
+// `rawRepresentation` is the bare 64-byte `X || Y` pair with no leading
+// `0x04` tag, and the Python side rebuilds the key with
+// `EllipticCurvePublicKey.from_encoded_point`, which accepts only the
+// tagged X9.63 form. The 64-byte form would raise there -- every
+// signature this helper produced on a real device would fail
+// verification, and no test in this repo could see it, because the fake
+// helper the Python tests run against emits the 65-byte form. The two
+// property names differ by one byte of prefix and nothing else; keep
+// them straight.
 func printPublicKey(_ key: P256.Signing.PublicKey) {
-    print(key.rawRepresentation.base64EncodedString())
+    print(key.x963Representation.base64EncodedString())
 }
 
 // MARK: - Commands
 
 func cmdCreate(_ args: Args) -> Never {
+    // Argument validation BEFORE the device probe, in all three
+    // subcommands. A malformed command line is a usage error (exit 64)
+    // whatever hardware it was typed on, and a caller debugging its own
+    // argv should not have the answer depend on whether this machine has
+    // an enclave -- which also keeps the exit code stable between a real
+    // Mac and the enclave-less CI runner that asserts it.
+    let path = requireKeyFile(args)
     guard SecureEnclave.isAvailable else {
         fail("Secure Enclave is not available on this device", code: .failure)
     }
-    let path = requireKeyFile(args)
     if FileManager.default.fileExists(atPath: path) && !args.force {
         fail(
             "a key file already exists at \(path); refusing to replace it (pass --force)",
@@ -194,10 +212,10 @@ func cmdCreate(_ args: Args) -> Never {
 }
 
 func cmdSign(_ args: Args) -> Never {
+    let path = requireKeyFile(args)
     guard SecureEnclave.isAvailable else {
         fail("Secure Enclave is not available on this device", code: .failure)
     }
-    let path = requireKeyFile(args)
     let key = loadPrivateKey(path: path)
     let payload = FileHandle.standardInput.readDataToEndOfFile()
     do {
@@ -210,10 +228,10 @@ func cmdSign(_ args: Args) -> Never {
 }
 
 func cmdPubkey(_ args: Args) -> Never {
+    let path = requireKeyFile(args)
     guard SecureEnclave.isAvailable else {
         fail("Secure Enclave is not available on this device", code: .failure)
     }
-    let path = requireKeyFile(args)
     let key = loadPrivateKey(path: path)
     printPublicKey(key.publicKey)
     exit(ExitCode.ok.rawValue)
