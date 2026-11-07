@@ -2,9 +2,10 @@
 """``KeyProvider`` protocol, the key-strength vocabulary, and the ``none`` /
 ``software-file`` / ``os-keystore`` signing adapters (athenaeum#2150,
 athenaeum#2152). :func:`resolve_key_provider` also selects
-``"secure-enclave"`` (athenaeum#2153) — that adapter itself lives in the
-sibling :mod:`promptwitness.secure_enclave` module, not here; see its
-module docstring for why it is a sibling rather than a subpackage.
+``"secure-enclave"`` (athenaeum#2153) and ``"tpm"`` (athenaeum#2154) — both
+adapters live in sibling modules, :mod:`promptwitness.secure_enclave` and
+:mod:`promptwitness.tpm` respectively, not here; see each module's own
+docstring for why it is a sibling rather than a subpackage.
 
 Layering: L1.5 (depends on :mod:`promptwitness.canon` and
 :mod:`promptwitness.ledger`, stdlib otherwise). Standard library only at
@@ -28,10 +29,11 @@ at all, which is the whole point of the ``key_provider=None`` default
 **Key-strength vocabulary**, weakest to strongest: ``none`` <
 ``software-file`` < ``os-keystore`` < ``hardware-nonexportable`` <
 ``hardware-presence``. The first three have adapters here;
-``hardware-nonexportable`` now has one too, on macOS, in the sibling
-:mod:`promptwitness.secure_enclave` module (athenaeum#2153) — a
-TPM-backed adapter for the same tier, on a different platform, is still
-to come (athenaeum#2154). ``hardware-presence`` is a seam only — operator
+``hardware-nonexportable`` now has two, on different platforms: macOS, in
+the sibling :mod:`promptwitness.secure_enclave` module (athenaeum#2153),
+and Linux/Windows, in the sibling :mod:`promptwitness.tpm` module
+(athenaeum#2154, through ``tpm2-tools`` and the CNG "Microsoft Platform
+Crypto Provider" respectively). ``hardware-presence`` is a seam only — operator
 ruling 1 builds no presence-gated adapter, so every adapter shipped here
 (and :mod:`secure_enclave`'s) returns ``presence_required() == False``.
 
@@ -105,10 +107,11 @@ log = logging.getLogger(__name__)
 
 #: Weakest to strongest (athenaeum#2144 epic body). ``none``,
 #: ``software-file`` and ``os-keystore`` have adapters in this module;
-#: ``hardware-nonexportable`` has an adapter too, in the sibling
-#: :mod:`promptwitness.secure_enclave` module (athenaeum#2153, macOS
-#: Secure Enclave) — a TPM-backed adapter for the same tier is still to
-#: come (athenaeum#2154). ``hardware-presence`` is a seam only (ruling 1).
+#: ``hardware-nonexportable`` has two adapters, in sibling modules:
+#: :mod:`promptwitness.secure_enclave` (athenaeum#2153, macOS Secure
+#: Enclave) and :mod:`promptwitness.tpm` (athenaeum#2154, Linux
+#: ``tpm2-tools`` / Windows CNG Platform Crypto Provider).
+#: ``hardware-presence`` is a seam only (ruling 1).
 STRENGTHS: tuple[str, ...] = (
     "none",
     "software-file",
@@ -1185,6 +1188,8 @@ def resolve_key_provider(
     key_path: str | os.PathLike[str] | None = None,
     keystore_backend: str | None = None,
     se_helper: str | os.PathLike[str] | None = None,
+    tpm_backend: str | None = None,
+    tpm_key_id: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> ledger.KeyProviderLike | None:
     """Resolve a key provider from config, the ``PROMPTWITNESS_KEY_PROVIDER``
@@ -1216,6 +1221,17 @@ def resolve_key_provider(
     enclave: an unavailable Secure Enclave shows up later as an unsigned
     line plus one warning, never a resolution-time failure.
 
+    ``"tpm"`` (athenaeum#2154) builds a
+    :class:`promptwitness.tpm.TpmKeyProvider` over the backend
+    :func:`promptwitness.tpm.resolve_tpm_backend` picks for this platform
+    (``tpm_backend`` argument > ``PROMPTWITNESS_TPM_BACKEND`` env > this
+    platform's default) and the key identifier it resolves (``tpm_key_id``
+    argument > ``PROMPTWITNESS_TPM_KEY_ID`` env > a per-backend default).
+    Like ``"os-keystore"`` and ``"secure-enclave"``, construction never
+    touches the TPM or the PowerShell helper: an unavailable TPM shows up
+    later as an unsigned line plus one warning, never a resolution-time
+    failure.
+
     Raises :class:`ValueError` for any other unrecognized provider name
     (``hardware-presence`` is a real vocabulary entry but has no adapter —
     operator ruling 1 builds no presence-gated adapter at all).
@@ -1246,9 +1262,23 @@ def resolve_key_provider(
             helper_path=secure_enclave.resolve_helper_path(override=se_helper, env=environ),
             key_path=secure_enclave.resolve_key_path(harness, override=key_path, env=environ),
         )
+    if name == "tpm":
+        # Function-local import, not a module-level one: `tpm` imports
+        # THIS module (for `derive_key_id` / `ledger.KeyUnavailable` /
+        # `_run_keystore_tool`), so importing it back at module scope here
+        # would make the dependency two-way. Deferring it to inside this
+        # branch keeps the direction one-way, the same discipline the
+        # `secure-enclave` branch above already applies.
+        from promptwitness import tpm
+
+        return tpm.TpmKeyProvider(
+            tpm.resolve_tpm_backend(
+                harness, backend=tpm_backend, key_id=tpm_key_id, env=environ
+            )
+        )
     raise ValueError(
         f"unknown PROMPTWITNESS_KEY_PROVIDER {name!r}; shipped adapters are "
-        "'none', 'software-file', 'os-keystore' and 'secure-enclave'"
+        "'none', 'software-file', 'os-keystore', 'secure-enclave' and 'tpm'"
     )
 
 
