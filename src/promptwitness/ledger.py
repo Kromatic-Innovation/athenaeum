@@ -1144,7 +1144,7 @@ def append_line(
 # ---------------------------------------------------------------------------
 
 
-def _verify_ed25519(
+def _verify_line_signature(
     payload: bytes, signature: bytes, public_key_raw: bytes, algorithm: str
 ) -> bool:
     """``True`` iff *signature* over *payload* verifies under
@@ -1158,23 +1158,53 @@ def _verify_ed25519(
     module, and this function only ever runs when a caller opts in by
     passing ``public_keys=`` — a ledger with no key provider never imports
     ``cryptography`` at all, exactly as the module docstring promises.
-    Only ``"ed25519"`` is implemented, matching the only algorithm either
-    shipped adapter in ``signing.py`` produces.
+
+    **Every algorithm any shipped adapter produces must be dispatched
+    here, or a VALID line is reported as a FORGED one.** This function
+    used to implement ``"ed25519"`` alone and return ``False`` for
+    anything else, which read as a safe default and was not: a Secure
+    Enclave line (``"ecdsa-p256-sha256"``, athenaeum#2153) whose key the
+    caller HAD registered in ``public_keys`` landed in
+    :attr:`ChainVerification.invalid_signature_seqs` — the field that
+    means "this signature does not match, someone edited the ledger" —
+    rather than in ``unverified_signed_lines``. An unverifiable algorithm
+    and a tampered line are different claims, and conflating them points
+    an operator at a forgery that never happened. Keep this dispatch in
+    step with :func:`signing.verify_signature`; ``tests/
+    test_promptwitness_secure_enclave.py`` asserts the end-to-end
+    behaviour through :func:`verify_chain` for each one.
     """
-    if algorithm != "ed25519":
-        return False
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError:
-        return False
-    try:
-        Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, payload)
-    except InvalidSignature:
-        return False
-    except ValueError:
-        return False
-    return True
+    if algorithm == "ed25519":
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        except ImportError:
+            return False
+        try:
+            Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, payload)
+        except InvalidSignature:
+            return False
+        except ValueError:
+            return False
+        return True
+    if algorithm == "ecdsa-p256-sha256":
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import ec
+        except ImportError:
+            return False
+        try:
+            ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), public_key_raw
+            ).verify(signature, payload, ec.ECDSA(hashes.SHA256()))
+        except InvalidSignature:
+            return False
+        except ValueError:
+            # Malformed point or signature -- not verifiable.
+            return False
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -1314,7 +1344,7 @@ def verify_chain(
                     seq = raw.get("seq")
                     invalid.append(seq if isinstance(seq, int) else -1)
                     continue
-                if not _verify_ed25519(
+                if not _verify_line_signature(
                     payload, sig_bytes, public_keys[key_id], str(key_block.get("alg") or "")
                 ):
                     seq = raw.get("seq")

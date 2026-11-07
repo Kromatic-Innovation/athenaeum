@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
-athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2157,
-athenaeum#2155).
+athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2153,
+athenaeum#2157, athenaeum#2155).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
 :mod:`promptwitness.canon`, :mod:`promptwitness.signing`,
-:mod:`promptwitness.anchor`, :mod:`promptwitness.anchor_rfc3161`,
-:mod:`promptwitness.verify` and :mod:`promptwitness.demo`).
-Standard library only at import time; no ``athenaeum`` import, and no
-``cryptography`` or ``opentimestamps`` import either — :mod:`promptwitness.signing`
-and :mod:`promptwitness.anchor` each import their optional dependency
-lazily, inside the functions that need it, so importing this module costs
-nothing on an install without the ``witness-sign`` / ``witness-anchor``
-extras. :mod:`promptwitness.anchor_rfc3161` shells out to ``openssl``
-rather than importing a third-party library, so it carries no such extra.
+:mod:`promptwitness.secure_enclave`, :mod:`promptwitness.anchor`,
+:mod:`promptwitness.anchor_rfc3161`, :mod:`promptwitness.verify` and
+:mod:`promptwitness.demo`). Standard library only at import time; no
+``athenaeum`` import, and no ``cryptography`` or ``opentimestamps`` import
+either — :mod:`promptwitness.signing` and :mod:`promptwitness.anchor` each
+import their optional dependency lazily, inside the functions that need
+it, so importing this module costs nothing on an install without the
+``witness-sign`` / ``witness-anchor`` extras. :mod:`promptwitness.anchor_rfc3161`
+shells out to ``openssl`` rather than importing a third-party library, so
+it carries no such extra; :mod:`promptwitness.secure_enclave` shells out
+to a separately-built Swift binary for the same reason and carries none
+either.
 
 ``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
-``--provider os-keystore`` by athenaeum#2152), ``hook claude-code``
-(athenaeum#2149), ``anchor`` (athenaeum#2151, extended with the optional
-RFC 3161 second source by athenaeum#2157), ``verify`` and ``demo``
-(athenaeum#2155) are all implemented here. Each was added the same way: by
-registering another subparser in :func:`build_parser`, in this module.
+``--provider os-keystore`` by athenaeum#2152 and ``--provider
+secure-enclave`` by athenaeum#2153), ``hook claude-code`` (athenaeum#2149),
+``anchor`` (athenaeum#2151, extended with the optional RFC 3161 second
+source by athenaeum#2157), ``verify`` and ``demo`` (athenaeum#2155) are
+all implemented here. Each was added the same way: by registering another
+subparser in :func:`build_parser`, in this module.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from promptwitness import __version__, anchor_rfc3161, canon, ledger, signing
+from promptwitness import __version__, anchor_rfc3161, canon, ledger, secure_enclave, signing
 from promptwitness import anchor as anchor_mod
 from promptwitness import demo as demo_mod
 from promptwitness import verify as verify_mod
@@ -87,10 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keygen.add_argument(
         "--provider",
-        choices=["software-file", "os-keystore"],
+        choices=["software-file", "os-keystore", "secure-enclave"],
         default="software-file",
-        help="Where to keep the key: a PEM file on disk, or the OS keystore "
-        "(encrypted at rest; your own session can still read it).",
+        help="Where to keep the key: a PEM file on disk, the OS keystore "
+        "(encrypted at rest; your own session can still read it), or a "
+        "macOS Secure Enclave (non-exportable; no user-presence check).",
     )
     keygen.add_argument(
         "--keystore-backend",
@@ -102,8 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
     keygen.add_argument(
         "--key-path",
         default=None,
-        help="Override the key file path (else PROMPTWITNESS_KEY_PATH, else "
-        "<ledger_dir>/keys/ed25519.pem).",
+        help="Override the key file path (else PROMPTWITNESS_KEY_PATH / "
+        "PROMPTWITNESS_SE_KEY_PATH, else <ledger_dir>/keys/ed25519.pem or "
+        "<ledger_dir>/keys/secure-enclave.key).",
+    )
+    keygen.add_argument(
+        "--se-helper",
+        default=None,
+        help="Override the promptwitness-se Swift helper path for --provider "
+        "secure-enclave (else PROMPTWITNESS_SE_HELPER, else 'promptwitness-se' "
+        "on PATH).",
     )
     keygen.add_argument(
         "--force",
@@ -280,9 +293,14 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
 
     ``--provider os-keystore`` stores the seed in the OS keystore instead of
     a PEM file; there is then no ``key_path`` to report, so the payload
-    carries ``keystore_backend`` in its place."""
+    carries ``keystore_backend`` in its place. ``--provider secure-enclave``
+    (athenaeum#2153) drives the ``promptwitness-se`` Swift helper instead;
+    its payload carries ``key_path`` (the opaque key-blob file, not a PEM)
+    like the default path does."""
     if args.provider == "os-keystore":
         return _keygen_os_keystore(args)
+    if args.provider == "secure-enclave":
+        return _keygen_secure_enclave(args)
     key_path = signing.resolve_key_path(args.harness, override=args.key_path)
     if key_path.exists():
         if not args.force:
@@ -367,6 +385,59 @@ def _keygen_os_keystore(args: argparse.Namespace) -> int:
         return 1
     payload: dict[str, Any] = {
         "keystore_backend": backend.name(),
+        "key_id": key_id,
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _keygen_secure_enclave(args: argparse.Namespace) -> int:
+    """The ``--provider secure-enclave`` half of :func:`_cmd_keygen`
+    (athenaeum#2153). Mirrors :func:`_keygen_os_keystore`'s shape: both
+    failure modes -- an existing key, and an unreachable helper/enclave --
+    report a one-line JSON error on stderr and exit 1 rather than raising,
+    never overwriting a non-exportable signing key that cannot be
+    recovered if destroyed."""
+    helper_path = secure_enclave.resolve_helper_path(override=args.se_helper)
+    key_path = secure_enclave.resolve_key_path(args.harness, override=args.key_path)
+    try:
+        provider = secure_enclave.generate_secure_enclave_key(
+            helper_path, key_path, replace=bool(args.force)
+        )
+    except FileExistsError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    except ledger.KeyUnavailable as exc:
+        # Unlike the os-keystore path, the key blob IS a file here -- it
+        # may or may not exist yet depending on which helper call failed,
+        # so the error payload reports the path without claiming the key
+        # was necessarily stored.
+        print(
+            json.dumps({"error": str(exc), "key_path": str(key_path)}, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        key_id = provider.key_id()
+    except ledger.KeyUnavailable as exc:
+        # The key IS stored at this point (`generate_secure_enclave_key`
+        # already read it back once before returning), so say so rather
+        # than letting a traceback imply nothing happened.
+        print(
+            json.dumps(
+                {
+                    "error": f"the key was stored but could not be read back: {exc}",
+                    "key_path": str(key_path),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    payload: dict[str, Any] = {
+        "key_path": str(key_path),
         "key_id": key_id,
         "algorithm": provider.algorithm(),
         "strength": provider.strength(),

@@ -107,7 +107,8 @@ identifiers.
 | `promptwitness.ledger` | `WitnessLine` v1, `append_line`, `iter_lines`, `verify_chain`, `LedgerIndex` (by `prompt_id` and `(session, prompt_digest)`) | athenaeum#2147 |
 | `promptwitness.cli` | `promptwitness status` (and the later subcommands below) | athenaeum#2147 |
 | `promptwitness.harness.claude_code` | Hook stdin/env → `TurnEvent`; wrapper table; channel detection; transcript reader | athenaeum#2149 |
-| `promptwitness.signing` | `KeyProvider` protocol and adapters (`none`, `software-file`, …) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
+| `promptwitness.signing` | `KeyProvider` protocol and adapters (`none`, `software-file`, `os-keystore`) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
+| `promptwitness.secure_enclave` | `SecureEnclaveKeyProvider` (`hardware-nonexportable`, macOS Secure Enclave, through the `tools/promptwitness-se/` Swift helper) | athenaeum#2153 |
 | `promptwitness.anchor` | `Anchorer` protocol; `LocalClockAnchorer`, `OpenTimestampsAnchorer`, `Rfc3161Anchorer` | athenaeum#2151, athenaeum#2157 |
 | `promptwitness.verify` / `.demo` | Per-turn verdicts; static HTML demo | athenaeum#2155 |
 
@@ -265,6 +266,72 @@ only). Create the key with `promptwitness keygen --provider os-keystore`;
 like the file path, it refuses to replace an existing key without `--force`,
 because replacing a signing key makes every line it ever signed permanently
 unverifiable.
+
+#### The Secure Enclave tier (athenaeum#2153)
+
+**What it protects, stated plainly: that the line was signed on THIS
+PHYSICAL DEVICE, and nothing else.** A Secure Enclave key's own
+`dataRepresentation` blob can be read straight off disk — unlike
+`os-keystore`'s seed, it needs no OS unlock at all to copy — but it is
+useless anywhere else: only the Secure Enclave that created it can use it
+to sign. That is what `hardware-nonexportable` means, and it is a strictly
+stronger guarantee than `os-keystore`'s "encrypted at rest" claim.
+
+**It does not prove a human was present.** `presence_required()` is
+`False`, exactly like every other adapter in this package:
+[ruling 1](#5-operator-rulings-2026-10-28) declined per-signature user
+presence, so any process running as this user's session — including a
+misaligned or prompt-injected model — can still ask the enclave for a
+signature indistinguishable from the hook's. Changing that would need the
+`hardware-presence` tier, which stays a seam only.
+
+The key is reached through a small Swift helper,
+`tools/promptwitness-se/`, built on CryptoKit's
+`SecureEnclave.P256.Signing.PrivateKey` — there is no Python (or C)
+binding to it. `promptwitness.secure_enclave.SecureEnclaveKeyProvider`
+shells out to the helper's `create`/`sign`/`pubkey` subcommands exactly
+the way the `os-keystore` adapter shells out to the OS keystore tools:
+fixed argv, the payload on stdin only (never argv, which is
+world-readable), a detached session, a bounded timeout, and every failure
+degrading to an unsigned line plus **one** warning for the whole process,
+never a blocked hook. The algorithm is `ecdsa-p256-sha256`: CryptoKit
+hashes with SHA-256 internally before signing, matching
+`cryptography`'s `ec.ECDSA(hashes.SHA256())` exactly, so
+`promptwitness.signing.verify_signature` can check a Secure Enclave
+signature the same way it checks an Ed25519 one. The public key is
+CryptoKit's `x963Representation` — the X9.63 uncompressed point
+(`0x04 || X || Y`, 65 bytes), base64 on the wire, and specifically not
+its `rawRepresentation`, which drops the `0x04` tag the Python side's
+`from_encoded_point` requires; a signature is the DER encoding of the ECDSA pair —
+both sides of the pipe (the Swift helper and the Python adapter) must
+agree on this byte-for-byte, or every derived `key_id` silently changes.
+
+The helper's "no key file yet" exit code is reported through
+`signing.KeystoreItemAbsent`, reused directly rather than given a second,
+meaning-duplicating subclass — "the backing store holds no key item" is
+exactly as backend-agnostic a claim for this Swift helper as it is for an
+OS keystore tool. `promptwitness.secure_enclave.generate_secure_enclave_key`
+follows the same discipline `generate_and_store_keystore_key` does: the
+existence probe calls the helper directly (an expected miss on first run
+must not trip the one-warning-per-process seam), only that specific
+absent signal counts as "nothing to lose", and the new key is verified by
+reading its public key back before the function returns.
+
+Selection: `PROMPTWITNESS_KEY_PROVIDER=secure-enclave`, then
+`PROMPTWITNESS_SE_HELPER` (override the helper binary path; default is
+the bare command `promptwitness-se`, found on `PATH`) and
+`PROMPTWITNESS_SE_KEY_PATH` (override the key-blob file; default
+`<ledger_dir>/keys/secure-enclave.key`). Create the key with
+`promptwitness keygen --provider secure-enclave`; like every other tier,
+it refuses to replace an existing key without `--force`.
+
+**What this tier does NOT cover.** Codesigning the helper, notarizing it,
+a real-device signature check, the second-Mac uselessness check (proving
+a copied key file is useless on a different machine), and latency
+measurement are all **athenaeum#2239**, a separate, `~operator` issue —
+this slice ships the adapter and an unsigned CI build only.
+`hardware-nonexportable`'s other platform, TPM, is a separate adapter
+still to come (athenaeum#2154).
 
 ### Anchoring
 
@@ -431,8 +498,12 @@ These replace the open questions the design pass raised.
   (blocked by athenaeum#2147).
 - **athenaeum#2152 — os-keystore key adapter** (macOS Keychain, Linux Secret
   Service, Windows DPAPI; blocked by athenaeum#2150).
-- athenaeum#2153 / athenaeum#2154 — Secure Enclave / TPM key adapters (both
-  ~operator).
+- **athenaeum#2153 — Secure Enclave key adapter** (non-exportable, through
+  the signed `tools/promptwitness-se/` Swift helper; blocked by
+  athenaeum#2150). Codesigning, notarization and every real-device check
+  split off to athenaeum#2239 (~operator) by operator ruling Q9.
+- athenaeum#2154 — TPM key adapter, the same `hardware-nonexportable` tier
+  on a different platform, still to come (~operator).
 - athenaeum#2151 — anchoring: `Anchorer`, local-clock, OpenTimestamps,
   block-explorer verification (blocked by athenaeum#2147).
 - athenaeum#2156 — periodic in-session and SessionEnd anchoring, local ledger

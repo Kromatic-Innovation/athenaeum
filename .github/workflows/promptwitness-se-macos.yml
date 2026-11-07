@@ -1,0 +1,195 @@
+name: promptwitness-se (macOS, unsigned build)
+
+# athenaeum#2153: a non-exportable Secure Enclave key adapter for
+# promptwitness, reached through tools/promptwitness-se/, a SwiftPM package
+# built on CryptoKit's `SecureEnclave.P256.Signing.PrivateKey`. No macOS CI
+# job existed anywhere in this repo before this one.
+#
+# Deliberately its own workflow file, NOT folded into ci.yml, and NOT added
+# to ci-required's `needs:` list -- same rationale ci.yml's own
+# `docs-uv-install-path` job states for itself: a macOS runner is scarce,
+# expensive minutes on a platform this repo otherwise never touches, and a
+# transient runner/toolchain blip here must never block every PR merge or
+# main promotion. A real build regression still shows up as a visible red
+# check on any PR that touches this tool.
+#
+# No signing identity, no secret, no entitlement: `swift build`'s default
+# (unsigned, ad-hoc) output is exactly what this job exercises -- AC1.
+# Codesigning and notarization are athenaeum#2239, not here.
+#
+# Path filter covers the one directory this tool lives in, plus this
+# workflow file's own path -- unlike embedding-pr.yml's deliberate
+# self-exclusion (that guard predates every file it covers, so a
+# self-reference would spuriously fire on the PR that introduces it), this
+# workflow and tools/promptwitness-se/ are being ADDED together in the same
+# PR, so including the workflow path here is exactly what makes THIS PR
+# itself exercise the new job rather than merging unverified.
+#
+# Third-party actions pinned to the same full commit SHA ci.yml uses, for
+# supply-chain hygiene.
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'tools/promptwitness-se/**'
+      - '.github/workflows/promptwitness-se-macos.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'tools/promptwitness-se/**'
+      - '.github/workflows/promptwitness-se-macos.yml'
+  workflow_dispatch:
+
+# Least-privilege default, matching ci.yml's own convention -- this job
+# only checks out the repo and runs a local build/CLI smoke test.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build promptwitness-se (unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: swift --version
+        run: swift --version
+
+      - name: Build (debug, unsigned, no dependency resolution needed)
+        working-directory: tools/promptwitness-se
+        run: swift build
+
+      - name: --help exits 0 and prints usage
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          OUT="$(.build/debug/promptwitness-se --help)"
+          echo "$OUT"
+          echo "$OUT" | grep -qi 'promptwitness-se'
+
+      # MEASURED, not assumed (and the first revision of this job assumed
+      # wrong): a GitHub-hosted `macos-latest` runner DOES expose a usable
+      # Secure Enclave -- `create` exits 0 there and returns a real 65-byte
+      # X9.63 point. So this step branches on what the machine actually is
+      # rather than hard-coding either answer: a runner image that later
+      # drops enclave access must exercise the clean-degrade contract
+      # instead of reding this job, and a runner that has one must prove the
+      # real path rather than skipping it.
+      #
+      # Still explicitly NOT athenaeum#2239's scope: nothing here is signed
+      # or notarized, and the second-Mac uselessness check and latency
+      # measurement (which need a second physical machine and a human) stay
+      # there. What this does cover is the wire-format agreement between the
+      # Swift helper and src/promptwitness/secure_enclave.py -- the one
+      # defect class this slice already shipped twice in review (CryptoKit's
+      # untagged 64-byte `rawRepresentation` in place of the tagged 65-byte
+      # `x963Representation`). The Python tests can only check that against
+      # a fake helper; this checks it against a real enclave, for free.
+      - name: create/sign/pubkey against this runner's real enclave (or degrade cleanly)
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          BIN=.build/debug/promptwitness-se
+          KEYFILE="$RUNNER_TEMP/se-key.blob"
+          rm -f "$KEYFILE"
+
+          set +e
+          CREATE_OUT="$("$BIN" create --key-file "$KEYFILE" 2>create.err)"
+          RC=$?
+          set -e
+          echo "create exit: $RC"; cat create.err
+
+          if [ "$RC" -ne 0 ]; then
+            echo "No usable Secure Enclave on this runner - asserting the clean-degrade contract."
+            test -s create.err
+            test ! -e "$KEYFILE"
+
+            set +e
+            "$BIN" pubkey --key-file "$KEYFILE" 2>pubkey.err; RC=$?
+            set -e
+            echo "pubkey exit: $RC"; cat pubkey.err
+            test "$RC" -ne 0
+            test -s pubkey.err
+
+            set +e
+            printf 'payload' | "$BIN" sign --key-file "$KEYFILE" 2>sign.err; RC=$?
+            set -e
+            echo "sign exit: $RC"; cat sign.err
+            test "$RC" -ne 0
+            test -s sign.err
+            exit 0
+          fi
+
+          echo "This runner has a usable Secure Enclave - asserting the real path."
+          test -f "$KEYFILE"
+
+          # The public key must be the 65-byte X9.63 uncompressed point
+          # (`0x04 || X || Y`). `rawRepresentation` would be 64 bytes with no
+          # tag, and src/promptwitness/secure_enclave.py refuses that -- so
+          # this is the same invariant, asserted on the Swift side of the pipe.
+          # `openssl base64 -d -A`, not `base64 --decode`: the long flag is
+          # a GNU coreutils spelling and this runs on BSD userland.
+          printf '%s' "$CREATE_OUT" | openssl base64 -d -A > create.pub.bin
+          PUBKEY_OUT="$("$BIN" pubkey --key-file "$KEYFILE")"
+          printf '%s' "$PUBKEY_OUT" | openssl base64 -d -A > pubkey.pub.bin
+          cmp create.pub.bin pubkey.pub.bin
+          test "$(wc -c < pubkey.pub.bin | tr -d ' ')" -eq 65
+          test "$(od -An -tx1 -N1 pubkey.pub.bin | tr -d ' \n')" = "04"
+
+          printf 'payload-under-test' > payload.bin
+          "$BIN" sign --key-file "$KEYFILE" < payload.bin > sig.der
+          test -s sig.der
+          # A DER SEQUENCE, which is what `derRepresentation` promises.
+          test "$(od -An -tx1 -N1 sig.der | tr -d ' \n')" = "30"
+
+          # Verify with openssl and nothing else -- no network, no signing
+          # identity, no Python dependency, and no `xxd` (it ships with vim,
+          # not the base system). The 26-byte prefix is the fixed
+          # SubjectPublicKeyInfo header for an id-ecPublicKey/prime256v1 key
+          # ending in a 66-byte BIT STRING, so appending the 65-byte point
+          # verbatim yields a DER key openssl will take.
+          {
+            printf '\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01'
+            printf '\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00'
+            cat pubkey.pub.bin
+          } > pubkey.spki.der
+          test "$(wc -c < pubkey.spki.der | tr -d ' ')" -eq 91
+          openssl pkey -pubin -inform DER -in pubkey.spki.der -out pubkey.pem
+          openssl dgst -sha256 -verify pubkey.pem -signature sig.der payload.bin
+
+          # A negative control, so the verification above cannot pass vacuously.
+          printf 'a different payload' > other.bin
+          if openssl dgst -sha256 -verify pubkey.pem -signature sig.der other.bin; then
+            echo "::error::the signature verified against the WRONG payload - the check above proves nothing"
+            exit 1
+          fi
+
+          # Refuse-to-replace, same discipline every other key tier follows.
+          set +e
+          "$BIN" create --key-file "$KEYFILE" 2>replace.err; RC=$?
+          set -e
+          echo "create-without-force exit: $RC"; cat replace.err
+          test "$RC" -ne 0
+          test -s replace.err
+
+      - name: unknown subcommand and missing --key-file are usage errors (exit 64)
+        working-directory: tools/promptwitness-se
+        run: |
+          set -euo pipefail
+          BIN=.build/debug/promptwitness-se
+
+          set +e
+          "$BIN" bogus-subcommand 2>bogus.err
+          RC=$?
+          set -e
+          echo "bogus subcommand exit: $RC"; cat bogus.err
+          test "$RC" -eq 64
+
+          set +e
+          "$BIN" sign 2>nokeyfile.err
+          RC=$?
+          set -e
+          echo "sign with no --key-file exit: $RC"; cat nokeyfile.err
+          test "$RC" -eq 64

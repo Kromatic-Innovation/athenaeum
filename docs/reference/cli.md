@@ -1985,9 +1985,10 @@ Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.
 |---|---|---|---|
 | `--force` | `False` | — | Overwrite an existing key instead of refusing. |
 | `--harness` | `claude-code` | — | Harness name the default key path is namespaced under. |
-| `--key-path` | — | — | Override the key file path (else PROMPTWITNESS_KEY_PATH, else <ledger_dir>/keys/ed25519.pem). |
+| `--key-path` | — | — | Override the key file path (else PROMPTWITNESS_KEY_PATH / PROMPTWITNESS_SE_KEY_PATH, else <ledger_dir>/keys/ed25519.pem or <ledger_dir>/keys/secure-enclave.key). |
 | `--keystore-backend` | — | macos-keychain, secret-service, windows-dpapi | Keystore to use with --provider os-keystore (else PROMPTWITNESS_KEYSTORE_BACKEND, else this platform's). |
-| `--provider` | `software-file` | software-file, os-keystore | Where to keep the key: a PEM file on disk, or the OS keystore (encrypted at rest; your own session can still read it). |
+| `--provider` | `software-file` | software-file, os-keystore, secure-enclave | Where to keep the key: a PEM file on disk, the OS keystore (encrypted at rest; your own session can still read it), or a macOS Secure Enclave (non-exportable; no user-presence check). |
+| `--se-helper` | — | — | Override the promptwitness-se Swift helper path for --provider secure-enclave (else PROMPTWITNESS_SE_HELPER, else 'promptwitness-se' on PATH). |
 
 ## `promptwitness status`
 

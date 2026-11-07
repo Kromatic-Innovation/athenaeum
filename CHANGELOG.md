@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`promptwitness` Secure Enclave key adapter, non-exportable, through a
+  signed Swift helper (issue athenaeum#2153, part of the
+  prompt-witness-ledger epic, athenaeum#2144).** A new SwiftPM package,
+  `tools/promptwitness-se/`, built on CryptoKit's
+  `SecureEnclave.P256.Signing.PrivateKey`, exposes `create`/`sign`/`pubkey`
+  subcommands; the key's opaque `dataRepresentation` blob lives in a plain
+  file (mode 0600), never the Keychain, so no entitlement is needed. A new
+  `promptwitness.secure_enclave.SecureEnclaveKeyProvider` (algorithm
+  `ecdsa-p256-sha256`, strength `hardware-nonexportable`) shells out to it
+  with the same subprocess discipline `signing._run_keystore_tool` already
+  uses for the OS-keystore tools: fixed argv, the payload on stdin only,
+  a detached session, a bounded timeout. Select it with
+  `PROMPTWITNESS_KEY_PROVIDER=secure-enclave` (helper path override
+  `PROMPTWITNESS_SE_HELPER`, key-blob path override
+  `PROMPTWITNESS_SE_KEY_PATH`); create the key with `promptwitness keygen
+  --provider secure-enclave`, which refuses to replace an existing key
+  without `--force`, same as every other tier.
+  - **Non-exportable, not presence-gated.** A signature proves the line
+    was signed on this physical device; `presence_required()` is `False`
+    (operator ruling 1) — any process running as this user's session can
+    still ask the enclave to sign.
+  - `signing.verify_signature` gains the `"ecdsa-p256-sha256"` algorithm
+    (raw X9.63 public key, DER signature), alongside the existing
+    `"ed25519"` one.
+  - A new, separate `.github/workflows/promptwitness-se-macos.yml` builds
+    the helper unsigned on `macos-latest` and smoke-tests it against that
+    runner's own enclave (measured: `macos-latest` has a usable one, so CI
+    verifies a real signature with `openssl` and nothing else), falling back
+    to asserting the clean-degrade contract on a runner without one. It is
+    deliberately excluded from the `ci-required` aggregate, same rationale
+    as `ci.yml`'s own `docs-uv-install-path` job.
+  - Codesigning, notarization, the real-device signature check, the
+    second-Mac uselessness check and latency measurement are **not** part
+    of this slice — they split off to athenaeum#2239 (operator ruling Q9).
+    A TPM-backed adapter for the same `hardware-nonexportable` tier is
+    separate, still-to-come work (athenaeum#2154).
+
 - **Witness-ledger signature verification against operator-declared keys,
   and a real anchor source instead of a bare boolean (issue athenaeum#2333,
   TG5).** A new `librarian.witness.keys` yaml map (`{<key_id>: {public_key,
