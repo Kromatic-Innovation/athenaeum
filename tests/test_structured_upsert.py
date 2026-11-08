@@ -619,3 +619,87 @@ def test_run_leaves_refused_raw_on_disk(tmp_path: Path, monkeypatch: pytest.Monk
     assert client.messages.create.call_count == 0
     assert raw_path.read_text(encoding="utf-8") == FULL_RAW  # still there, untouched
     assert (root / "wiki" / f"{UID}.md").read_text(encoding="utf-8") == page
+
+
+# --- final review: preamble hole, unranked raw value, CommonMark fences ---------
+
+_H1_RAW = "# Lemon Pistachio Loaf (imported)\n\n## Ingredients"
+
+
+@pytest.mark.parametrize(
+    "loose",
+    ["    # preheat to 180C", "# Serves 8, keeps 3 days", "### Overview", "<!-- imported -->"],
+    ids=["indented-code", "second-h1", "h3", "html-comment"],
+)
+def test_any_non_h1_preamble_text_is_refused(tmp_path: Path, wiki: Path, loose: str) -> None:
+    head = "# Lemon Pistachio Loaf (imported)"
+    raw_text = FULL_RAW.replace(_H1_RAW, f"{head}\n\n{loose}\n\n## Ingredients")
+    assert raw_text != FULL_RAW
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "refused" and out.reason == "unappliable"
+    assert (wiki / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+
+
+def test_whitespace_only_preamble_still_applies(tmp_path: Path, wiki: Path) -> None:
+    head = "# Lemon Pistachio Loaf (imported)"
+    raw_text = FULL_RAW.replace(_H1_RAW, f"{head}\n\n   \n\t\n\n## Ingredients")
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "applied"
+
+
+@pytest.mark.parametrize(
+    "status_line",
+    ["", "fetch_status: partial\n"],
+    ids=["missing", "unranked"],
+)
+def test_missing_or_unranked_raw_rank_does_not_replace_sections(
+    tmp_path: Path, wiki: Path, status_line: str
+) -> None:
+    _upsert(_raw(tmp_path, FULL_RAW), wiki)
+    weak = (
+        FULL_RAW.replace("fetch_status: full\n", status_line)
+        .replace("- 200 g flour", "- 999 g mystery")
+        .replace("- Lee swapped in almonds.", "- Weak raw note.")
+        .replace("  - citrus", "  - citrus\n  - holiday")
+    )
+    assert "fetch_status: full" not in weak
+    out = _upsert(_raw(tmp_path, weak, "r2.md"), wiki)
+    assert out is not None and out.status == "applied"
+    meta, body = _page(wiki)
+    assert "200 g flour" in body and "999 g mystery" not in body
+    assert "Weak raw note." in body and "holiday" in meta["tags"]
+    assert meta["fetch_status"] == "full"
+
+
+def test_unranked_page_value_does_not_gate_replacement(tmp_path: Path, wiki: Path) -> None:
+    """The gate only protects a page that holds a ranked value."""
+    (wiki / f"{UID}.md").write_text(
+        LINK_ONLY_PAGE.replace("fetch_status: link-only\n", ""), encoding="utf-8"
+    )
+    out = _upsert(_raw(tmp_path, FULL_RAW.replace("fetch_status: full\n", "")), wiki)
+    assert out is not None and out.status == "applied"
+    assert "200 g flour" in _page(wiki)[1]
+
+
+@pytest.mark.parametrize(
+    ("opener", "inner", "closer"),
+    [("````", "```", "````"), ("```", "~~~", "```"), ("~~~~", "~~~", "~~~~")],
+    ids=["long-backtick-holds-short", "backtick-holds-tilde", "long-tilde-holds-short"],
+)
+def test_balanced_fence_holding_other_fence_applies(
+    tmp_path: Path, wiki: Path, opener: str, inner: str, closer: str
+) -> None:
+    raw_text = FULL_RAW.replace(
+        "3. Bake for 45 minutes.",
+        f"{opener}\n{inner}\n## still code\n{closer}\n3. Bake for 45 minutes.",
+    )
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "applied"
+    body = _page(wiki)[1]
+    assert "## still code" in body and "## Notes" in body
+
+
+def test_shorter_closer_does_not_close_a_longer_fence(tmp_path: Path, wiki: Path) -> None:
+    raw_text = FULL_RAW.replace("3. Bake for 45 minutes.", "````\n```\n3. Bake for 45 minutes.")
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "refused" and out.reason == "unappliable"

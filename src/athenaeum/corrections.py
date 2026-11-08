@@ -1917,7 +1917,11 @@ def process_correction_record(
         merged_read["valid_until"] = correction_valid_until
 
     merged_read["updated"] = date.today().isoformat()
-    validate_wiki_meta(merged_read)
+    validate_wiki_meta(
+        merged_read,
+        declared_types=load_schema_list(index.wiki_root / "_schema", "types.md")
+        or sorted(KNOWN_TYPES),
+    )
     atomic_write_text(
         entity_path, render_frontmatter(merged_read) + "\n" + existing_body
     )

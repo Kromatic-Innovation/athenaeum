@@ -307,7 +307,7 @@ from athenaeum.tiers import (
     tier3_derive_actions,
     tier4_escalate,
 )
-from athenaeum.wiki_write_guard import guard_entity_write_type
+from athenaeum.wiki_write_guard import guard_entity_write_type, resolve_admitted_wiki_types
 
 log = logging.getLogger(__name__)
 
@@ -2260,7 +2260,7 @@ def _apply_tier3_results(
         # NOT collapse to validating ``entity`` directly without first
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
-        validate_wiki_meta(rendered_meta)
+        validate_wiki_meta(rendered_meta, declared_types=resolve_admitted_wiki_types(wiki_root))
         # Write-boundary type guard (issue athenaeum#1196): a backstop BEHIND
         # validate_wiki_meta's UserWarning-only check above — a type outside
         # declared ∪ KNOWN_TYPES is refused here regardless of whether any
