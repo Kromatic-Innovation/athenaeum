@@ -1033,7 +1033,7 @@ class TestCreateByHandle:
         else:  # pragma: no cover - defensive
             raise AssertionError("expected a ValidationError")
 
-        def _always_fail(meta: dict) -> None:
+        def _always_fail(meta: dict, **_kwargs: object) -> None:
             raise boom
 
         monkeypatch.setattr("athenaeum.corrections.validate_wiki_meta", _always_fail)

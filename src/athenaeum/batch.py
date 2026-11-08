@@ -112,6 +112,11 @@ from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.structured_upsert import (
+    STATUS_APPLIED,
+    STATUS_REFUSED,
+    tier0_structured_upsert,
+)
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
@@ -883,6 +888,10 @@ class _FileState:
     address_escalations: list[EscalationItem] = field(default_factory=list)
     failed: bool = False
     done: bool = False
+    # Issue athenaeum#2360: pages updated by the tier-0 structured upsert, and
+    # whether a refusal means the raw must stay on disk.
+    updated_uids: list[str] = field(default_factory=list)
+    retain_raw: bool = False
     # Set when the budget re-check at phase-2 assembly or before the
     # finalize-time sync merges defers this file (athenaeum#220): raw stays on
     # disk, ref goes to the deferred manifest, nothing is written.
@@ -1316,6 +1325,20 @@ def process_batch_run(
                     passthrough.filename,
                 )
                 st.created.append(passthrough)
+                st.done = True
+                continue
+
+            # Issue athenaeum#2360: configured-type structured upsert, the
+            # same deterministic step the synchronous path runs after
+            # passthrough. Without it a uid-bound update would silently
+            # degrade to name matching here. A refusal leaves the raw on disk.
+            su_outcome = tier0_structured_upsert(raw, index, wiki_root, valid_types, config=config)
+            if su_outcome is not None:
+                if su_outcome.status == STATUS_REFUSED:
+                    st.skipped.append(su_outcome.skipped_label)
+                    st.retain_raw = True
+                elif su_outcome.status == STATUS_APPLIED:
+                    st.updated_uids.append(su_outcome.uid)
                 st.done = True
                 continue
 
@@ -2016,6 +2039,10 @@ def process_batch_run(
                     for _e in st.address_escalations
                     if _e.conflict_type == "oversize_log_demote"
                 )
+            result.updated += len(st.updated_uids)
+            if st.retain_raw:
+                log.warning("  Retained (not deleted): %s", st.raw.path)
+                continue
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
             continue
@@ -2323,7 +2350,7 @@ def process_batch_run(
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
                 rendered_meta, _ = parse_frontmatter(rendered)
-                validate_wiki_meta(rendered_meta)
+                validate_wiki_meta(rendered_meta, declared_types=valid_types)
                 # Write-boundary type guard (issue athenaeum#1196): same
                 # backstop as process_one/_apply_tier3_results — refuse a
                 # type outside declared ∪ KNOWN_TYPES regardless of whether

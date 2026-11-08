@@ -110,6 +110,7 @@ MODULE_LAYER: dict[str, int] = {
     "never_ingest": 2,
     "page_description": 2,
     "person_registry": 2,
+    "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)
     "quiesce": 2,
     "schema_migrate": 2,
     "push_state": 2,

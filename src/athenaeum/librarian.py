@@ -284,6 +284,15 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.store import FilesystemStore, now_iso
+from athenaeum.structured_upsert import (
+    STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
+)
+from athenaeum.structured_upsert import (
+    STATUS_REFUSED as STRUCTURED_UPSERT_REFUSED,
+)
+from athenaeum.structured_upsert import (
+    tier0_structured_upsert,
+)
 from athenaeum.t1_census import get_t1_census, reset_t1_census
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
@@ -298,7 +307,7 @@ from athenaeum.tiers import (
     tier3_derive_actions,
     tier4_escalate,
 )
-from athenaeum.wiki_write_guard import guard_entity_write_type
+from athenaeum.wiki_write_guard import guard_entity_write_type, resolve_admitted_wiki_types
 
 log = logging.getLogger(__name__)
 
@@ -1173,7 +1182,7 @@ def tier0_handle_upsert(
 
     # Schema-gate the merged frontmatter before write — same guarantee tier0
     # passthrough gives. Source-handle keys ride through via extra="allow".
-    validate_wiki_meta(merged_meta)
+    validate_wiki_meta(merged_meta, declared_types=valid_types)
 
     if dry_run:
         return entity, True
@@ -2251,7 +2260,7 @@ def _apply_tier3_results(
         # NOT collapse to validating ``entity`` directly without first
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
-        validate_wiki_meta(rendered_meta)
+        validate_wiki_meta(rendered_meta, declared_types=resolve_admitted_wiki_types(wiki_root))
         # Write-boundary type guard (issue athenaeum#1196): a backstop BEHIND
         # validate_wiki_meta's UserWarning-only check above — a type outside
         # declared ∪ KNOWN_TYPES is refused here regardless of whether any
@@ -2631,6 +2640,23 @@ def process_one(
             passthrough.filename,
         )
         result.created.append(passthrough)
+        return result
+
+    # --- Tier 0 (structured upsert): a raw of a type configured under
+    # `librarian.structured_upsert` whose uid already resolves is merged onto
+    # that page section-by-section (issue athenaeum#2360). Inert (returns None)
+    # for every unconfigured type. A configured-type raw that cannot be
+    # applied is REFUSED: recorded as skipped, left on disk, and never passed
+    # on to the uid-bind path or the LLM tiers.
+    su_outcome = tier0_structured_upsert(
+        raw, index, wiki_root, valid_types, config=config, dry_run=dry_run
+    )
+    if su_outcome is not None:
+        if su_outcome.status == STRUCTURED_UPSERT_REFUSED:
+            result.skipped.append(su_outcome.skipped_label)
+            result.retain_raw = True
+        elif su_outcome.status == STRUCTURED_UPSERT_APPLIED:
+            result.updated.append(su_outcome.uid)
         return result
 
     # --- Tier 0 (upsert): deterministic source-handle seed onto an existing
@@ -9561,7 +9587,28 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             unchanged=0 if _entity_made_change else 1,
                         )
 
-                        if not ctx.dry_run:
+                        if not ctx.dry_run and getattr(result, "retain_raw", False):
+                            # Issue athenaeum#2360: a refused structured-upsert
+                            # raw stays on disk, never deleted. Its refusals ride
+                            # the existing stuck-file ledger (athenaeum#663):
+                            # consecutive refusals of unchanged content back off
+                            # (athenaeum#1185) and, at the stuck threshold, the
+                            # raw is skipped and surfaced as stuck until its
+                            # content changes or a human intervenes.
+                            log.warning("  Retained (not deleted): %s", raw.path)
+                            _crossed = _record_stuck_failure(
+                                stuck_ledger,
+                                raw,
+                                error=result.skipped[-1]
+                                if result.skipped
+                                else "structured-upsert-refused",
+                                action="tier0_structured_upsert",
+                                threshold=stuck_threshold,
+                                now=ctx.now,
+                            )
+                            if _crossed is not None:
+                                _surface_newly_stuck(ctx, raw, _crossed)
+                        elif not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1

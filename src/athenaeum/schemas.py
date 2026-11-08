@@ -84,6 +84,7 @@ resolution/conflict outcomes — that is out of scope per the notes above.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -389,7 +390,9 @@ FALLBACK_TYPES: frozenset[str] = frozenset(
 KNOWN_TYPES: frozenset[str] = frozenset(_BY_TYPE) | FALLBACK_TYPES
 
 
-def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
+def validate_wiki_meta(
+    meta: dict[str, Any], declared_types: Iterable[str] | None = None
+) -> WikiBase:
     """Validate a frontmatter dict against the appropriate schema.
 
     Dispatches by ``meta["type"]``. Unknown types fall through to
@@ -399,9 +402,17 @@ def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
     Issue athenaeum#93: emits a :class:`UserWarning` (NOT an exception) when
     ``meta["type"]`` is outside :data:`KNOWN_TYPES`. Recoverable —
     strict mode is out of scope.
+
+    Issue athenaeum#2362: *declared_types* is the deployment's own type
+    registry (``wiki/_schema/types.md``, as the librarian's ``valid_types``).
+    A type in it is known to this deployment, so it does not warn; the warning
+    fires only outside ``KNOWN_TYPES`` union *declared_types*. ``None`` (every
+    caller that holds no declared list) keeps the original behaviour exactly.
+    Dispatch to the per-type model is unchanged.
     """
     etype = meta.get("type", "")
-    if etype and etype not in KNOWN_TYPES:
+    declared = frozenset(declared_types) if declared_types is not None else frozenset()
+    if etype and etype not in KNOWN_TYPES and etype not in declared:
         warnings.warn(
             f"unknown wiki type: {etype!r} (not in KNOWN_TYPES)",
             UserWarning,
