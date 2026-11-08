@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tier-0 structured upsert for configured entity types (issue
+  athenaeum#2360).** A pre-structured raw whose `type` is listed under
+  `librarian.structured_upsert` and whose `uid` already resolves to a page is
+  merged onto that page deterministically, with no LLM: named H2 sections are
+  replaced or appended to, list keys unioned, scalar keys set, and ordered keys
+  (for example a fetch status) ratcheted so they never move down. The page's
+  H1 and its `uid`/`type`/`created`/`access` never change, and a raw that adds
+  nothing is a no-op (no write, no `updated` bump). The step runs in
+  `process_one` after `tier0_passthrough` declines and before
+  `tier0_handle_upsert`, and in the batch transport's tier-0 loop. A raw of a
+  configured type that cannot be applied (type mismatch, unresolvable uid, a
+  section the config does not name) is logged at WARNING, recorded in
+  `skipped`, and left on disk; it never reaches the uid-bind path or the LLM
+  tiers. Unconfigured types are unaffected. See
+  `docs/reference/configuration.md` (`resolve_structured_upsert`).
 - **`promptwitness` Secure Enclave key adapter, non-exportable, through a
   signed Swift helper (issue athenaeum#2153, part of the
   prompt-witness-ledger epic, athenaeum#2144).** A new SwiftPM package,

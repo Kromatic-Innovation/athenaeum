@@ -63,6 +63,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
@@ -8949,3 +8950,125 @@ def resolve_source_trust_edges(config: dict[str, Any] | None) -> tuple[Any, ...]
             edges[j].describe(),
         )
     return edges
+
+
+#: Frontmatter keys a ``structured_upsert`` entry may never name: they are the
+#: page's identity and access envelope, and the upsert contract is that none of
+#: them ever changes (issue athenaeum#2360). ``updated`` is excluded too: the
+#: upsert stamps it itself, and only when something actually changed.
+STRUCTURED_UPSERT_PROTECTED_KEYS = frozenset({"uid", "type", "created", "access", "updated"})
+
+
+@dataclass(frozen=True)
+class StructuredUpsertSpec:
+    """One entity type's resolved ``librarian.structured_upsert.<type>`` entry.
+
+    Pure data, no behaviour: :mod:`athenaeum.structured_upsert` interprets it.
+    ``sections`` is the canonical H2 order; ``replace_sections`` and
+    ``append_sections`` hold casefolded names that are a subset of it (a
+    section in neither is only ever inserted when absent). ``ordered_keys``
+    pairs a frontmatter key with its rank-ordered value list (lowest to
+    highest); a value never moves down.
+    """
+
+    sections: tuple[str, ...] = ()
+    replace_sections: frozenset[str] = frozenset()
+    append_sections: frozenset[str] = frozenset()
+    union_keys: tuple[str, ...] = ()
+    set_keys: tuple[str, ...] = ()
+    ordered_keys: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _structured_upsert_str_list(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip() and item.strip() not in out:
+            out.append(item.strip())
+    return tuple(out)
+
+
+def resolve_structured_upsert(
+    config: dict[str, Any] | None = None,
+) -> dict[str, StructuredUpsertSpec]:
+    """Resolve ``librarian.structured_upsert`` (issue athenaeum#2360).
+
+    Maps an entity ``type`` to the deterministic merge rules the tier-0
+    structured upsert applies when a pre-structured raw of that type names a
+    uid that already exists in the wiki. A type that is not listed here is
+    untouched: every other path behaves exactly as before.
+
+    Per type, all keys optional: ``sections`` (canonical H2 order),
+    ``replace_sections`` (replaced when the raw's section is non-empty),
+    ``append_sections`` (raw lines not already present are appended),
+    ``union_keys`` (list-valued frontmatter keys, set-unioned),
+    ``set_keys`` (scalar frontmatter keys, overwritten when the raw's value is
+    non-empty), and ``ordered_keys`` (key to a low-to-high value list; a value
+    never moves down the list).
+
+    Validation never raises: a non-dict entry, a type name that is not a
+    non-empty string, or a ``replace_sections``/``append_sections`` name absent
+    from ``sections`` is dropped (logged at WARNING) rather than half-applied.
+    The identity keys ``uid``, ``type``, ``created``, ``access`` and
+    ``updated`` are stripped from every key list, so no config can make the
+    upsert rewrite them. Missing or malformed config returns an empty mapping.
+    """
+    out: dict[str, StructuredUpsertSpec] = {}
+    if not isinstance(config, dict):
+        return out
+    lib = config.get("librarian")
+    if not isinstance(lib, dict):
+        return out
+    section = lib.get("structured_upsert")
+    if not isinstance(section, dict):
+        return out
+    for etype, entry in section.items():
+        if not isinstance(etype, str) or not etype.strip() or not isinstance(entry, dict):
+            logger.warning(
+                "librarian.structured_upsert: ignoring malformed entry %r "
+                "(want a non-empty type name mapping to a dict)",
+                etype,
+            )
+            continue
+        sections = _structured_upsert_str_list(entry.get("sections"))
+        folded = {s.casefold() for s in sections}
+        replace = _structured_upsert_str_list(entry.get("replace_sections"))
+        append = _structured_upsert_str_list(entry.get("append_sections"))
+        stray = [s for s in (*replace, *append) if s.casefold() not in folded]
+        if stray:
+            logger.warning(
+                "librarian.structured_upsert.%s: ignoring replace/append "
+                "section(s) %s not listed in `sections`",
+                etype.strip(),
+                stray,
+            )
+        ordered: list[tuple[str, tuple[str, ...]]] = []
+        raw_ordered = entry.get("ordered_keys")
+        if isinstance(raw_ordered, dict):
+            for key, ranks in raw_ordered.items():
+                rank_tuple = _structured_upsert_str_list(ranks)
+                if (
+                    isinstance(key, str)
+                    and key.strip()
+                    and key.strip() not in STRUCTURED_UPSERT_PROTECTED_KEYS
+                    and rank_tuple
+                ):
+                    ordered.append((key.strip(), rank_tuple))
+
+        def _keys(name: str, _entry: dict[str, Any] = entry) -> tuple[str, ...]:
+            return tuple(
+                k
+                for k in _structured_upsert_str_list(_entry.get(name))
+                if k not in STRUCTURED_UPSERT_PROTECTED_KEYS
+            )
+
+        out[etype.strip()] = StructuredUpsertSpec(
+            sections=sections,
+            replace_sections=frozenset(s.casefold() for s in replace if s.casefold() in folded),
+            append_sections=frozenset(s.casefold() for s in append if s.casefold() in folded),
+            union_keys=_keys("union_keys"),
+            set_keys=_keys("set_keys"),
+            ordered_keys=tuple(ordered),
+        )
+    return out

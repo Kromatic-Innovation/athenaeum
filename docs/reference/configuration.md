@@ -3645,6 +3645,36 @@ Values outside `athenaeum.models.CLAIM_KINDS` are dropped; an empty
 result falls through to the default rather than disabling every
 precondition silently.
 
+### `resolve_structured_upsert`
+
+- **YAML path:** `librarian.structured_upsert`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.structured_upsert``.
+
+Maps an entity ``type`` to the deterministic merge rules the tier-0
+structured upsert applies when a pre-structured raw of that type names a
+uid that already exists in the wiki. A type that is not listed here is
+untouched: every other path behaves exactly as before.
+
+Per type, all keys optional: ``sections`` (canonical H2 order),
+``replace_sections`` (replaced when the raw's section is non-empty),
+``append_sections`` (raw lines not already present are appended),
+``union_keys`` (list-valued frontmatter keys, set-unioned),
+``set_keys`` (scalar frontmatter keys, overwritten when the raw's value is
+non-empty), and ``ordered_keys`` (key to a low-to-high value list; a value
+never moves down the list).
+
+Validation never raises: a non-dict entry, a type name that is not a
+non-empty string, or a ``replace_sections``/``append_sections`` name absent
+from ``sections`` is dropped (logged at WARNING) rather than half-applied.
+The identity keys ``uid``, ``type``, ``created``, ``access`` and
+``updated`` are stripped from every key list, so no config can make the
+upsert rewrite them. Missing or malformed config returns an empty mapping.
+
 ### `resolve_supersession_asserter_weekly_max`
 
 - **YAML path:** `librarian.supersession_asserter_weekly_max`

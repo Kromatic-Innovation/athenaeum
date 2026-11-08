@@ -3297,6 +3297,12 @@ class ProcessingResult:
     updated: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     escalated: list[EscalationItem] = field(default_factory=list)
+    #: True when the raw file must stay on disk after this result (issue
+    #: athenaeum#2360): a configured-type raw the tier-0 structured upsert
+    #: refused. The entity loop otherwise unlinks every raw whose
+    #: ``process_one`` returned normally, so without this flag a refusal would
+    #: silently destroy the only copy of the update.
+    retain_raw: bool = False
     #: Count of Tier-2 classification responses that dropped ALL entities
     #: because no parseable JSON array could be recovered (issue athenaeum#472). Almost
     #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.
