@@ -17,6 +17,10 @@ named H2 sections, appends new lines to others, unions list keys, sets scalar
 keys, and ratchets ordered keys, all under the page's own H1 and identity
 frontmatter.
 
+Layering: L2 primitive, a sibling of :mod:`athenaeum.intake`. Imports only
+:mod:`athenaeum.config` (L2), :mod:`athenaeum.models` / :mod:`athenaeum.schemas`
+(L1) and :mod:`athenaeum.atomic_io` (L0); imported by the L4 librarian and batch.
+
 Lives in its own module (re-exported from :mod:`athenaeum.librarian`) so that
 :mod:`athenaeum.batch` can call it without importing the librarian, the same
 reason ``tier0_passthrough`` was hoisted into :mod:`athenaeum.intake`.
