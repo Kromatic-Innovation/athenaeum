@@ -1466,7 +1466,7 @@ def process_correction_record(
             today=today,
         )
         try:
-            validate_wiki_meta(created_meta)
+            validate_wiki_meta(created_meta, declared_types=valid_types)
         except PydanticValidationError as exc:
             return _raised(
                 f"create violates schema for type {resolution.entity_type!r}: {exc}"

@@ -1182,7 +1182,7 @@ def tier0_handle_upsert(
 
     # Schema-gate the merged frontmatter before write — same guarantee tier0
     # passthrough gives. Source-handle keys ride through via extra="allow".
-    validate_wiki_meta(merged_meta)
+    validate_wiki_meta(merged_meta, declared_types=valid_types)
 
     if dry_run:
         return entity, True

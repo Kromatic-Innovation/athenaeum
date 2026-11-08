@@ -1635,7 +1635,7 @@ def tier0_passthrough(
     # custom-namespace fields are still accepted (extra="allow"), but the
     # uid/type/name contract is enforced. Raises pydantic.ValidationError
     # on failure; caller treats that as a real bug, not a fall-through.
-    validate_wiki_meta(meta)
+    validate_wiki_meta(meta, declared_types=valid_types)
 
     # Issue athenaeum#714 intake AC: "intake rejects observed_at later than
     # recorded_at". THIS is the intake boundary the AC names, so the anchor

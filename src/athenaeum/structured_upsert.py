@@ -95,6 +95,14 @@ class _Section:
         return self.title.casefold()
 
 
+def _ends_in_open_fence(body: str) -> bool:
+    in_fence = False
+    for line in body.replace("\r\n", "\n").splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+    return in_fence
+
+
 def _split_sections(body: str) -> tuple[str, list[_Section]]:
     """Split *body* into (preamble, H2 sections), ignoring ``##`` inside fences."""
     preamble: list[str] = []
@@ -128,14 +136,31 @@ def _raw_section_map(sections: list[_Section]) -> dict[str, str]:
     return out
 
 
-def _merge_body(spec: StructuredUpsertSpec, page_body: str, raw_body: str) -> str | None:
+def _merge_body(
+    spec: StructuredUpsertSpec,
+    page_body: str,
+    raw_body: str,
+    allow_replace: bool = True,
+) -> str | None:
     """Merged body text, or ``None`` when the body needs no change.
 
-    Raises :class:`ValueError` when the raw carries non-empty content under an
-    H2 the spec does not configure (nothing would place it, and dropping it
-    silently would lose it once the raw is consumed).
+    Raises :class:`ValueError` when the raw carries content nothing would
+    place, since dropping it silently would lose it once the raw is consumed:
+    non-empty text under an H2 the spec does not configure, non-empty text
+    between the H1 and the first H2, or a body that ends inside an unclosed
+    code fence (every later heading would be swallowed into the fence).
+
+    *allow_replace* ``False`` leaves existing ``replace_sections`` untouched
+    (a lower-ranked raw must not overwrite a higher-ranked page's content).
     """
-    _, raw_sections = _split_sections(raw_body)
+    if _ends_in_open_fence(raw_body):
+        raise ValueError("raw body ends inside an unclosed code fence")
+    raw_preamble, raw_sections = _split_sections(raw_body)
+    loose = [
+        ln for ln in raw_preamble.splitlines() if ln.strip() and not ln.lstrip().startswith("# ")
+    ]
+    if loose:
+        raise ValueError("raw has text between the H1 and the first H2 that no section holds")
     raw_map = _raw_section_map(raw_sections)
     canon = {title.casefold(): i for i, title in enumerate(spec.sections)}
     stray = sorted(k for k in raw_map if k not in canon)
@@ -168,7 +193,7 @@ def _merge_body(spec: StructuredUpsertSpec, page_body: str, raw_body: str) -> st
             continue
         current = existing.text.strip()
         if key in spec.replace_sections:
-            if raw_content != current:
+            if allow_replace and raw_content != current:
                 existing.text = f"\n{raw_content}\n"
                 changed = True
         elif key in spec.append_sections:
@@ -200,6 +225,17 @@ def _as_list(value: object) -> list[object]:
     if value is None or value == "":
         return []
     return list(value) if isinstance(value, list) else [value]
+
+
+def _rank_regressed(
+    spec: StructuredUpsertSpec, existing: dict[str, Any], raw: dict[str, Any]
+) -> bool:
+    """True when the raw ranks below the page on any ordered key."""
+    for key, ranks in spec.ordered_keys:
+        incoming, current = str(raw.get(key, "")), str(existing.get(key, ""))
+        if incoming in ranks and current in ranks and ranks.index(incoming) < ranks.index(current):
+            return True
+    return False
 
 
 def _merge_frontmatter(
@@ -300,7 +336,12 @@ def tier0_structured_upsert(
         )
 
     try:
-        new_body = _merge_body(spec, existing_body, raw_body)
+        new_body = _merge_body(
+            spec,
+            existing_body,
+            raw_body,
+            allow_replace=not _rank_regressed(spec, existing_meta, meta),
+        )
     except ValueError as exc:
         return refuse(REASON_UNAPPLIABLE, str(exc))
     merged_meta = _merge_frontmatter(spec, existing_meta, meta)
@@ -310,7 +351,7 @@ def tier0_structured_upsert(
 
     merged_meta["updated"] = date.today().isoformat()
     try:
-        validate_wiki_meta(merged_meta)
+        validate_wiki_meta(merged_meta, declared_types=valid_types)
     except ValueError as exc:  # pydantic.ValidationError subclasses ValueError
         return refuse(REASON_UNAPPLIABLE, f"merged frontmatter fails the schema: {exc}")
     if not dry_run:

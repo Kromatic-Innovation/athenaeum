@@ -29,7 +29,18 @@ CONFIG: dict = {
                 "replace_sections": ["Ingredients", "Steps"],
                 "append_sections": ["Notes", "Source"],
                 "union_keys": ["tags", "shared_by", "source_messages"],
-                "set_keys": ["recipe_url", "recipe_author", "recipe_site", "servings"],
+                "set_keys": [
+                    "recipe_url",
+                    "recipe_author",
+                    "recipe_site",
+                    "cuisine",
+                    "course",
+                    "servings",
+                    "prep_time",
+                    "cook_time",
+                    "total_time",
+                    "source",
+                ],
                 "ordered_keys": {"fetch_status": ["video", "attachment-only", "link-only", "full"]},
             }
         }
@@ -41,13 +52,15 @@ LINK_ONLY_PAGE = """\
 uid: recipe-lemon-pistachio-loaf
 type: recipe
 name: Lemon-Pistachio Loaf
-access: internal
+access: personal
 created: '2026-10-01'
 updated: '2026-10-01'
 tags:
   - baking
+source: email:msg-001
+shared_at: '2026-10-01'
 shared_by:
-  - Dana
+  - person-dana-reyes
 source_messages:
   - msg-001
 fetch_status: link-only
@@ -75,23 +88,30 @@ created: '2026-11-08'
 tags:
   - baking
   - citrus
+source: email:msg-001
+shared_at: '2026-11-08'
 shared_by:
-  - Dana
-  - Lee
+  - person-dana-reyes
+  - person-lee-park
 source_messages:
   - msg-002
 fetch_status: full
 recipe_author: Pat Baker
 recipe_site: bakes.example
-servings: 8
+servings: '8'
 ---
 
-# Lemon-Pistachio Loaf
+# Lemon Pistachio Loaf (imported)
 
 ## Ingredients
 
+### For the loaf
+
 - 200 g flour
 - 2 lemons, zested
+
+### For the topping
+
 - 80 g pistachios
 
 ## Steps
@@ -159,20 +179,25 @@ def test_link_only_to_full_inserts_sections_in_canonical_order(tmp_path: Path, w
     out = _upsert(_raw(tmp_path, FULL_RAW), wiki)
     assert out is not None and out.status == "applied" and out.uid == UID
     meta, body = _page(wiki)
+    # The page's own H1 survives; the raw's different H1 is not adopted.
     assert _headings(body) == [
         "# Lemon-Pistachio Loaf",
         "## Ingredients",
+        "### For the loaf",
+        "### For the topping",
         "## Steps",
         "## Notes",
         "## Source",
     ]
+    assert "imported" not in body
     assert "200 g flour" in body and "Bake for 45 minutes." in body
     assert meta["fetch_status"] == "full"
     assert meta["tags"] == ["baking", "citrus"]
-    assert meta["shared_by"] == ["Dana", "Lee"]
+    assert meta["shared_by"] == ["person-dana-reyes", "person-lee-park"]
     assert meta["source_messages"] == ["msg-001", "msg-002"]
     assert meta["recipe_author"] == "Pat Baker"
-    assert meta["servings"] == 8
+    assert meta["servings"] == "8"
+    assert meta["shared_at"] == "2026-10-01"  # not a configured key: untouched
     # Notes and Source: existing line kept once, new lines appended.
     assert body.count("Dana says it freezes well.") == 1
     assert "Lee swapped in almonds." in body and "Forwarded by Lee" in body
@@ -181,7 +206,7 @@ def test_link_only_to_full_inserts_sections_in_canonical_order(tmp_path: Path, w
         UID,
         "recipe",
         "2026-10-01",
-        "internal",
+        "personal",
     )
     assert meta["updated"] != "2026-10-01"
 
@@ -344,15 +369,183 @@ def test_process_one_refusal_skips_retains_and_never_reaches_llm(
     assert raw.path.exists()  # process_one itself never deletes the raw
 
 
-def test_process_one_unconfigured_config_is_byte_identical_to_before(
+class _ReachedNextTier(Exception):
+    pass
+
+
+def test_process_one_unconfigured_falls_through_to_the_next_tier_untouched(
+    tmp_path: Path, wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No structured_upsert config: the raw is not claimed and proceeds, exactly as it
+    did before this step existed, to the uid-bind / Tier-3 path (a sentinel stands in
+    for the LLM write tier). The page is untouched when it gets there."""
+
+    def reached(*_a: object, **_k: object) -> None:
+        raise _ReachedNextTier
+
+    monkeypatch.setattr("athenaeum.librarian.tier3_derive_actions", reached)
+    raw = _raw(tmp_path, FULL_RAW)
+    with pytest.raises(_ReachedNextTier):
+        process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            MagicMock(),
+            TYPES,
+            ["baking"],
+            ["internal", "public"],
+            config={"librarian": {}},
+        )
+    assert (wiki / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+    assert raw.path.read_text(encoding="utf-8") == FULL_RAW
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "label"),
+    [
+        (
+            FULL_RAW.replace(f"uid: {UID}\n", ""),
+            "structured-upsert-ineligible",
+        ),
+    ],
+    ids=["ineligible"],
+)
+def test_process_one_ineligible_refuses(
+    tmp_path: Path, wiki: Path, raw_text: str, label: str
+) -> None:
+    client = _no_llm()
+    raw = _raw(tmp_path, raw_text)
+    result = _run(raw, wiki, client)
+    assert result.skipped == [label]
+    assert result.retain_raw is True
+    assert not result.updated and not result.created
+    assert client.mock_calls == []
+    assert (wiki / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+
+
+def test_process_one_unresolved_uid_refuses(tmp_path: Path, wiki: Path) -> None:
+    """The index knows the uid (so passthrough declines) but the page file is gone.
+
+    A uid the index has never seen is a NEW page and is created by passthrough, so
+    this stale-index shape is how a configured raw reaches the unresolved refusal."""
+    index = EntityIndex(wiki)
+    (wiki / f"{UID}.md").unlink()
+    client = _no_llm()
+    raw = _raw(tmp_path, FULL_RAW)
+    result = process_one(
+        raw, index, wiki, client, TYPES, ["baking"], ["internal", "public"], config=CONFIG
+    )
+    assert result.skipped == ["structured-upsert-unresolved-uid"]
+    assert result.retain_raw is True
+    assert not result.updated and not result.created
+    assert client.mock_calls == []
+
+
+# --- refusals added after review: preamble, open fence, rank gate --------------
+
+INTRO_RAW = FULL_RAW.replace(
+    "# Lemon Pistachio Loaf (imported)\n\n## Ingredients",
+    "# Lemon Pistachio Loaf (imported)\n\nA bright, nutty loaf from Pat's blog.\n\n## Ingredients",
+)
+NO_H2_RAW = NOTE_ONLY_RAW.split("## Notes")[0] + "Emily: halve the sugar next time.\n"
+OPEN_FENCE_RAW = FULL_RAW.replace("- 80 g pistachios", "- 80 g pistachios\n```")
+
+
+@pytest.mark.parametrize(
+    "raw_text", [INTRO_RAW, NO_H2_RAW, OPEN_FENCE_RAW], ids=["intro", "no-h2", "open-fence"]
+)
+def test_unplaceable_raw_body_is_refused_unappliable(
+    tmp_path: Path, wiki: Path, raw_text: str
+) -> None:
+    client = _no_llm()
+    raw = _raw(tmp_path, raw_text)
+    result = _run(raw, wiki, client)
+    assert result.skipped == ["structured-upsert-unappliable"]
+    assert result.retain_raw is True and not result.updated
+    assert client.mock_calls == []
+    assert (wiki / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+
+
+@pytest.mark.parametrize("raw_text", [INTRO_RAW, NO_H2_RAW], ids=["intro", "no-h2"])
+def test_run_keeps_raw_with_unplaceable_preamble_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_text: str
+) -> None:
+    root = _seed_root(tmp_path, LINK_ONLY_PAGE)
+    raw_path = root / "raw" / "recipes" / "20261108T120000Z-aabbccdd.md"
+    raw_path.write_text(raw_text, encoding="utf-8")
+    _run_loop(root, monkeypatch)
+    assert raw_path.read_text(encoding="utf-8") == raw_text
+    assert (root / "wiki" / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+
+
+def test_lower_ranked_raw_does_not_replace_sections_but_still_appends(
     tmp_path: Path, wiki: Path
 ) -> None:
-    """With no structured_upsert config the new step must not claim the raw."""
-    raw = _raw(tmp_path, FULL_RAW)
-    assert (
-        tier0_structured_upsert(raw, EntityIndex(wiki), wiki, TYPES, config={"librarian": {}})
-        is None
+    _upsert(_raw(tmp_path, FULL_RAW), wiki)
+    _, full_body = _page(wiki)
+    attach = (
+        FULL_RAW.replace("fetch_status: full", "fetch_status: attachment-only")
+        .replace("- 200 g flour", "- 999 g mystery")
+        .replace("- Lee swapped in almonds.", "- Photo attached from Lee.")
+        .replace("  - citrus", "  - citrus\n  - holiday")
     )
+    out = _upsert(_raw(tmp_path, attach, "r2.md"), wiki)
+    assert out is not None and out.status == "applied"
+    meta, body = _page(wiki)
+    assert "200 g flour" in body and "999 g mystery" not in body  # Ingredients kept
+    assert "Photo attached from Lee." in body  # append sections still apply
+    assert "holiday" in meta["tags"]  # union keys still apply
+    assert meta["fetch_status"] == "full"
+    assert body.split("## Ingredients")[1].split("\n## ")[0] == (
+        full_body.split("## Ingredients")[1].split("\n## ")[0]
+    )
+
+
+# --- batch transport ----------------------------------------------------------
+
+
+def _batch(root: Path, raw: RawFile, wiki: Path):
+    from athenaeum.batch import process_batch_run
+    from athenaeum.models import TokenUsage
+
+    client = MagicMock()
+    client.messages.create.side_effect = AssertionError("LLM reached")
+    client.messages.batches.create.side_effect = AssertionError("batch client reached")
+    result = process_batch_run(
+        [raw],
+        EntityIndex(wiki),
+        wiki,
+        client,
+        TYPES,
+        ["baking"],
+        ["internal", "public"],
+        usage=TokenUsage(),
+        config=CONFIG,
+        max_api_calls=100,
+        cache_dir=root / "cache",
+        sleep=lambda _s: None,
+    )
+    return result, client
+
+
+def test_batch_applies_and_deletes_raw(tmp_path: Path, wiki: Path) -> None:
+    raw = _raw(tmp_path, FULL_RAW)
+    result, client = _batch(tmp_path, raw, wiki)
+    assert result.updated == 1 and result.skipped == 0 and result.created == 0
+    assert not raw.path.exists()
+    assert _page(wiki)[0]["fetch_status"] == "full"
+    assert client.mock_calls == []
+
+
+def test_batch_refusal_retains_raw(tmp_path: Path, wiki: Path) -> None:
+    (wiki / f"{UID}.md").write_text(
+        LINK_ONLY_PAGE.replace("type: recipe", "type: concept"), encoding="utf-8"
+    )
+    raw = _raw(tmp_path, FULL_RAW)
+    result, client = _batch(tmp_path, raw, wiki)
+    assert result.skipped == 1 and result.updated == 0
+    assert raw.path.read_text(encoding="utf-8") == FULL_RAW
+    assert client.mock_calls == []
 
 
 # --- run() loop: applied raws are consumed, refused raws stay on disk ---------

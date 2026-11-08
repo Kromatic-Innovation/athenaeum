@@ -23,7 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section the config does not name) is logged at WARNING, recorded in
   `skipped`, and left on disk; it never reaches the uid-bind path or the LLM
   tiers. Unconfigured types are unaffected. See
-  `docs/reference/configuration.md` (`resolve_structured_upsert`).
+  `docs/reference/configuration.md` (`resolve_structured_upsert`). A raw is
+  also refused when it carries text between its H1 and first H2 or ends inside
+  an unclosed code fence, and a raw ranked below the page on an ordered key
+  never replaces `replace_sections`.
+- **`validate_wiki_meta(declared_types=...)` (issue athenaeum#2362).** The
+  unknown-type warning now fires only outside `KNOWN_TYPES` plus the
+  deployment's declared types, so a type declared in `wiki/_schema/types.md`
+  no longer warns on every write. Tier-0 passthrough, handle upsert,
+  structured upsert, the batch create path and the corrections create path pass
+  their declared list; callers that pass none behave as before.
 - **`promptwitness` Secure Enclave key adapter, non-exportable, through a
   signed Swift helper (issue athenaeum#2153, part of the
   prompt-witness-ledger epic, athenaeum#2144).** A new SwiftPM package,
