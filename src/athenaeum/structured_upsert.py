@@ -268,8 +268,8 @@ def _merge_frontmatter(
             continue
         if str(value) not in ranks:
             continue
-        have = str(merged.get(key, ""))
-        current_rank = ranks.index(have) if have in ranks else -1
+        held = str(merged.get(key, ""))
+        current_rank = ranks.index(held) if held in ranks else -1
         if ranks.index(str(value)) > current_rank:
             merged[key] = str(value)
     return merged
