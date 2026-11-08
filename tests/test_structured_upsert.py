@@ -29,6 +29,7 @@ CONFIG: dict = {
                 "replace_sections": ["Ingredients", "Steps"],
                 "append_sections": ["Notes", "Source"],
                 "union_keys": ["tags", "shared_by", "source_messages"],
+                "keep_keys": ["shared_at"],
                 "set_keys": [
                     "recipe_url",
                     "recipe_author",
@@ -570,7 +571,9 @@ def _seed_root(tmp_path: Path, page_text: str) -> Path:
         "      sections: [Ingredients, Steps, Notes, Source]\n"
         "      replace_sections: [Ingredients, Steps]\n"
         "      append_sections: [Notes, Source]\n"
-        "      union_keys: [tags]\n"
+        "      union_keys: [tags, shared_by, source_messages]\n"
+        "      keep_keys: [shared_at]\n"
+        "      set_keys: [source, recipe_author, recipe_site, servings]\n"
         "      ordered_keys:\n        fetch_status: [link-only, full]\n",
         encoding="utf-8",
     )
@@ -703,3 +706,129 @@ def test_shorter_closer_does_not_close_a_longer_fence(tmp_path: Path, wiki: Path
     raw_text = FULL_RAW.replace("3. Bake for 45 minutes.", "````\n```\n3. Bake for 45 minutes.")
     out = _upsert(_raw(tmp_path, raw_text), wiki)
     assert out is not None and out.status == "refused" and out.reason == "unappliable"
+
+
+# --- review: unknown raw keys, keep_keys, refusal back-off -----------------------
+
+_EXTRA = "servings: '8'\nemail_shape: link\nextra_note: x\n"
+
+
+def test_unknown_raw_frontmatter_key_is_refused_naming_it(
+    tmp_path: Path, wiki: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw_text = FULL_RAW.replace("servings: '8'\n", _EXTRA)
+    with caplog.at_level(logging.WARNING):
+        out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "refused" and out.reason == "unappliable"
+    assert "email_shape" in caplog.text and "extra_note" in caplog.text
+    assert (wiki / f"{UID}.md").read_text(encoding="utf-8") == LINK_ONLY_PAGE
+
+
+def test_unknown_raw_key_is_skipped_and_retained_through_process_one(
+    tmp_path: Path, wiki: Path
+) -> None:
+    client = _no_llm()
+    raw = _raw(tmp_path, FULL_RAW.replace("servings: '8'\n", _EXTRA))
+    result = _run(raw, wiki, client)
+    assert result.skipped == ["structured-upsert-unappliable"]
+    assert result.retain_raw is True and client.mock_calls == []
+    assert raw.path.exists()
+
+
+def test_keep_keys_page_value_wins_and_raw_still_applies(tmp_path: Path, wiki: Path) -> None:
+    # The raw carries shared_at 2026-11-08; the page's first-share date must stay.
+    out = _upsert(_raw(tmp_path, FULL_RAW), wiki)
+    assert out is not None and out.status == "applied"
+    meta, body = _page(wiki)
+    assert meta["shared_at"] == "2026-10-01"
+    assert "200 g flour" in body and meta["fetch_status"] == "full"
+
+
+def test_differing_raw_name_keeps_the_page_name(tmp_path: Path, wiki: Path) -> None:
+    raw_text = FULL_RAW.replace("name: Lemon-Pistachio Loaf", "name: Other")
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "applied"
+    assert _page(wiki)[0]["name"] == "Lemon-Pistachio Loaf"
+
+
+def test_config_keep_keys_strip_identity_keys() -> None:
+    specs = resolve_structured_upsert(
+        {"librarian": {"structured_upsert": {"recipe": {"keep_keys": ["uid", "shared_at"]}}}}
+    )
+    assert specs["recipe"].keep_keys == ("shared_at",)
+
+
+def _refused_root(tmp_path: Path) -> tuple[Path, Path]:
+    page = LINK_ONLY_PAGE.replace("type: recipe", "type: concept")
+    root = _seed_root(tmp_path, page)
+    raw_path = root / "raw" / "recipes" / "20261108T120000Z-aabbccdd.md"
+    raw_path.write_text(FULL_RAW, encoding="utf-8")
+    return root, raw_path
+
+
+def _loop_run(root: Path) -> dict:
+    from athenaeum.librarian import run
+
+    stats: dict = {}
+    run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=0,
+        out_run_stats=stats,
+    )
+    return stats
+
+
+def _no_llm_loop(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    import anthropic as anthropic_mod
+
+    client = MagicMock()
+    client.messages.create.side_effect = AssertionError("LLM tier reached")
+    monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.setenv("ATHENAEUM_STUCK_FILE_THRESHOLD", "2")
+    monkeypatch.setenv("ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS", "0")
+    return client
+
+
+def test_refused_raw_attempts_increment_and_threshold_marks_it_stuck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum.librarian import _load_stuck_ledger
+
+    client = _no_llm_loop(monkeypatch)
+    root, raw_path = _refused_root(tmp_path)
+
+    stats1 = _loop_run(root)
+    ledger = _load_stuck_ledger(root / "wiki")
+    ref = next(iter(ledger))
+    assert ledger[ref]["failures"] == 1
+    assert ledger[ref]["last_error"] == "structured-upsert-type-mismatch"
+    assert stats1["stuck_files"] == []
+
+    stats2 = _loop_run(root)  # a second consecutive refusal crosses the threshold
+    assert _load_stuck_ledger(root / "wiki")[ref]["failures"] == 2
+    assert [s["ref"] for s in stats2["stuck_files"]] == [ref]
+    assert stats2["stuck_files"][0]["action"] == "tier0_structured_upsert"
+
+    stats3 = _loop_run(root)  # now skipped without another attempt, still surfaced
+    assert _load_stuck_ledger(root / "wiki")[ref]["failures"] == 2
+    assert [s["ref"] for s in stats3["stuck_files"]] == [ref]
+    assert raw_path.read_text(encoding="utf-8") == FULL_RAW  # never deleted
+    assert client.messages.create.call_count == 0
+
+
+def test_editing_a_refused_raw_resets_its_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum.librarian import _load_stuck_ledger
+
+    _no_llm_loop(monkeypatch)
+    root, raw_path = _refused_root(tmp_path)
+    _loop_run(root)
+    raw_path.write_text(FULL_RAW + "\n- edited\n", encoding="utf-8")
+    _loop_run(root)
+    ledger = _load_stuck_ledger(root / "wiki")
+    assert next(iter(ledger.values()))["failures"] == 1

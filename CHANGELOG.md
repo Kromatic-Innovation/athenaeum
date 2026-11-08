@@ -26,7 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/reference/configuration.md` (`resolve_structured_upsert`). A raw is
   also refused when it carries text between its H1 and first H2 or ends inside
   an unclosed code fence, and a raw ranked below the page on an ordered key
-  never replaces `replace_sections`.
+  never replaces `replace_sections`. A raw frontmatter key the config neither
+  merges (`union_keys`, `set_keys`, `ordered_keys`) nor deliberately ignores
+  (the new `keep_keys`, where the page's value wins) is refused instead of
+  silently dropped. Refused raws are counted in the existing stuck-file ledger,
+  so repeated refusals of unchanged content back off and then stop retrying;
+  the raw is never deleted.
 - **`validate_wiki_meta(declared_types=...)` (issue athenaeum#2362).** The
   unknown-type warning now fires only outside `KNOWN_TYPES` plus the
   deployment's declared types, so a type declared in `wiki/_schema/types.md`

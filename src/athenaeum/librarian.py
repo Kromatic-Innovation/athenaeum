@@ -9589,8 +9589,25 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
 
                         if not ctx.dry_run and getattr(result, "retain_raw", False):
                             # Issue athenaeum#2360: a refused structured-upsert
-                            # raw stays in place (and is retried next run).
+                            # raw stays on disk, never deleted. Its refusals ride
+                            # the existing stuck-file ledger (athenaeum#663):
+                            # consecutive refusals of unchanged content back off
+                            # (athenaeum#1185) and, at the stuck threshold, the
+                            # raw is skipped and surfaced as stuck until its
+                            # content changes or a human intervenes.
                             log.warning("  Retained (not deleted): %s", raw.path)
+                            _crossed = _record_stuck_failure(
+                                stuck_ledger,
+                                raw,
+                                error=result.skipped[-1]
+                                if result.skipped
+                                else "structured-upsert-refused",
+                                action="tier0_structured_upsert",
+                                threshold=stuck_threshold,
+                                now=ctx.now,
+                            )
+                            if _crossed is not None:
+                                _surface_newly_stuck(ctx, raw, _crossed)
                         elif not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)

@@ -8977,6 +8977,7 @@ class StructuredUpsertSpec:
     union_keys: tuple[str, ...] = ()
     set_keys: tuple[str, ...] = ()
     ordered_keys: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    keep_keys: tuple[str, ...] = ()
 
 
 def _structured_upsert_str_list(raw: object) -> tuple[str, ...]:
@@ -9004,8 +9005,14 @@ def resolve_structured_upsert(
     ``append_sections`` (raw lines not already present are appended),
     ``union_keys`` (list-valued frontmatter keys, set-unioned),
     ``set_keys`` (scalar frontmatter keys, overwritten when the raw's value is
-    non-empty), and ``ordered_keys`` (key to a low-to-high value list; a value
-    never moves down the list).
+    non-empty), ``ordered_keys`` (key to a low-to-high value list; a value
+    never moves down the list), and ``keep_keys`` (keys whose raw value is
+    deliberately ignored: the page's value always wins, for example a
+    first-seen date that must never be overwritten).
+
+    A raw whose frontmatter carries a key outside the identity keys and these
+    configured lists is refused rather than having the key silently dropped,
+    so every key a producer writes must be named in one of the lists.
 
     Validation never raises: a non-dict entry, a type name that is not a
     non-empty string, or a ``replace_sections``/``append_sections`` name absent
@@ -9070,5 +9077,6 @@ def resolve_structured_upsert(
             union_keys=_keys("union_keys"),
             set_keys=_keys("set_keys"),
             ordered_keys=tuple(ordered),
+            keep_keys=_keys("keep_keys"),
         )
     return out

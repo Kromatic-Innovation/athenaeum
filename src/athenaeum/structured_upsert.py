@@ -59,6 +59,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Frontmatter keys that are the page's identity: the page's own value always wins.
+_IDENTITY_KEYS = STRUCTURED_UPSERT_PROTECTED_KEYS | {"name"}
+
 STATUS_APPLIED = "applied"
 STATUS_NOOP = "noop"
 STATUS_REFUSED = "refused"
@@ -369,6 +372,33 @@ def tier0_structured_upsert(
         return refuse(
             REASON_TYPE_MISMATCH,
             f"page {page_path.name} is type {existing_type!r}, raw is {etype!r}",
+        )
+
+    # Every raw frontmatter key must be handled: identity keys (the page's own
+    # values win; a differing raw ``name`` is ignored because name and H1 are
+    # identity), or a key the spec merges (union/set/ordered) or deliberately
+    # ignores (keep). Anything else would be silently lost when the raw is
+    # consumed, so refuse it, naming the keys.
+    known = (
+        _IDENTITY_KEYS
+        | set(spec.union_keys)
+        | set(spec.set_keys)
+        | {k for k, _ in spec.ordered_keys}
+        | set(spec.keep_keys)
+    )
+    unknown = sorted(str(k) for k in meta if k not in known)
+    if unknown:
+        return refuse(
+            REASON_UNAPPLIABLE,
+            f"raw carries frontmatter key(s) the config neither merges nor keeps: {unknown}",
+        )
+    raw_name = str(meta.get("name", "") or "").strip()
+    page_name = str(existing_meta.get("name", "") or "").strip()
+    if raw_name != page_name:
+        log.info(
+            "  T0 structured-upsert: raw name %r differs from page name %r; keeping the page's",
+            raw_name,
+            page_name,
         )
 
     try:
