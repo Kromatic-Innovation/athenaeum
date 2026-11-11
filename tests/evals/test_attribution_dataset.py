@@ -11,6 +11,8 @@ default suite.
 
 from __future__ import annotations
 
+import copy
+import functools
 import re
 from pathlib import Path
 from typing import Any
@@ -50,10 +52,35 @@ _ALLOWED_DOMAIN_RE = re.compile(r"(^|\.)example\.(org|com)\.?$")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+)")
 
 
-def _load_cases() -> list[dict[str, Any]]:
+@functools.lru_cache(maxsize=1)
+def _parse_cases_once() -> list[dict[str, Any]]:
+    """Parse ``cases.yaml`` once per process (athenaeum#2233).
+
+    The corpus is ~460 KB of YAML and ``yaml.safe_load`` costs about half a
+    second on it. Every one of the ~20 structural tests below needs the whole
+    corpus, so re-parsing per test was the entire cost of this module.
+
+    Cached rather than made a module-scoped pytest fixture on purpose: the
+    helpers in this file (``_assert_owner_uid_is_a_case_uid`` and friends)
+    take the case list as a plain argument and are called from several tests,
+    so a function is what every call site can share. ``unit_key`` in
+    ``tests/ci_sharding.py`` keeps a module on one xdist worker, so one
+    process serves every test here and the cache is hit for all but the
+    first.
+    """
     raw = yaml.safe_load(CASES_PATH.read_text(encoding="utf-8"))
     assert isinstance(raw, list)
     return raw
+
+
+def _load_cases() -> list[dict[str, Any]]:
+    """The corpus, as a private copy per caller.
+
+    Deep-copied out of the cache so that memoising the parse cannot couple
+    two tests together: a caller may do what it likes to what it gets back.
+    The copy costs single-digit milliseconds against a ~500 ms parse.
+    """
+    return copy.deepcopy(_parse_cases_once())
 
 
 def test_corpus_file_exists_and_is_nonempty() -> None:
