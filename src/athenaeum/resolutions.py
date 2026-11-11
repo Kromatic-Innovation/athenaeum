@@ -77,6 +77,8 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     _env_number,
     auto_apply_threshold_ledger_override_for,
+    resolve_source_trust_edges,
+    resolve_source_trust_enabled,
     resolve_transcript_receipts_enabled,
 )
 from athenaeum.config import resolve_model as _resolve_model_knob
@@ -109,6 +111,7 @@ from athenaeum.transcript_receipts import (
     classify_for_correct_gate,
     member_claim_and_origin,
 )
+from athenaeum.trust_graph import UNKNOWN_EVIDENCE_KIND, SourceTrustEdge
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
@@ -631,6 +634,13 @@ SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 TIE-BREAK: when two claims sit at the same precedence tier, prefer the
 NEWER source date.
 
+Honor DOMAIN TRUST OVERRIDES when present: a member's section may include
+a DOMAIN TRUST OVERRIDES block listing operator-declared edges for this
+pair's specific domain. Where a listed edge names one side's source as
+outranking the other's, treat that edge as authoritative for this pair in
+place of the SOURCE-PRECEDENCE TAXONOMY above. No block present means no
+operator edge applies here; fall back to the taxonomy as usual.
+
 You will be shown each member's `source:` value (or "unsourced"), any
 relevant `field_sources.<key>` slice. Each member's exact conflicting
 passage is always provided. The full body is also included when it fits
@@ -1113,6 +1123,86 @@ def _read_member_sources(am: AutoMemoryFile) -> tuple[str, dict[str, Any] | None
     return source_str, field_sources
 
 
+def _domain_trust_overrides_lines(
+    config: dict[str, Any] | None,
+    *,
+    both_opinion: bool,
+    entity_types: list[str | None],
+    field_sources_list: list[dict[str, Any] | None],
+) -> list[str]:
+    """Render the per-pair ``DOMAIN TRUST OVERRIDES`` data block (issue
+    athenaeum#2332, TG4), or ``[]`` when nothing should be rendered.
+
+    **Prompt text is content; this block is the permitted exception**
+    (`docs/design/trust-graph.md` §2.5, `policies/prompt-text-is-content.md`):
+    the one new INSTRUCTION sentence this feature needs lives in
+    ``_RESOLVE_SYSTEM`` above, added through ``prompt_registry`` — never
+    here. What this function assembles is a DATA fragment built from
+    variables: the operator's own ``librarian.source_trust_edges`` config,
+    read through the same ``trust_graph.SourceTrustEdge`` instances TG3's
+    deterministic seam reads (``corrections.py``), never reparsed here.
+
+    Returns ``[]`` (AC1 "byte-identical", and F8) in every one of these
+    cases, so the common "feature off" path costs nothing beyond one flag
+    read:
+
+    - ``both_opinion`` (F8): an opinion pair is never resolved by source
+      precedence, on the deterministic path OR this LLM one — it must
+      never even see an override block that could nudge it. Checked
+      FIRST, before the flag, so opinion suppression holds even if a
+      future caller forgets to gate the flag read.
+    - ``librarian.source_trust_enabled`` is off (AC1), or no edges are
+      configured.
+    - Neither member carries a concrete ``entity_type`` (frontmatter
+      ``type:``), or neither carries any ``field_sources`` key — there is
+      no concrete (entity_type, field) pair to match an edge's domain
+      against.
+    - No configured edge's domain matches any (entity_type, field) pair
+      drawn from this specific pair's members.
+
+    Domain match only (``SourceTrustDomain.matches``), never
+    ``compare_sources``: this hands the model the matching edges as RAW
+    DATA (the issue's title), not a resolved winner — the resolved
+    comparison stays TG3's deterministic seam, a different caller.
+    ``evidence_kind`` is :data:`UNKNOWN_EVIDENCE_KIND` here because
+    neither this function nor :func:`_read_member_sources` threads a
+    concrete evidence kind through today (`docs/design/trust-graph.md`
+    §2.3.1, "evidence-kind at seam 3 is unknown today") — so only an edge
+    with ``evidence_kind`` absent ("any") can ever match a pair rendered
+    by this function.
+    """
+    if both_opinion:
+        return []
+    if not resolve_source_trust_enabled(config):
+        return []
+    edges: tuple[SourceTrustEdge, ...] = resolve_source_trust_edges(config)
+    if not edges:
+        return []
+    concrete_entity_types = {et for et in entity_types if et}
+    concrete_fields: set[str] = set()
+    for field_sources in field_sources_list:
+        if field_sources:
+            concrete_fields.update(str(k) for k in field_sources)
+    if not concrete_entity_types or not concrete_fields:
+        return []
+    matching = [
+        edge
+        for edge in edges
+        if any(
+            edge.domain.matches(entity_type, field, UNKNOWN_EVIDENCE_KIND)
+            for entity_type in concrete_entity_types
+            for field in concrete_fields
+        )
+    ]
+    if not matching:
+        return []
+    out = ["DOMAIN TRUST OVERRIDES:"]
+    for edge in matching:
+        out.append(f"- {edge.describe()}")
+    out.append("")
+    return out
+
+
 def _build_user_message(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
@@ -1135,6 +1225,13 @@ def _build_user_message(
     - Declared ``refines:`` / ``supersedes:`` lists (Lane 1) on each
       side so the LLM sees the historical record even when the
       declared-winner short-circuit did not fire.
+    - A per-pair ``DOMAIN TRUST OVERRIDES`` data block (issue athenaeum#2332,
+      TG4) when ``librarian.source_trust_enabled`` is on, edges are
+      configured, a matching edge exists for this pair's (entity type,
+      field_sources keys) domain, and the pair is not opinion-vs-opinion
+      (F8). See :func:`_domain_trust_overrides_lines`. With the flag off,
+      no edges configured, or no match, this function's output is
+      byte-identical to its pre-TG4 self (AC1).
     """
     # Pick the (up to) two members the detector flagged; fall back to
     # the first two cluster members when the detector echoed garbage.
@@ -1173,9 +1270,22 @@ def _build_user_message(
     # self_path) so two members sharing a scope share work, but each
     # one still excludes its OWN file from its index.
     sibling_index_cache: dict[tuple[Path, Path], dict[str, str]] = {}
+    # Captured alongside each member's lines below so the DOMAIN TRUST
+    # OVERRIDES block (issue athenaeum#2332, TG4), appended once per-pair
+    # after this loop, can match on BOTH members' domains without a
+    # second frontmatter read. Purely an observation of what the loop
+    # already reads -- never alters a single line emitted above.
+    member_entity_types: list[str | None] = []
+    member_field_sources: list[dict[str, Any] | None] = []
     for label, am, passage in zip(labels, flagged, passages):
         source_str, field_sources = _read_member_sources(am)
         meta, body = _read_member_meta(am)
+        raw_entity_type = meta.get("type") if meta else None
+        entity_type: str | None = None
+        if isinstance(raw_entity_type, str) and raw_entity_type.strip():
+            entity_type = raw_entity_type
+        member_entity_types.append(entity_type)
+        member_field_sources.append(field_sources)
         # "Member a/b" is a scratch label scoped to this one prompt/response
         # round-trip. If raw text containing it ever re-enters intake,
         # tiers._PLACEHOLDER_LABEL_RE is the safety net that stops it being
@@ -1253,6 +1363,28 @@ def _build_user_message(
             )
         lines.append("</member>")
         lines.append("")
+
+    # DOMAIN TRUST OVERRIDES (issue athenaeum#2332, TG4) -- one block for the
+    # whole pair, not per-member (the issue's "in the per-pair user
+    # message, append a DOMAIN TRUST OVERRIDES block"). F8: suppressed
+    # outright when both flagged members are claim_kind: opinion -- an
+    # opinion pair is never resolved by precedence, so it must never see
+    # a block that could nudge it toward one. See
+    # :func:`_domain_trust_overrides_lines` for the full byte-identity
+    # (AC1) and matching contract.
+    both_opinion = False
+    if len(flagged) >= 2:
+        a_kind = (flagged[0].claim_kind or "").strip()
+        b_kind = (flagged[1].claim_kind or "").strip()
+        both_opinion = a_kind == OPINION_CLAIM_KIND and b_kind == OPINION_CLAIM_KIND
+    lines.extend(
+        _domain_trust_overrides_lines(
+            config,
+            both_opinion=both_opinion,
+            entity_types=member_entity_types,
+            field_sources_list=member_field_sources,
+        )
+    )
 
     lines.append(
         "Return STRICT JSON per the schema in the system prompt. "

@@ -51,6 +51,8 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import importlib.resources
+import inspect
 import json
 import logging
 import os
@@ -107,7 +109,7 @@ from athenaeum.recall_overflow import (
     render_access_withheld_line,
     render_overflow_line,
 )
-from athenaeum.remote_policy import RemotePolicy
+from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import (
     is_excluded,
@@ -3070,6 +3072,68 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
         """
 
 
+#: Issue athenaeum#2387: the packaged remote-profile steering texts. Prompt
+#: wording is content, not code (``policies/prompt-text-is-content.md``), so
+#: both live as ``.md`` files under ``src/athenaeum/prompts/`` and are read
+#: through ``importlib.resources`` -- the same packaged-prompt idiom
+#: :func:`athenaeum.recall_overflow.load_overflow_template` uses.
+REMOTE_INSTRUCTIONS_TEMPLATE_NAME = "remote_server_instructions.md"
+
+#: The remote ``recall`` description's LEAD, prepended to
+#: :func:`recall_tool_docstring`'s unchanged text -- see
+#: :func:`remote_recall_tool_docstring`.
+REMOTE_RECALL_LEAD_TEMPLATE_NAME = "remote_recall_lead.md"
+
+
+def _load_packaged_prompt(name: str) -> str:
+    """Read a packaged ``athenaeum.prompts`` file, whitespace-trimmed.
+
+    Loaded fresh on every call (the files are tiny, and this runs once per
+    server construction) rather than cached at import time, matching
+    :func:`athenaeum.recall_overflow.load_overflow_template`. Trimmed because
+    the caller here serves the whole STRING rather than rendering it into a
+    line: a file's trailing newline would otherwise spend part of the first
+    512 characters a host reads (issue athenaeum#2387).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(name)
+    return resource.read_text(encoding="utf-8").strip()
+
+
+def remote_server_instructions() -> str:
+    """The remote profile's MCP ``instructions`` text (issue athenaeum#2387).
+
+    Served INSTEAD of ``create_server``'s inline default when the serve-time
+    policy pins ``serve.profile: remote``, and only then -- the default
+    string is untouched, so a host with a per-turn hook (Claude Code, which
+    has its recall PUSHED to it) reads exactly what it read before.
+
+    What differs: this text opens with the instruction to call ``recall``
+    before answering, because a pull-only host has no other lever. OpenAI's
+    Apps SDK guidance asks for the key details in the first 512 characters,
+    and the inline default spends them on ``remember``. It promises nothing:
+    the text says what to call, never that a recall happens on its own.
+    """
+    return _load_packaged_prompt(REMOTE_INSTRUCTIONS_TEMPLATE_NAME)
+
+
+def remote_recall_tool_docstring(entity_classes_str: str) -> str:
+    """The remote profile's ``recall`` description (issue athenaeum#2387).
+
+    A packaged LEAD prepended to :func:`recall_tool_docstring`'s text, not a
+    rewrite of it: the backend, handle-query and ``**Links:**`` guidance, and
+    every parameter description under it, stay the ones the default path
+    serves -- word for word, so the two descriptions cannot drift apart as
+    the shared half is edited. Only the opening is new.
+
+    :func:`inspect.cleandoc` normalizes the shared half's docstring
+    indentation BEFORE the join: an unindented lead glued onto an
+    8-space-indented body leaves no common prefix for FastMCP's own
+    docstring parse to strip, which serves the ``Args:`` block as prose.
+    """
+    lead = _load_packaged_prompt(REMOTE_RECALL_LEAD_TEMPLATE_NAME)
+    return f"{lead}\n\n{inspect.cleandoc(recall_tool_docstring(entity_classes_str))}"
+
+
 #: The ``recall`` MCP tool's JSON input schema, hand-written to mirror what
 #: FastMCP generates from the real ``recall(...)`` function signature above
 #: (issue athenaeum#1733) -- so ``tests/evals/rollout.py``'s api-mode tool
@@ -3454,9 +3518,22 @@ def create_server(
 
     _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
 
+    # Issue athenaeum#2387: under ``serve.profile: remote`` the served
+    # ``instructions`` and ``recall`` description are the packaged steering
+    # texts; every other install -- including every pre-athenaeum#2383 one,
+    # where ``remote_policy`` is ``None`` -- keeps the inline default below,
+    # byte for byte. Read off the POLICY rather than taken as a separate
+    # ``create_server`` argument: ``build_remote_policy`` already holds the
+    # profile name, so nothing new has to be threaded through ``athenaeum
+    # serve``, and the pin stays as unforgeable from the client side as the
+    # other two (it is in no tool's input schema).
+    _steer_for_remote = remote_policy is not None and remote_policy.profile == REMOTE_PROFILE
+
     mcp = FastMCP(
         "athenaeum",
-        instructions=(
+        instructions=remote_server_instructions()
+        if _steer_for_remote
+        else (
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
             "Use `recall` to search the compiled wiki for relevant knowledge — narrow "
@@ -3632,7 +3709,11 @@ def create_server(
     # SAME real description rather than a paraphrase that could drift from
     # it. This call site is unchanged in behavior, only in where the text
     # lives.
-    recall.__doc__ = recall_tool_docstring(_entity_classes_str)
+    recall.__doc__ = (
+        remote_recall_tool_docstring(_entity_classes_str)
+        if _steer_for_remote
+        else recall_tool_docstring(_entity_classes_str)
+    )
     _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(recall)
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
