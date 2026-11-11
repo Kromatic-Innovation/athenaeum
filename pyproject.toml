@@ -50,7 +50,26 @@ mcp = [
     # surface does not exist on `mcp` 1.x, so a resolver that picked fastmcp
     # 3.x -- which declares `mcp<2.0` -- would break the bridge in the other
     # direction. `<3.0` matches what fastmcp-slim 4.x itself declares.
-    "fastmcp>=2.0.0,<5.0",
+    # athenaeum#2382 raises the FLOOR from 2.0.0 to 2.11.1 -- the lowest
+    # release that carries BOTH halves of what remote mode needs, each
+    # verified against fastmcp's own source at the tag rather than from its
+    # changelog prose:
+    #   * the streamable HTTP transport as `run(transport="http", host=...,
+    #     port=..., path=...)`. The literal `"http"` first appears in
+    #     `src/fastmcp/server/server.py`'s `Transport` union at 2.9.0 (2.8.1
+    #     typed it `Literal["stdio", "streamable-http", "sse"]`), alongside
+    #     `run_http_async`'s host/port/path keywords.
+    #   * the OAuth 2.1 RESOURCE-SERVER surface the auth child
+    #     (athenaeum#2384) builds on: `RemoteAuthProvider` joins
+    #     `src/fastmcp/server/auth/__init__.py`'s imports and `__all__` at
+    #     2.11.1 (2.11.0 exported `TokenVerifier`/`JWTVerifier` but not the
+    #     provider that composes a verifier with authorization-server
+    #     metadata into RFC 9728 protected-resource endpoints).
+    # max(2.9.0, 2.11.1) = 2.11.1. It declares `mcp>=1.10.0` with NO upper
+    # bound, so it does not fight the `mcp>=2.0,<3.0` pin below -- unlike the
+    # 3.x line, which narrowed to `mcp>=1.24.0,<2.0`. The `<5.0` ceiling is
+    # unchanged.
+    "fastmcp>=2.11.1,<5.0",
     "mcp>=2.0,<3.0",
     # athenaeum#1954: cli_tool_bridge.py validates `tools/call` arguments
     # against the served input schema itself -- `mcp` 2.x dropped the pre-2.0
@@ -132,8 +151,9 @@ dev = [
     "pytest-xdist>=3.5,<4",
     "ruff==0.17.3",
     # athenaeum#1954: kept identical to the `mcp` extra above -- see that
-    # block for why `mcp` stays declared and why its bound is a 2.0 floor.
-    "fastmcp>=2.0.0,<5.0",
+    # block for why `mcp` stays declared and why its bound is a 2.0 floor,
+    # and athenaeum#2382 for why fastmcp's floor is 2.11.1.
+    "fastmcp>=2.11.1,<5.0",
     "mcp>=2.0,<3.0",
     "jsonschema>=4.20",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
