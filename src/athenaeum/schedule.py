@@ -87,7 +87,9 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
+import string
 import subprocess
 import sys
 from collections.abc import Callable
@@ -303,8 +305,42 @@ def _systemd_timer_path(home: Path) -> Path:
 
 
 def _state_log_path(home: Path) -> Path:
-    """Shared log destination for the Linux generators."""
+    """Shared log destination for the Linux generators.
+
+    ``install`` creates this path's PARENT directory (Finding athenaeum#2408
+    review, HIGH) before writing the systemd unit / crontab line that
+    reference it -- neither systemd's ``StandardOutput=append:`` nor cron's
+    shell ``>>`` redirect creates a missing directory, so without that
+    ``mkdir`` the schedule fails every run on a fresh host. ``remove``
+    deliberately leaves this directory (and any log file in it) in place --
+    see the comment at its two call sites below.
+    """
     return home / ".local" / "state" / "athenaeum" / "schedule-run.log"
+
+
+#: Characters that render unquoted in a systemd unit's word-split settings
+#: (``ExecStart=``, ``Environment=`` -- systemd.service(5) "Command Lines")
+#: with no ambiguity. Deliberately excludes whitespace, quote/backslash
+#: characters, and `%` (a specifier-expansion prefix in systemd unit files --
+#: a literal `%` must be doubled, which only the quoted branch below does).
+_SYSTEMD_UNQUOTED_SAFE = frozenset(string.ascii_letters + string.digits + "-_./:=@")
+
+
+def _systemd_quote(value: str) -> str:
+    """Quote *value* for embedding in a systemd unit's ``ExecStart=`` /
+    ``Environment=`` lines.
+
+    This is systemd's own "Command Lines" quoting (systemd.service(5)), NOT
+    POSIX shell quoting -- systemd is not a shell (no globbing, no `$()`,
+    different escape rules), so pasting :func:`shlex.quote` output into a
+    unit file is itself a bug. Mirrors ``shlex.quote``'s "only quote when
+    the bare token isn't already safe" behaviour so a plain path with no
+    special characters renders unquoted, same as before this fix.
+    """
+    if value and all(ch in _SYSTEMD_UNQUOTED_SAFE for ch in value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +360,15 @@ def generate_launchd_plist(
 ) -> str:
     """Launchd plist, same shape as
     ``examples/claude-code/com.athenaeum.run.plist`` (this issue's own Plan
-    names that file as the template)."""
+    names that file as the template).
+
+    Unlike the systemd/cron generators below, no path-quoting is needed
+    here: each ``ProgramArguments`` entry is its own XML ``<string>``
+    element, so a space inside one is literal element text -- there is no
+    line-oriented word-splitting for XML to misinterpret (confirmed per
+    Finding athenaeum#2408 review, MEDIUM; see
+    ``test_launchd_plist_survives_a_space_in_every_path``).
+    """
     env_entries = "".join(
         f"    <key>{name}</key>\n    <string>{value}</string>\n"
         for name, value in key_source.env.items()
@@ -369,7 +413,15 @@ def generate_launchd_plist(
 def generate_systemd_service(
     athenaeum_bin: Path, knowledge_root: Path, key_source: KeySource, *, log_path: Path
 ) -> str:
-    env_lines = "".join(f"Environment={name}={value}\n" for name, value in key_source.env.items())
+    # Per systemd.exec(5) `Environment=`: "If you need to assign a value
+    # containing spaces ... put quotes around the WHOLE ASSIGNMENT" -- a
+    # quote mark may only open an item at its start (systemd.syntax(7)), so
+    # `NAME="value with space"` is NOT recognized the way shell quoting
+    # would read it; only `"NAME=value with space"` is.
+    env_lines = "".join(
+        f"Environment={_systemd_quote(f'{name}={value}')}\n"
+        for name, value in key_source.env.items()
+    )
     return (
         "[Unit]\n"
         "Description=Athenaeum librarian compile "
@@ -377,7 +429,13 @@ def generate_systemd_service(
         "[Service]\n"
         "Type=oneshot\n"
         f"{env_lines}"
-        f"ExecStart={athenaeum_bin} run --path {knowledge_root}\n"
+        f"ExecStart={_systemd_quote(str(athenaeum_bin))} run --path "
+        f"{_systemd_quote(str(knowledge_root))}\n"
+        # StandardOutput=/StandardError= take the ENTIRE rest of the line
+        # verbatim as a single path (systemd.exec(5) -- unlike ExecStart=/
+        # Environment= above, this setting is not word-split), so a space
+        # in `log_path` is already safe here and quoting it would instead
+        # make the literal quote characters part of the path.
         f"StandardOutput=append:{log_path}\n"
         f"StandardError=append:{log_path}\n"
     )
@@ -405,10 +463,16 @@ def generate_cron_line(
     minute: int,
     log_path: Path,
 ) -> str:
-    env_prefix = "".join(f"{name}={value} " for name, value in key_source.env.items())
+    # Unlike the systemd generator above, this line is handed to `/bin/sh`
+    # by cron -- POSIX shell quoting applies, so `shlex.quote` (not
+    # `_systemd_quote`) is correct here. `shlex.quote` only adds quotes when
+    # a token isn't already shell-safe, so a plain path with no spaces
+    # renders unchanged.
+    env_prefix = "".join(f"{name}={shlex.quote(value)} " for name, value in key_source.env.items())
     return (
-        f"{minute} {hour} * * * {env_prefix}{athenaeum_bin} run "
-        f"--path {knowledge_root} >> {log_path} 2>&1 # {CRON_TAG}"
+        f"{minute} {hour} * * * {env_prefix}{shlex.quote(str(athenaeum_bin))} run "
+        f"--path {shlex.quote(str(knowledge_root))} >> {shlex.quote(str(log_path))} 2>&1 "
+        f"# {CRON_TAG}"
     )
 
 
@@ -488,6 +552,13 @@ def install(
         service_path = _systemd_service_path(resolved_home)
         timer_path = _systemd_timer_path(resolved_home)
         log_path = _state_log_path(resolved_home)
+        # Finding athenaeum#2408 review (HIGH): `StandardOutput=append:` does
+        # not create a missing directory -- without this, the unit fails
+        # every run on a fresh host. `_write` already does the equivalent
+        # `mkdir(parents=True, exist_ok=True)` for the unit files themselves
+        # (via `atomic_write_text`); the log path needs the same treatment
+        # explicitly since nothing else ever opens it for writing here.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         _write(
             service_path,
             generate_systemd_service(
@@ -506,6 +577,10 @@ def install(
 
     # cron
     log_path = _state_log_path(resolved_home)
+    # Finding athenaeum#2408 review (HIGH): the shell's own `>> {log_path}`
+    # redirect fails if the directory is missing, same reasoning as the
+    # systemd branch above.
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     existing = [line for line in _crontab_lines(loader_fn) if CRON_TAG not in line]
     new_line = generate_cron_line(
         bin_path, resolved_knowledge_root, key_source, hour=hour, minute=minute, log_path=log_path
@@ -523,7 +598,19 @@ def remove(
 ) -> RemoveResult:
     """Unload and delete everything ``install`` wrote (issue athenaeum#2304
     AC1). Idempotent: removing an already-absent schedule is a successful
-    no-op (``had_schedule=False``), not an error."""
+    no-op (``had_schedule=False``), not an error.
+
+    **Deliberate exception (Finding athenaeum#2408 review, HIGH):**
+    ``install`` now also creates ``_state_log_path(home).parent`` (the
+    systemd/cron log directory) so the unit's own log redirect has
+    somewhere to write. ``remove`` does NOT delete that directory or any
+    log file inside it -- an operator may still want to read a schedule's
+    run history after unloading it, and the directory is inert, harmless
+    residue if left (it doesn't recreate itself and doesn't collide with a
+    future ``install``). ``remove`` only undoes what ``install`` did to
+    the scheduling unit itself (plist / service+timer / crontab line), not
+    every directory that unit's execution populates.
+    """
     loader_fn = loader or _default_loader
     resolved_home = (home or Path.home()).expanduser().resolve()
     plat = platform_override or detect_platform()

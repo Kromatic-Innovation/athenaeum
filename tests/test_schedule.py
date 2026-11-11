@@ -30,6 +30,8 @@ number.
 from __future__ import annotations
 
 import io
+import plistlib
+import shlex
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -223,6 +225,97 @@ class TestGenerators:
         assert str(knowledge_root) in line
         assert line.endswith(f"# {schedule.CRON_TAG}")
 
+    # -----------------------------------------------------------------
+    # Review-response regression tests (athenaeum#2408 review, MEDIUM):
+    # every interpolated path/env value must be quoted -- the PLATFORM-
+    # CORRECT way for each generator, not one blanket rule pasted across
+    # all three (a cron line is shell; a systemd unit is not; a launchd
+    # plist's XML argv array needs no quoting at all).
+    # -----------------------------------------------------------------
+
+    def test_systemd_execstart_and_environment_are_quoted_for_a_space(
+        self, tmp_path: Path
+    ) -> None:
+        bin_path = tmp_path / "ath env" / "bin" / "athenaeum"
+        knowledge_root = tmp_path / "know ledge" / "root"
+        key_source = schedule.KeySource(
+            kind="api_key", env={"ANTHROPIC_API_KEY": "sk abc with space"}
+        )
+        content = schedule.generate_systemd_service(
+            bin_path, knowledge_root, key_source, log_path=tmp_path / "log"
+        )
+        # ExecStart=/Environment= are word-split by systemd's own "Command
+        # Lines" syntax (systemd.service(5)) -- a bare space in either path
+        # would otherwise split it into two wrong argv words.
+        assert f'ExecStart="{bin_path}" run --path "{knowledge_root}"' in content
+        # Per systemd.exec(5) `Environment=`: quoting wraps the WHOLE
+        # `NAME=value` assignment, not just the value -- a quote mark may
+        # only open an item at the item's own start.
+        assert 'Environment="ANTHROPIC_API_KEY=sk abc with space"' in content
+
+    def test_systemd_standard_output_is_left_unquoted(self, tmp_path: Path) -> None:
+        """`StandardOutput=append:PATH` takes the ENTIRE rest of the line
+        verbatim as a single path (systemd.exec(5)) -- unlike `ExecStart=`/
+        `Environment=` above, this setting is never word-split, so quoting
+        it would instead put literal quote characters INTO the path."""
+        log_path = tmp_path / "log dir" / "schedule-run.log"
+        key_source = schedule.KeySource(kind="api_key", env={"ANTHROPIC_API_KEY": "sk-abc"})
+        content = schedule.generate_systemd_service(
+            tmp_path / "bin" / "athenaeum", tmp_path / "knowledge", key_source, log_path=log_path
+        )
+        assert f"StandardOutput=append:{log_path}\n" in content
+        assert f"StandardError=append:{log_path}\n" in content
+
+    def test_cron_line_round_trips_through_shell_quoting(self, tmp_path: Path) -> None:
+        bin_path = tmp_path / "ath env" / "bin" / "athenaeum"
+        knowledge_root = tmp_path / "know ledge" / "root"
+        log_path = tmp_path / "log dir" / "schedule-run.log"
+        key_source = schedule.KeySource(
+            kind="api_key", env={"ANTHROPIC_API_KEY": "sk abc with space"}
+        )
+        line = schedule.generate_cron_line(
+            bin_path, knowledge_root, key_source, hour=3, minute=0, log_path=log_path
+        )
+        # cron hands this whole line to `/bin/sh`, so POSIX shell quoting
+        # applies -- a round trip through `shlex` (the same quoting
+        # grammar) must recover every path/value as ONE token each, never
+        # split at the embedded space.
+        tokens = shlex.split(line.rsplit("#", 1)[0])
+        assert "ANTHROPIC_API_KEY=sk abc with space" in tokens
+        assert str(bin_path) in tokens
+        assert str(knowledge_root) in tokens
+        assert str(log_path) in tokens
+
+    def test_launchd_plist_survives_a_space_in_every_path(self, tmp_path: Path) -> None:
+        """Confirms (per Finding athenaeum#2408 review, MEDIUM) that the
+        launchd generator is ALREADY immune to spaces, unlike the systemd/
+        cron generators above: each `ProgramArguments` entry is its own
+        XML `<string>` element, so there is no line-oriented word-splitting
+        for a space to break.
+
+        The leading `<!--...-->` line is stripped before parsing only
+        because it is pre-existing, unrelated malformed XML (it contains a
+        literal `--` inside an XML comment body, which plistlib's strict
+        parser rejects) -- not something either review finding asked for;
+        reported separately rather than fixed here.
+        """
+        bin_path = tmp_path / "ath env" / "bin" / "athenaeum"
+        knowledge_root = tmp_path / "know ledge" / "root"
+        key_source = schedule.KeySource(kind="api_key", env={"ANTHROPIC_API_KEY": "sk-abc"})
+        content = schedule.generate_launchd_plist(
+            bin_path, knowledge_root, key_source, hour=3, minute=0, log_path=tmp_path / "log"
+        )
+        parseable = "\n".join(
+            line for line in content.splitlines() if not line.strip().startswith("<!--")
+        )
+        data = plistlib.loads(parseable.encode("utf-8"))
+        assert data["ProgramArguments"] == [
+            str(bin_path),
+            "run",
+            "--path",
+            str(knowledge_root),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # install() / remove() / status() -- per platform, loader mocked (AC1).
@@ -406,6 +499,50 @@ class TestInstallCron:
         assert _scheduled() is True
         schedule.remove(home=home, loader=loader, platform_override="cron")
         assert _scheduled() is False
+
+
+class TestLogDirectoryLifecycle:
+    """Review-response regression tests (Finding athenaeum#2408 review,
+    HIGH): neither systemd's `StandardOutput=append:` nor cron's shell
+    `>>` redirect creates a missing directory -- without `install` itself
+    creating `_state_log_path(home).parent`, the generated schedule fails
+    every single run on a fresh host (the exact AC3 outcome by a different
+    route). `remove` deliberately leaves the directory and any log file in
+    it alone (see `remove`'s own docstring)."""
+
+    def test_systemd_install_creates_the_log_directory(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader()
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        assert (home / ".local" / "state" / "athenaeum").is_dir()
+
+    def test_cron_install_creates_the_log_directory(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body="")
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        assert (home / ".local" / "state" / "athenaeum").is_dir()
+
+    def test_remove_leaves_an_existing_log_file_and_its_directory_in_place(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body="")
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        log_dir = home / ".local" / "state" / "athenaeum"
+        log_file = log_dir / "schedule-run.log"
+        log_file.write_text("a previous run's output\n", encoding="utf-8")
+
+        result = schedule.remove(home=home, loader=loader, platform_override="cron")
+
+        assert result.had_schedule is True
+        # Everything `remove` is documented to delete (the tagged crontab
+        # line) is gone -- but the log an operator may still want to read
+        # survives, and so does the directory holding it.
+        assert schedule.CRON_TAG not in loader.crontab_body
+        assert log_file.is_file()
+        assert log_file.read_text(encoding="utf-8") == "a previous run's output\n"
+        assert log_dir.is_dir()
 
 
 class TestInstallRefusesWithoutKeySource:
