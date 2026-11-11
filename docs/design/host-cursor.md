@@ -468,3 +468,20 @@ athenaeum#2382, athenaeum#2383 and athenaeum#2384:
    athenaeum#2201 was. *Recommended: yes.*
 5. **Re-check cadence.** Re-verify §3 on or after **2027-02-11**, or sooner if
    Cursor adds context injection to `beforeSubmitPrompt`.
+
+Decisions 1 to 3 are tracked in athenaeum#2397. Decision 4 was applied under
+the 2026-11-11 wording ruling.
+
+---
+
+## 10. Children of athenaeum#2202
+
+| Issue | What | Lifecycle | Blocked by |
+|---|---|---|---|
+| athenaeum#2394 | Claude Code hook no-ops under Cursor (§4). `moscow:should` | `ready` | athenaeum#2371 |
+| athenaeum#2396 | Cursor setup guide and `clients.md` row | `ready` | athenaeum#2394, athenaeum#2372 |
+| athenaeum#2397 | Decision: §9 items 1 to 3 | `needs-decision` | — |
+| athenaeum#2395 | Probe on a real Cursor install (§3.3, §3.4, §3.5) | `~operator` | — |
+| athenaeum#2399 | Instructed recall: example `alwaysApply` rule | `ready` | athenaeum#2396 |
+| athenaeum#2398 | `sessionStart` context-snapshot adapter | `ready` | athenaeum#2395, athenaeum#2396, athenaeum#2397 |
+| athenaeum#2400 | Measure recall against the Claude Code hook baseline | `~operator` | athenaeum#2398, athenaeum#2399 |
