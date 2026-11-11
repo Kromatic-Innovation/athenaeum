@@ -256,7 +256,7 @@ Legend:
   MCP servers by command pattern, URL pattern and tool.
   <https://cursor.com/docs/context/mcp>
 - **R.** Cursor's built-in Memories UI was removed in 2.1. There is no overlap
-  to manage.
+  to manage. <https://forum.cursor.com/t/custom-modes-and-memories-gone-in-2-1/143744>
 
 ---
 
@@ -483,5 +483,5 @@ the 2026-11-11 wording ruling.
 | athenaeum#2397 | Decision: §9 items 1 to 3 | `needs-decision` | — |
 | athenaeum#2395 | Probe on a real Cursor install (§3.3, §3.4, §3.5) | `~operator` | — |
 | athenaeum#2399 | Instructed recall: example `alwaysApply` rule | `ready` | athenaeum#2396 |
-| athenaeum#2398 | `sessionStart` context-snapshot adapter | `ready` | athenaeum#2395, athenaeum#2396, athenaeum#2397 |
+| athenaeum#2398 | `sessionStart` context-snapshot adapter | `~planning` until the probe shows injection landing | athenaeum#2395, athenaeum#2396, athenaeum#2397 |
 | athenaeum#2400 | Measure recall against the Claude Code hook baseline | `~operator` | athenaeum#2398, athenaeum#2399 |
