@@ -245,12 +245,24 @@ class AttestationIndex:
         registered_strengths: Mapping[str, str] | None = None,
         invalid_signature_seqs: frozenset[int] = frozenset(),
         anchor_records: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None,
+        ledger_id: str | None = None,
     ) -> None:
         self._ledger_index = ledger_index
         self.ledger_present = ledger_present
         self.chain_ok = chain_ok
         self.first_break_seq = first_break_seq
         self.first_break_prev_seq = first_break_prev_seq
+        #: the ``ledger_id`` asserted by this ``witness_dir``'s own first
+        #: physical line (``None`` when ``ledger_present`` is ``False``;
+        #: issue athenaeum#2334/TG6 review follow-up). ``chain_intact_through``
+        #: answers "is THIS index's chain unbroken up to seq N" with no
+        #: notion of which ledger a caller's ``seq`` came from -- a caller
+        #: holding a ``<ledger_id>:<seq>`` witness_ref (the only shape TG6
+        #: ever reads one in) MUST compare the ref's own ``ledger_id``
+        #: against this before trusting ``chain_intact_through``'s answer,
+        #: or a `seq` that collides with a different, foreign ledger's
+        #: numbering reads as "intact" against a chain it never named.
+        self.ledger_id = ledger_id
         self._anchored_through: dict[str, int] = dict(anchored_through)
         #: ``{key_id: registered strength}`` (issue athenaeum#2333) — only for
         #: keys :func:`athenaeum.config.resolve_witness_keys` accepted
@@ -297,7 +309,10 @@ class AttestationIndex:
         verification = ledger.verify_chain(witness_dir, public_keys=public_keys or None)
         anchored_through: dict[str, int] = {}
         anchor_records: dict[str, list[tuple[int, str, str]]] = {}
+        local_ledger_id: str | None = None
         for line in ledger.iter_lines(witness_dir):
+            if local_ledger_id is None:
+                local_ledger_id = line.ledger_id
             if line.kind != "anchor":
                 continue
             subject = line.extra.get("subject") if isinstance(line.extra, Mapping) else None
@@ -322,6 +337,7 @@ class AttestationIndex:
             registered_strengths={k: v["strength"] for k, v in registered.items()},
             invalid_signature_seqs=frozenset(verification.invalid_signature_seqs),
             anchor_records={k: tuple(v) for k, v in anchor_records.items()},
+            ledger_id=local_ledger_id,
         )
 
     def lookup(
