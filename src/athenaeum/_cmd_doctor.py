@@ -5,7 +5,8 @@ Thin CLI dispatcher over :mod:`athenaeum.doctor`, mirroring
 ``athenaeum contact-surface-lint``'s shape (no detection logic of its own —
 see ``_cmd_contact_surface_lint.py``'s module docstring for the same
 "factoring rule" note). Every check — package version, interpreter version,
-MCP registration, hooks, LLM key mode, search index, last compile time —
+MCP registration, hooks, LLM key mode, search index, last compile time,
+schedule state (issue athenaeum#2304) —
 lives in :mod:`athenaeum.doctor`; this module only builds the argparse
 surface, calls :func:`athenaeum.doctor.run_checks`, prints the report, and
 returns the exit code.
@@ -64,6 +65,13 @@ def add_doctor_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Claude Code config directory holding settings.json/"
         ".claude.json (default: CLAUDE_CONFIG_DIR env, else ~/.claude)",
     )
+    doctor_parser.add_argument(
+        "--home",
+        type=Path,
+        default=None,
+        help="Home directory to check the `athenaeum schedule` state under "
+        "(issue athenaeum#2304; default: the real home directory).",
+    )
     doctor_parser.set_defaults(func=cmd_doctor)
 
 
@@ -75,6 +83,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         knowledge_root,
         cache_dir=args.cache_dir,
         claude_config_dir=args.claude_config_dir,
+        home=args.home,
     )
     print(doctor.format_report(results))
     return doctor.exit_code(results)
