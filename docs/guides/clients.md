@@ -10,8 +10,12 @@ what works where.
 | Client | Status | What you get |
 |---|---|---|
 | Claude Code | Supported | All MCP tools **and** auto-recall via hooks — see [Passive recall via hooks](sidecar.md) |
-| Claude Desktop, Cursor, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
-| ChatGPT, Grok | Not supported | — (they need a remote HTTPS MCP server) |
+| Cursor | Works | All MCP tools by explicit call; see [Cursor guide](cursor.md) |
+| Claude Desktop, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
+| Grok Build | Works | All MCP tools by explicit call, no auto-recall — see [I want to use Grok Build](#i-want-to-use-grok-build) |
+| ChatGPT | Not supported | — (needs a remote HTTPS MCP server) |
+| Grok apps (grok.com, iOS, Android) | Not supported | — (needs remote mode) |
+| xAI API | Not supported | — (out of scope) |
 | OpenAI Codex | Static snapshot | A periodically refreshed context file — see [Codex context file](codex.md) |
 
 ## I want to use Claude Code
@@ -24,7 +28,9 @@ Full support. Register the server and wire the hooks: [Install](install.md) and
 Any client that can launch a local process over stdio can run `athenaeum serve`.
 The model gets every MCP tool (`remember`, `recall`, the decision-queue tools), but
 it calls them only when it decides to — there is no per-turn auto-recall outside
-Claude Code. Support for Cursor, including auto-recall, is tracked in the
+Claude Code. **Cursor has its own guide** — see [Cursor](cursor.md) for setup, the
+Claude Code hook passthrough, and what stays unsupported. Further Cursor work is
+tracked in the
 [Cursor support issue](https://github.com/Kromatic-Innovation/athenaeum/issues/2202).
 
 1. Install with the MCP extra — see [Install](install.md#i-want-agents-to-write-and-read-memory-through-mcp)
@@ -45,9 +51,10 @@ Claude Code. Support for Cursor, including auto-recall, is tracked in the
    }
    ```
 
-   Cursor and most other stdio clients take the same `mcpServers` shape (for Cursor:
-   `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project). Use absolute paths for
-   both the binary and `--path`.
+   Most other stdio clients take the same `mcpServers` shape. **Cursor's config
+   additionally takes a `"type": "stdio"` field** (`~/.cursor/mcp.json`, or
+   `.cursor/mcp.json` in a project) — see [Cursor](cursor.md) for the full example.
+   Use absolute paths for both the binary and `--path`.
 4. Restart the client.
 
 `serve` itself needs **no API key** — it only reads and writes files. Two things
@@ -61,11 +68,52 @@ still apply:
   `athenaeum session-end`, which compiles and reindexes); otherwise `recall` returns
   nothing new. See [Daily operation](daily-operation.md).
 
-## I want to use ChatGPT or Grok
+## I want to use Grok Build
 
-Not supported. ChatGPT and Grok connect only to a **remote MCP server over HTTPS**;
-they cannot launch a local process, and athenaeum has no HTTP transport and no
-authentication. Work is tracked in the
+Grok Build, xAI's terminal agent, launches local MCP servers over stdio the same
+way Claude Code and Cursor do — it is not limited to remote HTTPS the way the
+other Grok surfaces are. **These facts are unverified on a live install:** they
+come from xAI's own documentation (https://docs.x.ai/build/features/mcp-servers),
+not a tested athenaeum installation, pending a report from the Grok Build probe.
+
+1. Install with the MCP extra — see [Install](install.md#i-want-agents-to-write-and-read-memory-through-mcp)
+   for the command.
+2. Find the absolute path to the `athenaeum` binary (`which athenaeum`).
+3. Add a server entry to Grok Build's own config:
+
+   ```toml
+   [mcp_servers.athenaeum]
+   command = "/opt/athenaeum/.venv/bin/athenaeum"
+   args = ["serve", "--path", "/opt/athenaeum/knowledge"]
+   ```
+
+   Use absolute paths for both the binary and `--path` — adjust them to wherever
+   your own virtualenv and knowledge store actually live.
+
+Two things set Grok Build apart from a generic stdio client:
+
+- **It also loads Claude Code's MCP config automatically.** If you already
+  registered athenaeum for Claude Code, Grok Build picks it up with no separate
+  opt-in step. To opt out, set `[compat.claude] mcps = false` in Grok Build's
+  own config.
+- **Prompts and tool results go to xAI**, not Anthropic — the same boundary
+  that applies to any MCP client talking to a different model provider.
+
+Grok Build gets every MCP tool by **explicit tool call only** — there is no
+per-turn auto-recall on Grok Build, the same limitation other local (stdio)
+clients have above. For the fuller host analysis (including why no Grok surface
+gets Tier-1 auto-recall), see the
+[Grok host design note](https://github.com/Kromatic-Innovation/athenaeum/pull/2369)
+— landing separately and not yet merged as of this writing.
+
+## I want to use ChatGPT, Grok apps, or the xAI API
+
+Not supported. ChatGPT, the Grok apps (grok.com, iOS, Android), and the xAI API
+all connect only to a **remote MCP server over HTTPS**; none of them can launch
+a local process, and athenaeum has no HTTP transport and no authentication.
+(Grok Build is different — see
+[I want to use Grok Build](#i-want-to-use-grok-build) above.) Work is tracked in
+the
 [ChatGPT epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2200), the
 [Grok epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2201), and their
 shared prerequisite, the
@@ -94,5 +142,5 @@ Codex reads. See [Codex context file](codex.md).
 
 ## See also
 
-- Guides — [Install](install.md) · [Passive recall via hooks](sidecar.md) · [Codex context file](codex.md) · [Troubleshooting](troubleshooting.md)
+- Guides — [Cursor](cursor.md) · [Install](install.md) · [Passive recall via hooks](sidecar.md) · [Codex context file](codex.md) · [Troubleshooting](troubleshooting.md)
 - Modules — [mcp](../modules/mcp.md) · [recall](../modules/recall.md)
