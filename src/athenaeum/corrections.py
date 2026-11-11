@@ -21,8 +21,10 @@ leaf/service modules — :mod:`athenaeum.models`, :mod:`athenaeum.provenance`,
 :mod:`athenaeum.storage`, :mod:`athenaeum.compiled_exempt` (module-scope,
 issue athenaeum#1419 — see :func:`write_correction_handoff`; undeclared in
 ``tests/fixtures/layer_declarations.py`` same as every other importer of it),
-and (function-local, per call site — see :func:`_resolve_email_handle` and
-the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. Must never import
+:mod:`athenaeum.trust_graph` (module-scope, issue athenaeum#2331/TG3 — the
+pure `compare_sources` override layer; L1, so this stays a forward-only
+edge), and (function-local, per call site — see :func:`_resolve_email_handle`
+and the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. Must never import
 :mod:`athenaeum.intake`,
 :mod:`athenaeum.librarian`, :mod:`athenaeum.merge`, or :mod:`athenaeum.tiers`
 — `intake.py` imports :func:`parse_batch_envelope` from here (the "valid
@@ -89,7 +91,7 @@ import json
 import logging
 import subprocess
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
@@ -115,6 +117,8 @@ from athenaeum.config import (
     resolve_corrections_retry_days,
     resolve_corrections_schema_slots,
     resolve_corrections_sensitive_fields,
+    resolve_source_trust_edges,
+    resolve_source_trust_enabled,
 )
 from athenaeum.models import (
     EntityIndex,
@@ -133,6 +137,14 @@ from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
 from athenaeum.store import FilesystemStore, Store, append_line_durable
+from athenaeum.trust_graph import (
+    INCOMPARABLE,
+    OUTRANKED,
+    OUTRANKS,
+    UNKNOWN_EVIDENCE_KIND,
+    SourceTrustEdge,
+    compare_sources,
+)
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +238,16 @@ ALLOWED_RECORD_KEYS: frozenset[str] = frozenset(
         # the field/value allowlist+precedence machinery.
         "bucket",
         "valid_until",
+        # Issue athenaeum#2331 (TG3), failure class F5: a STRUCTURED
+        # rule-origin marker, set unconditionally by
+        # `rules.build_correction_record` for every record a shape rule
+        # compiles (both the general compile path, `rules.py:924`, and the
+        # preserved-log path, `rules.py:~2462`, share that one emit
+        # function). Deliberately NOT keyed on the free-text `note` field
+        # ("compiled by shape rule ...") — a human can override `note` via
+        # `spec.note`, which would silently blind the F5 guard below. See
+        # `_trust_edge_verdict`.
+        "rule_origin",
     }
 )
 
@@ -877,6 +899,88 @@ def _is_monotone_clear(value: Any, op: str) -> bool:
     return value in (None, "", False, 0)
 
 
+#: Source-type tokens that, per the 9-tier ladder, already occupy
+#: precedence rank 1 (`precedence.SOURCE_PRECEDENCE_TIERS`, athenaeum#2159).
+#: Used only by the F5 guard below -- NOT a new copy of the tier list (the
+#: issue's "no change to SOURCE_PRECEDENCE_TIERS" AC): this is a two-member
+#: set naming exactly the two tokens the guard must never let a rule-
+#: compiled correction outrank via an edge, not a ranking.
+_RANK_1_SOURCE_TYPES: frozenset[str] = frozenset({"user", "witnessed"})
+
+
+def _trust_edge_verdict(
+    *,
+    incoming_source: Any,
+    existing_source: Any,
+    trust_domain: dict[str, Any] | None,
+    trust_edges: Sequence[SourceTrustEdge],
+    incoming_is_rule_compiled: bool,
+) -> tuple[str, str] | None:
+    """Consult the trust-graph override layer for one (incoming, existing)
+    pair, or return ``None`` to mean "fall through to the ordinary
+    `source_rank` comparison, unchanged" (issue athenaeum#2331, TG3).
+
+    ``None`` is returned, deliberately, in every one of these cases:
+
+    - ``trust_domain`` is ``None`` or ``trust_edges`` is empty — the caller
+      encodes "flag off" and "no edges configured" identically this way,
+      satisfying AC1 ("either one off gives byte-identical behaviour")
+      without this function needing to know which.
+    - :func:`athenaeum.trust_graph.compare_sources` found no edge that
+      actually matches this pair's domain, and fell back to its own
+      `source_rank` comparison internally. That fallback's reason always
+      reads ``"source_rank fallback: ..."`` — never ``"edge[...]"`` — per
+      its own docstring contract, so checking the reason prefix distinguishes
+      "an edge decided this" from "no edge applied" without this module
+      re-deriving a description or duplicating `compare_sources`'s matching
+      logic. This keeps every pair an operator's edges do NOT touch on
+      exactly today's reason text, even with the flag on.
+
+    Failure class F5 (`docs/design/trust-graph.md` §4): a rule-compiled
+    correction (``incoming_is_rule_compiled``, from the record's structured
+    ``rule_origin`` marker — never the free-text ``note``) must never be
+    promoted over a ``user:``/``witnessed:`` incumbent by an edge. Both
+    `rules.py` emit paths (the general compile path, `rules.py:924`, and
+    the preserved-log path, `rules.py:~2462`) share the one
+    `build_correction_record` function that stamps ``rule_origin``, so this
+    one guard covers both. The guard forces ``trust_edges=()`` for this
+    call only — the ordinary rank comparison below already defers/escalates
+    correctly on its own, because `rules.MACHINE_TIER_SOURCE_TYPES`
+    (`script`/`api`) is capped well below rank 1.
+    """
+    if trust_domain is None or not trust_edges:
+        return None
+
+    effective_edges = trust_edges
+    if incoming_is_rule_compiled:
+        try:
+            existing_ref = parse_source(existing_source)
+        except ValueError:
+            # Same defensive handling as `precedence.source_rank` for a
+            # malformed source -- this guard must never be the first thing
+            # in this module to raise on bad input it did not create.
+            existing_ref = None
+        if existing_ref is not None and existing_ref.type in _RANK_1_SOURCE_TYPES:
+            effective_edges = ()
+
+    if not effective_edges:
+        return None
+
+    result = compare_sources(incoming_source, existing_source, trust_domain, edges=effective_edges)
+    if not result.reason.startswith("edge["):
+        # No edge actually fired for this pair/domain -- `compare_sources`
+        # fell back to `source_rank` internally. Let the caller's own
+        # (identical) rank comparison produce today's verdict and reason.
+        return None
+    if result.relation == OUTRANKS:
+        return "apply", f"trust edge: {result.reason}"
+    if result.relation == OUTRANKED:
+        return "defer", f"trust edge: {result.reason}"
+    if result.relation == INCOMPARABLE:
+        return "escalate", f"trust edge: {result.reason}"
+    return None  # pragma: no cover - EQUAL never carries an "edge[" reason
+
+
 def decide_verdict(
     *,
     existing_source: Any,
@@ -888,6 +992,9 @@ def decide_verdict(
     op: str,
     existing_updated: Any,
     incumbent_attributed: bool = False,
+    trust_domain: dict[str, Any] | None = None,
+    trust_edges: Sequence[SourceTrustEdge] = (),
+    incoming_is_rule_compiled: bool = False,
 ) -> tuple[str, str]:
     """§6.2 conflict policy for a single value comparison.
 
@@ -897,10 +1004,24 @@ def decide_verdict(
     this function only decides the case where a real value delta exists.
 
     The "incumbent is ``user:`` and the correction is not → defer" row of
-    §6.2's table needs no separate branch: ``user`` occupies precedence
-    rank 1 alone, so any non-``user`` incoming source already has a HIGHER
-    (worse) numeric rank and is deferred by the ordinary rank comparison
-    below.
+    §6.2's table needs no separate branch: ``user`` and ``witnessed`` share
+    precedence rank 1 (athenaeum#2159), so any incoming source outside that
+    pair already has a HIGHER (worse) numeric rank and is deferred by the
+    ordinary rank comparison below. (Stale comment fix, issue
+    athenaeum#2331/TG3 — this paragraph used to say "user occupies rank 1
+    alone"; the logic it describes was never wrong, only the prose.)
+
+    ``trust_domain``/``trust_edges``/``incoming_is_rule_compiled`` (issue
+    athenaeum#2331, TG3): the operator-overridable trust-graph layer, gated
+    entirely by the caller. ``trust_domain`` is ``None`` or ``trust_edges``
+    is empty (``librarian.source_trust_enabled`` default-off, or no edges
+    configured — "either one off" per the issue) means this function is
+    BYTE-IDENTICAL to its pre-TG3 self (AC1): neither is consulted for a
+    ``monotone`` op (F9, failure class in `docs/design/trust-graph.md` §4),
+    and even for a non-monotone op, :func:`_trust_edge_verdict` returns
+    ``None`` whenever no edge actually fires for this pair, falling through
+    to the ordinary rank comparison below unchanged. See
+    :func:`_trust_edge_verdict` for the F5 (machine-tier-via-rules) guard.
 
     ``incumbent_attributed`` (issue athenaeum#1803, default ``False`` so every
     existing caller keeps today's behaviour): whether the caller resolved
@@ -916,11 +1037,24 @@ def decide_verdict(
     existing_rank = source_rank(existing_source)
 
     if monotone:
+        # F9 (docs/design/trust-graph.md §4): edges are NEVER consulted for
+        # a monotone op. This branch returns unconditionally before
+        # `trust_domain`/`trust_edges` are ever read.
         if _is_monotone_clear(incoming_value, op):
             if incoming_rank == 1:
                 return "apply", "monotone unset at user: tier"
             return "defer", "monotone unset requires user: tier"
         return "apply", "monotone set by any permitted writer"
+
+    edge_verdict = _trust_edge_verdict(
+        incoming_source=incoming_source,
+        existing_source=existing_source,
+        trust_domain=trust_domain,
+        trust_edges=trust_edges,
+        incoming_is_rule_compiled=incoming_is_rule_compiled,
+    )
+    if edge_verdict is not None:
+        return edge_verdict
 
     if incoming_rank < existing_rank:
         return "apply", f"incoming rank {incoming_rank} outranks existing rank {existing_rank}"
@@ -1575,6 +1709,40 @@ def process_correction_record(
                 "recorded-as-prose", f"no schema slot for {field_name!r}; recorded as prose"
             )
 
+    # Trust-graph override layer (issue athenaeum#2331, TG3) -- resolved once
+    # per record, after `write_field` is final, and consulted by BOTH the
+    # scalar `decide_verdict` call below and the `op == "remove"` branch
+    # further down. "Either one off gives byte-identical behaviour" (AC1):
+    # `trust_edges` collapses to `()` whenever the flag is off OR no edges
+    # are configured, in which case `_trust_edge_verdict` always returns
+    # `None` and every caller below falls through to the untouched
+    # `source_rank` comparison.
+    trust_edges: Sequence[SourceTrustEdge] = (
+        resolve_source_trust_edges(config) if resolve_source_trust_enabled(config) else ()
+    )
+    # Domain (docs/design/trust-graph.md §2.3/§2.3.1): entity type is the
+    # target page's own `type:` (`existing_meta`, populated above for both
+    # the "existing" and newly-"creatable" resolution kinds -- see
+    # `resolve_target_for_apply`'s `TargetResolution.entity_type`, which is
+    # only ever set on the CREATE branch, so `existing_meta.get("type")` is
+    # the one value that is always populated here). `evidence_kind` is
+    # `UNKNOWN_EVIDENCE_KIND`: neither this module nor `rules.py` threads an
+    # evidence-kind-shaped value through a correction record today -- see
+    # §2.3.1 ("Evidence-kind at seam 1/seam 2 is `unknown` today") -- so an
+    # edge naming a specific evidence kind can never match here (the
+    # unknown-kind matching rule, same section); only an edge with
+    # `evidence_kind` absent ("any") can fire.
+    trust_domain: dict[str, Any] = {
+        "entity_type": existing_meta.get("type"),
+        "field": write_field,
+        "evidence_kind": UNKNOWN_EVIDENCE_KIND,
+    }
+    # Failure class F5: whether THIS record was compiled by a shape rule,
+    # read off the structured `rule_origin` marker (never the free-text
+    # `note`) -- see `rules.build_correction_record` and the F5 guard in
+    # `_trust_edge_verdict`.
+    incoming_is_rule_compiled = bool(effective.get("rule_origin"))
+
     # §7.1 sensitivity routing -- redirects BOTH the read of "existing
     # attribution" and the eventual write to the mapped surface, regardless
     # of the destination the correction named. ``surface_class`` was already
@@ -1650,6 +1818,9 @@ def process_correction_record(
                 op=op,
                 existing_updated=existing_meta.get("updated"),
                 incumbent_attributed=incumbent_attributed,
+                trust_domain=trust_domain,
+                trust_edges=trust_edges,
+                incoming_is_rule_compiled=incoming_is_rule_compiled,
             )
     elif op == "add":
         existing_list = read_meta.get(write_field)
@@ -1728,17 +1899,30 @@ def process_correction_record(
             incoming_rank = source_rank(source)
             existing_rank = source_rank(existing_source)
             if monotone:
+                # F9: edges are NEVER consulted for a monotone op -- same
+                # guard as `decide_verdict`'s own monotone branch, returned
+                # before `trust_domain`/`trust_edges` are ever read.
                 if incoming_rank == 1:
                     verdict, reason = "apply", "monotone unset at user: tier"
                 else:
                     verdict, reason = "defer", "monotone unset requires user: tier"
-            elif incoming_rank <= existing_rank:
-                verdict, reason = "apply", "incoming authority permits removal"
             else:
-                verdict, reason = (
-                    "defer",
-                    f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
+                edge_verdict = _trust_edge_verdict(
+                    incoming_source=source,
+                    existing_source=existing_source,
+                    trust_domain=trust_domain,
+                    trust_edges=trust_edges,
+                    incoming_is_rule_compiled=incoming_is_rule_compiled,
                 )
+                if edge_verdict is not None:
+                    verdict, reason = edge_verdict
+                elif incoming_rank <= existing_rank:
+                    verdict, reason = "apply", "incoming authority permits removal"
+                else:
+                    verdict, reason = (
+                        "defer",
+                        f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
+                    )
 
     if verdict == "attribution-non-personal":
         # Issue athenaeum#2210: a D1-narrow value never gets filed, whether
@@ -2130,6 +2314,162 @@ def process_batch_file(
         envelope=envelope,
         records_total=len(record_lines),
         results=results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Trust-graph dry-run flip report (issue athenaeum#2331, TG3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrustDryRunFlip:
+    """One correction record whose verdict would change if
+    ``librarian.source_trust_enabled`` were turned on, from
+    :func:`run_trust_dryrun`. Read-only by construction: everything this
+    is built from comes from two ``dry_run=True`` passes over the SAME
+    on-disk batches, neither of which ever writes (see
+    :func:`process_correction_record`'s own ``if dry_run:`` early return)."""
+
+    batch_path: Path
+    correction_id: str
+    target: Any
+    op: str | None
+    field: str | None
+    baseline_disposition: str
+    baseline_reason: str
+    candidate_disposition: str
+    candidate_reason: str
+
+
+@dataclass(frozen=True)
+class TrustDryRunReport:
+    """:func:`run_trust_dryrun`'s full result: every would-flip verdict,
+    the edges that produced them, and whether any CONFIGURED edge names an
+    evidence kind -- which, at seams 1/2 today, can never actually fire
+    (`docs/design/trust-graph.md` §2.3.1's unknown-kind matching rule: an
+    edge naming a kind never matches a claim whose evidence kind is
+    :data:`athenaeum.trust_graph.UNKNOWN_EVIDENCE_KIND`, and neither seam
+    threads anything else through yet). That flag exists so a caller can
+    render an explicit warning -- "zero flips" must never be read as "this
+    edge has no effect on your data" when the real reason is "this edge
+    cannot match at this seam today".
+    """
+
+    flips: tuple[TrustDryRunFlip, ...]
+    edges: tuple[SourceTrustEdge, ...]
+    has_evidence_kind_scoped_edge: bool
+
+
+def _dry_pass(
+    *, raw_root: Path, wiki_root: Path, knowledge_root: Path, config: dict[str, Any] | None
+) -> list[BatchOutcome]:
+    """Run every correction batch under *raw_root* once, ``dry_run=True``,
+    against a FRESH :class:`EntityIndex`/registry/overlay -- never shared
+    with another pass, so two hypothetical passes over the same on-disk
+    batches (e.g. :func:`run_trust_dryrun`'s baseline vs. candidate) cannot
+    see each other's in-memory-only creates."""
+    index = EntityIndex(wiki_root)
+    registry_entities = load_registry(knowledge_root)
+    dry_run_pages: DryRunPageOverlay = {}
+    outcomes: list[BatchOutcome] = []
+    for path, source, envelope in find_correction_batches(raw_root):
+        outcomes.append(
+            process_batch_file(
+                path,
+                envelope,
+                source,
+                index=index,
+                knowledge_root=knowledge_root,
+                config=config,
+                dry_run=True,
+                registry_entities=registry_entities,
+                dry_run_pages=dry_run_pages,
+            )
+        )
+    return outcomes
+
+
+def run_trust_dryrun(
+    *,
+    raw_root: Path,
+    wiki_root: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+) -> TrustDryRunReport:
+    """The read-only trust-graph flip report (issue athenaeum#2331, TG3): every
+    correction whose verdict would change if the trust edges ALREADY
+    declared in *config* (``librarian.source_trust_edges``) were consulted,
+    regardless of whether ``librarian.source_trust_enabled`` is currently
+    on or off. Never mutates the store (AC: "must work with the flag off"
+    and "does not mutate the store") -- both passes below call
+    :func:`process_batch_file` with ``dry_run=True``, which never writes.
+
+    Runs TWO read-only passes over the identical on-disk batches:
+
+    - **baseline**: *config* exactly as given -- today's live behaviour,
+      whatever ``source_trust_enabled`` currently is.
+    - **candidate**: *config* with ``librarian.source_trust_enabled``
+      forced ``True`` -- "what if an operator flipped the flag right now,
+      with the edges already on file". Edges themselves are never
+      invented or altered; only the flag is overridden, in an in-memory
+      copy (the on-disk config is never touched).
+
+    A flip is any record whose ``(disposition, reason)`` differs between
+    the two passes. Matched positionally (same batch file, same line
+    index) rather than by ``correction_id``, because two distinct records
+    can legitimately share one (same target/op/field/value computed by
+    :func:`compute_correction_id`), and the two passes always iterate the
+    identical set of batch files in the identical order.
+    """
+    edges = resolve_source_trust_edges(config)
+    has_evidence_kind_scoped_edge = any(
+        edge.domain.evidence_kind is not None for edge in edges
+    )
+
+    baseline_outcomes = _dry_pass(
+        raw_root=raw_root, wiki_root=wiki_root, knowledge_root=knowledge_root, config=config
+    )
+
+    candidate_config: dict[str, Any] = dict(config) if isinstance(config, dict) else {}
+    candidate_librarian = dict(candidate_config.get("librarian") or {})
+    candidate_librarian["source_trust_enabled"] = True
+    candidate_config["librarian"] = candidate_librarian
+    candidate_outcomes = _dry_pass(
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        knowledge_root=knowledge_root,
+        config=candidate_config,
+    )
+
+    flips: list[TrustDryRunFlip] = []
+    for baseline_batch, candidate_batch in zip(baseline_outcomes, candidate_outcomes):
+        for baseline_result, candidate_result in zip(
+            baseline_batch.results, candidate_batch.results
+        ):
+            if (
+                baseline_result.disposition == candidate_result.disposition
+                and baseline_result.reason == candidate_result.reason
+            ):
+                continue
+            flips.append(
+                TrustDryRunFlip(
+                    batch_path=baseline_batch.path,
+                    correction_id=baseline_result.correction_id,
+                    target=baseline_result.target,
+                    op=baseline_result.op,
+                    field=baseline_result.field,
+                    baseline_disposition=baseline_result.disposition,
+                    baseline_reason=baseline_result.reason,
+                    candidate_disposition=candidate_result.disposition,
+                    candidate_reason=candidate_result.reason,
+                )
+            )
+
+    return TrustDryRunReport(
+        flips=tuple(flips),
+        edges=edges,
+        has_evidence_kind_scoped_edge=has_evidence_kind_scoped_edge,
     )
 
 
