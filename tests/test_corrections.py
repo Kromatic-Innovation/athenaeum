@@ -4302,7 +4302,7 @@ class TestTrustGraphEvidenceKindUnknownAtSeams:
 
 
 class TestTrustGraphMalformedEdgesFailFastBeforeAnyWrite:
-    """Seer finding on PR #2405 (`corrections.py`, the pre-fix call site
+    """Seer finding on athenaeum#2405 (`corrections.py`, the pre-fix call site
     was `:1722`, inside the per-record loop): a malformed
     `librarian.source_trust_edges` entry must abort the WHOLE correction
     phase before any write, not raise mid-batch after earlier records have

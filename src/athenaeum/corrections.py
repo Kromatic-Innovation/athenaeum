@@ -3272,7 +3272,7 @@ def run_correction_phase(
     max_records_per_batch = resolve_corrections_max_records_per_batch(config)
     max_records_per_run = resolve_corrections_max_records_per_run(config)
 
-    # Issue athenaeum#2331 (TG3), Seer finding on PR #2405: resolve and
+    # Issue athenaeum#2331 (TG3), Seer finding on athenaeum#2405: resolve and
     # validate `librarian.source_trust_edges` ONCE, here, before this phase
     # performs any write -- including `retry_parked_corrections` just below,
     # which writes -- rather than lazily inside the per-record loop
