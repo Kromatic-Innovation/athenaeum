@@ -178,6 +178,61 @@ class TestInitDisclosesProvider:
         assert "fix:" in err
         assert "supplying-an-api-key" in err
 
+    def test_init_reports_invalid_provider_config_instead_of_crashing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Seer finding (athenaeum#2409): an unrecognized ``llm.provider``
+        value (here via a bad ``ATHENAEUM_LLM_PROVIDER`` env, same raise
+        site as a typo'd yaml value) must not crash ``init`` with an
+        unhandled ``ProviderConfigError`` traceback -- AC5 requires naming
+        the gap and its fix, not an opaque failure, and this is the exact
+        exception ``resolve_provider`` raises on a bad provider id."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "not-a-real-provider")
+
+        target = tmp_path / "knowledge"
+        rc = cli_main(["init", "--path", str(target)])
+        assert rc == 0  # init itself still succeeds — this is advisory
+        err = capsys.readouterr().err
+        assert "not-a-real-provider" in err
+        assert "fix:" in err
+
+    def test_init_displays_the_same_provider_check_key_mode_validated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Seer finding (athenaeum#2409): the printed provider name must
+        track the SAME resolution ``check_key_mode`` just validated (the
+        ``"topic"`` knob -- the knob the recall hook actually routes
+        through), not a separately-resolved global default that can
+        diverge from it under a per-knob override."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        import athenaeum.provider as provider_mod
+
+        # Fresh root with no key and a usable `claude` binary selects the
+        # global default `llm.provider: claude-cli` (AC1).
+        monkeypatch.setattr(provider_mod.shutil, "which", lambda _b: "/usr/bin/claude")
+
+        target = tmp_path / "knowledge"
+        rc = cli_main(["init", "--path", str(target)])
+        assert rc == 0
+        capsys.readouterr()  # drain the first init's output
+
+        # A per-knob override routes "topic" (and therefore recall) to the
+        # `api` provider with a real-looking key -- a configuration
+        # `check_key_mode` evaluates as "ok", distinct from the global
+        # `claude-cli` default still on disk from the first init above.
+        monkeypatch.setenv("ATHENAEUM_TOPIC_LLM_PROVIDER", "api")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+
+        rc = cli_main(["init", "--path", str(target)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "provider: api" in out
+        assert "claude-cli" not in out
+
 
 # ---------------------------------------------------------------------------
 # AC3 — SessionEnd's 20-file / 100-call caps hold under claude-cli

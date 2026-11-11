@@ -254,7 +254,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config, resolve_cache_dir
     from athenaeum.doctor import check_key_mode
     from athenaeum.init import copy_example_rules, copy_templates, init_knowledge_dir
-    from athenaeum.provider import resolve_provider
+    from athenaeum.provider import ProviderConfigError, resolve_provider
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
@@ -264,11 +264,24 @@ def cmd_init(args: argparse.Namespace) -> int:
     # and how to fix it when neither an API key nor a usable `claude` login
     # is available -- the SAME check `athenaeum doctor` runs
     # (`doctor.check_key_mode`), so the two commands can never disagree about
-    # what is actually configured/available.
+    # what is actually configured/available. Resolved for the SAME `"topic"`
+    # knob `check_key_mode` resolves internally (rather than the knob-less
+    # global default) so a per-knob override (`llm.providers.topic` /
+    # `ATHENAEUM_TOPIC_LLM_PROVIDER`) can never make the printed provider
+    # name disagree with the status `check_key_mode` just evaluated.
+    # `resolve_provider` raises `ProviderConfigError` on an unrecognized
+    # value (typo'd `llm.provider` / `llm.providers.topic`, or a bad
+    # `ATHENAEUM_*_LLM_PROVIDER` env) -- caught here so a misconfigured
+    # provider is reported the same actionable way AC5 requires, rather than
+    # crashing `init` with a traceback after the knowledge directory has
+    # already been created on disk.
     cfg = load_config(target)
-    provider = resolve_provider(cfg)
+    try:
+        provider: str | None = resolve_provider(cfg, knob="topic")
+    except ProviderConfigError:
+        provider = None
     key_mode = check_key_mode(cfg, resolve_cache_dir(None))
-    if key_mode.status == "ok":
+    if key_mode.status == "ok" and provider is not None:
         if provider == "claude-cli":
             print(
                 "LLM provider: claude-cli (Claude Code subscription login) — "
