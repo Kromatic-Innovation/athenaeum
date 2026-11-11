@@ -251,10 +251,37 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from athenaeum.config import load_config, resolve_cache_dir
+    from athenaeum.doctor import check_key_mode
     from athenaeum.init import copy_example_rules, copy_templates, init_knowledge_dir
+    from athenaeum.provider import resolve_provider
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
+
+    # Issue athenaeum#2367: disclose which LLM provider backs compiles, and
+    # (the missing-credential counter-example) name exactly what is absent
+    # and how to fix it when neither an API key nor a usable `claude` login
+    # is available -- the SAME check `athenaeum doctor` runs
+    # (`doctor.check_key_mode`), so the two commands can never disagree about
+    # what is actually configured/available.
+    cfg = load_config(target)
+    provider = resolve_provider(cfg)
+    key_mode = check_key_mode(cfg, resolve_cache_dir(None))
+    if key_mode.status == "ok":
+        if provider == "claude-cli":
+            print(
+                "LLM provider: claude-cli (Claude Code subscription login) — "
+                "compiles draw on your Claude Code plan's usage limits."
+            )
+        else:
+            print(
+                "LLM provider: api (ANTHROPIC_API_KEY) — compiles use your "
+                "Anthropic API usage/billing."
+            )
+    else:
+        print(f"warning: {key_mode.detail}", file=sys.stderr)
+        print(f"  fix: {key_mode.fix}", file=sys.stderr)
 
     if getattr(args, "with_templates", False):
         dest = args.templates_dest if args.templates_dest else target / "templates"
