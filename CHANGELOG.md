@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote-mode deployment guide (issue athenaeum#2386).** New
+  `docs/guides/remote.md` covers running `athenaeum serve --transport http`
+  behind a TLS reverse proxy with an external OIDC authorization server and the
+  `remote` serve profile: prerequisites, the properties an authorization server
+  must have (PKCE `S256` advertised, CIMD or dynamic client registration, an
+  exact issuer match, the RFC 8707 `resource` parameter mapped to the token
+  audience, `openid`/`email` scopes, a JWKS at the plain OIDC default path and
+  `RS256`), every `serve.*` / `serve.auth.*` setting, a reverse-proxy example on
+  invented hosts, scheduling `athenaeum run` / `session-end` / `reindex` with no
+  `SessionStart` hook available on a server, logs, rotation and revocation, and a
+  "do not" section. It states plainly that every recall result is egress to the
+  remote host provider, and presents proxy-level mTLS client-certificate
+  validation as defense in depth rather than as authorization.
+  `docs/guides/clients.md`'s ChatGPT and Grok-app rows now point at it instead of
+  reading "Not supported" (the xAI API row is unchanged, and the "do not expose
+  through a no-auth tunnel" warning stays); `docs/index.md` and
+  `docs/modules/mcp.md` link it.
+  New `tests/test_docs_cli_commands.py` keeps the guide honest: it extracts every
+  `athenaeum ...` invocation from the fenced shell and unit-file blocks of
+  `README.md`, `docs/index.md`, `docs/guides/*` and `docs/modules/*` and binds
+  each long option against the live `athenaeum.cli.build_parser()` tree, read
+  through `scripts/gen_cli_reference.py`'s own walk so the check and the
+  generated CLI reference cannot disagree.
 - **Remote profile: serve-time tool allowlist and excluded-fields pin (issue
   athenaeum#2383).** `athenaeum serve` gains `--profile` / `--tools` /
   `--excluded-fields` (also `ATHENAEUM_SERVE_PROFILE` /
