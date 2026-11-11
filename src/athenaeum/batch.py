@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence, cast
 import anthropic
 
 from athenaeum import batch_state, spend
+from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest
@@ -1315,6 +1316,11 @@ def process_batch_run(
     # the athenaeum#1143 handle's ref map without re-deriving it from the request ids.
     t2_raw_by_cid: dict[str, RawFile] = {}
     t3_raw_by_cid: dict[str, RawFile] = {}
+    # Issue athenaeum#2363 addendum: never-ingest refusals this run, accumulated
+    # here (not written per-file) and merged into the on-disk window-holdout
+    # ledger ONCE after the assembly loop below -- same cost discipline as
+    # the sync transport's own single end-of-loop write.
+    ni_holdout_updates: dict[str, dict[str, Any]] = {}
 
     # --- Tier 0/1 + phase-1 assembly (budget gate per file, athenaeum#220) ---
     for i, raw in enumerate([] if resume is not None else raw_files):
@@ -1360,6 +1366,16 @@ def process_batch_run(
                     st.skipped.append(f"never-ingest:{ni_refusal.class_slug}")
                     st.retain_raw = True
                     st.done = True
+                    # Issue athenaeum#2363 addendum: record into the
+                    # window-holdout ledger (never the stuck ledger -- a
+                    # never-ingest refusal is never a failure) so a future
+                    # run's `_hold_out_unworkable_raw` can keep this file
+                    # out of the `max_files` intake window without it ever
+                    # being deleted or counted as stuck.
+                    ni_holdout_updates[raw.ref] = {
+                        "hash": stuck_ledger_mod.stuck_content_hash(raw),
+                        "detail": f"never-ingest:{ni_refusal.class_slug}",
+                    }
                     continue
 
             passthrough = tier0_passthrough(raw, index, wiki_root, valid_types)
@@ -1455,6 +1471,15 @@ def process_batch_run(
         except Exception:
             log.exception("Failed to process %s", raw.ref)
             st.failed = True
+
+    if ni_holdout_updates:
+        # Issue athenaeum#2363 addendum: load-merge-write ONCE, never per
+        # refusal -- and load (not overwrite) first, so a never-ingest raw
+        # the SYNCHRONOUS transport recorded on a prior run is not clobbered
+        # by this transport's own write.
+        _ni_ledger = stuck_ledger_mod.load_never_ingest_holdouts(wiki_root)
+        _ni_ledger.update(ni_holdout_updates)
+        stuck_ledger_mod.write_never_ingest_holdouts(wiki_root, _ni_ledger)
 
     # --- Phase 1: tier-2 classification batch ---
     # Issue athenaeum#483: enforce the spend ceiling BEFORE submitting tier-2. Any

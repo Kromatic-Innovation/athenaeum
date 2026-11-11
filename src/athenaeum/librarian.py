@@ -4416,6 +4416,21 @@ def _write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> N
     stuck_ledger_mod.write_stuck_ledger(wiki_root, ledger)
 
 
+def _load_never_ingest_holdouts(wiki_root: Path) -> dict[str, dict[str, Any]]:
+    """Load the never-ingest window-holdout ledger (issue athenaeum#2363). Missing/corrupt -> empty.
+
+    Delegates to :func:`athenaeum.stuck_ledger.load_never_ingest_holdouts` —
+    same shared-leaf rationale as :func:`_load_stuck_ledger`."""
+    return stuck_ledger_mod.load_never_ingest_holdouts(wiki_root)
+
+
+def _write_never_ingest_holdouts(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> None:
+    """Persist the never-ingest window-holdout ledger (athenaeum#2363), or remove when empty.
+
+    Delegates to :func:`athenaeum.stuck_ledger.write_never_ingest_holdouts`."""
+    stuck_ledger_mod.write_never_ingest_holdouts(wiki_root, ledger)
+
+
 def _record_stuck_failure(
     ledger: dict[str, dict[str, Any]],
     raw: Any,
@@ -4884,8 +4899,10 @@ def _apply_pending_batch_leases(ctx: "RunContext") -> None:
     ctx.raw_files = kept
 
 
-def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
-    """Drop ledger-stuck / in-backoff raw files BEFORE the window is filled (athenaeum#1322).
+def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int, int]:
+    """Drop stuck / in-backoff / never-ingest raw files BEFORE the window fills.
+
+    Issues athenaeum#1322, athenaeum#2363.
 
     athenaeum#663 skips a stuck file INSIDE the per-file loop, and
     athenaeum#1185 does the same for a file that has failed at least once and
@@ -4911,14 +4928,31 @@ def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
     Only files NAMED in the ledger are content-hashed, so this costs at most
     ``len(ledger)`` reads -- never a hash of the whole backlog.
 
-    Returns ``(n_stuck, n_backoff)``. A dry run holds nothing out, mirroring
-    the ``not ctx.dry_run`` condition on both per-file guards.
+    Issue athenaeum#2363 addendum: a never-ingest-matched raw (issue
+    athenaeum#968) is retained on disk by design and deliberately excluded
+    from the ledger above (it must never accrue toward the athenaeum#663
+    threshold) -- but that means it was also silently excluded from THIS
+    window-scheduling job, reintroducing the exact athenaeum#1322 starvation
+    pathology through a different door: a permanently-refused-by-design file
+    rediscovered and consuming a slot every run, forever. The SEPARATE
+    never-ingest window-holdout ledger (`_load_never_ingest_holdouts`) is
+    checked here too, with the identical cost discipline -- only files
+    already named in THAT ledger are content-hashed, never a re-classify of
+    the whole backlog -- and the identical guarantees: the file stays on
+    disk, a content edit still re-evaluates it next run, and the hold-out is
+    surfaced on ``ctx.never_ingest_held_out_files`` rather than silently
+    swallowed. A file already held out for stuck/backoff reasons is not
+    double-counted against the never-ingest ledger.
+
+    Returns ``(n_stuck, n_backoff, n_never_ingest)``. A dry run holds nothing
+    out, mirroring the ``not ctx.dry_run`` condition on both per-file guards.
     """
     if ctx.dry_run:
-        return (0, 0)
+        return (0, 0, 0)
     ledger = _load_stuck_ledger(ctx.wiki_root)
-    if not ledger:
-        return (0, 0)
+    ni_ledger = _load_never_ingest_holdouts(ctx.wiki_root)
+    if not ledger and not ni_ledger:
+        return (0, 0, 0)
     # Issue athenaeum#1604: an entry whose raw file no longer exists on disk
     # (e.g. a `drive`-sourced import never re-materialized) can never be
     # retried -- it will never again appear in `ctx.raw_files` for any check
@@ -4929,7 +4963,9 @@ def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
     # (inside the `if ctx.raw_files: ... else:` split further down) never
     # runs at all this run. Persisted immediately so any later re-load THIS
     # run reads the reaped ledger fresh off disk rather than racing a stale
-    # in-memory copy this function does not share with that loop.
+    # in-memory copy this function does not share with that loop. The
+    # never-ingest holdout ledger gets the identical treatment -- same
+    # orphan pathology, same leaf primitive.
     ledger, n_reaped = stuck_ledger_mod.reap_orphaned_entries(ledger, ctx.raw_root)
     if n_reaped:
         log.info(
@@ -4939,74 +4975,105 @@ def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
             "y" if n_reaped == 1 else "ies",
         )
         _write_stuck_ledger(ctx.wiki_root, ledger)
-    if not ledger:
-        return (0, 0)
+    ni_ledger, n_ni_reaped = stuck_ledger_mod.reap_orphaned_entries(ni_ledger, ctx.raw_root)
+    if n_ni_reaped:
+        log.info(
+            "librarian-never-ingest-holdout-reap: dropped %d orphaned "
+            "never-ingest holdout entr%s (raw file no longer on disk, "
+            "issue athenaeum#1604)",
+            n_ni_reaped,
+            "y" if n_ni_reaped == 1 else "ies",
+        )
+        _write_never_ingest_holdouts(ctx.wiki_root, ni_ledger)
+    if not ledger and not ni_ledger:
+        return (0, 0, 0)
     threshold = librarian_stuck_file_threshold(ctx.config)
     backoff_base = librarian_stuck_file_backoff_base_seconds(ctx.config)
     now = ctx.now if ctx.now is not None else datetime.now(timezone.utc)
     kept: list[RawFile] = []
     n_stuck = 0
     n_backoff = 0
+    n_never_ingest = 0
     for raw in ctx.raw_files:
+        held = False
         entry = ledger.get(raw.ref)
-        if entry is None:
+        if entry is not None and entry.get("hash") == _stuck_content_hash(raw):
+            failures = int(entry.get("failures", 0))
+            if failures >= threshold:
+                ctx.stuck_files.append(
+                    {
+                        "ref": raw.ref,
+                        "failures": failures,
+                        "action": entry.get("last_action"),
+                        "error": entry.get("last_error"),
+                        # Issue athenaeum#1653: same detail field _surface_newly_stuck
+                        # attaches, so a file held out on a LATER run (not just the
+                        # run it first crossed threshold on) still carries it.
+                        "error_detail": entry.get("last_error_detail"),
+                    }
+                )
+                log.warning(
+                    "%s: holding %s out of this run's intake window — failed %d "
+                    "consecutive run(s) on action %s (%s); stuck, needs a human "
+                    "(issues athenaeum#663, athenaeum#1322)%s",
+                    STUCK_FILE_PREFIX,
+                    raw.ref,
+                    failures,
+                    entry.get("last_action") or "unknown",
+                    entry.get("last_error") or "unknown",
+                    (
+                        f" detail={entry['last_error_detail']!r}"
+                        if entry.get("last_error_detail")
+                        else ""
+                    ),
+                )
+                n_stuck += 1
+                held = True
+            elif failures > 0 and _stuck_backoff_window_open(
+                entry, base_seconds=backoff_base, now=now
+            ):
+                ctx.backoff_skipped_files.append(raw.ref)
+                log.info(
+                    "librarian-stuck-file-backoff: holding %s out of this run's "
+                    "intake window — %d consecutive failure(s), still within its "
+                    "backoff window (issues athenaeum#1185, athenaeum#1322)",
+                    raw.ref,
+                    failures,
+                )
+                n_backoff += 1
+                held = True
+            # Content unchanged but not (yet) stuck/in-backoff falls through
+            # to the never-ingest check below, same as a file with no stuck
+            # entry at all -- a file is never held out twice.
+        if not held:
+            ni_entry = ni_ledger.get(raw.ref)
+            if ni_entry is not None and ni_entry.get("hash") == _stuck_content_hash(raw):
+                ctx.never_ingest_held_out_files.append(
+                    {"ref": raw.ref, "detail": ni_entry.get("detail")}
+                )
+                log.info(
+                    "librarian-never-ingest-holdout: holding %s out of this "
+                    "run's intake window — refused by design on every run "
+                    "(%s); never counted as stuck, never deleted (issues "
+                    "athenaeum#2363, athenaeum#1322)",
+                    raw.ref,
+                    ni_entry.get("detail") or "never-ingest",
+                )
+                n_never_ingest += 1
+                held = True
+        if not held:
             kept.append(raw)
-            continue
-        if entry.get("hash") != _stuck_content_hash(raw):
-            # Content changed since it last failed -- athenaeum#663's
-            # hash-keyed reset. Workable again.
-            kept.append(raw)
-            continue
-        failures = int(entry.get("failures", 0))
-        if failures >= threshold:
-            ctx.stuck_files.append(
-                {
-                    "ref": raw.ref,
-                    "failures": failures,
-                    "action": entry.get("last_action"),
-                    "error": entry.get("last_error"),
-                    # Issue athenaeum#1653: same detail field _surface_newly_stuck
-                    # attaches, so a file held out on a LATER run (not just the
-                    # run it first crossed threshold on) still carries it.
-                    "error_detail": entry.get("last_error_detail"),
-                }
-            )
-            log.warning(
-                "%s: holding %s out of this run's intake window — failed %d "
-                "consecutive run(s) on action %s (%s); stuck, needs a human "
-                "(issues athenaeum#663, athenaeum#1322)%s",
-                STUCK_FILE_PREFIX,
-                raw.ref,
-                failures,
-                entry.get("last_action") or "unknown",
-                entry.get("last_error") or "unknown",
-                f" detail={entry['last_error_detail']!r}" if entry.get("last_error_detail") else "",
-            )
-            n_stuck += 1
-            continue
-        if failures > 0 and _stuck_backoff_window_open(
-            entry, base_seconds=backoff_base, now=now
-        ):
-            ctx.backoff_skipped_files.append(raw.ref)
-            log.info(
-                "librarian-stuck-file-backoff: holding %s out of this run's "
-                "intake window — %d consecutive failure(s), still within its "
-                "backoff window (issues athenaeum#1185, athenaeum#1322)",
-                raw.ref,
-                failures,
-            )
-            n_backoff += 1
-            continue
-        kept.append(raw)
-    if n_stuck or n_backoff:
+    if n_stuck or n_backoff or n_never_ingest:
         log.info(
-            "Intake window: held %d stuck + %d in-backoff raw file(s) out of "
-            "selection so they cannot consume slots (issue athenaeum#1322)",
+            "Intake window: held %d stuck + %d in-backoff + %d never-ingest "
+            "raw file(s) out of selection so they cannot consume slots "
+            "(issues athenaeum#1322, athenaeum#2363)",
             n_stuck,
             n_backoff,
+            n_never_ingest,
         )
     ctx.raw_files = kept
-    return (n_stuck, n_backoff)
+    return (n_stuck, n_backoff, n_never_ingest)
 
 
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
@@ -5671,6 +5738,17 @@ class RunContext:
     # run). Exported to ``out_run_stats["backoff_skipped_files"]``, same
     # convention as the two lists above.
     backoff_skipped_files: list[str] = field(default_factory=list)
+    # Issue athenaeum#2363 addendum: raw refs held OUT of this run's intake
+    # window because they are a never-ingest match already recorded in the
+    # window-holdout ledger (`_load_never_ingest_holdouts`) with a matching
+    # content hash — distinct from ``stuck_files``/``backoff_skipped_files``
+    # above: a never-ingest hold-out is never a failure, never counted
+    # toward the athenaeum#663 threshold, and never subject to athenaeum#1185
+    # backoff. Each entry is ``{"ref", "detail"}``. Exported to
+    # ``out_run_stats["never_ingest_held_out_files"]``, same convention as
+    # the lists above, so this hold-out is surfaced loudly rather than
+    # silently swallowed.
+    never_ingest_held_out_files: list[dict[str, Any]] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
     merged_entries: list = field(default_factory=list)
@@ -5951,6 +6029,14 @@ class RunContext:
             # quarantined_files above.
             self.out_run_stats["backoff_skipped_files"] = list(
                 self.backoff_skipped_files
+            )
+            # Issue athenaeum#2363 addendum: never-ingest raws held out of this
+            # run's intake window, mirroring stuck_files/backoff_skipped_files
+            # above — never a failure, never counted toward the athenaeum#663
+            # threshold, surfaced here so it is machine-detectable rather than
+            # silently swallowed.
+            self.out_run_stats["never_ingest_held_out_files"] = list(
+                self.never_ingest_held_out_files
             )
             # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
@@ -8619,6 +8705,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     n_round_robin = 0
     n_stuck_held = 0
     n_backoff_held = 0
+    n_never_ingest_held = 0
     if not ctx.cluster_only:
         # Issue athenaeum#1145: collect BEFORE claiming. A prior run's batch is
         # already paid for; applying it first books its cost into ``usage``
@@ -8639,7 +8726,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # candidate set was unworkable reads `considered=N window=0
         # held_stuck=N` rather than a bare, unexplained `considered=0`.
         total_intake = len(ctx.raw_files)
-        n_stuck_held, n_backoff_held = _hold_out_unworkable_raw(ctx)
+        n_stuck_held, n_backoff_held, n_never_ingest_held = _hold_out_unworkable_raw(ctx)
         # Issue athenaeum#1295: bound here (empty), OUTSIDE the `if
         # ctx.raw_files` / `else` split below, so the stalled-sources
         # computation further down — which runs UNCONDITIONALLY alongside
@@ -9011,6 +9098,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # consuming the entity budget every night) and surfaced as
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
+                    # Issue athenaeum#2363 addendum: the window-scheduling
+                    # sidecar ledger (never the stuck ledger above) a
+                    # never-ingest refusal records into instead of
+                    # `_record_stuck_failure` -- see the `retain_raw_by_design`
+                    # branch below and `_hold_out_unworkable_raw`.
+                    ni_holdout_ledger = _load_never_ingest_holdouts(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
                     # Issue athenaeum#1185: exponential backoff BETWEEN a file's
                     # consecutive failures, before it crosses stuck_threshold
@@ -9642,6 +9735,22 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
+                            else:
+                                # Issue athenaeum#2363 addendum: a by-design
+                                # retention (never-ingest) records into the
+                                # SEPARATE window-holdout ledger instead --
+                                # never the stuck ledger, so it can never
+                                # accrue toward the threshold above. This is
+                                # what lets `_hold_out_unworkable_raw` keep it
+                                # out of NEXT run's `max_files` window without
+                                # it ever being "stuck" (issue athenaeum#1322).
+                                stuck_ledger_mod.record_never_ingest_holdout(
+                                    ni_holdout_ledger,
+                                    raw,
+                                    detail=result.skipped[-1]
+                                    if result.skipped
+                                    else "never-ingest",
+                                )
                         elif not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
@@ -9661,6 +9770,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # ledger — a run that completed within bounds clears
                             # any prior violation streak.
                             quarantine_candidates.pop(raw.ref, None)
+                            # Issue athenaeum#2363 addendum: a never-ingest
+                            # holdout entry from a PRIOR run whose content has
+                            # since changed enough to no longer match (so it
+                            # fell through `_hold_out_unworkable_raw`'s hash
+                            # check and reached this normal-processing branch)
+                            # is now stale -- drop it rather than leave it to
+                            # wrongly gate a future identical edit.
+                            ni_holdout_ledger.pop(raw.ref, None)
 
                     entity_heartbeat.done()  # issue athenaeum#800
                     # Issue athenaeum#663: persist the updated stuck-file ledger (or remove
@@ -9671,6 +9788,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.wiki_root, quarantine_candidates
                         )
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
+                        # Issue athenaeum#2363 addendum: persist the
+                        # window-holdout ledger alongside, same cross-run
+                        # durability contract as the stuck ledger above.
+                        _write_never_ingest_holdouts(ctx.wiki_root, ni_holdout_ledger)
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
                 # not "Done" (not a crash — the deferred files are picked up by
@@ -9927,6 +10048,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # when a file crosses a threshold mid-run.
                     **({"held_stuck": n_stuck_held} if n_stuck_held else {}),
                     **({"held_backoff": n_backoff_held} if n_backoff_held else {}),
+                    # Issue athenaeum#2363 addendum: never-ingest files held out
+                    # of selection -- never a subset of stuck/backoff above,
+                    # since a never-ingest hold-out is deliberately NOT a
+                    # failure and never touches either of those ledgers.
+                    **(
+                        {"held_never_ingest": n_never_ingest_held}
+                        if n_never_ingest_held
+                        else {}
+                    ),
                     # athenaeum#1291 AC3: sources with pending intake that got
                     # zero slots in this run's window, as one comma-joined
                     # token (the `reconciled` convention below). Rendered only
