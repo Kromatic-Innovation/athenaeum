@@ -28,12 +28,15 @@ from athenaeum.logconf import configure_logging
 DEFAULT_SERVE_PATH_PREFIX = "/mcp"
 
 #: The ``athenaeum.yaml`` setting an operator must supply before athenaeum
-#: will bind anything other than a loopback address (issue athenaeum#2382).
-#: NOTHING in this module reads it yet: the OAuth 2.1 resource-server
-#: settings are the auth child's (athenaeum#2384) to add, and until they
-#: exist the refusal below is unconditional for a non-loopback address. The
-#: name is named here anyway so the refusal tells the operator what is
-#: missing rather than only what is forbidden.
+#: will bind anything other than a loopback address (issues athenaeum#2382,
+#: athenaeum#2384). Issue athenaeum#2384 wired it: ``cmd_serve`` resolves the
+#: whole ``serve.auth.*`` block into an
+#: :class:`athenaeum.serve_auth.ServeAuth` before the bind guard runs, and
+#: :func:`_non_loopback_bind_refusal` lifts the refusal when one was built.
+#: Configuring an issuer therefore does TWO things at once, which is the
+#: point: it permits a routable bind, and it is also the thing that makes
+#: every request to that bind carry a verified bearer token. There is no
+#: ordering in which one happens without the other.
 AUTH_ISSUER_SETTING = "serve.auth.issuer"
 
 
@@ -157,6 +160,63 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--port this knob has no environment variable and no athenaeum.yaml "
         "key.",
     )
+    # Issue athenaeum#2384: the four OAuth 2.1 resource-server pins. Help text
+    # carries no issue ref, same as the athenaeum#2383 block above --
+    # `scripts/gen_cli_reference.py` strips the ref and would leave a dangling
+    # "Issue :" prefix on the operator-facing row.
+    serve_parser.add_argument(
+        "--auth-issuer",
+        type=str,
+        default=None,
+        help="Make --transport http an OAuth 2.1 RESOURCE "
+        "SERVER delegating to this external authorization server. The value "
+        "is the issuer identifier a bearer token's `iss` claim must carry; "
+        "its key set is read from <issuer>/.well-known/jwks.json. athenaeum "
+        "never issues a token, stores a credential or shows a consent "
+        "screen. Setting this (with --auth-resource and "
+        "--auth-allowed-identities) is also what lifts the loopback-only "
+        "bind restriction. Overrides ATHENAEUM_SERVE_AUTH_ISSUER and "
+        "serve.auth.issuer in athenaeum.yaml. Unset = no auth = loopback "
+        "only.",
+    )
+    serve_parser.add_argument(
+        "--auth-resource",
+        type=str,
+        default=None,
+        help="This server's canonical public URL -- the ONE "
+        "audience this process serves. Every token's `aud` claim must equal "
+        "it, it is the `resource` advertised in the RFC 9728 protected "
+        "resource metadata, and it is what a client passes as the `resource` "
+        "parameter when requesting a token. Never read back from a token "
+        "claim or a request parameter: one process, one audience. Required "
+        "with --auth-issuer. Overrides ATHENAEUM_SERVE_AUTH_RESOURCE and "
+        "serve.auth.resource in athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--auth-allowed-identities",
+        type=str,
+        default=None,
+        help="Comma-separated allowlist of identities "
+        "permitted to use this server: `sub` claim values, or email "
+        "addresses the issuer marked verified. A token that verifies but "
+        "presents no allowlisted identity is refused with the same 401 an "
+        "invalid token gets. Required with --auth-issuer; an empty list is "
+        "refused rather than read as 'anyone the issuer vouches for'. "
+        "Overrides ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES and "
+        "serve.auth.allowed_identities in athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--auth-scopes",
+        type=str,
+        default=None,
+        help="Rename the two OAuth scopes this server "
+        "requires, as `read=<name>,write=<name>`. A read tool call must "
+        "carry the read scope and a write tool call the write scope, where "
+        "read/write is each tool's own readOnlyHint annotation. Both roles "
+        "are required and must differ. Overrides "
+        "ATHENAEUM_SERVE_AUTH_SCOPES and serve.auth.scopes in "
+        "athenaeum.yaml. Unset = athenaeum:read / athenaeum:write.",
+    )
     serve_parser.set_defaults(func=cmd_serve)
 
 
@@ -240,20 +300,34 @@ def _normalized_bind_host(host: str) -> str:
     return str(address) if address is not None else host.strip()
 
 
-def _non_loopback_bind_refusal(host: str) -> str | None:
+def _non_loopback_bind_refusal(host: str, *, authenticated: bool = False) -> str | None:
     """The refusal message for binding *host*, or ``None`` if it may be bound.
 
     This is the security property ``--transport http`` exists behind: an
-    unauthenticated streamable-HTTP endpoint on a routable address publishes
+    UNAUTHENTICATED streamable-HTTP endpoint on a routable address publishes
     the whole knowledge store to whoever can reach it. The refusal is
     evaluated BEFORE ``server.run`` is called, so a refused invocation never
     opens a listening socket, and it names the missing setting
     (:data:`AUTH_ISSUER_SETTING`) rather than only reporting that the address
-    is not allowed. Once that setting exists (athenaeum#2384) the auth child
-    lifts the refusal for a configured issuer; until then it holds for every
-    non-loopback address.
+    is not allowed.
+
+    *authenticated* is issue athenaeum#2384's half: ``True`` means
+    ``cmd_serve`` successfully built an
+    :class:`athenaeum.serve_auth.ServeAuth` from the ``serve.auth.*`` block,
+    so every request to this endpoint will carry a bearer token verified
+    against the configured issuer and pinned to the configured audience —
+    which is exactly the premise the refusal exists for the absence of. It
+    defaults to ``False`` so a caller that has not established that premise
+    gets the refusal, rather than the lift, by omission.
+
+    Note what this is NOT keyed on: the address. A loopback bind stays
+    permitted with or without auth (``_is_loopback_bind_address`` is checked
+    first), because the pre-athenaeum#2384 local-only server must keep
+    working untouched. The lift is strictly additive.
     """
     if _is_loopback_bind_address(host):
+        return None
+    if authenticated:
         return None
     message = (
         f"[transport] refusing to bind {host!r}: with no auth issuer configured, "
@@ -280,6 +354,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_cache_dir,
         resolve_extra_intake_roots,
         resolve_screening,
+        resolve_serve_auth_allowed_identities,
+        resolve_serve_auth_issuer,
+        resolve_serve_auth_resource,
+        resolve_serve_auth_scopes,
         resolve_serve_excluded_fields,
         resolve_serve_host,
         resolve_serve_port,
@@ -289,6 +367,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     from athenaeum.mcp_server import create_server
     from athenaeum.remote_policy import RemotePolicyError, build_remote_policy
+    from athenaeum.serve_auth import ServeAuthError, build_serve_auth
 
     # Issue athenaeum#540 (M25): the MCP server process previously configured NO logging
     # at all — every mcp_server log line was dropped. Configure the shared
@@ -314,12 +393,60 @@ def cmd_serve(args: argparse.Namespace) -> int:
     serve_host = resolve_serve_host(cfg, getattr(args, "host", None))
     serve_port = resolve_serve_port(cfg, getattr(args, "port", None))
     path_prefix = getattr(args, "path_prefix", DEFAULT_SERVE_PATH_PREFIX)
+
+    # Issue athenaeum#2384: resolve the OAuth 2.1 resource-server pins (CLI >
+    # env > yaml, per pin) BEFORE the bind guard, because whether one was
+    # built is what the guard asks. Fails fast on a half-configured or
+    # malformed block, for the same reason `resolve_screening` and
+    # `build_remote_policy` do below -- except the stake is higher here: a
+    # mis-set pin that fell through to "no auth" would not merely serve a
+    # wider surface, it would publish an unauthenticated one on whatever
+    # address the operator asked for, believing it was protected. Nothing has
+    # been bound at this point.
+    try:
+        serve_auth = build_serve_auth(
+            issuer=resolve_serve_auth_issuer(cfg, getattr(args, "auth_issuer", None)),
+            resource=resolve_serve_auth_resource(cfg, getattr(args, "auth_resource", None)),
+            allowed_identities=resolve_serve_auth_allowed_identities(
+                cfg, getattr(args, "auth_allowed_identities", None)
+            ),
+            scopes=resolve_serve_auth_scopes(cfg, getattr(args, "auth_scopes", None)),
+        )
+    except ServeAuthError as exc:
+        print(f"[auth] invalid configuration: {exc}", file=sys.stderr)
+        return 1
+
     if transport == "http":
-        refusal = _non_loopback_bind_refusal(serve_host)
+        refusal = _non_loopback_bind_refusal(serve_host, authenticated=serve_auth is not None)
         if refusal is not None:
             print(refusal, file=sys.stderr)
             return 1
         serve_host = _normalized_bind_host(serve_host)
+        if serve_auth is not None:
+            # No token, no subject, no scope value -- the issuer and the
+            # audience are the operator's own configuration, and the line is
+            # what they check a client registration against.
+            print(
+                f"[auth] OAuth 2.1 resource server: issuer {serve_auth.issuer}, "
+                f"audience {serve_auth.resource}, "
+                f"{len(serve_auth.allowed_identities)} allowed identit"
+                f"{'y' if len(serve_auth.allowed_identities) == 1 else 'ies'}, "
+                f"scopes {' '.join(serve_auth.scopes_supported)}",
+                file=sys.stderr,
+            )
+    elif serve_auth is not None:
+        # An auth block under stdio is inert and must SAY so rather than look
+        # applied: stdio binds no socket and carries no bearer token, so there
+        # is nothing for a resource server to verify. Warning rather than
+        # refusing, because one `athenaeum.yaml` legitimately serves both a
+        # local stdio client and a remote HTTP deployment.
+        print(
+            "[auth] ignoring serve.auth.* under the stdio transport: stdio "
+            "binds no socket and carries no bearer token, so nothing is "
+            "verified. Pass --transport http to use it.",
+            file=sys.stderr,
+        )
+        serve_auth = None
 
     backend = cfg.get("search_backend", "fts5")
     # Issue athenaeum#521 (H9): route serve's cache dir through the shared resolver so
@@ -410,6 +537,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             caller_audience=caller_audience,
             screening=screening,
             remote_policy=remote_policy,
+            serve_auth=serve_auth,
             config=cfg,
         )
     except RemotePolicyError as exc:
