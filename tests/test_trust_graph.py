@@ -20,17 +20,22 @@ from athenaeum import config as config_mod
 from athenaeum.precedence import SOURCE_PRECEDENCE_TIERS, source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.trust_graph import (
+    ATTESTATION_STRENGTHS,
     COMPARISON_RELATIONS,
     EQUAL,
     EVIDENCE_KINDS,
     INCOMPARABLE,
+    NO_ATTESTATION,
     OUTRANKED,
     OUTRANKS,
     UNKNOWN_EVIDENCE_KIND,
+    AttestedClaim,
     ComparisonResult,
     SourceTrustEdge,
     TrustGraphConfigError,
     _Selector,
+    attestation_for,
+    attestation_tiebreak,
     compare_sources,
     find_contradictory_edges,
     parse_edge,
@@ -541,17 +546,21 @@ class TestLayeringAndNoCallers:
         ]
 
     def test_no_other_src_module_imports_trust_graph_yet(self) -> None:
-        """No caller is wired in this slice (TG3/corrections.py and
-        TG4/resolutions.py are later work): the only two files in `src/`
-        that mention `trust_graph` are the module itself and
-        `config.py`'s lazy, function-local import of it."""
+        """TG3 (`corrections.py`, issue athenaeum#2331) wires the first real
+        caller -- seams 1 and 2, tier-0 field corrections and tier-0 list
+        removal. TG4 (`resolutions.py`, issue athenaeum#2332) wires the
+        second -- seam 3, the LLM-resolver's per-pair
+        ``DOMAIN TRUST OVERRIDES`` rendering. Both are now expected
+        alongside `config.py`'s existing lazy, function-local import.
+        This test's job is unchanged: catch an UNEXPECTED new importer,
+        not merely count mentions."""
         src_dir = Path(__file__).resolve().parents[1] / "src" / "athenaeum"
         importers = sorted(
             path.name
             for path in src_dir.glob("*.py")
             if path.name != "trust_graph.py" and "trust_graph" in path.read_text()
         )
-        assert importers == ["config.py"]
+        assert importers == ["config.py", "corrections.py", "resolutions.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -755,3 +764,171 @@ class TestSelectorMatchesDatedRefs:
         assert ref is not None
         assert ref.type == "api"
         assert ref.ref == "apollo:2026-05-07"
+
+
+# ---------------------------------------------------------------------------
+# TG6 (issue athenaeum#2334): attestation tie-break and demote-on-broken-
+# chain. `attestation_for`/`attestation_tiebreak` are pure functions over
+# already-joined plain fields -- no ledger, no receipt, no promptwitness
+# object anywhere in this test class, which is the point: the adapter
+# itself does no I/O (AC4) and performs no promptwitness import (AC6).
+# `tests/test_corrections.py::TestAttestation*` covers the real join
+# (`corrections._claim_attestation`) through a fixture ledger + receipt.
+# ---------------------------------------------------------------------------
+
+
+def _attested(
+    *,
+    witness_ref: str | None = "ledger-1:7",
+    chain_intact: bool = True,
+    witness_strength_verified: str | None = "hardware-nonexportable",
+    witness_anchor_source: str | None = "sentry",
+) -> dict[str, Any]:
+    return {
+        "witness_ref": witness_ref,
+        "chain_intact": chain_intact,
+        "witness_strength_verified": witness_strength_verified,
+        "witness_anchor_source": witness_anchor_source,
+    }
+
+
+class TestAttestationForInertness:
+    """AC1: unverified or `local-clock`-only attestation has no effect --
+    every one of these collapses to :data:`NO_ATTESTATION`."""
+
+    def test_none_meta(self) -> None:
+        assert attestation_for(None) == NO_ATTESTATION
+
+    def test_no_witness_ref_at_all(self) -> None:
+        """The ONLY shape any claim has on a store with no ledger (AC5)."""
+        assert attestation_for({}) == NO_ATTESTATION
+        assert attestation_for(_attested(witness_ref=None)) == NO_ATTESTATION
+        assert attestation_for(_attested(witness_ref="")) == NO_ATTESTATION
+
+    def test_claimed_strength_none_is_inert(self) -> None:
+        assert (
+            attestation_for(_attested(witness_strength_verified="none")) == NO_ATTESTATION
+        )
+
+    def test_unrecognized_strength_is_inert(self) -> None:
+        assert (
+            attestation_for(_attested(witness_strength_verified="quantum-yolo"))
+            == NO_ATTESTATION
+        )
+
+    def test_absent_strength_is_inert(self) -> None:
+        assert (
+            attestation_for(_attested(witness_strength_verified=None)) == NO_ATTESTATION
+        )
+
+    def test_local_clock_only_anchor_is_inert(self) -> None:
+        """G2/F7 (docs/design/trust-graph.md): the mandatory local-clock
+        fallback anchorer proves only that a machine claimed a time."""
+        assert (
+            attestation_for(_attested(witness_anchor_source="local-clock")) == NO_ATTESTATION
+        )
+
+    def test_absent_anchor_is_inert(self) -> None:
+        assert (
+            attestation_for(_attested(witness_anchor_source=None)) == NO_ATTESTATION
+        )
+
+
+class TestAttestationForDemotion:
+    """AC2: a broken chain yields effective strength `none` -- the SAME
+    value an ordinary, never-witnessed claim gets (the issue's "falls
+    back to user: rank handling")."""
+
+    def test_broken_chain_demotes_to_no_attestation(self) -> None:
+        assert attestation_for(_attested(chain_intact=False)) == NO_ATTESTATION
+
+    def test_broken_chain_demotion_matches_an_unwitnessed_claim(self) -> None:
+        assert attestation_for(_attested(chain_intact=False)) == attestation_for({})
+
+
+class TestAttestationForPositiveCase:
+    """A verified, anchored, chain-intact witnessed claim actually carries
+    an effective strength -- the positive control for the inertness/
+    demotion tests above (a test oracle that always returns NO_ATTESTATION
+    would pass every test above vacuously)."""
+
+    def test_positive_case_is_attested(self) -> None:
+        result = attestation_for(_attested())
+        assert result == AttestedClaim(effective_strength="hardware-nonexportable")
+        assert result != NO_ATTESTATION
+
+    @pytest.mark.parametrize("strength", ATTESTATION_STRENGTHS[1:])
+    def test_every_non_none_strength_is_attested_when_anchored_and_intact(
+        self, strength: str
+    ) -> None:
+        result = attestation_for(_attested(witness_strength_verified=strength))
+        assert result.effective_strength == strength
+
+
+class TestAttestationTiebreak:
+    """The TG6 tie-break ordering (operator ruling OQ1): never
+    INCOMPARABLE -- ATTESTATION_STRENGTHS is a total order."""
+
+    def test_stronger_outranks_weaker(self) -> None:
+        strong = AttestedClaim(effective_strength="hardware-presence")
+        weak = AttestedClaim(effective_strength="software-file")
+        assert attestation_tiebreak(strong, weak) == OUTRANKS
+        assert attestation_tiebreak(weak, strong) == OUTRANKED
+
+    def test_equal_strength_is_equal(self) -> None:
+        a = AttestedClaim(effective_strength="os-keystore")
+        b = AttestedClaim(effective_strength="os-keystore")
+        assert attestation_tiebreak(a, b) == EQUAL
+
+    def test_two_unattested_sides_are_equal(self) -> None:
+        """AC1/AC5: neither side attested -- falls straight through to
+        whatever tie-break ran before TG6 existed (observed_at)."""
+        assert attestation_tiebreak(NO_ATTESTATION, NO_ATTESTATION) == EQUAL
+
+    def test_result_is_never_incomparable(self) -> None:
+        for s_a in ATTESTATION_STRENGTHS:
+            for s_b in ATTESTATION_STRENGTHS:
+                result = attestation_tiebreak(
+                    AttestedClaim(effective_strength=s_a), AttestedClaim(effective_strength=s_b)
+                )
+                assert result in (OUTRANKS, OUTRANKED, EQUAL)
+                assert result != INCOMPARABLE
+
+
+class TestAttestationStrengthsMatchPromptwitnessVocabulary:
+    """AC6: `trust_graph` code never imports `promptwitness` -- so this
+    module keeps its OWN copy of the strength vocabulary
+    (:data:`ATTESTATION_STRENGTHS`). This is the membership test the issue
+    requires to catch the two copies drifting apart; it lives here, in
+    athenaeum's suite, never inside `trust_graph.py` itself."""
+
+    def test_membership_against_promptwitness_signing_strengths(self) -> None:
+        from promptwitness.signing import STRENGTHS
+
+        assert set(ATTESTATION_STRENGTHS) == set(STRENGTHS)
+
+    def test_order_also_matches(self) -> None:
+        """Membership alone would miss a silently reordered tuple -- the
+        tie-break's correctness depends on the ORDER, not just the set."""
+        from promptwitness.signing import STRENGTHS
+
+        assert ATTESTATION_STRENGTHS == STRENGTHS
+
+    def test_trust_graph_module_still_imports_nothing_from_promptwitness(self) -> None:
+        """Belt-and-suspenders alongside
+        `TestLayeringAndNoCallers.test_module_imports_nothing_from_promptwitness`
+        above -- re-asserted here, next to the vocabulary-drift test, so a
+        reviewer sees both halves of AC6 (no import; a membership test
+        exists) side by side."""
+        import ast
+
+        from athenaeum import trust_graph
+
+        tree = ast.parse(inspect.getsource(trust_graph))
+        imported_modules: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+        assert not any("promptwitness" in name for name in imported_modules)

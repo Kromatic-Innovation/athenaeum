@@ -23,6 +23,7 @@ Covers:
 from __future__ import annotations
 
 import ast
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -492,6 +493,36 @@ class TestEntityTierWiring:
         assert not result.escalated
         assert result.skipped == ["never-ingest:mirror-of-live-source"]
 
+    def test_refused_file_sets_retain_raw_by_design(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2363: the never-ingest return path sets BOTH
+        ``retain_raw`` (so the entity loop keeps the file on disk at all)
+        and ``retain_raw_by_design`` (so the entity loop does NOT count this
+        retention toward the athenaeum#663 stuck-file threshold / athenaeum#1185
+        backoff -- a never-ingest raw is refused by design on every run,
+        per ``athenaeum.never_ingest``'s own module docstring, so it is
+        never "progress pending" the way a structured-upsert refusal is).
+        """
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
+        manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            None,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            never_ingest_manifest=manifest,
+        )
+        assert result.retain_raw is True
+        assert result.retain_raw_by_design is True
+
     def test_refused_file_never_deleted_and_no_wiki_page_written(
         self, tmp_path: Path
     ) -> None:
@@ -650,3 +681,270 @@ class TestDiscoverRawFilesUnaffectedByNeverIngest:
 
         refs_after = sorted(r.ref for r in discover_raw_files(raw_root))
         assert refs_before == refs_after == [f"{ENTITY_SOURCE_DIR}/a.md"]
+
+
+# ---------------------------------------------------------------------------
+# Run()-level survival (issue athenaeum#2363)
+# ---------------------------------------------------------------------------
+
+_RUN_LEVEL_MATCHING_CONTENT = (
+    "---\nname: Montserrat cover font\ntopics:\n  - webfont-embedding\n"
+    "---\nThe cover uses Montserrat, set in assets/styles/cover.css.\n"
+)
+
+
+def _seed_run_level_root(tmp_path: Path) -> Path:
+    """Minimal knowledge root for a full ``run()``: wiki/_schema, a git
+    repo, and an authority manifest declaring the never-ingest class the
+    raw content written by each test below triggers. Mirrors
+    tests/test_structured_upsert.py's own ``_seed_root`` helper, the
+    established pattern for a real (mocked-LLM) ``run()`` in this suite.
+    """
+    root = tmp_path / "knowledge"
+    wiki = root / "wiki"
+    (wiki / "_schema").mkdir(parents=True)
+    (wiki / "_schema" / "types.md").write_text(
+        "# Types\n\n| Type |\n|------|\n| person |\n| company |\n"
+    )
+    (wiki / "_schema" / "tags.md").write_text("# Tags\n\n| Tag |\n|-----|\n| active |\n")
+    (wiki / "_schema" / "access-levels.md").write_text(
+        "# Access\n\n| Level |\n|-------|\n| internal |\n"
+    )
+    (root / "authority-manifest.yaml").write_text(_ENTITY_MANIFEST_YAML, encoding="utf-8")
+    (root / "raw" / "sessions").mkdir(parents=True)
+    for cmd in (
+        ["git", "init", "-q", "-b", "test-branch"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test Runner"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "seed"],
+    ):
+        subprocess.run(cmd, cwd=root, check=True)
+    return root
+
+
+def _write_run_level_raw(root: Path, *, filename: str = "20260101T120000Z-aabbccd0.md") -> Path:
+    path = root / "raw" / "sessions" / filename
+    path.write_text(_RUN_LEVEL_MATCHING_CONTENT, encoding="utf-8")
+    return path
+
+
+class TestRunLevelNeverIngestSurvival:
+    """Issue athenaeum#2363 AC: a never-ingest match must survive a full
+    ``run()`` -- not just the ``process_one``-level assertions above -- on
+    BOTH transports. The two honor ``retain_raw`` at DIFFERENT sites: the
+    synchronous entity loop's unlink branch (`librarian.py`, around L9600),
+    and the batch finalizer's (`batch.py`, around L2043). Each transport
+    also now runs its OWN never-ingest check (the batch transport never
+    calls ``process_one`` -- it replicates the deterministic tier-0 steps
+    inline, same as its existing `tier0_structured_upsert` call), so a
+    regression in either one's wiring is a distinct failure mode this file
+    covers separately.
+    """
+
+    def test_survives_sequential_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = _seed_run_level_root(tmp_path)
+        raw_path = _write_run_level_raw(root)
+        original = raw_path.read_text(encoding="utf-8")
+
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError(
+            "never-ingest refusal must short-circuit before any LLM tier runs"
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        assert raw_path.exists()
+        assert raw_path.read_text(encoding="utf-8") == original
+        assert list((root / "wiki").glob("*.md")) == []
+        client.messages.create.assert_not_called()
+
+    def test_survives_batch_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = _seed_run_level_root(tmp_path)
+        raw_path = _write_run_level_raw(root)
+        original = raw_path.read_text(encoding="utf-8")
+
+        client = MagicMock()
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            batch_mode=True,
+        )
+
+        assert rc == 0
+        assert raw_path.exists()
+        assert raw_path.read_text(encoding="utf-8") == original
+        assert list((root / "wiki").glob("*.md")) == []
+        # The never-ingest gate must fire in the batch transport's OWN
+        # assembly loop, before any tier-2 classification is even built --
+        # a single refused file means zero batch requests ever submitted.
+        client.messages.batches.create.assert_not_called()
+
+    def test_retained_by_design_never_crosses_stuck_threshold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Design-decision test (issue athenaeum#2363): a never-ingest
+        retention must NOT accrue toward the athenaeum#663 stuck-file ledger /
+        athenaeum#1185 backoff, unlike the structured-upsert refusal that
+        shares the same ``retain_raw`` branch (see
+        tests/test_structured_upsert.py::
+        test_refused_raw_attempts_increment_and_threshold_marks_it_stuck,
+        which proves that SIBLING refusal DOES accrue). This test would
+        fail if ``retain_raw_by_design`` were dropped or ignored: with the
+        threshold forced to 1 and backoff forced to 0, a run that counted
+        the refusal would surface this file as stuck on the very first run.
+        """
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import _load_stuck_ledger, run
+
+        root = _seed_run_level_root(tmp_path)
+        raw_path = _write_run_level_raw(root)
+
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError("LLM tier reached")
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_STUCK_FILE_THRESHOLD", "1")
+        monkeypatch.setenv("ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS", "0")
+
+        for _ in range(3):
+            stats: dict = {}
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_api_calls=100,
+                max_runtime=0,
+                out_run_stats=stats,
+            )
+            assert rc == 0
+            assert stats["stuck_files"] == []
+            assert _load_stuck_ledger(root / "wiki") == {}
+            assert raw_path.exists()
+
+        client.messages.create.assert_not_called()
+
+
+class TestNeverIngestWindowStarvation:
+    """Issue athenaeum#2363 addendum (Seer finding, coordinator-verified true
+    positive). A never-ingest raw is retained on disk by design and
+    deliberately excluded from the stuck-file ledger -- but
+    `_hold_out_unworkable_raw` (`athenaeum.librarian`, issue athenaeum#1322)
+    only holds a file out of the `max_files` intake window when it is NAMED
+    IN THE STUCK LEDGER. Opting never-ingest out of that ledger silently
+    opted it out of the window-scheduling job too: before this fix, a
+    never-ingest raw was rediscovered and consumed a window slot on every
+    run, forever -- the exact athenaeum#1322 starvation pathology
+    (`_hold_out_unworkable_raw`'s own docstring: 50 permanently-stuck files
+    filling a 50-slot window for six hours while 4,181 healthy records
+    behind them never got a slot) arriving through a different door.
+
+    This test pins the fix with the shape that actually catches a
+    regression: not merely "the hold-out ledger has N entries" (which would
+    pass even if the hold-out were never consulted at window-fill time), but
+    that a WORKABLE file sorted BEHIND more never-ingest files than
+    `max_files` allows still gets a slot within a few runs, and that every
+    never-ingest raw is still on disk throughout. Removing the hold-out
+    (reverting to pre-fix behavior) makes this test fail because the
+    workable file would never be created at all.
+    """
+
+    def test_workable_file_gets_a_slot_despite_never_ingest_backlog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = _seed_run_level_root(tmp_path)
+        sessions = root / "raw" / "sessions"
+
+        # Three never-ingest raws, timestamped so discovery (oldest-first)
+        # places all three AHEAD of the workable raw below -- the exact
+        # "permanently blocks the front of the queue" shape the issue
+        # describes. max_files=2 below is smaller than 3, so pre-fix this
+        # window is filled by never-ingest files on EVERY run, forever.
+        ni_paths = []
+        for i in range(3):
+            p = sessions / f"2026010{i + 1}T120000Z-ni0000{i}.md"
+            p.write_text(_RUN_LEVEL_MATCHING_CONTENT, encoding="utf-8")
+            ni_paths.append(p)
+
+        # A workable, LLM-free raw (tier0_passthrough-eligible: uid/type/name
+        # already wiki-shaped) sorted LAST by timestamp -- the healthy record
+        # standing behind the never-ingest backlog.
+        workable_path = sessions / "20260104T120000Z-wrk00001.md"
+        workable_path.write_text(
+            "---\nuid: wrk00001\ntype: company\nname: Workable Co\n---\n"
+            "A workable raw that needs no LLM call.\n",
+            encoding="utf-8",
+        )
+
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError(
+            "this test's raws are never-ingest or tier0-passthrough-eligible "
+            "-- neither reaches an LLM tier"
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        # Run twice: run 1 has no holdout ledger yet (first encounter), so
+        # the window (max_files=2) fills with the two earliest never-ingest
+        # raws and the workable file gets nothing. Run 2's hold-out should
+        # keep those two already-recorded never-ingest raws OUT of the
+        # window, freeing both slots for the third never-ingest raw AND the
+        # workable file.
+        for _ in range(2):
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_api_calls=100,
+                max_files=2,
+            )
+            assert rc == 0
+
+        # The workable file got its slot: promoted to wiki, raw deleted.
+        assert not workable_path.exists(), (
+            "workable raw was never given a window slot -- the "
+            "never-ingest backlog starved it (issue athenaeum#1322/athenaeum#2363 "
+            "regression)"
+        )
+        assert (root / "wiki" / "wrk00001-workable-co.md").exists()
+
+        # AC1 still holds: every never-ingest raw survives, untouched, on
+        # BOTH runs -- the hold-out must never delete what it excludes.
+        for p in ni_paths:
+            assert p.exists()
+            assert p.read_text(encoding="utf-8") == _RUN_LEVEL_MATCHING_CONTENT
+
+        # And no never-ingest raw was ever counted as stuck.
+        from athenaeum.librarian import _load_stuck_ledger
+
+        assert _load_stuck_ledger(root / "wiki") == {}

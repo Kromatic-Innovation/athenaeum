@@ -62,6 +62,7 @@ import json
 import logging
 import math
 import os
+import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -5643,6 +5644,51 @@ def _render_pricing_yaml_block() -> str:
     return "\n".join(lines)
 
 
+def default_llm_provider_for_new_config() -> str:
+    """One-time decision for a BRAND-NEW ``athenaeum.yaml`` (issue athenaeum#2367):
+    which ``llm.provider`` a freshly-created config should select.
+
+    Called ONLY by :func:`write_default_config`, at the moment a knowledge
+    root is first scaffolded. An EXISTING config is never consulted by this
+    function and never rewritten by its caller (``write_default_config``'s
+    own ``config_path.exists()`` guard, unchanged) — every subsequent read
+    of ``llm.provider`` goes through :func:`athenaeum.provider.resolve_provider`
+    as always, which this function does not touch or duplicate.
+
+    Deliberately NOT named ``resolve_*``: it reads no yaml key (there is no
+    config file yet to read), so it would read as a dead-literal resolver to
+    ``tests/test_config_resolver_parity_generic.py``'s generic enumeration —
+    this is a one-time default-content DECISION, not a knob resolution.
+
+    ``ANTHROPIC_API_KEY`` set -> ``"api"`` (today's default, unchanged — the
+    2026-11-05 athenaeum#2307 ruling only changes the KEYLESS case). Unset AND
+    a usable ``claude`` binary is already on ``PATH`` -> ``"claude-cli"``, so
+    a brand-new user's first ``remember``/``recall`` works with zero setup.
+    Neither a key nor a usable binary -> ``"api"`` (unchanged); ``athenaeum
+    init`` and ``athenaeum doctor`` name the missing credential and its fix
+    instead of this function raising or guessing (athenaeum#2367 AC5).
+
+    The binary-presence check below DUPLICATES
+    :func:`athenaeum.provider.preflight_provider`'s ``"claude-cli"`` branch
+    byte-for-byte on purpose, rather than importing and calling it: this is
+    an L2 module, and :mod:`athenaeum.provider` (L3) transitively imports
+    :mod:`athenaeum.outbound_pii` -> :mod:`athenaeum.sensitivity` ->
+    :mod:`athenaeum.config` (module scope, pre-existing) — so a
+    ``config -> provider`` edge, even function-local/deferred, closes a real
+    import cycle (proven: it broke
+    ``tests/test_import_graph_acyclic.py::test_no_import_scc_outside_allowed_baseline``
+    during review). ``shutil.which``/``os.path.exists`` are plain stdlib
+    calls either copy makes directly, so both read the SAME live state —
+    there is no drift risk the way a cached/memoized value would carry one.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "api"
+    binary = os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
+    if shutil.which(binary) is not None or os.path.exists(binary):
+        return "claude-cli"
+    return "api"
+
+
 def write_default_config(knowledge_root: Path) -> Path:
     """Write the default config file if it doesn't exist. Returns the path."""
     config_path = knowledge_root / "athenaeum.yaml"
@@ -5650,6 +5696,14 @@ def write_default_config(knowledge_root: Path) -> Path:
         content = _DEFAULT_CONFIG_CONTENT.replace(
             "{{PRICING_YAML_BLOCK}}", _render_pricing_yaml_block()
         )
+        if default_llm_provider_for_new_config() == "claude-cli":
+            # Flip the shipped-commented-out example into an ACTIVE selection
+            # (issue athenaeum#2367) -- the surrounding prose block (explaining
+            # both values) stays exactly as written just above this literal.
+            content = content.replace(
+                "# llm:\n#   provider: api",
+                "llm:\n  provider: claude-cli",
+            )
         config_path.write_text(content, encoding="utf-8")
     return config_path
 
@@ -9080,3 +9134,376 @@ def resolve_structured_upsert(
             keep_keys=_keys("keep_keys"),
         )
     return out
+
+
+def resolve_serve_profile(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str | None:
+    """Resolve the serve-time profile preset (issue athenaeum#2383).
+
+    Returns a validated :data:`athenaeum.remote_policy.VALID_SERVE_PROFILES`
+    member, or ``None`` for no profile — which keeps every existing install
+    unchanged. ``remote`` is the one profile today: it presets the serve-time
+    tool allowlist and the excluded-fields pin for a server exposed to a
+    third-party host (see :mod:`athenaeum.remote_policy`).
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --profile`` flag.
+    - ``ATHENAEUM_SERVE_PROFILE`` — env var.
+    - ``serve.profile`` — yaml string.
+    - ``None`` — no profile.
+
+    Raises :class:`athenaeum.remote_policy.RemotePolicyError` on an
+    unrecognized value rather than warning and falling back, so
+    ``athenaeum serve`` exits non-zero at startup instead of serving a WIDER
+    surface than the operator asked for — the same fail-loud posture
+    :func:`resolve_screening` takes for the other serve-time safety pin, and
+    the documented exception to this module's warn-and-fall-back policy for
+    a knob whose silent default has a safety cost. No seed in ``_DEFAULTS``
+    so the code default stays reachable.
+    """
+    from athenaeum.remote_policy import VALID_SERVE_PROFILES, RemotePolicyError
+
+    raw: str | None = None
+    source = "serve.profile"
+    if cli_value is not None:
+        raw = cli_value
+        source = "--profile"
+    else:
+        env = os.environ.get("ATHENAEUM_SERVE_PROFILE")
+        if env is not None:
+            raw = env
+            source = "ATHENAEUM_SERVE_PROFILE"
+        elif isinstance(config, dict):
+            serve_cfg = config.get("serve")
+            if isinstance(serve_cfg, dict):
+                candidate = serve_cfg.get("profile")
+                if isinstance(candidate, str):
+                    raw = candidate
+                elif candidate is not None:
+                    # A non-string value (`serve.profile: true`, a number, a
+                    # list) must not fall through to "no profile": that would
+                    # serve the FULL surface on a typo, the one direction a
+                    # safety pin must never fail in. Same fail-loud rule as
+                    # `resolve_serve_excluded_fields` below. (Seer review on
+                    # PR athenaeum#2416.)
+                    raise RemotePolicyError(
+                        f"serve.profile={candidate!r} must be a string naming "
+                        f"one of {sorted(VALID_SERVE_PROFILES)}."
+                    )
+
+    if raw is None or not raw.strip():
+        # An explicitly EMPTY value at any tier means "no profile", matching
+        # `resolve_audience`'s empty-means-unset convention rather than
+        # erroring on a blank flag.
+        return None
+    profile = raw.strip().lower()
+    if profile not in VALID_SERVE_PROFILES:
+        raise RemotePolicyError(
+            f"{source}={raw!r} is not a valid serve profile; expected one of "
+            f"{sorted(VALID_SERVE_PROFILES)}."
+        )
+    return profile
+
+
+def resolve_serve_tools(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> frozenset[str] | None:
+    """Resolve the serve-time tool ALLOWLIST (issue athenaeum#2383).
+
+    Returns the set of MCP tool names this server process may register, or
+    ``None`` for no allowlist (every tool, the existing behaviour). A tool
+    outside a non-``None`` allowlist is never registered, so it is ABSENT
+    from ``tools/list`` rather than present and refusing — see
+    :mod:`athenaeum.remote_policy`.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --tools`` flag's comma-separated
+      value.
+    - ``ATHENAEUM_SERVE_TOOLS`` — comma-separated env var.
+    - ``serve.tools`` — a yaml list (or comma string).
+    - ``None`` — no allowlist.
+
+    Names are trimmed and case-folded but NOT validated here: whether a name
+    is a real tool is only knowable from what ``create_server`` actually
+    registers, so that check lives at startup in
+    :meth:`athenaeum.remote_policy.RemotePolicy.validate_tool_names` rather
+    than against a constant in this module that could drift. An explicitly
+    EMPTY value resolves to ``None`` (no allowlist) for the same reason
+    :func:`resolve_audience` treats a blank flag as unset — to narrow the
+    served surface you must name at least one tool. No seed in ``_DEFAULTS``.
+    """
+    if cli_value is not None:
+        names = _normalize_audience_roles(cli_value.split(","))
+        return frozenset(names) or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_TOOLS")
+    if env is not None:
+        names = _normalize_audience_roles(env.split(","))
+        return frozenset(names) or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            raw = serve_cfg.get("tools")
+            if isinstance(raw, str):
+                return frozenset(_normalize_audience_roles(raw.split(","))) or None
+            if raw is not None and not isinstance(raw, (list, tuple, set)):
+                # Fail loud rather than fall through to "no allowlist": a
+                # `serve.tools: recall` typo'd as a scalar non-string, or a
+                # mapping, would otherwise serve the FULL tool set. Same rule
+                # as `resolve_serve_profile`. An EMPTY list stays "unset" --
+                # that is this knob's documented convention, not a typo.
+                from athenaeum.remote_policy import RemotePolicyError
+
+                raise RemotePolicyError(
+                    f"serve.tools={raw!r} must be a list of tool names or a "
+                    "comma-separated string."
+                )
+            return frozenset(_normalize_audience_roles(raw)) or None
+    return None
+
+
+def resolve_serve_excluded_fields(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> bool | None:
+    """Resolve the serve-time excluded-fields pin (issue athenaeum#2383).
+
+    Returns ``True`` (excluded values are resolvable, the historical
+    behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
+    :func:`athenaeum.remote_policy.build_remote_policy` fall back to the
+    active profile's default (``off`` under ``remote``) and keeps a server
+    with no serve-time pins at all unchanged. A plain ``bool`` could not
+    express that third state.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
+    - ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
+    - ``serve.excluded_fields`` — yaml string.
+    - ``None`` — not set.
+
+    The vocabulary is the words ``off`` / ``on``
+    (:data:`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
+    bool, so YAML's permissive truthiness cannot quietly pick a side on a
+    PII-egress boundary; anything else raises
+    :class:`athenaeum.remote_policy.RemotePolicyError` and
+    ``athenaeum serve`` exits non-zero, exactly as
+    :func:`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.remote_policy import (
+        VALID_EXCLUDED_FIELDS_VALUES,
+        RemotePolicyError,
+    )
+
+    raw: str | None = None
+    source = "serve.excluded_fields"
+    if cli_value is not None:
+        raw = cli_value
+        source = "--excluded-fields"
+    else:
+        env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+        if env is not None:
+            raw = env
+            source = "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+        elif isinstance(config, dict):
+            serve_cfg = config.get("serve")
+            if isinstance(serve_cfg, dict):
+                candidate = serve_cfg.get("excluded_fields")
+                if isinstance(candidate, str):
+                    raw = candidate
+                elif candidate is not None:
+                    # A bare `serve.excluded_fields: false` is YAML's bool, not
+                    # this knob's vocabulary. Reject it rather than guessing
+                    # which of off/on the operator meant -- a wrong guess here
+                    # is a PII egress.
+                    raise RemotePolicyError(
+                        f"serve.excluded_fields={candidate!r} must be one of "
+                        f"{list(VALID_EXCLUDED_FIELDS_VALUES)} (as a quoted "
+                        "string), not a YAML boolean."
+                    )
+
+    if raw is None or not raw.strip():
+        # An explicitly EMPTY value at any tier means "not set", matching
+        # `resolve_serve_profile` and `resolve_audience` rather than erroring
+        # on the `ATHENAEUM_SERVE_EXCLUDED_FIELDS=` unset idiom.
+        return None
+    value = raw.strip().lower()
+    if value not in VALID_EXCLUDED_FIELDS_VALUES:
+        raise RemotePolicyError(
+            f"{source}={raw!r} is not a valid excluded-fields setting; "
+            f"expected one of {list(VALID_EXCLUDED_FIELDS_VALUES)}."
+        )
+    return value == "on"
+# Issue athenaeum#2382: the `athenaeum serve` transport knobs. Appended at EOF
+# per this module's own convention, and each reads its nested yaml path INLINE
+# (`config.get("serve")` then `.get("<leaf>")`) rather than through a shared
+# helper, so the path is discoverable from each resolver's own source.
+# `stdio` stays the shipped default, so an install that sets none of these
+# three keys resolves exactly the behaviour that predates the HTTP transport.
+
+
+#: The closed vocabulary ``serve.transport`` / ``ATHENAEUM_SERVE_TRANSPORT``
+#: accept (issue athenaeum#2382). ``stdio`` is the historical transport (one
+#: server process per client, spoken over the process's own stdin/stdout);
+#: ``http`` is FastMCP's streamable-HTTP transport, which BINDS A SOCKET and
+#: is therefore opt-in. Deliberately NOT the wider set FastMCP itself accepts
+#: (``sse``, and ``streamable-http`` as a second spelling of ``http``): the
+#: deprecated SSE transport is not supported, and a duplicate spelling would
+#: only widen the surface the loopback guard has to cover.
+SERVE_TRANSPORTS: tuple[str, ...] = ("stdio", "http")
+
+#: Default serve transport (issue athenaeum#2382) — what an install that names
+#: no transport gets. ``stdio`` binds nothing and is reachable only by its own
+#: parent process, which is why it, and not ``http``, is the default.
+DEFAULT_SERVE_TRANSPORT = "stdio"
+
+#: Default HTTP bind address (issue athenaeum#2382): the IPv4 loopback
+#: address. A default of ``0.0.0.0`` would make a bare ``--transport http``
+#: publish an unauthenticated knowledge store on every interface, so the
+#: default is the narrowest address that still works — and widening it is
+#: refused outright until an auth issuer is configured, by the loopback bind
+#: guard in ``athenaeum serve`` itself.
+DEFAULT_SERVE_HOST = "127.0.0.1"
+
+#: Default HTTP port (issue athenaeum#2382). 8000 is FastMCP's own default, so
+#: an operator who has read FastMCP's documentation sees the port they expect;
+#: athenaeum resolves it here rather than leaving it unset for FastMCP to
+#: default, so the value is reportable, and overridable in ``athenaeum.yaml``,
+#: before anything binds.
+DEFAULT_SERVE_PORT = 8000
+
+
+def resolve_serve_transport(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str:
+    """Resolve the ``athenaeum serve`` transport (issue athenaeum#2382).
+
+    Precedence follows the repo convention CLI > env > yaml > default — the
+    same shape :func:`resolve_audience` uses for the sibling ``serve``
+    section's audience pin:
+
+    - ``cli_value`` — the ``--transport`` flag.
+    - ``ATHENAEUM_SERVE_TRANSPORT`` — env var.
+    - ``serve.transport`` — yaml.
+    - :data:`DEFAULT_SERVE_TRANSPORT` (``stdio``).
+
+    The value is filtered against the closed vocabulary
+    :data:`SERVE_TRANSPORTS` (case-insensitive, whitespace-trimmed). An
+    out-of-vocabulary value at any tier WARNs and falls through to the next
+    tier, per this module's malformed-value policy (see
+    :func:`_env_number`). The fallback direction is the safe one here:
+    every rejected value eventually lands on ``stdio``, which binds no
+    socket, so a typo cannot start a listener.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("transport")
+    for tier, raw in (
+        ("--transport", cli_value),
+        ("ATHENAEUM_SERVE_TRANSPORT", os.environ.get("ATHENAEUM_SERVE_TRANSPORT")),
+        ("serve.transport", yaml_value),
+    ):
+        if raw is None:
+            continue
+        if isinstance(raw, str) and raw.strip().lower() in SERVE_TRANSPORTS:
+            return raw.strip().lower()
+        logger.warning(
+            "Ignoring %s=%r (expected one of %s); falling back.",
+            tier,
+            raw,
+            ", ".join(SERVE_TRANSPORTS),
+        )
+    return DEFAULT_SERVE_TRANSPORT
+
+
+def resolve_serve_host(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str:
+    """Resolve the HTTP-transport bind address (issue athenaeum#2382).
+
+    Precedence CLI > env > yaml > default, matching
+    :func:`resolve_serve_transport`:
+
+    - ``cli_value`` — the ``--host`` flag.
+    - ``ATHENAEUM_SERVE_HOST`` — env var.
+    - ``serve.host`` — yaml.
+    - :data:`DEFAULT_SERVE_HOST` (``127.0.0.1``).
+
+    The value is returned verbatim (whitespace-trimmed) and is deliberately
+    NOT validated here. This resolver answers only "which address did the
+    operator ask for"; whether that address may be bound with no auth issuer
+    configured is a separate, security-bearing decision, made by the loopback
+    bind guard in the ``serve`` command itself. Keeping the two
+    apart is what stops a mistyped or hostile address from falling back to
+    the loopback default and binding something nobody asked for — a resolver
+    that "corrected" it would make the refusal unreachable. Ignored entirely
+    under the ``stdio`` transport, which binds nothing.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("host")
+    for raw in (
+        cli_value,
+        os.environ.get("ATHENAEUM_SERVE_HOST"),
+        yaml_value,
+    ):
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return DEFAULT_SERVE_HOST
+
+
+def resolve_serve_port(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int:
+    """Resolve the HTTP-transport TCP port (issue athenaeum#2382).
+
+    Precedence CLI > env > yaml > default, matching
+    :func:`resolve_serve_transport`:
+
+    - ``cli_value`` — the ``--port`` flag.
+    - ``ATHENAEUM_SERVE_PORT`` — env var.
+    - ``serve.port`` — yaml.
+    - :data:`DEFAULT_SERVE_PORT` (``8000``).
+
+    Only a port in the usable TCP range 1-65535 is accepted; a non-numeric,
+    ``bool``, or out-of-range value at any tier WARNs and falls through to
+    the next, per this module's malformed-value policy. Port 0 — which asks
+    the kernel for an arbitrary free port — is deliberately NOT accepted:
+    nobody can connect to a port they were never told, so a server whose
+    address changes on every restart is not something configuration should
+    be able to express. Ignored entirely under the ``stdio`` transport,
+    which binds nothing.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("port")
+    for tier, raw in (
+        ("--port", cli_value),
+        ("ATHENAEUM_SERVE_PORT", _env_number("ATHENAEUM_SERVE_PORT", int)),
+        ("serve.port", yaml_value),
+    ):
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            logger.warning("Ignoring %s=%r (expected an integer port); falling back.", tier, raw)
+            continue
+        if not 1 <= raw <= 65535:
+            logger.warning("Ignoring %s=%r (expected a port in 1-65535); falling back.", tier, raw)
+            continue
+        return raw
+    return DEFAULT_SERVE_PORT

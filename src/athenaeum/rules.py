@@ -900,6 +900,17 @@ def build_correction_record(
     record dict (`record`/`correction_id` included). Raises
     :class:`ShapeRuleTransformError` if any value expression cannot
     resolve — the caller treats that as a per-record fallthrough.
+
+    Every record this function returns carries a structured ``rule_origin``
+    marker (issue athenaeum#2331, TG3, failure class F5) naming the compiling
+    rule — set unconditionally, independent of ``spec.note``/``note`` (the
+    operator-overridable free-text annotation), so a rule author who
+    customizes ``note`` can never blind the F5 guard in `corrections.py`
+    that reads this marker. This one function is the sole place EITHER
+    `rules.py` emit path (the general compile path, which calls this
+    directly, and the preserved-log path, which calls this then only
+    reassigns the returned dict's ``source`` key) produces a correction
+    record, so marking it here covers both without a second call site.
     """
     target = resolve_value_expr(spec.target, record)
     if not isinstance(target, dict) or not target:
@@ -924,6 +935,7 @@ def build_correction_record(
         "source": spec.source,
         "observed_at": observed_at,
         "note": str(note),
+        "rule_origin": rule_tag,
     }
     # Issue athenaeum#904 (AC2): optional decay annotations, riding alongside the
     # field/value payload exactly like `usage_class` does — omitted entirely

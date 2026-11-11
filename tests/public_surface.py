@@ -119,19 +119,30 @@ def python_all() -> list[str]:
     return sorted(athenaeum.__all__)
 
 
-def _is_mcp_tool_ref(node: ast.expr) -> ast.Call | None:
-    """``mcp.tool`` / ``mcp.tool(...)`` -> the Call node (or a synthetic None).
+#: The local wrapper every tool registers through since issue athenaeum#2383,
+#: so the serve-time allowlist is applied at registration. It forwards
+#: ``**kwargs`` to ``mcp.tool(...)``, so a ``name=`` keyword reads identically
+#: through either spelling.
+_REGISTER_TOOL_WRAPPER = "_register_tool"
 
-    Returns the ``ast.Call`` when the reference was called with arguments (so
-    the caller can read a ``name=`` keyword), and ``None`` for a bare
-    attribute reference. Raises nothing — a non-match is signalled by the
-    ``matched`` flag the caller checks first.
-    """
+
+def _is_tool_registrar(node: ast.expr) -> bool:
+    """Is *node* a reference to a tool registrar: ``mcp.tool`` or the
+    ``_register_tool`` wrapper (called or bare)?"""
     target = node.func if isinstance(node, ast.Call) else node
-    if not (isinstance(target, ast.Attribute) and target.attr == "tool"):
-        return None
-    if not (isinstance(target.value, ast.Name) and target.value.id == "mcp"):
-        return None
+    if isinstance(target, ast.Name):
+        return target.id == _REGISTER_TOOL_WRAPPER
+    return (
+        isinstance(target, ast.Attribute)
+        and target.attr == "tool"
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "mcp"
+    )
+
+
+def _registrar_call(node: ast.expr) -> ast.Call | None:
+    """The registrar's own ``ast.Call`` when it was called with arguments (so
+    the caller can read a ``name=`` keyword), else ``None``."""
     return node if isinstance(node, ast.Call) else None
 
 
@@ -147,19 +158,29 @@ def _explicit_tool_name(call: ast.Call | None) -> str | None:
 def mcp_tool_names(source_root: Path | None = None) -> list[str]:
     """Names of the MCP tools ``mcp_server.py`` registers.
 
-    Covers BOTH registration forms this module uses:
+    Covers both registration forms this module uses, through either
+    registrar — ``mcp.tool`` directly, or the ``_register_tool`` wrapper every
+    tool goes through since issue athenaeum#2383 so the serve-time allowlist
+    is applied at registration:
 
-    * the ``@mcp.tool()`` decorator, which every tool but one uses; and
-    * the explicit ``mcp.tool()(recall)`` call, which ``recall`` alone uses so
-      that its dynamically-computed ``__doc__`` is attached before registration
-      (see the athenaeum#964 comment at the call site).
+    * the decorator form, which every tool but three uses; and
+    * the explicit ``_register_tool()(recall)`` call form, used by the three
+      tools whose dynamically-computed ``__doc__`` must be attached BEFORE
+      registration (see the athenaeum#964 comment at the ``recall`` call site).
 
-    Missing the second form is not hypothetical — the first draft of this
-    extractor did, and reported ``recall`` as a REMOVED public surface, which
-    would have failed the guard on a tool that is very much still there. That
-    is why :func:`mcp_tool_names` is cross-checked against the live FastMCP
-    registration in ``tests/test_public_surface_guard.py``: a static extractor
-    that silently under-reports turns this guard into a rubber stamp.
+    Missing a form is not hypothetical — the first draft of this extractor
+    missed the call form and reported ``recall`` as a REMOVED public surface,
+    which would have failed the guard on a tool that is very much still there.
+    That is why :func:`mcp_tool_names` is cross-checked against the live
+    FastMCP registration in ``tests/test_public_surface_guard.py``: a static
+    extractor that silently under-reports turns this guard into a rubber
+    stamp.
+
+    The call form is matched only on a bare EXPRESSION STATEMENT, which is
+    what a real registration is. That is also what excludes
+    ``_register_tool``'s own ``return mcp.tool(**kwargs)(fn)`` — a return, not
+    a statement — whose argument is the wrapper's parameter and not a tool
+    name at all.
 
     An explicit ``name=`` keyword wins over the function name, matching what
     FastMCP itself does.
@@ -171,32 +192,31 @@ def mcp_tool_names(source_root: Path | None = None) -> list[str]:
     names: set[str] = set()
 
     for node in ast.walk(tree):
-        # Form 1: @mcp.tool() / @mcp.tool above a def.
+        # Form 1: @_register_tool() / @mcp.tool() (called or bare) above a def.
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             for decorator in node.decorator_list:
-                target = decorator.func if isinstance(decorator, ast.Call) else decorator
-                if not (isinstance(target, ast.Attribute) and target.attr == "tool"):
+                if not _is_tool_registrar(decorator):
                     continue
-                if not (isinstance(target.value, ast.Name) and target.value.id == "mcp"):
-                    continue
-                call = decorator if isinstance(decorator, ast.Call) else None
-                names.add(_explicit_tool_name(call) or node.name)
+                names.add(
+                    _explicit_tool_name(_registrar_call(decorator)) or node.name
+                )
             continue
 
-        # Form 2: mcp.tool()(fn) as a bare expression statement.
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Call):
-            registrar = _is_mcp_tool_ref(node.func)
-            inner = node.func
-            target = inner.func
-            if not (isinstance(target, ast.Attribute) and target.attr == "tool"):
-                continue
-            if not (isinstance(target.value, ast.Name) and target.value.id == "mcp"):
-                continue
-            explicit = _explicit_tool_name(registrar)
-            if explicit:
-                names.add(explicit)
-            elif node.args and isinstance(node.args[0], ast.Name):
-                names.add(node.args[0].id)
+        # Form 2: `_register_tool()(fn)` / `mcp.tool()(fn)` as a bare
+        # expression STATEMENT -- see the docstring for why the statement
+        # scoping matters.
+        if not isinstance(node, ast.Expr):
+            continue
+        outer = node.value
+        if not (isinstance(outer, ast.Call) and isinstance(outer.func, ast.Call)):
+            continue
+        if not _is_tool_registrar(outer.func):
+            continue
+        explicit = _explicit_tool_name(_registrar_call(outer.func))
+        if explicit:
+            names.add(explicit)
+        elif outer.args and isinstance(outer.args[0], ast.Name):
+            names.add(outer.args[0].id)
 
     return sorted(names)
 
