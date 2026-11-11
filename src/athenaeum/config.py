@@ -9134,3 +9134,172 @@ def resolve_structured_upsert(
             keep_keys=_keys("keep_keys"),
         )
     return out
+
+
+# Issue athenaeum#2382: the `athenaeum serve` transport knobs. Appended at EOF
+# per this module's own convention, and each reads its nested yaml path INLINE
+# (`config.get("serve")` then `.get("<leaf>")`) rather than through a shared
+# helper, so the path is discoverable from each resolver's own source.
+# `stdio` stays the shipped default, so an install that sets none of these
+# three keys resolves exactly the behaviour that predates the HTTP transport.
+
+
+#: The closed vocabulary ``serve.transport`` / ``ATHENAEUM_SERVE_TRANSPORT``
+#: accept (issue athenaeum#2382). ``stdio`` is the historical transport (one
+#: server process per client, spoken over the process's own stdin/stdout);
+#: ``http`` is FastMCP's streamable-HTTP transport, which BINDS A SOCKET and
+#: is therefore opt-in. Deliberately NOT the wider set FastMCP itself accepts
+#: (``sse``, and ``streamable-http`` as a second spelling of ``http``): the
+#: deprecated SSE transport is not supported, and a duplicate spelling would
+#: only widen the surface the loopback guard has to cover.
+SERVE_TRANSPORTS: tuple[str, ...] = ("stdio", "http")
+
+#: Default serve transport (issue athenaeum#2382) — what an install that names
+#: no transport gets. ``stdio`` binds nothing and is reachable only by its own
+#: parent process, which is why it, and not ``http``, is the default.
+DEFAULT_SERVE_TRANSPORT = "stdio"
+
+#: Default HTTP bind address (issue athenaeum#2382): the IPv4 loopback
+#: address. A default of ``0.0.0.0`` would make a bare ``--transport http``
+#: publish an unauthenticated knowledge store on every interface, so the
+#: default is the narrowest address that still works — and widening it is
+#: refused outright until an auth issuer is configured, by the loopback bind
+#: guard in ``athenaeum serve`` itself.
+DEFAULT_SERVE_HOST = "127.0.0.1"
+
+#: Default HTTP port (issue athenaeum#2382). 8000 is FastMCP's own default, so
+#: an operator who has read FastMCP's documentation sees the port they expect;
+#: athenaeum resolves it here rather than leaving it unset for FastMCP to
+#: default, so the value is reportable, and overridable in ``athenaeum.yaml``,
+#: before anything binds.
+DEFAULT_SERVE_PORT = 8000
+
+
+def resolve_serve_transport(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str:
+    """Resolve the ``athenaeum serve`` transport (issue athenaeum#2382).
+
+    Precedence follows the repo convention CLI > env > yaml > default — the
+    same shape :func:`resolve_audience` uses for the sibling ``serve``
+    section's audience pin:
+
+    - ``cli_value`` — the ``--transport`` flag.
+    - ``ATHENAEUM_SERVE_TRANSPORT`` — env var.
+    - ``serve.transport`` — yaml.
+    - :data:`DEFAULT_SERVE_TRANSPORT` (``stdio``).
+
+    The value is filtered against the closed vocabulary
+    :data:`SERVE_TRANSPORTS` (case-insensitive, whitespace-trimmed). An
+    out-of-vocabulary value at any tier WARNs and falls through to the next
+    tier, per this module's malformed-value policy (see
+    :func:`_env_number`). The fallback direction is the safe one here:
+    every rejected value eventually lands on ``stdio``, which binds no
+    socket, so a typo cannot start a listener.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("transport")
+    for tier, raw in (
+        ("--transport", cli_value),
+        ("ATHENAEUM_SERVE_TRANSPORT", os.environ.get("ATHENAEUM_SERVE_TRANSPORT")),
+        ("serve.transport", yaml_value),
+    ):
+        if raw is None:
+            continue
+        if isinstance(raw, str) and raw.strip().lower() in SERVE_TRANSPORTS:
+            return raw.strip().lower()
+        logger.warning(
+            "Ignoring %s=%r (expected one of %s); falling back.",
+            tier,
+            raw,
+            ", ".join(SERVE_TRANSPORTS),
+        )
+    return DEFAULT_SERVE_TRANSPORT
+
+
+def resolve_serve_host(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str:
+    """Resolve the HTTP-transport bind address (issue athenaeum#2382).
+
+    Precedence CLI > env > yaml > default, matching
+    :func:`resolve_serve_transport`:
+
+    - ``cli_value`` — the ``--host`` flag.
+    - ``ATHENAEUM_SERVE_HOST`` — env var.
+    - ``serve.host`` — yaml.
+    - :data:`DEFAULT_SERVE_HOST` (``127.0.0.1``).
+
+    The value is returned verbatim (whitespace-trimmed) and is deliberately
+    NOT validated here. This resolver answers only "which address did the
+    operator ask for"; whether that address may be bound with no auth issuer
+    configured is a separate, security-bearing decision, made by the loopback
+    bind guard in the ``serve`` command itself. Keeping the two
+    apart is what stops a mistyped or hostile address from falling back to
+    the loopback default and binding something nobody asked for — a resolver
+    that "corrected" it would make the refusal unreachable. Ignored entirely
+    under the ``stdio`` transport, which binds nothing.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("host")
+    for raw in (
+        cli_value,
+        os.environ.get("ATHENAEUM_SERVE_HOST"),
+        yaml_value,
+    ):
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return DEFAULT_SERVE_HOST
+
+
+def resolve_serve_port(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int:
+    """Resolve the HTTP-transport TCP port (issue athenaeum#2382).
+
+    Precedence CLI > env > yaml > default, matching
+    :func:`resolve_serve_transport`:
+
+    - ``cli_value`` — the ``--port`` flag.
+    - ``ATHENAEUM_SERVE_PORT`` — env var.
+    - ``serve.port`` — yaml.
+    - :data:`DEFAULT_SERVE_PORT` (``8000``).
+
+    Only a port in the usable TCP range 1-65535 is accepted; a non-numeric,
+    ``bool``, or out-of-range value at any tier WARNs and falls through to
+    the next, per this module's malformed-value policy. Port 0 — which asks
+    the kernel for an arbitrary free port — is deliberately NOT accepted:
+    nobody can connect to a port they were never told, so a server whose
+    address changes on every restart is not something configuration should
+    be able to express. Ignored entirely under the ``stdio`` transport,
+    which binds nothing.
+    """
+    yaml_value: object = None
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            yaml_value = serve_cfg.get("port")
+    for tier, raw in (
+        ("--port", cli_value),
+        ("ATHENAEUM_SERVE_PORT", _env_number("ATHENAEUM_SERVE_PORT", int)),
+        ("serve.port", yaml_value),
+    ):
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            logger.warning("Ignoring %s=%r (expected an integer port); falling back.", tier, raw)
+            continue
+        if not 1 <= raw <= 65535:
+            logger.warning("Ignoring %s=%r (expected a port in 1-65535); falling back.", tier, raw)
+            continue
+        return raw
+    return DEFAULT_SERVE_PORT
