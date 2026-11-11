@@ -235,9 +235,11 @@ it decides whether to. The levers, strongest first:
 
 1. **Server `instructions`** (verified as consumed by ChatGPT). Today's string is
    inline in `create_server` and opens with `remember`. A remote-profile variant leads
-   with recall guidance inside the first 512 characters. Per
-   `policies/prompt-text-is-content.md` in the workspace config, it lives as a file
-   under `src/athenaeum/prompts/`, not as an inline literal. It is served only by the
+   with recall guidance inside the first 512 characters. It is text a host's model
+   reads, like the recall overflow breadcrumb, so it follows that precedent: a packaged
+   template under `src/athenaeum/prompts/` (as `recall_overflow_breadcrumb.md` is), not
+   an inline literal. It is not one of the prompts athenaeum sends to its own model,
+   which [`prompts.md`](prompts.md) inventories. It is served only by the
    remote profile, so the Claude Code host, which already has Tier-1 push, does not
    change.
 2. **Tool description and annotations** on `recall` (verified as used for tool
@@ -339,8 +341,9 @@ can be found and retired by that source.
 
 ## 8. Open decisions for the operator
 
-Each decision has a recommendation. Decisions D1 to D5 are tracked on the athenaeum#2199
-decision child, and D6 to D9 on the athenaeum#2200 decision child.
+Each decision has a recommendation. Decisions D1 to D5 are tracked on athenaeum#2378
+(the remote-mode gate, under athenaeum#2199), and D6 to D9 on athenaeum#2379 (under
+athenaeum#2200).
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
