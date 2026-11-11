@@ -367,6 +367,18 @@ the rest. Five steps, all existing code:
 All five steps run from a single `athenaeum run`. You can inspect any stage
 in isolation with `--cluster-only` or `--merge-only`.
 
+**Which provider runs the compile.** `athenaeum init` picks (and prints) the
+LLM provider a fresh knowledge base compiles against: with no
+`ANTHROPIC_API_KEY` set, it selects the Claude Code subscription login
+(`llm.provider: claude-cli`) when a logged-in `claude` binary is already on
+`PATH`, so step 5 below draws on your Claude Code plan's usage limits
+instead of a metered API bill — no key to manage for a first compile. With
+`ANTHROPIC_API_KEY` set, compiles use the Anthropic API and bill against
+that key as before. See
+[Installing Athenaeum](install.md#i-want-a-knowledge-base-to-start-from) for
+the full three-way selection (including the case where neither is
+available, and what `athenaeum doctor` reports then).
+
 ## 6. Quick start
 
 ```bash

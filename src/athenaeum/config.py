@@ -62,6 +62,7 @@ import json
 import logging
 import math
 import os
+import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -5643,6 +5644,51 @@ def _render_pricing_yaml_block() -> str:
     return "\n".join(lines)
 
 
+def default_llm_provider_for_new_config() -> str:
+    """One-time decision for a BRAND-NEW ``athenaeum.yaml`` (issue athenaeum#2367):
+    which ``llm.provider`` a freshly-created config should select.
+
+    Called ONLY by :func:`write_default_config`, at the moment a knowledge
+    root is first scaffolded. An EXISTING config is never consulted by this
+    function and never rewritten by its caller (``write_default_config``'s
+    own ``config_path.exists()`` guard, unchanged) — every subsequent read
+    of ``llm.provider`` goes through :func:`athenaeum.provider.resolve_provider`
+    as always, which this function does not touch or duplicate.
+
+    Deliberately NOT named ``resolve_*``: it reads no yaml key (there is no
+    config file yet to read), so it would read as a dead-literal resolver to
+    ``tests/test_config_resolver_parity_generic.py``'s generic enumeration —
+    this is a one-time default-content DECISION, not a knob resolution.
+
+    ``ANTHROPIC_API_KEY`` set -> ``"api"`` (today's default, unchanged — the
+    2026-11-05 athenaeum#2307 ruling only changes the KEYLESS case). Unset AND
+    a usable ``claude`` binary is already on ``PATH`` -> ``"claude-cli"``, so
+    a brand-new user's first ``remember``/``recall`` works with zero setup.
+    Neither a key nor a usable binary -> ``"api"`` (unchanged); ``athenaeum
+    init`` and ``athenaeum doctor`` name the missing credential and its fix
+    instead of this function raising or guessing (athenaeum#2367 AC5).
+
+    The binary-presence check below DUPLICATES
+    :func:`athenaeum.provider.preflight_provider`'s ``"claude-cli"`` branch
+    byte-for-byte on purpose, rather than importing and calling it: this is
+    an L2 module, and :mod:`athenaeum.provider` (L3) transitively imports
+    :mod:`athenaeum.outbound_pii` -> :mod:`athenaeum.sensitivity` ->
+    :mod:`athenaeum.config` (module scope, pre-existing) — so a
+    ``config -> provider`` edge, even function-local/deferred, closes a real
+    import cycle (proven: it broke
+    ``tests/test_import_graph_acyclic.py::test_no_import_scc_outside_allowed_baseline``
+    during review). ``shutil.which``/``os.path.exists`` are plain stdlib
+    calls either copy makes directly, so both read the SAME live state —
+    there is no drift risk the way a cached/memoized value would carry one.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "api"
+    binary = os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
+    if shutil.which(binary) is not None or os.path.exists(binary):
+        return "claude-cli"
+    return "api"
+
+
 def write_default_config(knowledge_root: Path) -> Path:
     """Write the default config file if it doesn't exist. Returns the path."""
     config_path = knowledge_root / "athenaeum.yaml"
@@ -5650,6 +5696,14 @@ def write_default_config(knowledge_root: Path) -> Path:
         content = _DEFAULT_CONFIG_CONTENT.replace(
             "{{PRICING_YAML_BLOCK}}", _render_pricing_yaml_block()
         )
+        if default_llm_provider_for_new_config() == "claude-cli":
+            # Flip the shipped-commented-out example into an ACTIVE selection
+            # (issue athenaeum#2367) -- the surrounding prose block (explaining
+            # both values) stays exactly as written just above this literal.
+            content = content.replace(
+                "# llm:\n#   provider: api",
+                "llm:\n  provider: claude-cli",
+            )
         config_path.write_text(content, encoding="utf-8")
     return config_path
 

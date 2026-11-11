@@ -69,6 +69,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum enumerate`](#athenaeum-enumerate) (command) — Enumerate every entity of a declared type matching field predicates — no query text. The generalized form of the former `athenaeum people` (removed) — see docs/design/recall-architecture.md's capability-parity table.
 - [`athenaeum explain-routing`](#athenaeum-explain-routing) (command) — Read-only preview: resolved provider/model/batch/price per model knob. Prints what 'athenaeum run' would actually use for this athenaeum.yaml + environment -- no LLM call, no file processed, no routing behavior changed.
 - [`athenaeum fold-lint`](#athenaeum-fold-lint) (command) — Read-only check of the two fold-graph invariants: the folded_into graph is acyclic, and every fold set has exactly one live canonical page.
+- [`athenaeum import-memory`](#athenaeum-import-memory) (command) — Opt-in: discover existing Claude Code memory across projects and offer to compile it. Off by default — nothing is read without an explicit yes, and only the projects you select.
 - [`athenaeum ingest`](#athenaeum-ingest) (command) — Compile new/changed raw intake into the wiki on demand. --incremental (default) compiles only files new/changed since the last ingest; --full recompiles.
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
@@ -870,6 +871,22 @@ Read-only check of the two fold-graph invariants: the folded_into graph is acycl
 |---|---|---|---|
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum import-memory`
+
+Opt-in: discover existing Claude Code memory across projects and offer to compile it. Off by default — nothing is read without an explicit yes, and only the projects you select.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the resumable import-memory state (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--max-calls` | `100` | — | Cap API calls this run (default 100, same ruling as --max-files). |
+| `--max-files` | `20` | — | Cap files compiled this run (default 20, ruling 3 — same cap as). Raise it for a larger batch; re-running with no flag change resumes where the cap stopped. |
+| `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+| `--project` | — | — | Select a discovered project by its scope name (the directory name under the Claude Code projects root). Repeatable. Given at least once, this bypasses the interactive picker entirely — the scripts/tests path (ruling 4). Omitted: an interactive picker runs, with nothing selected by default. |
+| `--projects-root` | — | — | Override the Claude Code projects root to scan (default: ~/.claude/projects, honoring CLAUDE_CONFIG_DIR). For tests/scripts. |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+| `--yes` | `False` | — | Skip the 'proceed?' confirmation after the cost/cap summary prints. Does NOT select any project by itself — selection still requires --project or an interactive pick. |
 
 ## `athenaeum ingest`
 
