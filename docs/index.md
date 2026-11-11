@@ -135,6 +135,9 @@ does not answer.
 - [Trust graph](design/trust-graph.md) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
+- [Cursor as a host](design/host-cursor.md) — what Cursor desktop, the CLI and cloud agents
+  can reach today, why Cursor's prompt hook cannot carry auto-recall, the session-start
+  context snapshot, and the hazard of Cursor running Claude Code's hooks.
 
 ## Measurements
 
