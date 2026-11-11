@@ -118,11 +118,24 @@ class RemotePolicy:
         excluded_fields: ``True`` = the historical behaviour (``with_pii`` /
             ``include_excluded`` resolve excluded values). ``False`` =
             withheld.
+        profile: The validated :data:`VALID_SERVE_PROFILES` name this policy
+            was built from, or ``None`` when the pins were set individually
+            with no profile (issue athenaeum#2387). Kept ALONGSIDE the folded
+            pins rather than discarded once folded, because the profile name
+            answers a question the folded pins cannot: not "is this tool
+            served" but "which host posture is this process serving", which
+            is what selects the served ``instructions`` and ``recall``
+            description in ``athenaeum.mcp_server.create_server``. It is
+            deliberately not a fourth pin -- nothing reads it to decide
+            whether a tool is registered or a field resolved -- and it is
+            declared LAST so the three original fields keep their positions
+            for any caller that constructs this by position.
     """
 
     allowed_tools: frozenset[str] | None = None
     disabled_tools: frozenset[str] = field(default_factory=frozenset)
     excluded_fields: bool = True
+    profile: str | None = None
 
     def tool_enabled(self, name: str) -> bool:
         """Whether *name* should be REGISTERED on this server process.
@@ -201,6 +214,13 @@ def build_remote_policy(
         excluded_fields: ``True``/``False`` to pin it explicitly, ``None`` to
             take the profile's default (and the historical ``True`` with no
             profile).
+
+    The *profile* name is carried through onto the returned policy
+    (issue athenaeum#2387) as well as folded into the pins. That does not
+    change the ``None`` return above: a call with no profile, no tools and no
+    ``excluded_fields`` still returns ``None``, so an install that sets none
+    of the new keys is unchanged -- there is no policy object for a
+    ``profile`` field to appear on.
     """
     if profile is None and tools is None and excluded_fields is None:
         return None
@@ -222,4 +242,5 @@ def build_remote_policy(
         excluded_fields=(
             profile_excluded_fields if excluded_fields is None else excluded_fields
         ),
+        profile=profile,
     )
