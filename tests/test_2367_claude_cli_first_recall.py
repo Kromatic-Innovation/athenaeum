@@ -46,6 +46,32 @@ from tests.test_budget_deferred import _fake_process_one_factory
 from tests.test_session_end import _seed_knowledge_root, _write_tier0_raw
 
 # ---------------------------------------------------------------------------
+# Environment isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _pin_llm_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delete the global provider env override unconditionally.
+
+    Every test in this module asserts on the provider its OWN yaml selects,
+    and :func:`athenaeum.provider.resolve_provider`'s global chain reads
+    ``ATHENAEUM_LLM_PROVIDER`` ahead of that yaml — so an ambient value
+    substitutes for the module's setup and the assertion fails with ``api``
+    where the config on disk says ``claude-cli``. ``tests/test_schedule.py``
+    and ``tests/test_doctor.py`` already pin the same hazard the same way.
+
+    Not hypothetical: under CI's ``-n auto --dist loadfile`` sharding these
+    tests failed exactly that way (``assert 'api' == 'claude-cli'`` with the
+    written config correct) once a sibling change shifted which modules share
+    an xdist worker — proven by an A/B run where the same source with one test
+    file removed was green. A test that wants a specific value still sets it
+    in its own body; this fixture runs first.
+    """
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+
+
+# ---------------------------------------------------------------------------
 # AC1 — default provider selection on a fresh root
 # ---------------------------------------------------------------------------
 

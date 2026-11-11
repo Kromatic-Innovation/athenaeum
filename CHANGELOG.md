@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote profile: serve-time tool allowlist and excluded-fields pin (issue
+  athenaeum#2383).** `athenaeum serve` gains `--profile` / `--tools` /
+  `--excluded-fields` (also `ATHENAEUM_SERVE_PROFILE` /
+  `ATHENAEUM_SERVE_TOOLS` / `ATHENAEUM_SERVE_EXCLUDED_FIELDS` and
+  `serve.profile` / `serve.tools` / `serve.excluded_fields`), resolved
+  CLI > env > yaml and pinned into `create_server` as arguments rather than
+  tool parameters. `serve.tools` is an allowlist: a tool outside it is never
+  registered, so it is absent from `tools/list` rather than refusing, and a
+  name that is not a tool of the deployment fails startup.
+  `serve.excluded_fields: off` withholds every excluded (off-corpus) value —
+  `recall(with_pii=True)` returns a count-free withheld notice (closing both
+  the per-hit join and the handle-shaped reverse lookup), `read_entity`
+  returns none, and `enumerate_entities` refuses a PII-scoped predicate or
+  output field. `serve.profile: remote` presets both: `remember` and
+  `raise_decision` stay on; `resolve_question`, `resolve_merge` and
+  `review_audit_item` are not served. With none of the keys set, the served
+  `tools/list` and every tool's output are unchanged.
 - **Opt-in streamable HTTP transport for `athenaeum serve` (issue
   athenaeum#2382).** `athenaeum serve --transport http` serves MCP over
   FastMCP's streamable HTTP transport on `--host` (default `127.0.0.1`),

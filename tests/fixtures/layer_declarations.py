@@ -65,6 +65,11 @@ MODULE_LAYER: dict[str, int] = {
     "owner": 0,
     "pagination": 0,
     "progress": 0,
+    # Issue athenaeum#2383: the serve-time remote-profile pins -- own
+    # docstring states "Layering: L0 -- stdlib-only ..., no athenaeum
+    # imports at all", so both the L2 config resolvers and the L5 MCP
+    # server can depend on it.
+    "remote_policy": 0,
     "schema_migrations": 0,
     "t1_census": 0,
     "vecmath": 0,
