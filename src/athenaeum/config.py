@@ -9515,3 +9515,244 @@ def resolve_serve_port(
             continue
         return raw
     return DEFAULT_SERVE_PORT
+
+
+# Issue athenaeum#2384: the four `athenaeum serve` OAuth 2.1 resource-server
+# knobs. Appended at EOF per this module's own convention, next to the
+# athenaeum#2382 transport knobs above. Every key here is THREE segments deep
+# (`serve.auth.<leaf>`), and each resolver spells all three out INLINE in its
+# own body -- `config.get("serve", {})`, then `.get("auth", {})`, then the
+# leaf -- rather than sharing an outer-section helper.
+# `tests/test_config_resolver_parity_generic.py::test_yaml_key_is_actually_read`
+# discovers a resolver's yaml path from the string literals in that resolver's
+# OWN source, so a shared helper holding the outer two segments would leave no
+# resolver naming `serve` or `auth` and the discovered yaml path would be a
+# bare leaf -- read as dead. The repetition is what the gate is for.
+#
+# `None` from all four is the shipped default: no auth, and the transport
+# child's non-loopback bind refusal stays unconditional.
+
+
+def resolve_serve_auth_issuer(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str | None:
+    """Resolve the OAuth authorization server issuer (issue athenaeum#2384).
+
+    Returns the issuer identifier whose signatures this resource server
+    trusts -- the value a bearer token's ``iss`` claim must carry, and the
+    base the JSON Web Key Set URI is derived from
+    (:data:`athenaeum.serve_auth.JWKS_PATH`). ``None`` means no auth is
+    configured, which is the shipped default and keeps
+    ``athenaeum serve --transport http`` refusing every non-loopback bind.
+
+    athenaeum never issues a token. Setting this names someone ELSE's
+    authorization server; see ``docs/modules/mcp.md``.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` -- the ``athenaeum serve --auth-issuer`` flag.
+    - ``ATHENAEUM_SERVE_AUTH_ISSUER`` -- env var.
+    - ``serve.auth.issuer`` -- yaml string.
+    - ``None`` -- no auth.
+
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a non-string yaml
+    value rather than falling through to ``None``. Falling through is the
+    unsafe direction for this one knob specifically: ``None`` here is what
+    LIFTS nothing and keeps the loopback-only refusal, but a half-read issuer
+    next to a configured resource would make the whole block look unset. The
+    URL itself is validated once, with the resource, by
+    :func:`athenaeum.serve_auth.build_serve_auth`. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import ServeAuthError
+
+    if cli_value is not None:
+        return cli_value.strip() or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_ISSUER")
+    if env is not None:
+        return env.strip() or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                candidate = auth_cfg.get("issuer")
+                if isinstance(candidate, str):
+                    return candidate.strip() or None
+                if candidate is not None:
+                    raise ServeAuthError(
+                        f"serve.auth.issuer={candidate!r} must be a string "
+                        "naming the authorization server's issuer URL."
+                    )
+    return None
+
+
+def resolve_serve_auth_resource(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str | None:
+    """Resolve this server's canonical public resource URL (issue athenaeum#2384).
+
+    Returns the URL that IS this process's audience: the value every bearer
+    token's ``aud`` claim must carry, the ``resource`` advertised in RFC 9728
+    protected resource metadata, and the identifier a client passes as the
+    ``resource`` parameter when it asks the authorization server for a token.
+    One process serves exactly one audience (decision D3), which is why this
+    is a serve-time pin and not a per-request value.
+
+    It is NEVER read back from a token claim or a request parameter. A token
+    that carries an audience-like claim naming something broader is still
+    served this process's pin -- see
+    :mod:`athenaeum.serve_auth`'s module docstring.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` -- the ``athenaeum serve --auth-resource`` flag.
+    - ``ATHENAEUM_SERVE_AUTH_RESOURCE`` -- env var.
+    - ``serve.auth.resource`` -- yaml string.
+    - ``None`` -- no auth.
+
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a non-string yaml
+    value, for the same reason :func:`resolve_serve_auth_issuer` does. No seed
+    in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import ServeAuthError
+
+    if cli_value is not None:
+        return cli_value.strip() or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_RESOURCE")
+    if env is not None:
+        return env.strip() or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                candidate = auth_cfg.get("resource")
+                if isinstance(candidate, str):
+                    return candidate.strip() or None
+                if candidate is not None:
+                    raise ServeAuthError(
+                        f"serve.auth.resource={candidate!r} must be a string "
+                        "naming this server's canonical public URL."
+                    )
+    return None
+
+
+def resolve_serve_auth_allowed_identities(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> frozenset[str] | None:
+    """Resolve the identity allowlist (issue athenaeum#2384).
+
+    Returns the set of ``sub`` values and issuer-verified email addresses
+    permitted to use this server, case-folded and de-duplicated, or ``None``
+    when nothing is configured. A verified token whose identity is not in the
+    set is refused with the same 401 an invalid token gets, so the endpoint is
+    not an oracle for the allowlist.
+
+    An EMPTY value resolves to ``None``, not to the empty set: the two would
+    be indistinguishable here, and the distinction is drawn one level up --
+    :func:`athenaeum.serve_auth.build_serve_auth` refuses an empty allowlist
+    outright when any other ``serve.auth.*`` pin IS set, rather than reading
+    it as "every identity the issuer vouches for". That is the one reading a
+    typo produces, and on a public authorization server it means everyone who
+    can sign up.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` -- the ``--auth-allowed-identities`` flag's
+      comma-separated value.
+    - ``ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES`` -- comma-separated env var.
+    - ``serve.auth.allowed_identities`` -- a yaml list (or comma string).
+    - ``None`` -- no allowlist configured.
+
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a yaml value that
+    is neither a list nor a string, and on a list entry that is not a string.
+    No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import ServeAuthError, normalize_identities
+
+    if cli_value is not None:
+        return normalize_identities(cli_value.split(",")) or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES")
+    if env is not None:
+        return normalize_identities(env.split(",")) or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("allowed_identities")
+                if isinstance(raw, str):
+                    return normalize_identities(raw.split(",")) or None
+                if isinstance(raw, (list, tuple, set)):
+                    return normalize_identities(raw) or None
+                if raw is not None:
+                    raise ServeAuthError(
+                        f"serve.auth.allowed_identities={raw!r} must be a list "
+                        "of `sub` values / email addresses, or a "
+                        "comma-separated string."
+                    )
+    return None
+
+
+def resolve_serve_auth_scopes(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> dict[str, str] | None:
+    """Resolve the read/write scope names (issue athenaeum#2384).
+
+    Returns ``{"read": <name>, "write": <name>}`` -- the OAuth scope a caller
+    must hold to invoke a read tool and a write tool respectively -- or
+    ``None`` to take :data:`athenaeum.serve_auth.DEFAULT_READ_SCOPE` /
+    :data:`athenaeum.serve_auth.DEFAULT_WRITE_SCOPE`. The read/write class of
+    each tool is NOT configurable: it is read off the tool's own MCP
+    ``readOnlyHint`` annotation at registration, so it cannot drift from what
+    the server actually serves.
+
+    A mapping is the yaml spelling; a ``read=<name>,write=<name>`` string is
+    the CLI/env spelling. Both roles are required in both spellings --
+    :func:`athenaeum.serve_auth.parse_scope_pair` refuses a single name rather
+    than applying it to both roles, because that would make the read scope
+    sufficient for every write tool.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` -- the ``--auth-scopes`` flag.
+    - ``ATHENAEUM_SERVE_AUTH_SCOPES`` -- env var, same ``read=,write=`` form.
+    - ``serve.auth.scopes`` -- a yaml mapping (or the same string form).
+    - ``None`` -- the default pair.
+
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on anything it cannot
+    read as a complete pair, rather than falling back to the defaults: a
+    deployment that renamed its scopes and typo'd the rename would otherwise
+    silently enforce ``athenaeum:read``/``athenaeum:write``, which its
+    authorization server never issues, and every tool call would fail for a
+    reason the operator cannot see from the configuration. No seed in
+    ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import parse_scope_pair
+
+    if cli_value is not None:
+        return parse_scope_pair(cli_value, "--auth-scopes") if cli_value.strip() else None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_SCOPES")
+    if env is not None:
+        return parse_scope_pair(env, "ATHENAEUM_SERVE_AUTH_SCOPES") if env.strip() else None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("scopes")
+                if raw is not None:
+                    return parse_scope_pair(raw, "serve.auth.scopes")
+    return None

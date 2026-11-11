@@ -71,6 +71,11 @@ MODULE_LAYER: dict[str, int] = {
     # server can depend on it.
     "remote_policy": 0,
     "schema_migrations": 0,
+    # Issue athenaeum#2384: the serve-time OAuth 2.1 resource-server pins --
+    # own docstring states "Layering: L0 -- stdlib-only ..., no athenaeum
+    # imports at all", the same shape as remote_policy above and for the same
+    # reason: the L2 config resolvers and the L5 MCP server both depend on it.
+    "serve_auth": 0,
     "t1_census": 0,
     "vecmath": 0,
     # L1 -- data model.
@@ -387,6 +392,11 @@ MODULE_LAYER: dict[str, int] = {
     "viewer_corpus": 4,
     "claude_code_adapter": 5,
     "codex_adapter": 5,
+    # Issue athenaeum#2384: the FastMCP half of the resource-server wiring --
+    # own docstring states "Layering: L5 -- presentation, peer of
+    # athenaeum.mcp_server". It is where the `fastmcp` import is allowed to
+    # appear, which is exactly what keeps serve_auth (L0) free of it.
+    "mcp_auth": 5,
     "cli": 5,
     # Above L5 -- the package root, which the design's own docstring says
     # "sits above L5 by necessity" (imports the CLI-adjacent librarian

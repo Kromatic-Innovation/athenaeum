@@ -155,6 +155,25 @@ dev = [
     # and athenaeum#2382 for why fastmcp's floor is 2.11.1.
     "fastmcp>=2.11.1,<5.0",
     "mcp>=2.0,<3.0",
+    # athenaeum#2384: both already ride in as fastmcp dependencies, and both
+    # are TEST-only -- `src/` imports neither. Declared because
+    # `scripts/check_declared_imports.py` (correctly) refuses an import whose
+    # distribution this file does not name: an incidental transitive dep can
+    # be dropped by any upstream release, and the symptom would be a
+    # collection error in the OAuth resource-server tests rather than
+    # anything legible.
+    #
+    # `joserfc` mints the fake issuer's tokens. Deliberately the same JWT
+    # library fastmcp's own `JWTVerifier` decodes with, so a signature the
+    # test produces is one the production path really accepts -- a
+    # hand-rolled signer could agree with itself and with nothing else.
+    # `httpx2` provides the `ASGITransport` that keeps the whole suite
+    # socket-free: it backs both the in-process key-set endpoint handed to
+    # the verifier and the MCP client talking to `create_server`'s own ASGI
+    # app. `httpx` (above) cannot stand in -- fastmcp's verifier and client
+    # transport both take httpx2 objects specifically.
+    "httpx2>=2.0,<3.0",
+    "joserfc>=1.0,<2.0",
     "jsonschema>=4.20",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into

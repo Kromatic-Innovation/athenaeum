@@ -103,6 +103,116 @@ pre-image and the second dropped the first's entry — the file was on disk but 
 `recall`. The file writes themselves never needed serializing; each mints a unique name and
 is renamed into place atomically.
 
+## Authentication — a resource server, only
+
+`athenaeum serve --transport http` can run as an **OAuth 2.1 resource server only**. It
+verifies bearer tokens that an external authorization server issued, and that is the
+entirety of its role in the protocol:
+
+- It **never issues** a token, and has no token endpoint.
+- It **never stores** a credential — no client secret, no refresh token, nothing at rest.
+- It **never shows** a consent screen, and runs no authorization endpoint or dynamic client
+  registration.
+
+Everything on the issuing side — PKCE, client registration, consent, refresh — belongs to
+the authorization server you point athenaeum at. If you do not already run one, athenaeum
+is not the component that gives you one.
+
+Configuring an issuer does two things at once, and that is deliberate: it is what permits a
+non-loopback bind, and it is what makes every request to that bind carry a verified token.
+There is no ordering in which you get one without the other.
+
+```bash
+athenaeum serve --path ~/knowledge --transport http --host 0.0.0.0 \
+  --auth-issuer https://auth.example.com \
+  --auth-resource https://memory.example.com/mcp \
+  --auth-allowed-identities ops@example.com
+# [auth] OAuth 2.1 resource server: issuer https://auth.example.com, audience
+#        https://memory.example.com/mcp, 1 allowed identity, scopes
+#        athenaeum:read athenaeum:write
+# [transport] streamable HTTP on http://0.0.0.0:8000/mcp
+```
+
+| Flag | `athenaeum.yaml` | Environment variable | What it sets |
+|---|---|---|---|
+| `--auth-issuer` | `serve.auth.issuer` | `ATHENAEUM_SERVE_AUTH_ISSUER` | The authorization server's issuer identifier — what a token's `iss` claim must carry. |
+| `--auth-resource` | `serve.auth.resource` | `ATHENAEUM_SERVE_AUTH_RESOURCE` | This server's canonical public URL — the one audience this process serves. |
+| `--auth-allowed-identities` | `serve.auth.allowed_identities` | `ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES` | Comma-separated `sub` values, or emails the issuer marked verified. |
+| `--auth-scopes` | `serve.auth.scopes` | `ATHENAEUM_SERVE_AUTH_SCOPES` | `read=<name>,write=<name>`. Defaults to `athenaeum:read` / `athenaeum:write`. |
+
+Each resolves **CLI flag > environment variable > `athenaeum.yaml`**, the same order every
+other knob uses. The first three are a set: configure all of them or none of them. Under
+`stdio` the block is inert and says so on startup — stdio binds no socket and carries no
+bearer token, so there is nothing to verify.
+
+```yaml
+serve:
+  transport: http
+  host: 0.0.0.0
+  auth:
+    issuer: https://auth.example.com
+    resource: https://memory.example.com/mcp
+    allowed_identities:
+      - ops@example.com
+      - auth0|operator-1
+    scopes:
+      read: athenaeum:read
+      write: athenaeum:write
+```
+
+**The key set location is a convention, not a setting.** athenaeum reads the issuer's JSON
+Web Key Set from `/.well-known/jwks.json` under the configured issuer, and accepts `RS256`
+signatures only. That is the plain OIDC default, and it is what the hosted authorization
+servers publish. An issuer that serves its key set from a tenant-scoped path instead is not
+supported by this setting set — check your issuer's own discovery document before you
+deploy, because the symptom is every token being rejected.
+
+### What a client discovers
+
+`GET /.well-known/oauth-protected-resource` serves RFC 9728 protected resource metadata:
+the `resource` (your `serve.auth.resource`), `authorization_servers` (a one-element list
+naming your issuer) and `scopes_supported` (both scope names). A resource URL that carries
+a path is served at the path-scoped variant RFC 9728 §3.1 defines — `.../mcp` is published
+at `/.well-known/oauth-protected-resource/mcp`.
+
+Every rejected request answers **401** with a `WWW-Authenticate: Bearer` challenge naming
+that metadata URL and the scopes to request, so a client can discover where to authenticate
+without being told anything else.
+
+### Refusals, and the reasons for them
+
+- **The audience is this process's pin, and is never read from a token claim.** `serve.auth.resource`
+  is set once, by the operator's own `athenaeum serve` invocation. It is what a token's `aud`
+  claim is checked against, what the metadata advertises, and what a client passes as its
+  `resource` parameter — one process, one audience. A token that presents an `audience`-like
+  claim naming a broader role is served this pin anyway, and so is the separate read scope
+  `--audience` pins: no claim in any token widens what `recall` returns.
+- **An identity that is not on the allowlist is refused with the same 401 an invalid token
+  gets.** Not a distinguishable 403 — a caller able to tell "your signature is fine but you
+  are not on the list" from "your signature is wrong" can enumerate which subjects you
+  trust. An empty allowlist is a startup error, never read as "anyone the issuer vouches
+  for".
+- **An unverified email claim is not an identity.** An `email` claim counts only when the
+  same token carries `email_verified: true`; otherwise it is self-asserted by whoever
+  registered the account.
+- **A read-scoped token cannot call a write tool.** Each tool requires the scope matching
+  its own `readOnlyHint` annotation (the table above): the read scope for the nine read
+  tools, the write scope for the six that mutate. A token carrying neither can call
+  nothing. The served `tools/list` is the same either way — authentication narrows who may
+  call, never what is published.
+- **A half-configured block refuses to start.** An issuer with no resource, or a resource
+  with no issuer, exits non-zero before anything binds. Falling back to "no auth" is the
+  one direction this must never fail in: it would publish an unauthenticated store on the
+  address you asked for, while you believed it was protected.
+- **No token reaches a log line.** Neither athenaeum's own refusals nor the underlying
+  verifier's print a token or any segment of one. An allowlist refusal names the `sub` it
+  refused — a value from your own configuration — and nothing else.
+
+Still out of scope here, and genuinely elsewhere: TLS (above), validating a host's mTLS
+client certificate (a deployment-proxy concern), and a per-request audience. For the latter,
+run one process per audience.
+
+
 ## Tool annotations
 
 Every tool carries an MCP `ToolAnnotations` hint so a remote host can decide
@@ -192,9 +302,11 @@ KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
 ## What it refuses
 
 - **An HTTP server refuses every non-loopback bind until an auth issuer is configured.**
-  This is a security property rather than a cautious default. The HTTP transport carries no
-  authentication of its own, so binding a routable address would publish the entire store to
-  anyone who can reach the port. The check is a POSITIVE allowlist of loopback address
+  This is a security property rather than a cautious default. With no issuer configured the
+  HTTP transport carries no authentication of its own, so binding a routable address would
+  publish the entire store to anyone who can reach the port. Configuring one (see
+  [Authentication](#authentication--a-resource-server-only) above) lifts the restriction,
+  because it is the same act that makes every request carry a verified token. The check is a POSITIVE allowlist of loopback address
   **literals** — any `127.0.0.0/8` address, the IPv6 loopback (bracketed or bare), and
   IPv4-mapped IPv6 loopback forms. Every other value exits non-zero **before any socket is
   bound**, and the message names the missing `serve.auth.issuer` setting rather than only
