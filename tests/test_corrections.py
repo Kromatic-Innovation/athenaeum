@@ -34,9 +34,12 @@ from athenaeum.corrections import (
     resolve_target_for_apply,
     retire_batch,
     run_correction_phase,
+    run_trust_dryrun,
     write_correction_handoff,
 )
 from athenaeum.models import EntityIndex, parse_frontmatter
+from athenaeum.rules import CorrectionSpec, build_correction_record
+from athenaeum.trust_graph import TrustGraphConfigError, parse_edge
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -90,6 +93,19 @@ def _envelope(**overrides) -> dict:
 
 def _fields_config(**fields) -> dict:
     return {"librarian": {"corrections": {"fields": fields}}}
+
+
+def _with_trust(base_config: dict, *, enabled: bool, edges: list[dict] | None = None) -> dict:
+    """Overlay `librarian.source_trust_enabled`/`source_trust_edges` onto an
+    existing `_fields_config(...)`-shaped config dict (issue athenaeum#2331,
+    TG3), WITHOUT disturbing the existing `librarian.corrections.fields`
+    sibling key the base config carries."""
+    cfg = dict(base_config)
+    librarian = dict(cfg.get("librarian") or {})
+    librarian["source_trust_enabled"] = enabled
+    librarian["source_trust_edges"] = edges if edges is not None else []
+    cfg["librarian"] = librarian
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -3694,3 +3710,824 @@ def test_value_key_treats_dates_and_iso_strings_alike() -> None:
     assert _value_key(datetime(2023, 10, 1, 12, 0)) == _value_key("2023-10-01T12:00:00")
     assert _value_key("x") == "x"
     assert _value_key({"a": 1}) != _value_key({"a": 2})
+
+
+# ---------------------------------------------------------------------------
+# Trust-graph wiring (issue athenaeum#2331, TG3) -- compare_sources consulted
+# by decide_verdict and the op=="remove" branch, behind
+# librarian.source_trust_enabled.
+# ---------------------------------------------------------------------------
+
+
+class TestTrustGraphListRemovalFlip:
+    """Seam 2 (tier-0 list removal): a matching edge flips the
+    `op == "remove"` verdict exactly like it flips `decide_verdict`'s --
+    the control proving `_trust_edge_verdict`'s result is actually
+    threaded through the non-monotone branch of
+    `process_correction_record`'s own `elif op == "remove"` arm, not just
+    unreachable dead code."""
+
+    def _page(self, wiki: Path) -> Path:
+        return _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "verified_domains": ["example.com"],
+                "field_sources": {
+                    "verified_domains": [{"value": "example.com", "source": "user:conv-1"}]
+                },
+            },
+        )
+
+    def _record(self) -> dict:
+        return {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "remove",
+            "field": "verified_domains",
+            "value": "example.com",
+            "source": "api:govdb",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+
+    def test_flag_off_defers_like_today(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        cfg = _fields_config(verified_domains={"shape": "list", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=False, edges=[])
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+    def test_matching_edge_flips_to_applied(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "verified_domains"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        cfg = _fields_config(verified_domains={"shape": "list", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=True, edges=edges)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "applied"
+        assert "edge[0]" in result.reason
+
+
+class TestTrustGraphFlagOffByteIdentical:
+    """AC1: "with the flag off, or with no edges, decide_verdict output and
+    the list-removal behaviour are byte-identical over the existing test
+    corpus." Every pre-existing test class above already proves this (none
+    of them pass trust kwargs). These two prove it end-to-end through
+    `process_correction_record` in the two cases most likely to regress:
+    edges configured but the flag off, and the flag on but no edge
+    matching this pair's domain."""
+
+    def _config(self) -> dict:
+        return _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+
+    def _page(self, wiki: Path) -> Path:
+        return _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+
+    def _record(self) -> dict:
+        return {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "set",
+            "field": "revenue",
+            "value": "500",
+            "source": "api:govdb",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+
+    def test_flag_off_defers_exactly_like_today_even_with_a_matching_edge_configured(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+                "note": "govdb beats self-report on revenue",
+            }
+        ]
+        config = _with_trust(self._config(), enabled=False, edges=edges)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+    def test_flag_on_no_matching_edge_keeps_todays_reason_text(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        edges = [
+            {
+                # Different entity_type -- never matches this claim's domain.
+                "domain": {"entity_type": "company", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = _with_trust(self._config(), enabled=True, edges=edges)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+    def test_flag_on_matching_edge_flips_the_verdict(self, tmp_path: Path) -> None:
+        """Not an AC1 case -- the control proving the wiring actually does
+        something when the operator turns it on with a matching edge."""
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = _with_trust(self._config(), enabled=True, edges=edges)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "applied"
+        assert "edge[0]" in result.reason
+
+    def test_flag_on_matching_edge_can_also_defer(self, tmp_path: Path) -> None:
+        """The OUTRANKED side of the same edge: incoming is the edge's
+        `under` selector, so it is now the DEMOTED side -- without the
+        edge, `user:` (rank 1) would trivially outrank `api:` (rank 3) and
+        apply. Exercises `_trust_edge_verdict`'s OUTRANKED branch, not just
+        OUTRANKS/INCOMPARABLE."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "api:govdb",
+            },
+        )
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = _with_trust(self._config(), enabled=True, edges=edges)
+        record = dict(self._record())
+        record["source"] = "user:self-report"
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert "edge[0]" in result.reason
+
+
+class TestTrustGraphMonotoneGuardF9:
+    """F9: the monotone-unset guard stays keyed on `source_rank == 1`
+    alone -- edges are NEVER consulted for a monotone op, in either the
+    scalar (`decide_verdict`) or list-removal branch."""
+
+    def test_scalar_matching_edge_cannot_grant_monotone_unset(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {"uid": "person-a", "type": "person", "name": "A", "bounced": "2026-08-06"},
+        )
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "set",
+            "field": "bounced",
+            "value": "",  # monotone unset
+            "source": "script:delivery-monitor",
+            "observed_at": "2026-08-06T14:01:55Z",
+        }
+        # If F9 were broken, this edge would make `script` outrank `user`
+        # in exactly this domain and grant the unset.
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "bounced"},
+                "over": "script",
+                "under": "user",
+            }
+        ]
+        cfg = _fields_config(
+            bounced={"shape": "scalar", "writers": ["delivery-monitor"], "monotone": True}
+        )
+        config = _with_trust(cfg, enabled=True, edges=edges)
+        result = process_correction_record(
+            record,
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "monotone unset requires user: tier"
+
+    def test_list_removal_matching_edge_cannot_grant_monotone_unset(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        meta = {
+            "uid": "person-a",
+            "type": "person",
+            "name": "A",
+            "verified_domains": ["example.com"],
+            "field_sources": {
+                "verified_domains": [{"value": "example.com", "source": "user:conv-1"}]
+            },
+        }
+        _write_page(wiki, "p.md", meta)
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "remove",
+            "field": "verified_domains",
+            "value": "example.com",
+            "source": "script:delivery-monitor",
+            "observed_at": "2026-08-06T14:01:55Z",
+        }
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "verified_domains"},
+                "over": "script",
+                "under": "user",
+            }
+        ]
+        cfg = _fields_config(
+            verified_domains={
+                "shape": "list",
+                "writers": ["delivery-monitor"],
+                "monotone": True,
+            }
+        )
+        config = _with_trust(cfg, enabled=True, edges=edges)
+        result = process_correction_record(
+            record,
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "monotone unset requires user: tier"
+
+
+class TestTrustGraphIncomparableEscalates:
+    """`incomparable` maps to `escalate`, and every verdict reason names
+    the matching edge(s)."""
+
+    def test_contradictory_edges_escalate_naming_both_edges(self) -> None:
+        edges = [
+            parse_edge(
+                {
+                    "domain": {"entity_type": "person", "field": "revenue"},
+                    "over": "api:govdb",
+                    "under": "user",
+                }
+            ),
+            parse_edge(
+                {
+                    "domain": {"entity_type": "person", "field": "revenue"},
+                    "over": "user",
+                    "under": "api:govdb",
+                }
+            ),
+        ]
+        verdict, reason = decide_verdict(
+            existing_source="user:self-report",
+            incoming_source="api:govdb",
+            existing_value="100",
+            incoming_value="500",
+            observed_at="2026-08-06",
+            monotone=False,
+            op="set",
+            existing_updated="2026-08-01",
+            trust_domain={
+                "entity_type": "person",
+                "field": "revenue",
+                "evidence_kind": "unknown",
+            },
+            trust_edges=edges,
+        )
+        assert verdict == "escalate"
+        assert "edge[0]" in reason and "edge[1]" in reason
+
+
+def test_trust_edge_verdict_f5_guard_survives_a_malformed_existing_source() -> None:
+    """`_trust_edge_verdict`'s F5 guard parses `existing_source` to decide
+    whether to disable the edges (user:/witnessed: incumbent) -- it must
+    never be the first thing in this module to raise on a bad source value
+    it did not create, matching `precedence.source_rank`'s own defensive
+    handling. A malformed source can't parse to user/witnessed, so the
+    guard does not disable the edges; `compare_sources`'s own (separately
+    tested) defensive handling takes it from there -- this test's job is
+    only "does not raise", not re-deriving that result."""
+    from athenaeum.corrections import _trust_edge_verdict
+
+    edges = [
+        parse_edge(
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        )
+    ]
+    result = _trust_edge_verdict(
+        incoming_source="api:govdb",
+        existing_source=" bad",  # leading whitespace -- parse_source raises ValueError
+        trust_domain={"entity_type": "person", "field": "revenue", "evidence_kind": "unknown"},
+        trust_edges=edges,
+        incoming_is_rule_compiled=True,
+    )
+    assert result is None or result[0] in ("apply", "defer", "escalate")
+
+
+class TestTrustGraphRuleOriginGuardF5:
+    """F5: an edge never promotes a rule-compiled correction over a
+    `user:`/`witnessed:` incumbent, on BOTH `rules.py` emit paths. The
+    structured `rule_origin` marker (not the free-text `note`) is what the
+    guard reads."""
+
+    def _config(self, edges: list[dict]) -> dict:
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-rule"]})
+        return _with_trust(cfg, enabled=True, edges=edges)
+
+    def test_general_compile_path_never_promotes_over_user(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        # rules.py:924 ("source": spec.source) emits the declared source
+        # verbatim.
+        spec = CorrectionSpec(
+            target={"uid": "person-a"}, op="set", field="revenue", value="500", source="api:govdb"
+        )
+        record = build_correction_record(spec, {}, rule_tag="govdb-revenue@1")
+        assert record["rule_origin"] == "govdb-revenue@1"
+
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-rule"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(edges),
+        )
+        assert result.disposition == "deferred-lower-precedence", result.reason
+
+    def test_general_compile_path_control_edge_still_fires_against_non_user_incumbent(
+        self, tmp_path: Path
+    ) -> None:
+        """Control: the SAME shape of edge DOES promote a rule-compiled
+        correction over a non-user/witnessed incumbent -- the guard is
+        scoped to F5, not a blanket "rule-compiled never wins"."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "api:other-vendor",
+            },
+        )
+        spec = CorrectionSpec(
+            target={"uid": "person-a"}, op="set", field="revenue", value="500", source="api:govdb"
+        )
+        record = build_correction_record(spec, {}, rule_tag="govdb-revenue@1")
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "api:other-vendor",
+            }
+        ]
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-rule"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(edges),
+        )
+        assert result.disposition == "applied", result.reason
+
+    def test_preserved_log_path_never_promotes_over_witnessed(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "witnessed:session-77",
+            },
+        )
+        spec = CorrectionSpec(
+            target={"uid": "person-a"},
+            op="set",
+            field="revenue",
+            value="500",
+            source="script:ingest-bot",
+        )
+        record = build_correction_record(spec, {}, rule_tag="ingest-revenue@1")
+        # Simulate rules.py's preserved-log emit path (`rules.py:~2462`):
+        # `ref` is swapped for a log pointer, `type` is kept from the
+        # declared source -- `rule_origin` (and everything else
+        # `build_correction_record` produced) is untouched.
+        record = dict(record)
+        record["source"] = {
+            "type": "script",
+            "ref": "preserved-log:raw/preserved/ingest-bot/2026-08-06.jsonl#L1",
+        }
+        assert record["rule_origin"] == "ingest-revenue@1"
+
+        # A BARE "script" selector (legal -- "script" is not in
+        # trust_graph's ref-required type set) matches any script-sourced
+        # claim regardless of ref, which is exactly the case the
+        # preserved-log path's ref-swap does NOT defend against on its own.
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "script",
+                "under": "witnessed",
+            }
+        ]
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-rule"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(edges),
+        )
+        assert result.disposition == "deferred-lower-precedence", result.reason
+
+
+class TestTrustGraphEvidenceKindUnknownAtSeams:
+    """The evidence kind passed at the call site matches
+    `docs/design/trust-graph.md` §2.3.1: `unknown` at both seams today, so
+    an edge naming a specific evidence kind can never match."""
+
+    def test_evidence_kind_scoped_edge_never_fires_at_seam_1(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "set",
+            "field": "revenue",
+            "value": "500",
+            "source": "api:govdb",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        edges = [
+            {
+                "domain": {
+                    "entity_type": "person",
+                    "field": "revenue",
+                    "evidence_kind": "document",
+                },
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=True, edges=edges)
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        # The edge names an evidence kind; this claim's evidence kind is
+        # `unknown` at this seam, so the edge can never match -- today's
+        # ordinary rank fallback decides instead.
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+
+class TestTrustGraphMalformedEdgesFailFastBeforeAnyWrite:
+    """Seer finding on athenaeum#2405 (`corrections.py`, the pre-fix call site
+    was `:1722`, inside the per-record loop): a malformed
+    `librarian.source_trust_edges` entry must abort the WHOLE correction
+    phase before any write, not raise mid-batch after earlier records have
+    already been applied to disk. `run_correction_phase` now resolves and
+    validates the edges once, up front, gated on the flag exactly like
+    `process_correction_record`'s own per-record resolution."""
+
+    def _noop_escalate(self, result: object, outcome: object) -> bool:
+        return True
+
+    # A selector naming type `api` with no `:ref` -- `trust_graph.parse_edge`
+    # rejects this at validation time (`api` is in `_REF_REQUIRED_TYPES`).
+    _MALFORMED_EDGES = [{"domain": {"entity_type": "person"}, "over": "api", "under": "user"}]
+
+    def test_raises_and_writes_nothing(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        before_page = page.read_bytes()
+        before_mtime = page.stat().st_mtime
+
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "500"},
+                submitter="govdb-feed",
+                defaults={
+                    "op": "set",
+                    "field": "revenue",
+                    "source": "api:govdb",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+            )
+        )
+        before_batch = batch.read_bytes()
+
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=True, edges=self._MALFORMED_EDGES)
+
+        with pytest.raises(TrustGraphConfigError):
+            run_correction_phase(
+                raw_root=tmp_path / "raw",
+                wiki_root=wiki,
+                knowledge_root=tmp_path,
+                index=EntityIndex(wiki),
+                config=config,
+                escalate_one=self._noop_escalate,
+            )
+
+        # A test asserting only the exception type would pass even if the
+        # batch had already written -- assert the store is untouched, the
+        # same byte/mtime-invariance shape TestTrustDryRunReport uses.
+        assert page.read_bytes() == before_page
+        assert page.stat().st_mtime == before_mtime
+        assert batch.read_bytes() == before_batch
+        assert not (wiki / "_corrections_applied.jsonl").exists()
+        assert not (tmp_path / "registry.json").exists()
+
+    def test_flag_off_does_not_even_look_at_the_malformed_edges(self, tmp_path: Path) -> None:
+        """AC1: with the flag off, the SAME malformed edges list must not
+        be resolved at all -- not raise, not warn, not read -- exactly
+        today's (pre-fix) behaviour. Proves the new eager call is gated,
+        not merely that it fires later for a different reason."""
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "500"},
+                submitter="govdb-feed",
+                defaults={
+                    "op": "set",
+                    "field": "revenue",
+                    "source": "api:govdb",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+            )
+        )
+
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=False, edges=self._MALFORMED_EDGES)
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=self._noop_escalate,
+        )
+        # No exception, and the batch's ordinary (non-trust) rank compare
+        # ran to completion -- `api` (rank 3) is outranked by `user`
+        # (rank 1), so it defers, exactly as it would with no trust keys
+        # in config at all. The deferred value never gets written.
+        assert summary["dispositions"].get("deferred-lower-precedence") == 1
+        assert "500" not in page.read_text(encoding="utf-8")
+
+
+class TestTrustDryRunReport:
+    """The dry-run report: read-only, works with the flag off, lists
+    would-flip verdicts with their edges."""
+
+    def _config(self, edges: list[dict]) -> dict:
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        return _with_trust(cfg, enabled=False, edges=edges)  # flag OFF live
+
+    def _store(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "500"},
+                submitter="govdb-feed",
+                defaults={
+                    "op": "set",
+                    "field": "revenue",
+                    "source": "api:govdb",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+            )
+        )
+        return tmp_path / "raw", wiki, batch
+
+    def test_lists_the_flip_with_its_edge_and_never_mutates_the_store(
+        self, tmp_path: Path
+    ) -> None:
+        raw_root, wiki, batch = self._store(tmp_path)
+        page = wiki / "p.md"
+        before_batch = batch.read_bytes()
+        before_page = page.read_bytes()
+        before_mtime = batch.stat().st_mtime
+
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = self._config(edges)
+
+        report = run_trust_dryrun(
+            raw_root=raw_root, wiki_root=wiki, knowledge_root=tmp_path, config=config
+        )
+
+        assert len(report.flips) == 1
+        flip = report.flips[0]
+        assert flip.baseline_disposition == "deferred-lower-precedence"
+        assert flip.candidate_disposition == "applied"
+        assert "edge[0]" in flip.candidate_reason
+        assert report.has_evidence_kind_scoped_edge is False
+
+        # Read-only: nothing on disk changed.
+        assert batch.read_bytes() == before_batch
+        assert page.read_bytes() == before_page
+        assert batch.stat().st_mtime == before_mtime
+        assert not (wiki / "_corrections_applied.jsonl").exists()
+        assert not (tmp_path / "registry.json").exists()
+
+    def test_no_edges_configured_zero_flips(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        raw_root = tmp_path / "raw"
+        raw_root.mkdir()
+        report = run_trust_dryrun(
+            raw_root=raw_root, wiki_root=wiki, knowledge_root=tmp_path, config={}
+        )
+        assert report.flips == ()
+        assert report.edges == ()
+        assert report.has_evidence_kind_scoped_edge is False
+
+    def test_evidence_kind_scoped_edge_flagged_and_produces_no_flip(
+        self, tmp_path: Path
+    ) -> None:
+        raw_root, wiki, _batch = self._store(tmp_path)
+        edges = [
+            {
+                "domain": {
+                    "entity_type": "person",
+                    "field": "revenue",
+                    "evidence_kind": "document",
+                },
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = self._config(edges)
+        report = run_trust_dryrun(
+            raw_root=raw_root, wiki_root=wiki, knowledge_root=tmp_path, config=config
+        )
+        assert report.has_evidence_kind_scoped_edge is True
+        assert report.flips == ()
