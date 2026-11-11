@@ -457,18 +457,27 @@ class TestThresholdForClass:
         )
 
 
-class TestShippedRecordIsNotAutoFiling:
-    """The shipped record must not auto-file anything, for any class."""
+class TestShippedRecordAutoFilesOnlyPassingClasses:
+    """The measured record (athenaeum#2260) auto-files a class only when it
+    passes; names-other failed the bar and must stay with a human."""
 
-    def test_every_shipped_class_has_no_threshold_and_no_model(self) -> None:
+    def test_names_other_has_no_threshold_and_no_model(self) -> None:
+        assert pii_attribution.threshold_for_class("names-other") is None
+        assert pii_attribution.recommended_model_for_class("names-other") is None
+        assert (
+            pii_attribution.calibrated_probability_for_class("names-other", 1.0)
+            == 0.0
+        )
+
+    def test_passing_classes_carry_their_recorded_model(self) -> None:
         record = pii_attribution.load_calibration_record()
         assert set(record) == set(pii_attribution.QUESTION_CLASSES)
-        for question_class in pii_attribution.QUESTION_CLASSES:
-            assert pii_attribution.threshold_for_class(question_class) is None
-            assert pii_attribution.recommended_model_for_class(question_class) is None
-            assert (
-                pii_attribution.calibrated_probability_for_class(question_class, 1.0)
-                == 0.0
+        for question_class, entry in record.items():
+            if question_class == "names-other":
+                continue
+            assert entry.passes is True
+            assert pii_attribution.recommended_model_for_class(question_class) == (
+                entry.model
             )
 
 
