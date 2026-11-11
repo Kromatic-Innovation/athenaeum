@@ -169,12 +169,16 @@ KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
   read scope for the life of the process. `recall`, `read_entity`, `enumerate_entities` and
   the three pending-decision list tools all apply the same predicate.
 
-  **Three read tools are not audience-scoped**: `list_axiom_audit`,
+  **Three tools are not audience-scoped**: `list_axiom_audit`,
   `scan_retraction_cascade` and `calibration_summary` take no audience and apply no filter.
   They return slugs, paths and counts rather than page bodies, so a restricted caller learns
   no page *content* through them — but it can learn that a page **exists**. If that
   distinction matters to your deployment, do not expose those three to a restricted
-  audience. Pages carry `access:`
+  audience. Note that `scan_retraction_cascade` is not a read tool at all: it appends
+  review items to the owner's decision queue (which is why it is annotated
+  `readOnlyHint: false`, above), and unlike the three decision-queue mutators it is
+  **not** refused for a pinned audience. Its annotation records that behaviour; it does
+  not change it. Pages carry `access:`
   (`open`/`internal`/`confidential`/`personal`) and/or an `audience:` role list; **untagged
   pages are invisible** to a restricted caller. The owner, with no audience pinned, sees
   everything.
