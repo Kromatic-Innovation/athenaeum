@@ -5,20 +5,20 @@
       "type": "thinking"
     },
     {
-      "text": "{\"recommended_winner\": \"b\", \"action\": \"correct_b\", \"rationale\": \"FACT/identity conflict about the same attribute that IS resolvable by precedence \u2014 b's directly user-stated and confirmed contact outranks a's unsourced inferred claim, which is erroneous rather than valid-then-replaced history, so it is removed rather than kept as superseded.\", \"confidence\": 0.84, \"source_precedence_used\": [\"b:user:session-2026-05-12 > a:unsourced\"]}",
+      "text": "{\"recommended_winner\":\"b\",\"action\":\"correct_b\",\"rationale\":\"FACT/identity conflict over the same attribute where precedence decides cleanly: b is a user-stated, dated claim (tier 1) while a is an unsourced inference with no evidence of being a valid earlier snapshot, so a is removed as erroneous rather than preserved as superseded history.\",\"confidence\":0.86,\"source_precedence_used\":[\"b:user:session-2026-05-12 > a:unsourced\"]}",
       "type": "text"
     }
   ],
   "layer": "resolver",
   "model": "claude-opus-5",
-  "prompt_hash": "sha256:69aa910421d02a4f447f156fcb939f07bfaa771a413e7b0a572c6ca6edda1ac6",
-  "recorded_at": "2026-10-29T11:11:30.672918+00:00",
+  "prompt_hash": "sha256:9a590d321406532f60b0d9810171fa9e5c3ac449b7c3aab8c2a7606c8cb5ce40",
+  "recorded_at": "2026-11-11T14:58:10.166530+00:00",
   "rederived": null,
-  "response_text": "{\"recommended_winner\": \"b\", \"action\": \"correct_b\", \"rationale\": \"FACT/identity conflict about the same attribute that IS resolvable by precedence \u2014 b's directly user-stated and confirmed contact outranks a's unsourced inferred claim, which is erroneous rather than valid-then-replaced history, so it is removed rather than kept as superseded.\", \"confidence\": 0.84, \"source_precedence_used\": [\"b:user:session-2026-05-12 > a:unsourced\"]}",
+  "response_text": "{\"recommended_winner\":\"b\",\"action\":\"correct_b\",\"rationale\":\"FACT/identity conflict over the same attribute where precedence decides cleanly: b is a user-stated, dated claim (tier 1) while a is an unsourced inference with no evidence of being a valid earlier snapshot, so a is removed as erroneous rather than preserved as superseded history.\",\"confidence\":0.86,\"source_precedence_used\":[\"b:user:session-2026-05-12 > a:unsourced\"]}",
   "usage": {
     "cache_creation_input_tokens": 0,
-    "cache_read_input_tokens": 4475,
+    "cache_read_input_tokens": 4636,
     "input_tokens": 343,
-    "output_tokens": 531
+    "output_tokens": 376
   }
 }

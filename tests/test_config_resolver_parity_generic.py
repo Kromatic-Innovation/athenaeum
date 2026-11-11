@@ -225,6 +225,13 @@ _CLOSED_VOCABULARY_VALUE = frozenset(
         # reading identically to "never read the key". Covered directly by
         # TestClosedVocabularyResolversDirect below.
         "resolve_audit_date_fill",
+        # Issue athenaeum#2382: only "stdio"/"http" are valid, so every
+        # generic sentinel -- of any type -- is out-of-vocabulary and
+        # correctly returns the default, reading identically to "never read
+        # the key". Unlike the port knob alongside it, no sentinel can fix
+        # this generically: the vocabulary is two specific words. Covered
+        # directly by TestClosedVocabularyResolversDirect below.
+        "resolve_serve_transport",
     }
 )
 
@@ -337,6 +344,16 @@ _SENTINEL_VALUES: tuple[Any, ...] = (
     # start failing. The value is in ``[0, 1]`` so a probability-typed knob
     # accepts it.
     {"__parity_sentinel_key__": 0.987654321},
+    # A small positive int inside the usable TCP port range (issue
+    # athenaeum#2382). The battery's existing int sentinel (123456789) is
+    # out of range for a port-typed knob -- ``resolve_serve_port``'s
+    # ``serve.port`` is the first -- so the resolver's own range check drops
+    # it and the result reads identically to "never read the key". Same shape
+    # gap as the dict-of-list and dict-of-number entries above, and closed the
+    # same way rather than with an exclusion entry: a sentinel only ADDS
+    # candidates, so it can never make a resolver that does read its key start
+    # failing. 8080 is deliberately not any resolver's default.
+    8080,
 )
 
 
@@ -565,6 +582,10 @@ class TestGenericResolverParity:
             "0.987654321",
             "true",
             "false",
+            # In-range for a port-typed knob; see the matching entry in
+            # `_SENTINEL_VALUES` for why a merely-numeric string is not
+            # enough (issue athenaeum#2382).
+            "8080",
         )
 
         for env_var in env_vars:
@@ -861,6 +882,31 @@ class TestClosedVocabularyResolversDirect:
     ) -> None:
         monkeypatch.setenv("ATHENAEUM_AUDIT_DATE_FILL", "bogus")
         assert config_mod.resolve_audit_date_fill(None) == "constrained"
+
+    def test_serve_transport_reads_its_yaml_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SERVE_TRANSPORT", raising=False)
+        assert config_mod.resolve_serve_transport({"serve": {"transport": "http"}}) == "http"
+
+    def test_serve_transport_reads_its_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "http")
+        assert config_mod.resolve_serve_transport(None) == "http"
+
+    def test_serve_transport_env_beats_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "http")
+        resolved = config_mod.resolve_serve_transport({"serve": {"transport": "stdio"}})
+        assert resolved == "http"
+
+    def test_serve_transport_cli_beats_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "http")
+        assert config_mod.resolve_serve_transport(None, "stdio") == "stdio"
+
+    def test_serve_transport_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing direction: a typo must never start a listener, so
+        # every unrecognised value lands on the transport that binds nothing.
+        monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "htttp")
+        assert config_mod.resolve_serve_transport(None) == "stdio"
 
     def test_sibling_widening_classes_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch

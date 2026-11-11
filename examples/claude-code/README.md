@@ -118,6 +118,21 @@ timer, or at session end. See "Compile raw → wiki" below.
    produce no `recall` hit. Check `~/knowledge/raw/` for pending files if
    recall surprises you.
 
+   **Option D (recommended): let `athenaeum` generate and load Options B/C
+   for you** — `athenaeum schedule install` writes the launchd plist (macOS)
+   or a systemd user timer / crontab entry (Linux) with absolute paths and
+   `ANTHROPIC_API_KEY` (or `ATHENAEUM_CLAUDE_CLI_BIN`, under
+   `llm.provider: claude-cli`) resolved into the unit itself — the exact gap
+   the hand-written Option B above has (no key in its environment, so it
+   fails every night under cron with `ANTHROPIC_API_KEY not set`). Refuses
+   outright if no key source is available instead of installing a schedule
+   that would fail. `athenaeum schedule remove` undoes it. `athenaeum
+   doctor` reports whether a schedule is installed.
+
+   ```bash
+   athenaeum schedule install --path ~/knowledge
+   ```
+
 ## Smoke test
 
 Verify the pipeline without a live session:

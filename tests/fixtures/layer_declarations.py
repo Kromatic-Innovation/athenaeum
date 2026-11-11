@@ -65,6 +65,11 @@ MODULE_LAYER: dict[str, int] = {
     "owner": 0,
     "pagination": 0,
     "progress": 0,
+    # Issue athenaeum#2383: the serve-time remote-profile pins -- own
+    # docstring states "Layering: L0 -- stdlib-only ..., no athenaeum
+    # imports at all", so both the L2 config resolvers and the L5 MCP
+    # server can depend on it.
+    "remote_policy": 0,
     "schema_migrations": 0,
     "t1_census": 0,
     "vecmath": 0,
@@ -94,6 +99,7 @@ MODULE_LAYER: dict[str, int] = {
     "text_overlap": 1,     # pure text arithmetic, no I/O
     "session_recovery": 1,  # "L0/L1-boundary primitive" -> upper bound
     "transcript_verify": 1,  # "L0/L1-boundary primitive" -> upper bound
+    "memory_discovery": 1,  # issue athenaeum#2316: "Layering: L1 (data model...)"
     # L2 -- primitives/utilities/services one tier up.
     "bounce_contract": 2,  # "L2-ish" -> upper (non-boundary) bound stated
     "cli_tool_bridge": 2,  # athenaeum#1951: module docstring states "Layering: L2"
@@ -303,6 +309,9 @@ MODULE_LAYER: dict[str, int] = {
     # issue athenaeum#2298: "athenaeum doctor"'s checks -- own docstring states
     # "Layering: L4 domain/pipeline".
     "doctor": 4,
+    # issue athenaeum#2304: schedule install/remove generators -- own
+    # docstring states "Layering: L4 domain/pipeline".
+    "schedule": 4,
     # issue athenaeum#2156: SessionEnd anchor-step orchestration (budget/deadline
     # arithmetic, receipt-partition digesting via receipt_sealers.py L2, and
     # promptwitness anchoring) -- kept OUT of claude_code_adapter.py (L5)
@@ -323,6 +332,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_contact_surface_lint": 5,  # issue athenaeum#2218
     "_cmd_decompose_page": 5,
     "_cmd_correct_notes": 5,
+    "_cmd_corrections_trust_dryrun": 5,  # issue athenaeum#2331 (TG3)
     "_cmd_paste_cleanup": 5,
     "_cmd_authority": 5,
     "_cmd_axiom": 5,
@@ -341,6 +351,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_enumerate": 5,
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,
+    "_cmd_import_memory": 5,  # issue athenaeum#2316
     "_cmd_index": 5,
     "_cmd_lifecycle": 5,
     "_cmd_measure": 5,
@@ -363,6 +374,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
     "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
+    "_cmd_schedule": 5,  # issue athenaeum#2304
     "_cmd_schema": 5,
     "_cmd_serve": 5,
     "_cmd_storage": 5,

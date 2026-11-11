@@ -35,6 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+from athenaeum.comparator import VERDICT_DUPLICATE, compare_pages, page_from_path
+from athenaeum.config import resolve_reversible_verdict_auto_apply_enabled
 from athenaeum.models import is_tombstone, parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import (
     NAME_COLLISION_RATIONALE_PREFIX,
@@ -49,6 +51,14 @@ if TYPE_CHECKING:
     # ``athenaeum.pending_merges``'s own audit hook) stays deferred, so this
     # module pays nothing extra for it.
     from athenaeum.audit_on_touch import AuditOnTouchCounters
+
+    # Annotation-only (issue athenaeum#2364): both only ever appear in a
+    # string-deferred signature/return annotation below (`from __future__
+    # import annotations` is active at the top of this module) — neither is
+    # constructed or inspected by this module's own runtime code, so there
+    # is nothing to pay for by keeping them out of the real import set.
+    from athenaeum.comparator import ComparatorPage, CompareOutcome  # noqa: F401
+    from athenaeum.provider import LLMBackend
 
 log = logging.getLogger(__name__)
 
@@ -394,11 +404,68 @@ def _find_open_merge_id(merges_path: Path, sources: list[str], target_name: str)
     return None
 
 
+def _content_comparator_confidence(
+    canonical: CollisionPage,
+    others: tuple[CollisionPage, ...],
+    *,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None,
+) -> tuple[float, list[CompareOutcome]]:
+    """Real confidence that *canonical* and every other page in a collision
+    genuinely carry the SAME content — issue athenaeum#2364.
+
+    Compares *canonical* against each page in *others* via the existing
+    five-verdict comparator (:func:`athenaeum.comparator.compare_pages`,
+    issue athenaeum#715), content rather than name. ``1.0`` ONLY when every
+    pair settles as :data:`~athenaeum.comparator.VERDICT_DUPLICATE` (Gate 2
+    judged the bodies truly equivalent, not merely similarly named) — the
+    exact, narrow equality this module's write path mandates (see
+    :func:`resolve_name_collisions`'s own docstring for why a fudge like
+    ``>= 0.99`` is refused). Anything else — a settled non-duplicate verdict
+    (``distinct``/``contradiction``/``specialization``/``underdetermined``)
+    OR a pair the comparator cannot settle at all (``client=None``, a
+    transient Gate-2 failure, an unreadable page) — returns ``0.0``: sharing
+    only a ``name:`` key is never, by itself, evidence of identity.
+
+    :mod:`athenaeum.comparator`'s own module docstring is explicit that it
+    never emits a numeric confidence ("No confidence thresholds, anywhere")
+    — the binary collapse here (``duplicate`` -> ``1.0``, every other
+    verdict -> ``0.0``) is THIS module's own mapping from a verdict to the
+    one scalar :func:`~athenaeum.pending_merges.write_pending_merge`'s
+    mandatory ``confidence`` field needs, not a reintroduction of a scalar
+    into the comparator's own decision logic.
+
+    Returns the confidence plus every :class:`~athenaeum.comparator.CompareOutcome`
+    computed along the way (empty once a non-duplicate pair short-circuits
+    the rest), so a caller can ledger or log them without a second
+    comparison.
+    """
+    try:
+        canonical_page_cmp = page_from_path(canonical.path)
+    except (OSError, UnicodeDecodeError):
+        return 0.0, []
+    outcomes: list[CompareOutcome] = []
+    for other in others:
+        if other.path == canonical.path:
+            continue
+        try:
+            other_page_cmp = page_from_path(other.path)
+        except (OSError, UnicodeDecodeError):
+            return 0.0, outcomes
+        outcome = compare_pages(canonical_page_cmp, other_page_cmp, client=client, config=config)
+        outcomes.append(outcome)
+        if outcome.verdict != VERDICT_DUPLICATE:
+            return 0.0, outcomes
+    return 1.0, outcomes
+
+
 def resolve_name_collisions(
     wiki_root: Path,
     *,
     auto_merge: bool,
     dry_run: bool,
+    client: "LLMBackend | None" = None,
+    config: dict[str, Any] | None = None,
     audit_client: Any = None,
     audit_model: str = "",
     audit_counters: "AuditOnTouchCounters | None" = None,
@@ -406,6 +473,60 @@ def resolve_name_collisions(
     audit_now: "Callable[[], datetime] | None" = None,
 ) -> dict[str, int]:
     """Scan, propose, and (when enabled) auto-resolve name collisions.
+
+    ``client`` / ``config`` (issue athenaeum#2364, both keyword-only,
+    ``None`` default): wired into :func:`_content_comparator_confidence`
+    below, which replaces the hard-coded ``confidence=1.0`` every
+    :func:`~athenaeum.pending_merges.write_pending_merge` call used to pass
+    — including for a collision this function's OWN ``classify_collision``
+    already called ``ambiguous`` — with a REAL score from the five-verdict
+    comparator (:mod:`athenaeum.comparator`, issue athenaeum#715), judging
+    page CONTENT rather than the shared ``name:`` that got the pair into
+    this scan in the first place. ``client=None`` (every caller before this
+    issue, and every caller that does not pass one) degrades exactly like
+    every other Gate-2-unavailable call site in this codebase: Gate 2
+    reports "no verdict" for every pair, so the computed confidence is
+    ``0.0`` (never a fabricated ``1.0``) and nothing new auto-applies —
+    byte-identical to pre-athenaeum#2364 behaviour for the write-queue path
+    (see below for the ONE exception: the stored confidence number itself).
+
+    A collision's confidence is **exactly** ``1.0`` only when the
+    comparator settles EVERY other page in the group as
+    :data:`~athenaeum.comparator.VERDICT_DUPLICATE` against the canonical
+    page — true content equivalence, not a similarity score crossing a
+    threshold (:mod:`athenaeum.comparator` never emits a scalar at all, so
+    there is no threshold to fudge; see
+    :func:`_content_comparator_confidence`'s own docstring). When that
+    confidence is ``1.0`` AND
+    :func:`athenaeum.config.resolve_reversible_verdict_auto_apply_enabled`
+    is true (``librarian.reversible_verdict_auto_apply_enabled`` — the SAME
+    operator opt-in :mod:`athenaeum.auto_apply` gates its own reversible
+    fold-on-duplicate apply with), the pair is folded immediately via
+    :func:`~athenaeum.pending_merges.resolve_merge` with
+    ``auto_applied=True`` — the identical non-human-approved marker (issue
+    athenaeum#602) both :mod:`athenaeum.auto_apply` and this function's own
+    pre-existing ``unambiguous``/*auto_merge* branch already use — so the
+    proposal :func:`~athenaeum.pending_merges.write_pending_merge` just
+    wrote is immediately resolved (withdrawn from the unresolved queue)
+    rather than left for a human. This is a SEPARATE auto-apply path from
+    the pre-existing deterministic ``unambiguous``/*auto_merge* one below:
+    a collision ``classify_collision`` calls ``ambiguous`` (distinct
+    bodies/frontmatter by that function's stricter, no-LLM rule) can still
+    auto-apply here if the comparator's own content judgement settles it as
+    a true duplicate — and conversely a collision already auto-merged by
+    the deterministic path is never re-processed by this one (checked via
+    ``merged_this_collision`` below) to avoid writing or resolving the same
+    pair twice. Bypasses :mod:`athenaeum.auto_apply`'s own
+    ``enact_verdict_effect``/verdict-ledger-freshness machinery
+    deliberately: that machinery exists to protect a CONTINUOUSLY
+    re-scanned, memoized comparator pass (:mod:`athenaeum.wiki_dedupe`)
+    against auto-applying a since-gone-stale verdict; this scan computes
+    its verdict FRESH, from scratch, every single run, with no memoization
+    at all, so there is no staleness case for that machinery to guard
+    against, and reaching for it would add a :class:`~athenaeum.runlock.RunLock`
+    + verdict-ledger dependency this deterministic scan has never needed.
+    See the PR description for this issue for the exact rationale
+    recorded at implementation time.
 
     ``audit_client`` / ``audit_model`` / ``audit_counters`` /
     ``audit_freshness_hours`` / ``audit_now`` (issue athenaeum#1627): forwarded
@@ -561,20 +682,28 @@ def resolve_name_collisions(
             draft_full_text = canonical.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             draft_full_text = canonical.body
-        # Issue athenaeum#1620: deliberately unscreened by T1. This proposal's
-        # evidence is name IDENTITY — two-plus pages literally sharing a
+        # Issue athenaeum#1620: deliberately unscreened by T1. `verdict`
+        # above is name IDENTITY — two-plus pages literally sharing a
         # `name:` value (see `scan_name_collisions` above) — a deterministic
-        # equality check with no LLM client anywhere in this module's call
-        # chain (`resolve_name_collisions` takes no client parameter at
-        # all). A reasoning screen adds nothing over a same-string
-        # comparison, and the `unambiguous` branch below already auto-merges
-        # without ever reaching a human queue, so there is no queue-side
-        # cost T1 could reduce either way. Routing this through T1 would
-        # mean threading an LLM client (plus usage/provider/authority
-        # manifest/spend-ceiling participation) into a writer that has never
-        # needed one — an architecture change, not a fix. Recorded here so
-        # the gap is attributable rather than silent (AC3).
+        # equality check that reads no model output. Issue athenaeum#2364 adds
+        # a SEPARATE, OPTIONAL content-comparator score below (`confidence`)
+        # that CAN take an LLM client, but that client only ever feeds the
+        # comparator's own Gate 2, never T1 — routing THIS proposal through a
+        # T1 reasoning screen on top would still mean threading a second,
+        # independent client (plus usage/provider/authority
+        # manifest/spend-ceiling participation) into a writer that never
+        # needed one for its OWN (name-identity) evidence — an architecture
+        # change, not a fix. Recorded here so the gap is attributable rather
+        # than silent (AC3).
         get_t1_census().record_unscreened(T1_UNSCREENED_NAME_COLLISION)
+        # Issue athenaeum#2364: the REAL content-comparator score, replacing
+        # the hard-coded `confidence=1.0` this call used to pass for every
+        # collision — ambiguous ones included. See
+        # `_content_comparator_confidence`'s docstring for the exact-1.0
+        # mapping.
+        confidence, _ = _content_comparator_confidence(
+            canonical, collision.pages, client=client, config=config
+        )
         write_pending_merge(
             merges_path,
             merge_target_name=canonical.path.stem,
@@ -587,7 +716,7 @@ def resolve_name_collisions(
             sources=sources,
             rationale=rationale,
             draft_merged_body=draft_full_text,
-            confidence=1.0,
+            confidence=confidence,
             write_kind=None,
             audit_client=audit_client,
             audit_model=audit_model,
@@ -595,6 +724,7 @@ def resolve_name_collisions(
             audit_freshness_hours=audit_freshness_hours,
             audit_now=audit_now,
         )
+        merged_this_collision = False
         if verdict == "unambiguous":
             unambiguous += 1
             if auto_merge:
@@ -610,6 +740,7 @@ def resolve_name_collisions(
                     )
                     if result.get("ok"):
                         merged += 1
+                        merged_this_collision = True
                         log.info(
                             "name-collision-auto-merged name=%r canonical=%s sources=%s",
                             collision.name,
@@ -640,6 +771,63 @@ def resolve_name_collisions(
                     )
         else:
             ambiguous += 1
+
+        # Issue athenaeum#2364: a SEPARATE auto-apply path from the
+        # deterministic one above — gated on the content comparator's own
+        # real score being EXACTLY 1.0 (every other page in the group
+        # settled `duplicate` against the canonical page) and on the
+        # operator's `librarian.reversible_verdict_auto_apply_enabled`
+        # opt-in (the same flag :mod:`athenaeum.auto_apply` gates its own
+        # reversible fold-on-duplicate apply with). Checked independently of
+        # `verdict` — a collision `classify_collision` called `ambiguous`
+        # can still land here if the comparator settles it as a true
+        # content duplicate — but skipped entirely when the deterministic
+        # branch above already resolved this exact pair, so the same pair
+        # is never resolved twice.
+        if (
+            not merged_this_collision
+            and confidence == 1.0
+            and resolve_reversible_verdict_auto_apply_enabled(config)
+        ):
+            merge_id = _find_open_merge_id(merges_path, sources, canonical.path.stem)
+            if merge_id is not None:
+                result = resolve_merge(
+                    merges_path,
+                    merge_id,
+                    "approve",
+                    note=(
+                        "athenaeum#2364 content-comparator auto-apply: every "
+                        "other page in this group scored a real 1.0 duplicate "
+                        "verdict against the canonical page "
+                        "(librarian.reversible_verdict_auto_apply_enabled)."
+                    ),
+                    wiki_root=wiki_root,
+                    auto_applied=True,
+                )
+                if result.get("ok"):
+                    merged += 1
+                    log.info(
+                        "name-collision-content-auto-applied name=%r canonical=%s "
+                        "sources=%s",
+                        collision.name,
+                        canonical.path.name,
+                        sources,
+                    )
+                else:
+                    log.warning(
+                        "name-collision-content-auto-apply-failed name=%r error=%s",
+                        collision.name,
+                        result.get("error_code"),
+                    )
+            else:
+                log.warning(
+                    "name-collision-content-auto-apply-block-not-found name=%r "
+                    "canonical=%s sources=%s — proposal was written but could "
+                    "not be re-found by value; left queued",
+                    collision.name,
+                    canonical.path.name,
+                    sources,
+                )
 
     return {
         "collisions": len(collisions),

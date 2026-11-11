@@ -21,8 +21,25 @@ leaf/service modules — :mod:`athenaeum.models`, :mod:`athenaeum.provenance`,
 :mod:`athenaeum.storage`, :mod:`athenaeum.compiled_exempt` (module-scope,
 issue athenaeum#1419 — see :func:`write_correction_handoff`; undeclared in
 ``tests/fixtures/layer_declarations.py`` same as every other importer of it),
-and (function-local, per call site — see :func:`_resolve_email_handle` and
-the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. Must never import
+:mod:`athenaeum.trust_graph` (module-scope, issue athenaeum#2331/TG3 — the
+pure `compare_sources` override layer; L1, so this stays a forward-only
+edge), :mod:`athenaeum.witness_attestation` (module-scope, issue
+athenaeum#2334/TG6 — :func:`_claim_attestation`'s fresh chain-intactness
+re-check; L2, same tier as this module, and it imports nothing of its own
+that leads back here, so this stays a forward-only edge too), and
+(function-local, per call site — see :func:`_resolve_email_handle` and
+the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. **Deliberately
+does NOT import** :mod:`athenaeum.transcript_receipts` — that module has
+a (function-local) edge to :mod:`athenaeum.intake`, which imports FROM
+this module (see below); importing it here would close a THREE-module
+import cycle (``corrections -> transcript_receipts -> intake ->
+corrections``), caught by `tests/test_import_graph_acyclic.py`'s whole-
+graph SCC guard. :func:`_lookup_receipt_by_witness_ref` therefore reads
+the `_transcript_receipts/*.jsonl` partitions with its OWN small,
+tolerant JSONL scan (deliberately duplicating
+`transcript_receipts._parse_jsonl_text`'s few lines rather than importing
+the module that owns it) instead of calling `transcript_receipts.
+iter_receipts`. Must never import
 :mod:`athenaeum.intake`,
 :mod:`athenaeum.librarian`, :mod:`athenaeum.merge`, or :mod:`athenaeum.tiers`
 — `intake.py` imports :func:`parse_batch_envelope` from here (the "valid
@@ -89,7 +106,7 @@ import json
 import logging
 import subprocess
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
@@ -115,6 +132,8 @@ from athenaeum.config import (
     resolve_corrections_retry_days,
     resolve_corrections_schema_slots,
     resolve_corrections_sensitive_fields,
+    resolve_source_trust_edges,
+    resolve_source_trust_enabled,
 )
 from athenaeum.models import (
     EntityIndex,
@@ -133,6 +152,19 @@ from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
 from athenaeum.store import FilesystemStore, Store, append_line_durable
+from athenaeum.trust_graph import (
+    EQUAL,
+    INCOMPARABLE,
+    OUTRANKED,
+    OUTRANKS,
+    UNKNOWN_EVIDENCE_KIND,
+    AttestedClaim,
+    SourceTrustEdge,
+    attestation_for,
+    attestation_tiebreak,
+    compare_sources,
+)
+from athenaeum.witness_attestation import AttestationIndex, resolve_default_witness_dir
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +258,16 @@ ALLOWED_RECORD_KEYS: frozenset[str] = frozenset(
         # the field/value allowlist+precedence machinery.
         "bucket",
         "valid_until",
+        # Issue athenaeum#2331 (TG3), failure class F5: a STRUCTURED
+        # rule-origin marker, set unconditionally by
+        # `rules.build_correction_record` for every record a shape rule
+        # compiles (both the general compile path, `rules.py:924`, and the
+        # preserved-log path, `rules.py:~2462`, share that one emit
+        # function). Deliberately NOT keyed on the free-text `note` field
+        # ("compiled by shape rule ...") — a human can override `note` via
+        # `spec.note`, which would silently blind the F5 guard below. See
+        # `_trust_edge_verdict`.
+        "rule_origin",
     }
 )
 
@@ -877,6 +919,220 @@ def _is_monotone_clear(value: Any, op: str) -> bool:
     return value in (None, "", False, 0)
 
 
+#: Source-type tokens that, per the 9-tier ladder, already occupy
+#: precedence rank 1 (`precedence.SOURCE_PRECEDENCE_TIERS`, athenaeum#2159).
+#: Used only by the F5 guard below -- NOT a new copy of the tier list (the
+#: issue's "no change to SOURCE_PRECEDENCE_TIERS" AC): this is a two-member
+#: set naming exactly the two tokens the guard must never let a rule-
+#: compiled correction outrank via an edge, not a ranking.
+_RANK_1_SOURCE_TYPES: frozenset[str] = frozenset({"user", "witnessed"})
+
+
+def _trust_edge_verdict(
+    *,
+    incoming_source: Any,
+    existing_source: Any,
+    trust_domain: dict[str, Any] | None,
+    trust_edges: Sequence[SourceTrustEdge],
+    incoming_is_rule_compiled: bool,
+) -> tuple[str, str] | None:
+    """Consult the trust-graph override layer for one (incoming, existing)
+    pair, or return ``None`` to mean "fall through to the ordinary
+    `source_rank` comparison, unchanged" (issue athenaeum#2331, TG3).
+
+    ``None`` is returned, deliberately, in every one of these cases:
+
+    - ``trust_domain`` is ``None`` or ``trust_edges`` is empty — the caller
+      encodes "flag off" and "no edges configured" identically this way,
+      satisfying AC1 ("either one off gives byte-identical behaviour")
+      without this function needing to know which.
+    - :func:`athenaeum.trust_graph.compare_sources` found no edge that
+      actually matches this pair's domain, and fell back to its own
+      `source_rank` comparison internally. That fallback's reason always
+      reads ``"source_rank fallback: ..."`` — never ``"edge[...]"`` — per
+      its own docstring contract, so checking the reason prefix distinguishes
+      "an edge decided this" from "no edge applied" without this module
+      re-deriving a description or duplicating `compare_sources`'s matching
+      logic. This keeps every pair an operator's edges do NOT touch on
+      exactly today's reason text, even with the flag on.
+
+    Failure class F5 (`docs/design/trust-graph.md` §4): a rule-compiled
+    correction (``incoming_is_rule_compiled``, from the record's structured
+    ``rule_origin`` marker — never the free-text ``note``) must never be
+    promoted over a ``user:``/``witnessed:`` incumbent by an edge. Both
+    `rules.py` emit paths (the general compile path, `rules.py:924`, and
+    the preserved-log path, `rules.py:~2462`) share the one
+    `build_correction_record` function that stamps ``rule_origin``, so this
+    one guard covers both. The guard forces ``trust_edges=()`` for this
+    call only — the ordinary rank comparison below already defers/escalates
+    correctly on its own, because `rules.MACHINE_TIER_SOURCE_TYPES`
+    (`script`/`api`) is capped well below rank 1.
+    """
+    if trust_domain is None or not trust_edges:
+        return None
+
+    effective_edges = trust_edges
+    if incoming_is_rule_compiled:
+        try:
+            existing_ref = parse_source(existing_source)
+        except ValueError:
+            # Same defensive handling as `precedence.source_rank` for a
+            # malformed source -- this guard must never be the first thing
+            # in this module to raise on bad input it did not create.
+            existing_ref = None
+        if existing_ref is not None and existing_ref.type in _RANK_1_SOURCE_TYPES:
+            effective_edges = ()
+
+    if not effective_edges:
+        return None
+
+    result = compare_sources(incoming_source, existing_source, trust_domain, edges=effective_edges)
+    if not result.reason.startswith("edge["):
+        # No edge actually fired for this pair/domain -- `compare_sources`
+        # fell back to `source_rank` internally. Let the caller's own
+        # (identical) rank comparison produce today's verdict and reason.
+        return None
+    if result.relation == OUTRANKS:
+        return "apply", f"trust edge: {result.reason}"
+    if result.relation == OUTRANKED:
+        return "defer", f"trust edge: {result.reason}"
+    if result.relation == INCOMPARABLE:
+        return "escalate", f"trust edge: {result.reason}"
+    return None  # pragma: no cover - EQUAL never carries an "edge[" reason
+
+
+#: Duplicated from `transcript_receipts.RECEIPTS_DIRNAME` (issue
+#: athenaeum#2334) -- not imported, per the module docstring's "Deliberately
+#: does NOT import `athenaeum.transcript_receipts`" note (the import-cycle
+#: guard, `tests/test_import_graph_acyclic.py`).
+_RECEIPTS_DIRNAME = "_transcript_receipts"
+
+
+def _iter_receipt_dicts(wiki_root: Path) -> Iterable[dict[str, Any]]:
+    """Every receipt record across every monthly ``_transcript_receipts/
+    *.jsonl`` partition, as a raw ``dict`` (issue athenaeum#2334, TG6).
+
+    Deliberately a SEPARATE, small reimplementation of
+    `transcript_receipts.iter_receipts`/`_parse_jsonl_text` -- never an
+    import of that module, which would close an import cycle (see the
+    module docstring). Tolerates a torn trailing line exactly like the
+    original: a per-line ``json.JSONDecodeError`` is skipped, never
+    raised.
+    """
+    receipts_dir = wiki_root / _RECEIPTS_DIRNAME
+    if not receipts_dir.is_dir():
+        return
+    for path in sorted(receipts_dir.glob("*.jsonl")):
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # torn trailing write or hand-edit; skip
+            if isinstance(record, dict):
+                yield record
+
+
+def _lookup_receipt_by_witness_ref(wiki_root: Path, witness_ref: str) -> dict[str, Any] | None:
+    """Find the receipt record minted for *witness_ref* (issue
+    athenaeum#2334, TG6).
+
+    The join key IS `witness_ref` itself — the exact ``<ledger_id>:<seq>``
+    string `frontmatter_edit.witnessed_source_fields` writes onto a page's
+    own frontmatter is the SAME string `transcript_receipts.
+    write_receipt_for_origin` stamps onto the matching receipt's own
+    `witness_ref` field. No `(origin_scope, memory_digest)` lookup is
+    needed or possible here — a field-correction target is a structured
+    entity page, not the `AutoMemoryFile` claim shape that lookup key
+    assumes.
+
+    Ties (more than one receipt sharing a `witness_ref` — a re-run, or two
+    claims witnessed by the same ledger line) break on the most recently
+    recorded, matching every other receipt lookup in this codebase
+    (`transcript_receipts.lookup_receipt` / `ReceiptRun.lookup`).
+    """
+    candidates = [
+        r for r in _iter_receipt_dicts(wiki_root) if r.get("witness_ref") == witness_ref
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: str(r.get("recorded_at", "")))
+    return candidates[-1]
+
+
+def _claim_attestation(
+    source: Any,
+    meta: dict[str, Any],
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+) -> AttestedClaim:
+    """Decision-time attestation for one side of a `decide_verdict`
+    comparison (issue athenaeum#2334, TG6).
+
+    *meta* is the claim's own frontmatter dict. `witness_ref` is written
+    only alongside a page's page-level `source:`
+    (`frontmatter_edit.witnessed_source_fields`) — never onto a
+    `field_sources.<field>` entry, which carries only ``{value, source}``.
+    So this is consulted ONLY when *source* equals *meta*'s own
+    page-level `source` — a `field_sources` entry's source is a
+    DIFFERENT, more specific claim, and must never borrow the page's
+    attestation.
+
+    Loads a FRESH `witness_attestation.AttestationIndex` on every call
+    that actually has a `witness_ref` to check — deliberately never
+    cached across records (failure class F6, `docs/design/trust-graph.md`
+    §4): a chain break discovered after an earlier receipt was written
+    must demote THIS decision, not reproduce whatever `chain_ok` looked
+    like back when the receipt was written. On a store with no ledger
+    (AC5, today's host state) no claim ever carries a `witness_ref`, so
+    this returns `trust_graph.NO_ATTESTATION` with zero I/O.
+
+    Demotes to `chain_intact=False` (never trusts `chain_intact_through`
+    at all) when the loaded index has no live ledger
+    (`ledger_present` is `False`) or when the `ledger_id` named in
+    `witness_ref` doesn't match this index's own ledger (Seer finding on
+    PR athenaeum#2410): `chain_intact_through` answers "is THIS chain
+    unbroken through seq N" with no notion of WHICH ledger `seq` came
+    from, so an absent ledger (`first_break_seq` vacuously `None`) or a
+    `seq` that collides with a foreign ledger's own numbering must never
+    read as "verified" — that would let an unverifiable receipt's stored
+    strength decide a tie-break, exactly the promotion-in-disguise AC1
+    forbids.
+    """
+    witness_ref = meta.get("witness_ref")
+    if not isinstance(witness_ref, str) or not witness_ref or meta.get("source") != source:
+        return attestation_for(None)
+    try:
+        ref_ledger_id, seq_text = witness_ref.rsplit(":", 1)
+        seq = int(seq_text)
+    except (IndexError, ValueError):
+        return attestation_for(None)
+    receipt = _lookup_receipt_by_witness_ref(wiki_root, witness_ref)
+    if receipt is None:
+        return attestation_for(None)
+    attestation_index = AttestationIndex.load(resolve_default_witness_dir(), config=config)
+    chain_intact = (
+        attestation_index.ledger_present
+        and attestation_index.ledger_id == ref_ledger_id
+        and attestation_index.chain_intact_through(seq)
+    )
+    return attestation_for(
+        {
+            "witness_ref": witness_ref,
+            "chain_intact": chain_intact,
+            "witness_strength_verified": receipt.get("witness_strength_verified"),
+            "witness_anchor_source": receipt.get("witness_anchor_source"),
+        }
+    )
+
+
 def decide_verdict(
     *,
     existing_source: Any,
@@ -888,6 +1144,10 @@ def decide_verdict(
     op: str,
     existing_updated: Any,
     incumbent_attributed: bool = False,
+    trust_domain: dict[str, Any] | None = None,
+    trust_edges: Sequence[SourceTrustEdge] = (),
+    incoming_is_rule_compiled: bool = False,
+    attestation: tuple[AttestedClaim, AttestedClaim] | None = None,
 ) -> tuple[str, str]:
     """§6.2 conflict policy for a single value comparison.
 
@@ -897,10 +1157,24 @@ def decide_verdict(
     this function only decides the case where a real value delta exists.
 
     The "incumbent is ``user:`` and the correction is not → defer" row of
-    §6.2's table needs no separate branch: ``user`` occupies precedence
-    rank 1 alone, so any non-``user`` incoming source already has a HIGHER
-    (worse) numeric rank and is deferred by the ordinary rank comparison
-    below.
+    §6.2's table needs no separate branch: ``user`` and ``witnessed`` share
+    precedence rank 1 (athenaeum#2159), so any incoming source outside that
+    pair already has a HIGHER (worse) numeric rank and is deferred by the
+    ordinary rank comparison below. (Stale comment fix, issue
+    athenaeum#2331/TG3 — this paragraph used to say "user occupies rank 1
+    alone"; the logic it describes was never wrong, only the prose.)
+
+    ``trust_domain``/``trust_edges``/``incoming_is_rule_compiled`` (issue
+    athenaeum#2331, TG3): the operator-overridable trust-graph layer, gated
+    entirely by the caller. ``trust_domain`` is ``None`` or ``trust_edges``
+    is empty (``librarian.source_trust_enabled`` default-off, or no edges
+    configured — "either one off" per the issue) means this function is
+    BYTE-IDENTICAL to its pre-TG3 self (AC1): neither is consulted for a
+    ``monotone`` op (F9, failure class in `docs/design/trust-graph.md` §4),
+    and even for a non-monotone op, :func:`_trust_edge_verdict` returns
+    ``None`` whenever no edge actually fires for this pair, falling through
+    to the ordinary rank comparison below unchanged. See
+    :func:`_trust_edge_verdict` for the F5 (machine-tier-via-rules) guard.
 
     ``incumbent_attributed`` (issue athenaeum#1803, default ``False`` so every
     existing caller keeps today's behaviour): whether the caller resolved
@@ -908,6 +1182,17 @@ def decide_verdict(
     entry, as opposed to falling back to the page-level ``source:``. Only
     consulted at the final "equal rank, indistinguishable dates" branch —
     see the module docstring's decisions list.
+
+    ``attestation`` (issue athenaeum#2334, TG6; default ``None`` so every
+    existing caller is byte-identical — AC1/AC5): a
+    ``(incoming, existing)`` pair of :class:`athenaeum.trust_graph.
+    AttestedClaim`, built by the caller (:func:`_claim_attestation`) ONLY
+    when ``librarian.source_trust_enabled`` resolves on. Consulted in
+    exactly ONE place below — the ``incoming_rank == existing_rank``
+    branch, BEFORE the ``observed_at`` tie-break — which is what makes
+    "attestation never overrides rank" (operator ruling OQ1) structural:
+    every branch that could have decided this on rank alone has already
+    returned by the time this parameter is ever read.
     """
     if existing_value == incoming_value:
         return "noop", "identical value (delta gate)"
@@ -916,16 +1201,60 @@ def decide_verdict(
     existing_rank = source_rank(existing_source)
 
     if monotone:
+        # F9 (docs/design/trust-graph.md §4): edges are NEVER consulted for
+        # a monotone op. This branch returns unconditionally before
+        # `trust_domain`/`trust_edges` are ever read.
         if _is_monotone_clear(incoming_value, op):
             if incoming_rank == 1:
                 return "apply", "monotone unset at user: tier"
             return "defer", "monotone unset requires user: tier"
         return "apply", "monotone set by any permitted writer"
 
+    edge_verdict = _trust_edge_verdict(
+        incoming_source=incoming_source,
+        existing_source=existing_source,
+        trust_domain=trust_domain,
+        trust_edges=trust_edges,
+        incoming_is_rule_compiled=incoming_is_rule_compiled,
+    )
+    if edge_verdict is not None:
+        return edge_verdict
+
     if incoming_rank < existing_rank:
         return "apply", f"incoming rank {incoming_rank} outranks existing rank {existing_rank}"
     if incoming_rank > existing_rank:
         return "defer", f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}"
+
+    # Equal rank, differing value: TG6 (issue athenaeum#2334) attestation
+    # tie-break, consulted BEFORE the observed_at tie-break below (operator
+    # ruling OQ1 — see the `attestation` parameter's own docstring for why
+    # this placement is what keeps attestation from ever overriding rank).
+    # `attestation_tiebreak` returns EQUAL whenever neither side has an
+    # effective attestation above "none" (AC1: unverified/local-clock-only
+    # has no effect; AC2: a broken chain demotes to "none", which compares
+    # identically) — this falls straight through to observed_at, unchanged,
+    # exactly as if `attestation` had been omitted (AC5: a store with no
+    # ledger never has a `witness_ref` to attest in the first place).
+    if attestation is not None:
+        incoming_attestation, existing_attestation = attestation
+        att_relation = attestation_tiebreak(incoming_attestation, existing_attestation)
+        if att_relation == OUTRANKS:
+            return (
+                "apply",
+                "equal rank, attestation tie-break: incoming "
+                f"{incoming_attestation.effective_strength!r} outranks existing "
+                f"{existing_attestation.effective_strength!r}",
+            )
+        if att_relation == OUTRANKED:
+            return (
+                "defer",
+                "equal rank, attestation tie-break: existing "
+                f"{existing_attestation.effective_strength!r} outranks incoming "
+                f"{incoming_attestation.effective_strength!r}",
+            )
+        assert att_relation == EQUAL  # pragma: no branch - attestation_tiebreak is total
+        # EQUAL (including "neither side is attested") falls through to the
+        # observed_at tie-break below, unchanged.
 
     # Equal rank, differing value: break on observed_at (§6.2's own
     # tie-break). No per-value observed_at is persisted (§4's per-value
@@ -1575,6 +1904,40 @@ def process_correction_record(
                 "recorded-as-prose", f"no schema slot for {field_name!r}; recorded as prose"
             )
 
+    # Trust-graph override layer (issue athenaeum#2331, TG3) -- resolved once
+    # per record, after `write_field` is final, and consulted by BOTH the
+    # scalar `decide_verdict` call below and the `op == "remove"` branch
+    # further down. "Either one off gives byte-identical behaviour" (AC1):
+    # `trust_edges` collapses to `()` whenever the flag is off OR no edges
+    # are configured, in which case `_trust_edge_verdict` always returns
+    # `None` and every caller below falls through to the untouched
+    # `source_rank` comparison.
+    trust_edges: Sequence[SourceTrustEdge] = (
+        resolve_source_trust_edges(config) if resolve_source_trust_enabled(config) else ()
+    )
+    # Domain (docs/design/trust-graph.md §2.3/§2.3.1): entity type is the
+    # target page's own `type:` (`existing_meta`, populated above for both
+    # the "existing" and newly-"creatable" resolution kinds -- see
+    # `resolve_target_for_apply`'s `TargetResolution.entity_type`, which is
+    # only ever set on the CREATE branch, so `existing_meta.get("type")` is
+    # the one value that is always populated here). `evidence_kind` is
+    # `UNKNOWN_EVIDENCE_KIND`: neither this module nor `rules.py` threads an
+    # evidence-kind-shaped value through a correction record today -- see
+    # §2.3.1 ("Evidence-kind at seam 1/seam 2 is `unknown` today") -- so an
+    # edge naming a specific evidence kind can never match here (the
+    # unknown-kind matching rule, same section); only an edge with
+    # `evidence_kind` absent ("any") can fire.
+    trust_domain: dict[str, Any] = {
+        "entity_type": existing_meta.get("type"),
+        "field": write_field,
+        "evidence_kind": UNKNOWN_EVIDENCE_KIND,
+    }
+    # Failure class F5: whether THIS record was compiled by a shape rule,
+    # read off the structured `rule_origin` marker (never the free-text
+    # `note`) -- see `rules.build_correction_record` and the F5 guard in
+    # `_trust_edge_verdict`.
+    incoming_is_rule_compiled = bool(effective.get("rule_origin"))
+
     # §7.1 sensitivity routing -- redirects BOTH the read of "existing
     # attribution" and the eventual write to the mapped surface, regardless
     # of the destination the correction named. ``surface_class`` was already
@@ -1640,6 +2003,23 @@ def process_correction_record(
             incumbent_attributed = (
                 isinstance(existing_fs, dict) and write_field in existing_fs
             )
+            # TG6 (issue athenaeum#2334): attestation tie-break inputs,
+            # gated on the SAME flag as the edge layer above (no new flag)
+            # -- `attestation` stays `None` (byte-identical, AC1/AC5) when
+            # the flag is off. `effective` is the compiled correction's
+            # own dict (never carries `witness_ref` at this seam -- see
+            # `_claim_attestation`'s docstring), so the incoming side
+            # resolves to `trust_graph.NO_ATTESTATION` with zero I/O.
+            attestation: tuple[AttestedClaim, AttestedClaim] | None = None
+            if resolve_source_trust_enabled(config):
+                attestation = (
+                    _claim_attestation(
+                        source, effective, wiki_root=index.wiki_root, config=config
+                    ),
+                    _claim_attestation(
+                        existing_source, read_meta, wiki_root=index.wiki_root, config=config
+                    ),
+                )
             verdict, reason = decide_verdict(
                 existing_source=existing_source,
                 incoming_source=source,
@@ -1650,6 +2030,10 @@ def process_correction_record(
                 op=op,
                 existing_updated=existing_meta.get("updated"),
                 incumbent_attributed=incumbent_attributed,
+                trust_domain=trust_domain,
+                trust_edges=trust_edges,
+                incoming_is_rule_compiled=incoming_is_rule_compiled,
+                attestation=attestation,
             )
     elif op == "add":
         existing_list = read_meta.get(write_field)
@@ -1728,17 +2112,30 @@ def process_correction_record(
             incoming_rank = source_rank(source)
             existing_rank = source_rank(existing_source)
             if monotone:
+                # F9: edges are NEVER consulted for a monotone op -- same
+                # guard as `decide_verdict`'s own monotone branch, returned
+                # before `trust_domain`/`trust_edges` are ever read.
                 if incoming_rank == 1:
                     verdict, reason = "apply", "monotone unset at user: tier"
                 else:
                     verdict, reason = "defer", "monotone unset requires user: tier"
-            elif incoming_rank <= existing_rank:
-                verdict, reason = "apply", "incoming authority permits removal"
             else:
-                verdict, reason = (
-                    "defer",
-                    f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
+                edge_verdict = _trust_edge_verdict(
+                    incoming_source=source,
+                    existing_source=existing_source,
+                    trust_domain=trust_domain,
+                    trust_edges=trust_edges,
+                    incoming_is_rule_compiled=incoming_is_rule_compiled,
                 )
+                if edge_verdict is not None:
+                    verdict, reason = edge_verdict
+                elif incoming_rank <= existing_rank:
+                    verdict, reason = "apply", "incoming authority permits removal"
+                else:
+                    verdict, reason = (
+                        "defer",
+                        f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
+                    )
 
     if verdict == "attribution-non-personal":
         # Issue athenaeum#2210: a D1-narrow value never gets filed, whether
@@ -2130,6 +2527,162 @@ def process_batch_file(
         envelope=envelope,
         records_total=len(record_lines),
         results=results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Trust-graph dry-run flip report (issue athenaeum#2331, TG3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrustDryRunFlip:
+    """One correction record whose verdict would change if
+    ``librarian.source_trust_enabled`` were turned on, from
+    :func:`run_trust_dryrun`. Read-only by construction: everything this
+    is built from comes from two ``dry_run=True`` passes over the SAME
+    on-disk batches, neither of which ever writes (see
+    :func:`process_correction_record`'s own ``if dry_run:`` early return)."""
+
+    batch_path: Path
+    correction_id: str
+    target: Any
+    op: str | None
+    field: str | None
+    baseline_disposition: str
+    baseline_reason: str
+    candidate_disposition: str
+    candidate_reason: str
+
+
+@dataclass(frozen=True)
+class TrustDryRunReport:
+    """:func:`run_trust_dryrun`'s full result: every would-flip verdict,
+    the edges that produced them, and whether any CONFIGURED edge names an
+    evidence kind -- which, at seams 1/2 today, can never actually fire
+    (`docs/design/trust-graph.md` §2.3.1's unknown-kind matching rule: an
+    edge naming a kind never matches a claim whose evidence kind is
+    :data:`athenaeum.trust_graph.UNKNOWN_EVIDENCE_KIND`, and neither seam
+    threads anything else through yet). That flag exists so a caller can
+    render an explicit warning -- "zero flips" must never be read as "this
+    edge has no effect on your data" when the real reason is "this edge
+    cannot match at this seam today".
+    """
+
+    flips: tuple[TrustDryRunFlip, ...]
+    edges: tuple[SourceTrustEdge, ...]
+    has_evidence_kind_scoped_edge: bool
+
+
+def _dry_pass(
+    *, raw_root: Path, wiki_root: Path, knowledge_root: Path, config: dict[str, Any] | None
+) -> list[BatchOutcome]:
+    """Run every correction batch under *raw_root* once, ``dry_run=True``,
+    against a FRESH :class:`EntityIndex`/registry/overlay -- never shared
+    with another pass, so two hypothetical passes over the same on-disk
+    batches (e.g. :func:`run_trust_dryrun`'s baseline vs. candidate) cannot
+    see each other's in-memory-only creates."""
+    index = EntityIndex(wiki_root)
+    registry_entities = load_registry(knowledge_root)
+    dry_run_pages: DryRunPageOverlay = {}
+    outcomes: list[BatchOutcome] = []
+    for path, source, envelope in find_correction_batches(raw_root):
+        outcomes.append(
+            process_batch_file(
+                path,
+                envelope,
+                source,
+                index=index,
+                knowledge_root=knowledge_root,
+                config=config,
+                dry_run=True,
+                registry_entities=registry_entities,
+                dry_run_pages=dry_run_pages,
+            )
+        )
+    return outcomes
+
+
+def run_trust_dryrun(
+    *,
+    raw_root: Path,
+    wiki_root: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+) -> TrustDryRunReport:
+    """The read-only trust-graph flip report (issue athenaeum#2331, TG3): every
+    correction whose verdict would change if the trust edges ALREADY
+    declared in *config* (``librarian.source_trust_edges``) were consulted,
+    regardless of whether ``librarian.source_trust_enabled`` is currently
+    on or off. Never mutates the store (AC: "must work with the flag off"
+    and "does not mutate the store") -- both passes below call
+    :func:`process_batch_file` with ``dry_run=True``, which never writes.
+
+    Runs TWO read-only passes over the identical on-disk batches:
+
+    - **baseline**: *config* exactly as given -- today's live behaviour,
+      whatever ``source_trust_enabled`` currently is.
+    - **candidate**: *config* with ``librarian.source_trust_enabled``
+      forced ``True`` -- "what if an operator flipped the flag right now,
+      with the edges already on file". Edges themselves are never
+      invented or altered; only the flag is overridden, in an in-memory
+      copy (the on-disk config is never touched).
+
+    A flip is any record whose ``(disposition, reason)`` differs between
+    the two passes. Matched positionally (same batch file, same line
+    index) rather than by ``correction_id``, because two distinct records
+    can legitimately share one (same target/op/field/value computed by
+    :func:`compute_correction_id`), and the two passes always iterate the
+    identical set of batch files in the identical order.
+    """
+    edges = resolve_source_trust_edges(config)
+    has_evidence_kind_scoped_edge = any(
+        edge.domain.evidence_kind is not None for edge in edges
+    )
+
+    baseline_outcomes = _dry_pass(
+        raw_root=raw_root, wiki_root=wiki_root, knowledge_root=knowledge_root, config=config
+    )
+
+    candidate_config: dict[str, Any] = dict(config) if isinstance(config, dict) else {}
+    candidate_librarian = dict(candidate_config.get("librarian") or {})
+    candidate_librarian["source_trust_enabled"] = True
+    candidate_config["librarian"] = candidate_librarian
+    candidate_outcomes = _dry_pass(
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        knowledge_root=knowledge_root,
+        config=candidate_config,
+    )
+
+    flips: list[TrustDryRunFlip] = []
+    for baseline_batch, candidate_batch in zip(baseline_outcomes, candidate_outcomes):
+        for baseline_result, candidate_result in zip(
+            baseline_batch.results, candidate_batch.results
+        ):
+            if (
+                baseline_result.disposition == candidate_result.disposition
+                and baseline_result.reason == candidate_result.reason
+            ):
+                continue
+            flips.append(
+                TrustDryRunFlip(
+                    batch_path=baseline_batch.path,
+                    correction_id=baseline_result.correction_id,
+                    target=baseline_result.target,
+                    op=baseline_result.op,
+                    field=baseline_result.field,
+                    baseline_disposition=baseline_result.disposition,
+                    baseline_reason=baseline_result.reason,
+                    candidate_disposition=candidate_result.disposition,
+                    candidate_reason=candidate_result.reason,
+                )
+            )
+
+    return TrustDryRunReport(
+        flips=tuple(flips),
+        edges=edges,
+        has_evidence_kind_scoped_edge=has_evidence_kind_scoped_edge,
     )
 
 
@@ -2931,6 +3484,39 @@ def run_correction_phase(
     max_batch_bytes = resolve_corrections_max_batch_bytes(config)
     max_records_per_batch = resolve_corrections_max_records_per_batch(config)
     max_records_per_run = resolve_corrections_max_records_per_run(config)
+
+    # Issue athenaeum#2331 (TG3), Seer finding on athenaeum#2405: resolve and
+    # validate `librarian.source_trust_edges` ONCE, here, before this phase
+    # performs any write -- including `retry_parked_corrections` just below,
+    # which writes -- rather than lazily inside the per-record loop
+    # (`process_correction_record` -> `_trust_edge_verdict` ->
+    # `resolve_source_trust_edges`). Lazily, a malformed edges list raises
+    # `trust_graph.TrustGraphConfigError` only once the per-record loop
+    # reaches the first record that actually consults it, by which point
+    # earlier records in this same run may already have written pages --
+    # orphaned files and duplicate entities on retry. The two conditions
+    # for that failure (the flag on, and a bad edge) coincide exactly at
+    # the moment an operator first flips `source_trust_enabled` on after a
+    # config edit -- the single most likely way this code is first
+    # exercised for real, so "fails fast, writes nothing" matters more
+    # here than an ordinary deferred validation would.
+    #
+    # This is a fail-fast REORDERING only, not a new error-handling policy:
+    # the exception type and its message (naming the malformed edge) are
+    # unchanged, propagated to this function's caller exactly as an
+    # unhandled `TrustGraphConfigError` from deeper in the call stack
+    # already would have been -- no catch, no retry, no partial-rollback
+    # or cleanup logic added here. config is the same already-loaded dict
+    # for the whole call, so resolving it again per-record below still
+    # re-validates deterministically; this discards its result and exists
+    # solely to force that validation BEFORE any write, not to cache it.
+    #
+    # Gated on the flag (AC1): with `librarian.source_trust_enabled` off,
+    # `source_trust_edges` is never parsed here, or anywhere else in this
+    # phase -- byte-identical to before this fix. Mirrors the identical
+    # gate `process_correction_record` already applies per record.
+    if resolve_source_trust_enabled(config):
+        resolve_source_trust_edges(config)
 
     summary: dict[str, Any] = {
         "batches_processed": 0,
