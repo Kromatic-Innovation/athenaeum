@@ -50,14 +50,18 @@ no cap. Staging a file (copying it into
 an operator uses manually today — :mod:`athenaeum.memory_index`'s module
 docstring) is content-stable: the destination path is a pure function of
 scope+filename, so a retried stage is an idempotent overwrite, never a
-second raw member for the same source. The state entries for a batch are
-written ONLY after :func:`_default_compile_batch` (or its test substitute)
-returns exit code ``0`` — a crash, a raised exception (the catch-all AC8
-names, which is also what a missing/expired login surfaces as — this module
-has no separate login probe, since any interruption gets the identical
-honest "did not complete; nothing marked imported; rerun to resume"
-treatment) or a nonzero/degraded exit leaves every file in the batch PENDING
-again. Re-running is safe either way: re-staging overwrites the same path,
+second raw member for the same source. State entries are written ONLY when
+:func:`_default_compile_batch` (or its test substitute) returns exit code
+``0`` AND the staged file is actually gone afterward (see
+:func:`run_import`'s post-compile reconciliation) — a crash, a raised
+exception (the catch-all AC8 names, which is also what a missing/expired
+login surfaces as — this module has no separate login probe, since any
+interruption gets the identical honest "did not complete; nothing marked
+imported; rerun to resume" treatment), a nonzero/degraded exit, OR a file
+intake silently dropped despite an overall exit ``0`` (``MEMORY.md``, a
+name+frontmatter intake does not recognise, an ephemeral-classified file)
+leaves that file PENDING again. Re-running is safe either way: re-staging
+overwrites the same path,
 and the underlying compile pipeline's own incremental/hash-stamped dedup
 (the same one ``athenaeum ingest`` already relies on) makes recompiling an
 already-fully-compiled raw member a no-op rather than a duplicate page.
@@ -77,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -342,6 +347,16 @@ def _pending_files(
 # ---------------------------------------------------------------------------
 
 
+def _staged_path(knowledge_root: Path, project: ProjectMemory, file: MemoryFile) -> Path:
+    """Where *file* lands under ``<knowledge_root>/raw/auto-memory/<scope>/``.
+
+    Shared by :func:`_stage_file` (the write) and :func:`run_import`'s
+    post-compile reconciliation (the read) so both agree on the same path
+    without recomputing it differently in two places.
+    """
+    return knowledge_root / "raw" / "auto-memory" / project.scope / file.path.name
+
+
 def _stage_file(knowledge_root: Path, project: ProjectMemory, file: MemoryFile) -> Path:
     """Copy *file* into ``<knowledge_root>/raw/auto-memory/<scope>/<name>``.
 
@@ -351,10 +366,28 @@ def _stage_file(knowledge_root: Path, project: ProjectMemory, file: MemoryFile) 
     intake, never a bespoke second intake path. Content-read happens HERE,
     never before the explicit confirmation that gates every caller of this
     function (AC1/AC5).
+
+    Restores the SOURCE's original ``mtime`` on the staged copy after the
+    write. :func:`athenaeum.atomic_io.atomic_write_text` always stamps a
+    fresh destination inode with "now" (same-dir temp + ``os.replace``),
+    which is right for its original pending-sidecar use but wrong here:
+    :func:`athenaeum.session_recovery.written_at_from_frontmatter`'s own
+    docstring documents that the mtime fallback it feeds works only because
+    "the symlink-bridged intake tree preserves" the native file's mtime —
+    this module is the first caller that stages a real COPY rather than a
+    symlink, so without this restore every staged file's provenance-
+    recovery fallback would silently degrade to "now" instead of the
+    memory's real write time. Restoring it also keeps a scope an operator
+    has ALREADY bridged via ``examples/claude-code/setup-symlinks.sh``
+    self-consistent: there, staging's destination and the discovery source
+    are the same inode, so leaving the reset mtime in place would make the
+    next run's discovery mismatch the state entry THIS run just recorded
+    (which captured the pre-staging mtime) and re-stage forever.
     """
-    dest = knowledge_root / "raw" / "auto-memory" / project.scope / file.path.name
+    dest = _staged_path(knowledge_root, project, file)
     content = file.path.read_text(encoding="utf-8")
     atomic_write_text(dest, content)
+    os.utime(dest, (file.mtime, file.mtime))
     return dest
 
 
@@ -520,13 +553,43 @@ def run_import(
 
         from athenaeum.store import now_iso
 
+        # exit_code == 0 means the compile call succeeded overall — it does
+        # NOT mean every staged file in this batch was actually compiled.
+        # Intake silently `continue`s past a file named ``MEMORY.md``, one
+        # whose name and frontmatter both miss the recognised-type
+        # convention, one that fails to read, or one `classify_ephemeral`
+        # drops — none of that surfaces as a nonzero exit code or a raised
+        # exception, so a batch can succeed overall while leaving one or
+        # more of its own files untouched. Reconcile against the SAME
+        # observable signal the move-then-retire pass's own caller already
+        # uses elsewhere in this codebase (a before/after presence diff,
+        # issue athenaeum#895's "left the intake queue" invariant): a
+        # staged file that is GONE after a successful compile was actually
+        # processed (compiled-and-retired, or merged); one still on disk
+        # was not, for any of the reasons above, and must stay PENDING so
+        # the next run retries it instead of silently losing it forever.
+        # This can only ever UNDER-approximate what was processed, same as
+        # the precedent it follows — never the wrong direction.
         imported_at = now_iso(None)
+        skipped: list[tuple[ProjectMemory, MemoryFile]] = []
+        processed_count = 0
         for project, file in batch:
+            if _staged_path(knowledge_root, project, file).exists():
+                skipped.append((project, file))
+                continue
             _mark_imported(state, project.scope, file, imported_at=imported_at)
+            processed_count += 1
         save_state(cache_dir, state)
 
         remaining = left_after_cap
-        print(f"Imported {len(batch)} file(s).", file=out)
+        print(f"Imported {processed_count} file(s).", file=out)
+        if skipped:
+            print(
+                f"{len(skipped)} file(s) were staged but not compiled (dropped "
+                "or deferred during intake); not marked imported. Rerun "
+                "athenaeum import-memory to retry them.",
+                file=out,
+            )
         if remaining:
             print(
                 f"{remaining} file(s) left for the next run (cap reached).",

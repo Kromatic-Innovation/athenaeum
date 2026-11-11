@@ -9,8 +9,13 @@ ruling 5) — every call to :func:`run_import` substitutes a fake
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import time
 from pathlib import Path
+
+import pytest
 
 from athenaeum._cmd_import_memory import (
     EXIT_INCOMPLETE,
@@ -27,6 +32,22 @@ from athenaeum.memory_discovery import MemoryFile, ProjectMemory, discover_proje
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _retire_everything(knowledge_root: Path, **_: object) -> int:
+    """A ``compile_fn`` fake that simulates a FULLY successful real compile:
+    the default-on move-then-retire pass unlinks every raw file it
+    processes. Every ``run_import`` test whose fixture wants "the compile
+    succeeded for everything staged" uses this rather than a bare
+    ``lambda *a, **k: 0`` — a fake that leaves staged files in place is
+    indistinguishable, post-fix, from one where intake silently dropped
+    them (see ``TestRunImport.test_file_silently_skipped_by_intake_is_not_
+    marked_imported``), so "succeeded" fakes must actually remove what they
+    claim to have compiled.
+    """
+    for p in (knowledge_root / "raw" / "auto-memory").rglob("*.md"):
+        p.unlink()
+    return 0
 
 
 def _discover(tmp_path: Path, projects: dict[str, list[str]]) -> list[ProjectMemory]:
@@ -224,6 +245,18 @@ class TestRunImport:
         discovered = _discover(tmp_path, {"proj-a": ["MEMORY.md", "topic.md"]})
         knowledge_root = self._knowledge_root(tmp_path)
         cache_dir = tmp_path / "cache"
+        staged_during_compile: dict[str, str] = {}
+
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            # Capture staging's effect WHILE the staged copy still exists,
+            # then retire it -- exactly what a fully successful real
+            # compile does by default, and what `run_import`'s post-compile
+            # reconciliation now requires to mark a file imported.
+            staged = knowledge_root / "raw" / "auto-memory" / "proj-a"
+            for p in staged.glob("*.md"):
+                staged_during_compile[p.name] = p.read_text(encoding="utf-8")
+                p.unlink()
+            return 0
 
         rc = run_import(
             knowledge_root=knowledge_root,
@@ -234,13 +267,17 @@ class TestRunImport:
             auto_yes=True,
             max_files=20,
             max_calls=100,
-            compile_fn=lambda *a, **k: 0,
+            compile_fn=_compile,
         )
 
         assert rc == 0
+        assert staged_during_compile == {
+            "MEMORY.md": "content of MEMORY.md",
+            "topic.md": "content of topic.md",
+        }
         staged = knowledge_root / "raw" / "auto-memory" / "proj-a"
-        assert (staged / "MEMORY.md").read_text(encoding="utf-8") == "content of MEMORY.md"
-        assert (staged / "topic.md").exists()
+        assert not (staged / "MEMORY.md").exists()
+        assert not (staged / "topic.md").exists()
 
         state = json.loads((cache_dir / "import_memory_state.json").read_text())
         assert set(state["imported"]) == {"proj-a/MEMORY.md", "proj-a/topic.md"}
@@ -260,7 +297,7 @@ class TestRunImport:
             auto_yes=True,
             max_files=20,
             max_calls=100,
-            compile_fn=lambda *a, **k: 0,
+            compile_fn=_retire_everything,
         )
         assert rc1 == 0
 
@@ -297,7 +334,7 @@ class TestRunImport:
             auto_yes=True,
             max_files=2,
             max_calls=100,
-            compile_fn=lambda *a, **k: compile_calls.append(k) or 0,
+            compile_fn=lambda *a, **k: compile_calls.append(k) or _retire_everything(*a, **k),
         )
         assert rc == 0
         assert compile_calls[0]["max_files"] == 2
@@ -314,11 +351,100 @@ class TestRunImport:
             auto_yes=True,
             max_files=2,
             max_calls=100,
-            compile_fn=lambda *a, **k: compile_calls.append(k) or 0,
+            compile_fn=lambda *a, **k: compile_calls.append(k) or _retire_everything(*a, **k),
         )
         assert rc2 == 0
         state2 = load_state(cache_dir)
         assert len(state2["imported"]) == 3
+
+    def test_file_silently_skipped_by_intake_is_not_marked_imported(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum PR 2407: intake can silently drop a
+        staged file (named ``MEMORY.md``, unrecognised name+frontmatter, or
+        ``classify_ephemeral``-flagged) while the overall compile still
+        exits 0 for the rest of the batch. A dropped file must stay
+        on disk and PENDING -- never marked imported -- so the next run
+        retries exactly it, never losing it permanently (AC3/AC8)."""
+        discovered = _discover(tmp_path, {"proj-a": ["kept.md", "dropped.md"]})
+        knowledge_root = self._knowledge_root(tmp_path)
+        cache_dir = tmp_path / "cache"
+        out = io.StringIO()
+
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            # "kept.md" compiles and is retired; "dropped.md" is silently
+            # skipped by intake (e.g. ephemeral) and stays on disk. Exit
+            # code is 0 either way -- intake surfaces no signal of its own.
+            (knowledge_root / "raw" / "auto-memory" / "proj-a" / "kept.md").unlink()
+            return 0
+
+        rc = run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=cache_dir,
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=_compile,
+            out=out,
+        )
+
+        assert rc == 0
+        state = load_state(cache_dir)
+        assert set(state["imported"]) == {"proj-a/kept.md"}
+        assert "1 file(s) were staged but not compiled" in out.getvalue()
+        # The dropped file is untouched on disk -- still there to retry.
+        assert (knowledge_root / "raw" / "auto-memory" / "proj-a" / "dropped.md").exists()
+
+        # Rerun: only the skipped file is still pending, and compile is
+        # invoked again for exactly it.
+        compile_calls = []
+        rc2 = run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=cache_dir,
+            provider="claude-cli",
+            discovered=discover_project_memories(discovered[0].memory_dir.parent.parent),
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=lambda *a, **k: compile_calls.append(k) or 0,
+        )
+        assert rc2 == 0
+        assert compile_calls == [{"max_files": 1, "max_api_calls": 100}]
+
+    def test_staged_copy_preserves_source_mtime(self, tmp_path: Path) -> None:
+        """Seer finding on athenaeum PR 2407: ``_stage_file`` must not reset
+        the staged copy's mtime to "now" -- intake's provenance-recovery
+        fallback (``session_recovery.written_at_from_frontmatter``'s own
+        docstring) relies on the staged file's mtime matching the memory's
+        real write time, a property every pre-existing symlink-bridged
+        scope got for free and a real file copy does not."""
+        root = tmp_path / "claude-projects"
+        source = root / "proj-a" / "memory" / "topic.md"
+        _write(source, "content of topic.md")
+        old_time = time.time() - 7 * 86400  # a week old
+        os.utime(source, (old_time, old_time))
+
+        discovered = discover_project_memories(root)
+        knowledge_root = self._knowledge_root(tmp_path)
+
+        rc = run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=lambda *a, **k: 0,  # leaves the staged copy in place
+        )
+        assert rc == 0
+        staged = knowledge_root / "raw" / "auto-memory" / "proj-a" / "topic.md"
+        assert staged.stat().st_mtime == pytest.approx(old_time, abs=1.0)
 
     def test_interrupted_run_reports_and_does_not_mark_imported(
         self, tmp_path: Path
