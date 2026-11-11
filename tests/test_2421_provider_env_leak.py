@@ -30,8 +30,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+
+#: Node-ids below are repo-root-relative, so the replay subprocess is pinned to
+#: the repo root rather than inheriting whatever cwd the outer run has.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: The leaker, then the probe that fails if the leak survived it, then the two
 #: tests that actually failed in CI. Order is the point: pytest runs explicit
@@ -93,6 +98,7 @@ class TestOrderedReplayOfTheFailingShard:
             capture_output=True,
             text=True,
             timeout=600,
+            cwd=_REPO_ROOT,
         )
         assert completed.returncode == 0, (
             f"ordered replay failed (rc={completed.returncode})\n"
