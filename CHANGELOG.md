@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in streamable HTTP transport for `athenaeum serve` (issue
+  athenaeum#2382).** `athenaeum serve --transport http` serves MCP over
+  FastMCP's streamable HTTP transport on `--host` (default `127.0.0.1`),
+  `--port` (default `8000`) and `--path-prefix` (default `/mcp`); `stdio`
+  remains the default and calls `server.run()` exactly as before.
+  `--transport`, `--host` and `--port` resolve CLI > `ATHENAEUM_SERVE_*` env >
+  `serve.transport` / `serve.host` / `serve.port` in `athenaeum.yaml`. With no
+  auth issuer configured the server REFUSES any non-loopback bind, exiting
+  non-zero before a socket is opened and naming the missing
+  `serve.auth.issuer` setting; the guard is a positive allowlist of loopback
+  address literals (`127.0.0.0/8`, `::1` bracketed or bare, IPv4-mapped
+  loopback forms) and never resolves a hostname. The `mcp` extra's `fastmcp`
+  floor rises to 2.11.1, the lowest release carrying both the `http` transport
+  literal (2.9.0) and the `RemoteAuthProvider` resource-server export (2.11.1)
+  the auth child needs.
 - **Cursor instructed-recall example rule (issue athenaeum#2399).** Added
   `examples/cursor/athenaeum.mdc`, an always-applied Cursor rule example that
   tells the agent to call `recall` before answering when the request

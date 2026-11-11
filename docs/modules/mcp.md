@@ -35,6 +35,37 @@ athenaeum test-mcp          # smoke-test the round-trip without a live session
 | `resolve_merge` | WRITE | Approves or rejects a pending merge proposal. Approval folds or creates the merged wiki page. |
 | `review_audit_item` | WRITE | Records a human's confirm/overturn verdict on a sampled tier-audit item. Calibration signal only; never re-executes a merge. |
 
+## Transport
+
+By default `athenaeum serve` speaks MCP over **stdio**: the client launches the process and
+talks to it over that process's own stdin and stdout. Nothing is bound and nothing is
+reachable from a network. This is the shipped behaviour and it is unchanged.
+
+`--transport http` opts into FastMCP's **streamable HTTP** transport instead, for hosts that
+cannot launch a local process:
+
+```bash
+athenaeum serve --path ~/knowledge --transport http --port 8000
+# [transport] streamable HTTP on http://127.0.0.1:8000/mcp
+```
+
+| Flag | Default | Applies to | What it sets |
+|---|---|---|---|
+| `--transport` | `stdio` | both | `stdio` or `http`. |
+| `--host` | `127.0.0.1` | http | The bind address. Loopback only — see below. |
+| `--port` | `8000` | http | The TCP port. |
+| `--path-prefix` | `/mcp` | http | The URL path the endpoint is mounted at. |
+
+`--transport`, `--host` and `--port` each resolve **CLI flag > environment variable >
+`athenaeum.yaml`**, the same order every other knob uses: `ATHENAEUM_SERVE_TRANSPORT`,
+`ATHENAEUM_SERVE_HOST` and `ATHENAEUM_SERVE_PORT`, then `serve.transport`, `serve.host` and
+`serve.port`. `--path-prefix` is CLI-only. Under `stdio` the other three are inert, because
+nothing binds. See [configuration](../reference/configuration.md) and
+[the CLI reference](../reference/cli.md).
+
+**TLS is not athenaeum's concern.** Terminate HTTPS at a reverse proxy in front of the
+process; the server itself speaks plain HTTP to that proxy over loopback.
+
 ## Tool annotations
 
 Every tool carries an MCP `ToolAnnotations` hint so a remote host can decide
@@ -121,6 +152,18 @@ KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
   calls `remember` and waits for the librarian.
 
 ## What it refuses
+
+- **An HTTP server refuses every non-loopback bind until an auth issuer is configured.**
+  This is a security property rather than a cautious default. The HTTP transport carries no
+  authentication of its own, so binding a routable address would publish the entire store to
+  anyone who can reach the port. The check is a POSITIVE allowlist of loopback address
+  **literals** — any `127.0.0.0/8` address, the IPv6 loopback (bracketed or bare), and
+  IPv4-mapped IPv6 loopback forms. Every other value exits non-zero **before any socket is
+  bound**, and the message names the missing `serve.auth.issuer` setting rather than only
+  reporting that the address is disallowed. Host *names* are never resolved, `localhost`
+  included: resolving one would move the loopback decision into `/etc/hosts`, DNS and search
+  domains, so a name that is loopback today could be routable tomorrow with nothing in
+  athenaeum's own configuration having changed.
 
 - **A restricted audience fails closed on reads.** `athenaeum serve --audience ops` pins a
   read scope for the life of the process. `recall`, `read_entity`, `enumerate_entities` and
