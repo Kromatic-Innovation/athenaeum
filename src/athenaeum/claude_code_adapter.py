@@ -152,56 +152,76 @@ JSON output), but deliberately NOT one of the ``_cmd_*.py`` siblings
 ``cli.py``'s factoring rule governs, since it is deliberately unreachable
 through ``athenaeum.cli``.
 
-**Foreign-host guard (issue athenaeum#2371).** Grok Build, xAI's terminal
-agent, reads Claude Code's own ``.claude/settings.json`` hook wiring, so an
-operator who installed this adapter as a ``UserPromptSubmit`` hook (and,
-per :func:`witness_session_end` / :func:`witness_session_end_anchor` below,
-a ``SessionEnd`` hook calling ``athenaeum session-end``) can have it invoked
-by a host it was never written for. :func:`_is_foreign_host_invocation`
-gates :func:`main` BEFORE :func:`_witness_turn` runs (and the two
-``witness_session_end*`` functions gate on the same signal at their own
-entry), printing nothing and returning 0/no-op on either of two signals,
-checked in this order:
+**Foreign-host guard (issues athenaeum#2371, athenaeum#2394).** Grok Build,
+xAI's terminal agent, reads Claude Code's own ``.claude/settings.json`` hook
+wiring, so an operator who installed this adapter as a ``UserPromptSubmit``
+hook (and, per :func:`witness_session_end` / :func:`witness_session_end_anchor`
+below, a ``SessionEnd`` hook calling ``athenaeum session-end``) can have it
+invoked by a host it was never written for. Cursor does the same thing for a
+second, unrelated reason: when its "Include Third-Party Plugins, Skills, and
+Other Configs" setting is on (**on by default**), Cursor also loads
+``~/.claude/settings.json`` and maps ``UserPromptSubmit`` to its own
+``beforeSubmitPrompt`` hook event (plus ``SessionStart``/``SessionEnd`` to its
+own equivalents) — per
+https://cursor.com/docs/reference/third-party-hooks and
+https://cursor.com/docs/hooks (both verified 2026-11-11).
+:func:`_is_foreign_host_invocation` gates :func:`main` BEFORE
+:func:`_witness_turn` runs (and the two ``witness_session_end*`` functions
+gate on the same signal at their own entry), printing nothing and returning
+0/no-op on any of four signals, checked in this order:
 
 1. ``GROK_HOOK_EVENT`` present in the environment — Grok Build sets this on
    every hook subprocess it launches, for every event type, documented at
    https://docs.x.ai/build/features/hooks (verified 2026-11-10). Specific
    and free of ambiguity, but only catches Grok.
-2. The stdin payload carrying any of ``hookEventName`` / ``sessionId`` /
+2. ``CURSOR_VERSION`` present in the environment — Cursor sets this (along
+   with ``CURSOR_PROJECT_DIR``) on every hook subprocess it launches, per the
+   same two Cursor URLs above. Specific and free of ambiguity, but only
+   catches Cursor.
+3. The stdin payload carrying any of ``hookEventName`` / ``sessionId`` /
    ``workspaceRoot`` — the camelCase spelling Grok's own hook payload uses
    for the keys Claude Code spells ``hook_event_name`` / ``session_id`` /
    (Claude Code has no ``workspaceRoot`` equivalent at all). This is a
    **blocklist**, not an allowlist: it is checked as "does this payload
    look like Grok's", never as "does this payload look like Claude Code's".
+4. The stdin payload carrying either ``cursor_version`` or
+   ``conversation_id`` — every Cursor hook payload carries
+   ``conversation_id``, ``hook_event_name``, and ``cursor_version`` (per the
+   same two Cursor URLs above); Claude Code emits neither key. Also a
+   **blocklist**, same reasoning as point 3.
 
-Both signals were deliberately chosen as things to reject, not things to
+All four signals were deliberately chosen as things to reject, not things to
 require. The issue's own second candidate discriminator — requiring
 Claude's ``hook_event_name`` key to be present and treating its absence as
-non-Claude — was considered and rejected: this module's own test suite
-(``tests/test_claude_code_adapter.py``) exercises the adapter with minimal
-stdin payloads of exactly ``{"prompt": ..., "session_id": ...}``, with no
-``hook_event_name`` key at all, and :func:`_read_hook_input` has never
-required one. An allowlist shaped that way would silently no-op the hook
-for every one of those genuine Claude Code invocations — the exact failure
-mode this guard exists to avoid inflicting on *this* host, in the course of
-defending against a *different* one. A blocklist of camelCase markers that
-Claude Code itself never emits carries the opposite, strictly smaller risk:
-it stays blind to some future third host that happens to send neither
-``GROK_HOOK_EVENT`` nor any of these three keys, rather than ever
+non-Claude — was considered and rejected, for Grok originally and again for
+Cursor: this module's own test suite (``tests/test_claude_code_adapter.py``)
+exercises the adapter with minimal stdin payloads of exactly
+``{"prompt": ..., "session_id": ...}``, with no ``hook_event_name`` key at
+all, and :func:`_read_hook_input` has never required one. An allowlist
+shaped that way would silently no-op the hook for every one of those genuine
+Claude Code invocations — the exact failure mode this guard exists to avoid
+inflicting on *this* host, in the course of defending against a *different*
+one. Worse, Cursor's own hook payload ALSO carries ``hook_event_name`` (per
+the two Cursor URLs above), so that key's mere presence cannot even
+distinguish Cursor from Claude Code, let alone serve as a positive Claude
+Code identification — it is exactly as useless a discriminator for Cursor as
+it was for Grok. A blocklist of markers that Claude Code itself never emits
+carries the opposite, strictly smaller risk: it stays blind to some future
+third host that happens to send none of these markers, rather than ever
 mis-firing on a real Claude Code turn.
 
 ``athenaeum session-end`` (:func:`witness_session_end` /
 :func:`witness_session_end_anchor`'s caller,
 :func:`athenaeum._cmd_index.cmd_session_end`) takes no stdin payload at
 all — it is a plain argparse CLI command, not a JSON-stdin hook reader —
-so only the ``GROK_HOOK_EVENT`` signal applies there; see each function's
-own docstring. It IS reachable from a Grok ``SessionEnd`` hook: both
-``examples/claude-code/settings-snippet.json``'s ``SessionEnd`` block and
-this module's own "Witness ledger wiring" section above describe wiring a
-``SessionEnd`` hook command straight to ``athenaeum session-end``, and Grok
-Build's hook loading is not scoped to ``UserPromptSubmit`` — it reads
-``.claude/settings.json``'s hook arrays generally, per the same source this
-section opened with.
+so only the environment signals (``GROK_HOOK_EVENT``, ``CURSOR_VERSION``)
+apply there; see each function's own docstring. It IS reachable from a Grok
+or Cursor ``SessionEnd`` hook: both ``examples/claude-code/settings-snippet.json``'s
+``SessionEnd`` block and this module's own "Witness ledger wiring" section
+above describe wiring a ``SessionEnd`` hook command straight to
+``athenaeum session-end``, and neither Grok's nor Cursor's hook loading is
+scoped to ``UserPromptSubmit`` — both read ``.claude/settings.json``'s hook
+arrays generally, per the sources cited above.
 """
 
 from __future__ import annotations
@@ -242,6 +262,18 @@ _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT = 15
 _FOREIGN_HOST_PAYLOAD_MARKER_KEYS = ("hookEventName", "sessionId", "workspaceRoot")
 
 
+#: Keys unique to Cursor's hook payload (issue athenaeum#2394) -- every
+#: Cursor hook payload carries ``conversation_id``, ``hook_event_name``, and
+#: ``cursor_version`` (https://cursor.com/docs/reference/third-party-hooks,
+#: https://cursor.com/docs/hooks, both verified 2026-11-11). ``hook_event_name``
+#: is deliberately NOT included here -- Claude Code's own genuine payload
+#: can carry that same key (see the module docstring's "Foreign-host guard"
+#: section for why it was rejected as a discriminator for both hosts), but
+#: Claude Code never emits ``cursor_version`` or ``conversation_id``, so a
+#: payload carrying either could only have come from Cursor.
+_FOREIGN_HOST_CURSOR_PAYLOAD_MARKER_KEYS = ("cursor_version", "conversation_id")
+
+
 def _grok_env_marker_present() -> bool:
     """``GROK_HOOK_EVENT`` -- Grok Build sets this on every hook subprocess
     it launches, for every event type (issue athenaeum#2371;
@@ -251,17 +283,43 @@ def _grok_env_marker_present() -> bool:
     return bool(os.environ.get("GROK_HOOK_EVENT"))
 
 
+def _cursor_env_marker_present() -> bool:
+    """``CURSOR_VERSION`` -- Cursor sets this (along with
+    ``CURSOR_PROJECT_DIR``) on every hook subprocess it launches (issue
+    athenaeum#2394; https://cursor.com/docs/reference/third-party-hooks,
+    https://cursor.com/docs/hooks, both verified 2026-11-11). Any non-empty
+    value counts; this adapter has no reason to care which event fired,
+    only that the launching host was Cursor."""
+    return bool(os.environ.get("CURSOR_VERSION"))
+
+
+def _foreign_host_env_marker_present() -> bool:
+    """``True`` if the current environment identifies the caller as EITHER
+    Grok Build or Cursor (issues athenaeum#2371, athenaeum#2394) -- the
+    single shared entry point :func:`_is_foreign_host_invocation` and both
+    ``witness_session_end*`` functions call instead of naming
+    :func:`_grok_env_marker_present` directly, so a third host's env signal
+    can be added here once, in one place, rather than at every call site."""
+    return _grok_env_marker_present() or _cursor_env_marker_present()
+
+
 def _is_foreign_host_invocation(raw: str) -> bool:
     """``True`` if *raw* (the ``UserPromptSubmit`` stdin payload) or the
     current environment identifies the caller as a non-Claude-Code host
-    (issue athenaeum#2371). See the module docstring's "Foreign-host guard"
-    section for the two signals checked and why both are blocklist checks.
+    (issues athenaeum#2371, athenaeum#2394). See the module docstring's
+    "Foreign-host guard" section for the four signals checked -- two
+    environment variables (``GROK_HOOK_EVENT``, ``CURSOR_VERSION``) and two
+    payload-key blocklists (Grok's camelCase keys, Cursor's
+    ``cursor_version``/``conversation_id``) -- and why all four are
+    blocklist checks, never an allowlist built around Claude Code's own
+    ``hook_event_name`` key (Cursor's payload carries that key too, so its
+    presence cannot distinguish either foreign host from Claude Code).
 
     Never raises: a malformed payload simply fails the payload-shape check
     (the same fail-safe posture as :func:`_read_hook_input`), falling back
     to the environment-only signal.
     """
-    if _grok_env_marker_present():
+    if _foreign_host_env_marker_present():
         return True
     try:
         payload = json.loads(raw) if raw.strip() else {}
@@ -269,7 +327,9 @@ def _is_foreign_host_invocation(raw: str) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    return any(key in payload for key in _FOREIGN_HOST_PAYLOAD_MARKER_KEYS)
+    if any(key in payload for key in _FOREIGN_HOST_PAYLOAD_MARKER_KEYS):
+        return True
+    return any(key in payload for key in _FOREIGN_HOST_CURSOR_PAYLOAD_MARKER_KEYS)
 
 
 def _load_config_env(cache_dir: Path) -> None:
@@ -501,13 +561,14 @@ def witness_session_end(cache_dir: Path) -> None:
     caller's result or exit code. :func:`main` already wraps its own
     ``_load_config_env`` call for the same reason.
 
-    **Foreign-host guard (issue athenaeum#2371).** Checked first, before
-    even ``_load_config_env`` -- ``athenaeum session-end`` takes no stdin
-    payload (it is a plain argparse CLI command), so only the
-    ``GROK_HOOK_EVENT`` environment signal applies here; see the module
+    **Foreign-host guard (issues athenaeum#2371, athenaeum#2394).** Checked
+    first, before even ``_load_config_env`` -- ``athenaeum session-end``
+    takes no stdin payload (it is a plain argparse CLI command), so only the
+    environment signals (``GROK_HOOK_EVENT``, ``CURSOR_VERSION``) apply
+    here, via :func:`_foreign_host_env_marker_present`; see the module
     docstring's "Foreign-host guard" section for why this call site is
-    reachable from a Grok ``SessionEnd`` hook."""
-    if _grok_env_marker_present():
+    reachable from a Grok or Cursor ``SessionEnd`` hook."""
+    if _foreign_host_env_marker_present():
         return
     try:
         _load_config_env(cache_dir)
@@ -543,12 +604,12 @@ def witness_session_end_anchor(cache_dir: Path, wiki_root: Path) -> None:
     function is therefore, like :func:`witness_session_end`, a single
     delegation call with no arithmetic of its own.
 
-    **Foreign-host guard (issue athenaeum#2371).** Same check, same
-    reasoning, same place in the sequence as :func:`witness_session_end`'s
-    own guard -- see that function's docstring and the module docstring's
-    "Foreign-host guard" section.
+    **Foreign-host guard (issues athenaeum#2371, athenaeum#2394).** Same
+    check, same reasoning, same place in the sequence as
+    :func:`witness_session_end`'s own guard -- see that function's
+    docstring and the module docstring's "Foreign-host guard" section.
     """
-    if _grok_env_marker_present():
+    if _foreign_host_env_marker_present():
         return
     try:
         _load_config_env(cache_dir)
@@ -683,8 +744,9 @@ def main(argv: list[str] | None = None) -> int:
         # shorter than 8 characters), so it runs BEFORE both of those gates.
         raw = sys.stdin.read()
 
-        # Foreign-host guard (issue athenaeum#2371): must run before
-        # `_witness_turn` -- a non-Claude-Code host must write no witness
+        # Foreign-host guard (issues athenaeum#2371, athenaeum#2394): must
+        # run before `_witness_turn` -- a non-Claude-Code host must write no
+        # witness
         # line, record no push telemetry, and append to no seen-file, and
         # every one of those effects is downstream of `_witness_turn`/the
         # recall call below. See the module docstring's "Foreign-host
