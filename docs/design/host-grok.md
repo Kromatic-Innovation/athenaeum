@@ -139,9 +139,16 @@ Legend:
   HTTP servers are both supported, configured in `config.toml` under
   `[mcp_servers.<name>]`. Grok Build **also loads Claude Code's and Cursor's
   MCP config** (`.claude.json`, project `.mcp.json`, `.cursor/mcp.json`),
-  merged below its own config. `[compat.claude] mcps = false` turns that
-  off. OAuth is handled for remote servers, and static headers are
-  supported. <https://docs.x.ai/build/features/mcp-servers>
+  merged below its own config. OAuth is handled for remote servers, and
+  static headers are supported.
+  <https://docs.x.ai/build/features/mcp-servers>
+- **V.** `[compat.claude]` and `[compat.cursor]` each take `skills`, `rules`,
+  `agents`, `mcps` and `hooks`. All default to `true` ("Scan Cursor or Claude
+  harness directories"), so `[compat.claude] hooks = false` and
+  `mcps = false` are the documented user-side opt-outs. The environment
+  variable `GROK_CLAUDE_AGENTS_ENABLED` is described as "Scan `CLAUDE.md` /
+  `CLAUDE.local.md`". <https://docs.x.ai/build/settings/reference>
+  (verified 2026-11-11)
 - **V.** The hook events include `SessionStart` and `UserPromptSubmit`. Hook
   stdin carries `hookEventName`, `sessionId`, `cwd` and `workspaceRoot`, and
   each hook process gets `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`,
@@ -163,9 +170,11 @@ Legend:
   passive, its stdout is discarded and nothing reaches the model. This is
   the documented reading. It still needs an `~operator` probe before it is
   treated as settled, because "passive" is undefined.
-- **I.** Grok Build reads some instruction file (`grok inspect` reports
-  "instructions"), but which file is undocumented. A Tier 2 snapshot is
-  workable only once that is known.
+- **I.** Grok Build reads instruction files: `grok inspect` reports
+  "instructions", and `GROK_CLAUDE_AGENTS_ENABLED` implies `CLAUDE.md` is
+  scanned. Whether `AGENTS.md` or a Grok-native file is read is
+  undocumented. Whether the agent follows a pointer to a context file is
+  unobserved. A Tier 2 snapshot is workable only once both are known.
 
 ### 3.3 xAI API: remote MCP tools
 
@@ -266,7 +275,8 @@ push.
   that the user's own agent launches. Two Grok-specific points apply:
   - Grok Build auto-loads Claude Code's MCP config, so athenaeum becomes
     available to a second model vendor **without the user opting in**.
-    Docs must say so and name `[compat.claude] mcps = false` as the opt-out.
+    Docs must say so, and name `[compat.claude] mcps = false` (and
+    `hooks = false`) as the opt-outs.
   - Prompts and tool results go to xAI rather than Anthropic. That is a
     data-residency fact for the operator, not a defect.
 - **Grok apps and xAI API.** Every requirement in athenaeum#2199's security
@@ -287,6 +297,12 @@ push.
 ---
 
 ## 6. Requirements Grok places on remote mode (input to athenaeum#2199)
+
+The remote-mode children of athenaeum#2199 that this list feeds:
+
+- athenaeum#2382: transport;
+- athenaeum#2384: OAuth and identity-bound audience;
+- athenaeum#2383: tool allowlist and the `with_pii` pin.
 
 1. **Challenge `initialize`.** Grok apps discover OAuth only when the
    initial handshake returns 401 (R). A design that allows anonymous
