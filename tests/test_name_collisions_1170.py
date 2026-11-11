@@ -1124,3 +1124,335 @@ class TestResolveNameCollisionsAuditOnTouch:
 
         assert client.calls == []
         assert counters.is_zero
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2364: the hard-coded `confidence=1.0` is replaced with a
+# REAL score from the five-verdict comparator (content, not name), and a
+# real score of exactly 1.0 auto-applies via the SEPARATE
+# `librarian.reversible_verdict_auto_apply_enabled` gate
+# (:mod:`athenaeum.auto_apply`'s own opt-in). The comparator itself is
+# mocked at the `athenaeum.name_collisions.compare_pages` call site (the
+# AC's own "mocked comparator" language) so these tests exercise the real
+# wiring without a live LLM call. Every fixture pair here has DISTINCT
+# bodies ("Body one."/"Body two.") so `classify_collision` always reports
+# `ambiguous` and the pre-existing `auto_merge`/`name_collision_automerge`
+# deterministic path never fires -- isolating the NEW comparator-driven
+# path under test.
+# ---------------------------------------------------------------------------
+
+
+class TestContentComparatorConfidence:
+    _AUTO_APPLY_ON: dict[str, Any] = {
+        "librarian": {"reversible_verdict_auto_apply_enabled": True}
+    }
+    _AUTO_APPLY_OFF: dict[str, Any] = {
+        "librarian": {"reversible_verdict_auto_apply_enabled": False}
+    }
+
+    @staticmethod
+    def _two_distinct_pages(wiki: Path) -> tuple[Path, Path]:
+        """Two pages with equal-length, DISTINCT bodies, so neither is a
+        substring of the other -- ``classify_collision`` always reports
+        ``ambiguous`` regardless of comparator outcome. Filenames are
+        chosen so ``canonical_page``'s lexicographic-path tiebreak (equal
+        body length) picks the first file as canonical, matching the
+        returned tuple order -- ``acme-1.md`` sorts before ``acme-2.md``."""
+        canonical_path = _write_page(
+            wiki, "acme-1.md", uid="u1", name="Acme", type_="company", body="Body one."
+        )
+        other_path = _write_page(
+            wiki, "acme-2.md", uid="u2", name="Acme", type_="company", body="Body two."
+        )
+        init_git_repo(wiki)
+        return canonical_path, other_path
+
+    def test_name_only_collision_does_not_score_1_0_with_no_client(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1: two pages sharing ONLY a name (no client wired at all --
+        the real default for every pre-athenaeum#2364 caller) must never be
+        stored at confidence 1.0. The comparator's own Gate 2 degrades to
+        "no verdict" with no client, so the real score is 0.0, never the
+        old literal 1.0."""
+        wiki = tmp_path / "wiki"
+        self._two_distinct_pages(wiki)
+
+        result = resolve_name_collisions(wiki, auto_merge=False, dry_run=False)
+
+        assert result["ambiguous"] == 1
+        assert result["merged"] == 0
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert len(pms) == 1
+        assert pms[0].confidence != 1.0
+        assert pms[0].confidence == 0.0
+        assert pms[0].resolved is False
+
+    def test_name_only_collision_does_not_score_1_0_when_comparator_settles_distinct(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1, direct comparator-integration variant: the mocked comparator
+        explicitly settles the pair as `distinct` (not merely unavailable) --
+        still never stored at confidence 1.0."""
+        from athenaeum.comparator import VERDICT_DISTINCT, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_DISTINCT),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["merged"] == 0
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert pms[0].confidence == 0.0
+        assert pms[0].resolved is False
+
+    def test_matching_content_merges_without_approval_when_flag_on(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2 (flag ON): a pair the mocked comparator settles as a true
+        content `duplicate` is folded immediately -- no human approval --
+        and the pending-merges entry is withdrawn (resolved), even though
+        `classify_collision` itself still calls this pair `ambiguous`."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        _canonical_path, dup_path = self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["ambiguous"] == 1  # classify_collision's own verdict, unchanged
+        assert result["merged"] == 1
+        assert result["queued"] == 0
+
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert len(pms) == 1
+        assert pms[0].confidence == 1.0
+        assert pms[0].resolved is True
+        assert pms[0].auto_applied is True
+
+        # The fold really executed via the SAME reversible machinery the
+        # deterministic path uses: the duplicate is tombstoned, not deleted.
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+
+    def test_matching_content_stays_queued_when_flag_off(self, tmp_path: Path) -> None:
+        """AC2 (flag OFF): the SAME matching-content pair, with
+        `librarian.reversible_verdict_auto_apply_enabled` off, stays queued
+        exactly like before athenaeum#2364 -- the ONLY observable difference is
+        that the stored confidence is the real (here, 1.0) score rather than
+        the old hard-coded literal."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        _canonical_path, dup_path = self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_OFF
+            )
+
+        assert result["merged"] == 0
+        assert result["queued"] == 1
+
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert len(pms) == 1
+        assert pms[0].confidence == 1.0
+        assert pms[0].resolved is False
+
+        # Nothing merged -- the duplicate-but-not-yet-approved source is
+        # untouched on disk.
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert not is_tombstone(dup_meta)
+
+    def test_matching_content_stays_queued_with_no_config_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Same as the flag-off case, but via the DEFAULT (``config=None``)
+        every pre-athenaeum#2364 caller still passes -- confirms the opt-in's
+        documented default-off posture holds here too."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+        ):
+            result = resolve_name_collisions(wiki, auto_merge=False, dry_run=False)
+
+        assert result["merged"] == 0
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert pms[0].confidence == 1.0
+        assert pms[0].resolved is False
+
+    def test_ambiguous_pair_does_not_auto_merge_even_with_flag_on(
+        self, tmp_path: Path
+    ) -> None:
+        """The AC's own named scenario: an ambiguous pair (here, the
+        comparator itself settles `underdetermined` -- it looked, and could
+        not decide) must NOT auto-merge even with the opt-in on."""
+        from athenaeum.comparator import VERDICT_UNDERDETERMINED, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        canonical_path, dup_path = self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_UNDERDETERMINED),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["merged"] == 0
+        assert result["queued"] == 1
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert pms[0].confidence == 0.0
+        assert pms[0].resolved is False
+        assert canonical_path.exists()
+        assert dup_path.exists()
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert not is_tombstone(dup_meta)
+
+    def test_comparator_unavailable_pair_is_queued_not_auto_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """The third outcome the issue names explicitly: a pair the
+        comparator cannot settle AT ALL (``verdict=None`` -- Gate 2's own
+        documented "no verdict" contract for an unavailable judge, issue
+        athenaeum#715) stays queued and is never auto-applied, even with the
+        opt-in on."""
+        from athenaeum.comparator import CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        canonical_path, dup_path = self._two_distinct_pages(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=None, reason="llm-unavailable"),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["merged"] == 0
+        assert result["queued"] == 1
+        pms = parse_pending_merges(wiki / "_pending_merges.md")
+        assert pms[0].confidence == 0.0
+        assert pms[0].resolved is False
+        assert canonical_path.exists()
+        assert dup_path.exists()
+
+    def test_unambiguous_automerge_not_double_applied_by_content_path(
+        self, tmp_path: Path
+    ) -> None:
+        """When the pre-existing deterministic path already resolved the
+        pair (`classify_collision` says `unambiguous` and `auto_merge` is
+        on), the NEW content-comparator path must not try to resolve the
+        same, now-already-resolved block a second time -- `merged` counts
+        the collision exactly once."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Acme is a widget company.",
+        )
+        dup_path = _write_page(
+            wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body=""
+        )
+        init_git_repo(wiki)
+
+        with patch(
+            "athenaeum.name_collisions.compare_pages",
+            return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+        ):
+            result = resolve_name_collisions(
+                wiki,
+                auto_merge=True,
+                dry_run=False,
+                config=self._AUTO_APPLY_ON,
+            )
+
+        assert result["unambiguous"] == 1
+        assert result["merged"] == 1  # not 2 -- resolved once, by the old path
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+
+    def test_content_auto_apply_unfindable_block_is_logged_and_left_queued(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Mirrors ``TestAutoMergeFailureModesAreLogged`` for the NEW
+        content-comparator auto-apply path: a ``_find_open_merge_id`` miss
+        is logged, not silent, and the pair is left queued."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        canonical_path, dup_path = self._two_distinct_pages(wiki)
+
+        with (
+            patch(
+                "athenaeum.name_collisions.compare_pages",
+                return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+            ),
+            patch("athenaeum.name_collisions._find_open_merge_id", return_value=None),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["merged"] == 0
+        assert "name-collision-content-auto-apply-block-not-found" in caplog.text
+        assert canonical_path.exists()
+        assert dup_path.exists()
+
+    def test_content_auto_apply_resolve_failure_is_logged_neither_page_touched(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Mirrors ``TestAutoMergeFailureModesAreLogged`` for the NEW
+        content-comparator auto-apply path: a real (unmocked) ``resolve_merge``
+        failure (no git repo) is logged and neither page is touched."""
+        from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+
+        wiki = tmp_path / "wiki"
+        canonical_path = _write_page(
+            wiki, "acme-1.md", uid="u1", name="Acme", type_="company", body="Body one."
+        )
+        dup_path = _write_page(
+            wiki, "acme-2.md", uid="u2", name="Acme", type_="company", body="Body two."
+        )
+        # Deliberately no init_git_repo(wiki) here.
+
+        with (
+            patch(
+                "athenaeum.name_collisions.compare_pages",
+                return_value=CompareOutcome(verdict=VERDICT_DUPLICATE),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = resolve_name_collisions(
+                wiki, auto_merge=False, dry_run=False, config=self._AUTO_APPLY_ON
+            )
+
+        assert result["merged"] == 0
+        assert "name-collision-content-auto-apply-failed" in caplog.text
+        assert "no_git_repo" in caplog.text
+        assert canonical_path.exists()
+        assert dup_path.exists()

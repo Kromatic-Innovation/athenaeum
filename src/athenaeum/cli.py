@@ -131,6 +131,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_correct_notes",
         "add_correct_notes_subparser",
     ),
+    "corrections-trust-dryrun": (
+        "athenaeum._cmd_corrections_trust_dryrun",
+        "add_corrections_trust_dryrun_subparser",
+    ),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "split-oversize": (
         "athenaeum._cmd_split_oversize",
@@ -221,6 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_context import add_context_subparser
     from athenaeum._cmd_convergence import add_convergence_subparser
     from athenaeum._cmd_correct_notes import add_correct_notes_subparser
+    from athenaeum._cmd_corrections_trust_dryrun import add_corrections_trust_dryrun_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
@@ -291,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_quarantine_subparser(subparsers)  # quarantine requeue (issue athenaeum#2075)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
+    add_corrections_trust_dryrun_subparser(subparsers)  # corrections-trust-dryrun (athenaeum#2331)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_receipts_subparser(subparsers)  # receipts seal|verify (issue athenaeum#2039)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
