@@ -63,7 +63,11 @@ UNIT_WEIGHT_SECONDS: dict[str, float] = {
     # would mean less proven, and reworking `provider.run_tool_loop`'s
     # per-call bridge isolation is a production design change rather than a
     # test cost fix. This single unit is the floor of whichever shard holds
-    # it -- see PR #2392 for the arithmetic.
+    # it: see athenaeum#2233's PR for the arithmetic. Measured 202.5 before
+    # this issue's changes, then 190.8 and 150.7 on two runs after -- the
+    # module is untouched, so that spread is runner contention, which is why
+    # the entry stays at the conservative end: overpricing the heaviest unit
+    # is what makes the packer isolate it.
     "tests/evals/test_north_star_preflight.py": 191.0,
     "tests/test_shell_hooks.py": 115.0,
     "tests/test_eval_corpus_generator.py": 103.0,
