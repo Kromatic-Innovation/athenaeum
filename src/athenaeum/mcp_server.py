@@ -2923,6 +2923,57 @@ READ_ENTITY_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+# Issue athenaeum#2381: shared `mcp.tool(annotations=...)` groups for every tool
+# registered in `create_server` below. Grouped rather than inlined per tool so
+# the four annotations stay byte-identical across every tool in a category —
+# a per-tool literal would drift the moment one call site's dict is edited
+# without the others. `openWorldHint: false` on every group: this deployment
+# only ever reads/writes its own local knowledge store, never an external
+# service (the MCP spec's own worked contrast is a memory tool vs. a web
+# search tool). `idempotentHint` is set ONLY where the tool body actually
+# guarantees it (per `mcp.types.ToolAnnotations`, it is meaningful only when
+# `readOnlyHint` is false) — never asserted speculatively.
+#
+# `scan_retraction_cascade` is NOT in the read-only group despite being named
+# alongside the other nine read tools in the issue: its body
+# (`athenaeum.retraction_cascade.scan_retraction_cascade`, via
+# `athenaeum.store.append_line_durable`) durably appends newly-flagged
+# `(merge, retracted source)` pairs to `wiki/_pending_retractions.jsonl`,
+# which `list_pending_decisions` then surfaces as `type: "retraction"` items
+# — a real, user-visible modification of the decision queue, not a cache or
+# telemetry side-channel. It is grouped with `remember`/`raise_decision`
+# instead: append-only (never edits or removes an existing record, never
+# touches a completed merge), non-destructive, and — unlike those two —
+# explicitly documented as idempotent ("a re-scan emits only newly-flagged
+# pairs"), so it gets `idempotentHint: true` where they get none. See
+# `docs/modules/mcp.md`'s annotation table for the full per-tool rationale,
+# including the two side effects that were checked and judged NOT
+# disqualifying for the read-only group: `recall`'s best-effort push-metrics
+# telemetry append (wrapped so a failure can never surface, and never
+# touches wiki/decision-queue content) and `enumerate_entities`'/
+# `read_entity`'s persisted search-index/entity-index CACHE refresh (derived,
+# rebuildable plumbing for the read itself, not user-authored content).
+_READ_ONLY_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "openWorldHint": False,
+}
+_APPEND_ONLY_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "openWorldHint": False,
+}
+_APPEND_ONLY_IDEMPOTENT_TOOL_ANNOTATIONS: dict[str, Any] = {
+    **_APPEND_ONLY_TOOL_ANNOTATIONS,
+    "idempotentHint": True,
+}
+_ADJUDICATION_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "openWorldHint": False,
+    "idempotentHint": True,
+}
+
+
 def create_server(
     raw_root: Path,
     wiki_root: Path,
@@ -3142,9 +3193,9 @@ def create_server(
     # it. This call site is unchanged in behavior, only in where the text
     # lives.
     recall.__doc__ = recall_tool_docstring(_entity_classes_str)
-    mcp.tool()(recall)
+    mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(recall)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def entity_schema() -> dict:
         """Report the entity classes this deployment declares and/or observes.
 
@@ -3307,9 +3358,9 @@ def create_server(
             `with_pii=True`, or a cursor minted under a different query
             shape — an `error` string with `hits`/`next_cursor` empty.
         """
-    mcp.tool()(enumerate_entities)
+    mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(enumerate_entities)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def remember(
         content: str,
         source: str = "claude-session",
@@ -3396,7 +3447,7 @@ def create_server(
             )
         return result
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_questions(offset: int = 0, limit: int | None = None) -> dict:
         """List unanswered pending questions, bounded and paginated (issue athenaeum#1431).
 
@@ -3458,7 +3509,7 @@ def create_server(
         )
         return paginate(all_items, offset=offset, limit=limit)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def resolve_question(id: str, answer: str) -> dict:
         """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
@@ -3549,7 +3600,7 @@ def create_server(
             "error": None,
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def raise_decision(
         question: str = "",
         context: str = "",
@@ -3693,7 +3744,7 @@ def create_server(
             alternative=alternative,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_merges(full_body: bool = False) -> list[dict]:
         """List unresolved merge proposals (issue athenaeum#169).
 
@@ -3740,7 +3791,7 @@ def create_server(
             knowledge_root=wiki_root.parent,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_decisions(offset: int = 0, limit: int | None = None) -> dict:
         """List pending human decisions — questions AND merges (issue athenaeum#401).
 
@@ -3855,9 +3906,9 @@ def create_server(
         )
 
     read_entity.__doc__ = read_entity_tool_docstring()
-    mcp.tool()(read_entity)
+    mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(read_entity)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_axiom_audit() -> list[dict]:
         """Axiom assignment audit — every slug's status + promote/demote history (athenaeum#434).
 
@@ -3882,7 +3933,7 @@ def create_server(
 
         return _list_axiom_audit(wiki_root)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_APPEND_ONLY_IDEMPOTENT_TOOL_ANNOTATIONS)
     def scan_retraction_cascade() -> dict:
         """Flag completed merges that relied on a now-retracted source (athenaeum#435).
 
@@ -3910,7 +3961,7 @@ def create_server(
         newly = _scan(wiki_root, contacts_root)
         return {"flagged": len(newly), "items": newly}
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def calibration_summary() -> dict:
         """Per-tier tier-audit calibration counts (issue athenaeum#438).
 
@@ -3948,7 +3999,7 @@ def create_server(
 
         return _summary(wiki_root)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
         """Record a human's confirm/overturn of a sampled audit item (athenaeum#438,
         deferred apply per athenaeum#908).
@@ -4040,7 +4091,7 @@ def create_server(
             "error": None,
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
         """Record approve/reject on a pending merge (issue athenaeum#908: deferred apply).
 
