@@ -9182,6 +9182,17 @@ def resolve_serve_profile(
                 candidate = serve_cfg.get("profile")
                 if isinstance(candidate, str):
                     raw = candidate
+                elif candidate is not None:
+                    # A non-string value (`serve.profile: true`, a number, a
+                    # list) must not fall through to "no profile": that would
+                    # serve the FULL surface on a typo, the one direction a
+                    # safety pin must never fail in. Same fail-loud rule as
+                    # `resolve_serve_excluded_fields` below. (Seer review on
+                    # PR athenaeum#2416.)
+                    raise RemotePolicyError(
+                        f"serve.profile={candidate!r} must be a string naming "
+                        f"one of {sorted(VALID_SERVE_PROFILES)}."
+                    )
 
     if raw is None or not raw.strip():
         # An explicitly EMPTY value at any tier means "no profile", matching
@@ -9241,6 +9252,18 @@ def resolve_serve_tools(
             raw = serve_cfg.get("tools")
             if isinstance(raw, str):
                 return frozenset(_normalize_audience_roles(raw.split(","))) or None
+            if raw is not None and not isinstance(raw, (list, tuple, set)):
+                # Fail loud rather than fall through to "no allowlist": a
+                # `serve.tools: recall` typo'd as a scalar non-string, or a
+                # mapping, would otherwise serve the FULL tool set. Same rule
+                # as `resolve_serve_profile`. An EMPTY list stays "unset" --
+                # that is this knob's documented convention, not a typo.
+                from athenaeum.remote_policy import RemotePolicyError
+
+                raise RemotePolicyError(
+                    f"serve.tools={raw!r} must be a list of tool names or a "
+                    "comma-separated string."
+                )
             return frozenset(_normalize_audience_roles(raw)) or None
     return None
 

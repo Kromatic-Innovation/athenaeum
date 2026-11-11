@@ -218,6 +218,45 @@ EXCLUDED_FIELDS_WITHHELD_NOTICE = (
     f"\n_Excluded fields withheld - {EXCLUDED_FIELDS_WITHHELD_REASON}._\n"
 )
 
+
+def _with_excluded_fields_withheld_notice(rendered: str) -> str:
+    """Attach the withheld notice to a ``recall`` result of EITHER shape.
+
+    ``recall_search`` returns two different media on two different paths:
+    markdown for the similarity search, and a strict JSON document for a
+    handle-shaped query (``identity_resolution.resolve_handle_query``'s
+    :class:`~athenaeum.identity_resolution.HandleResolution`). Appending prose
+    to the JSON one would leave trailing markdown after the closing brace, so
+    a client that correctly reads that payload as JSON gets a parse error
+    instead of a result (Seer review on PR athenaeum#2416, confirmed by
+    reproduction before fixing).
+
+    So the notice goes INSIDE the object on the JSON path, under the same
+    ``excluded_fields_withheld`` key :func:`entity_read` uses — one key name
+    across every structured surface the pin touches — and is appended as a
+    markdown line only to markdown.
+
+    The JSON path is detected by PARSING, not by guessing from the first
+    character: a leading ``{`` that does not parse (or parses to something
+    other than an object) falls through to the markdown branch rather than
+    being mangled. Re-dumped with the same ``indent``/``sort_keys``/``default``
+    the handle path itself uses, so the shape a client reads is unchanged
+    apart from the added key.
+    """
+    from athenaeum import pii
+
+    if rendered.lstrip().startswith("{"):
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            payload["excluded_fields_withheld"] = EXCLUDED_FIELDS_WITHHELD_REASON
+            return json.dumps(
+                payload, indent=2, sort_keys=True, default=pii.json_date_default
+            )
+    return rendered + EXCLUDED_FIELDS_WITHHELD_NOTICE
+
 # Default wiki-level source stamped onto remember() writes when the caller
 # does not supply ``sources``. ``claude:inferred`` is intentionally
 # distinct from any session-id format so downstream provenance audits
@@ -3280,7 +3319,7 @@ def create_server(
             session_resolver=_session_resolver,
         )
         if withheld:
-            return rendered + EXCLUDED_FIELDS_WITHHELD_NOTICE
+            return _with_excluded_fields_withheld_notice(rendered)
         return rendered
 
     # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's

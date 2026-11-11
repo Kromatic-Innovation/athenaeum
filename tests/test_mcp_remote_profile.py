@@ -417,6 +417,28 @@ class TestExcludedFieldsPinOff:
         rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], with_pii=True)
         assert FIXTURE_EMAILS[1] not in rendered
 
+    def test_a_handle_shaped_query_still_returns_parseable_json(self, server) -> None:
+        """Regression (Seer review on PR athenaeum#2416): the handle path
+        returns a strict JSON document, so the notice must go INSIDE the
+        object. Appending a markdown line left trailing prose after the
+        closing brace and broke every client that parses that payload."""
+        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_REASON
+
+        rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], with_pii=True)
+        payload = json.loads(rendered)  # raises on trailing prose
+        assert payload["excluded_fields_withheld"] == EXCLUDED_FIELDS_WITHHELD_REASON
+        # The handle payload's own keys survive the round-trip.
+        assert payload["uid"] == "alex"
+        assert payload["contact_values"] == []
+
+    def test_the_similarity_path_still_gets_the_markdown_notice(self, server) -> None:
+        """The other half of the same fix: markdown output is NOT turned into
+        JSON, so the two media stay distinguishable."""
+        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_NOTICE
+
+        rendered = _call(server, "recall", query="widget", with_pii=True)
+        assert rendered.endswith(EXCLUDED_FIELDS_WITHHELD_NOTICE)
+
     def test_read_entity_returns_none_of_the_excluded_values(self, server) -> None:
         raw = _call(
             server,
@@ -608,6 +630,28 @@ class TestPinsResolveCliOverEnvOverYaml:
     def test_an_invalid_excluded_fields_value_raises(self) -> None:
         with pytest.raises(RemotePolicyError, match="maybe"):
             resolve_serve_excluded_fields({"serve": {"excluded_fields": "maybe"}})
+
+    @pytest.mark.parametrize("value", [True, 7, ["remote"], {"name": "remote"}])
+    def test_a_non_string_profile_value_raises_rather_than_falling_open(
+        self, value: object
+    ) -> None:
+        """Regression (Seer review on PR athenaeum#2416): a non-string
+        `serve.profile` used to fall through to "no profile", which serves the
+        FULL surface -- the one direction a safety pin must never fail in."""
+        with pytest.raises(RemotePolicyError, match="serve.profile"):
+            resolve_serve_profile({"serve": {"profile": value}})
+
+    @pytest.mark.parametrize("value", [True, 7, {"name": "recall"}])
+    def test_a_non_list_non_string_tools_value_raises(self, value: object) -> None:
+        """Same fail-open class on the allowlist: a scalar or mapping would
+        otherwise resolve to "no allowlist" and serve every tool."""
+        with pytest.raises(RemotePolicyError, match="serve.tools"):
+            resolve_serve_tools({"serve": {"tools": value}})
+
+    def test_an_empty_tools_list_is_still_unset_not_an_error(self) -> None:
+        """The documented convention, kept distinct from the typo cases above:
+        to narrow the surface you must name at least one tool."""
+        assert resolve_serve_tools({"serve": {"tools": []}}) is None
 
     def test_a_yaml_boolean_excluded_fields_value_raises(self) -> None:
         """`serve.excluded_fields: false` is YAML's bool, not this knob's
