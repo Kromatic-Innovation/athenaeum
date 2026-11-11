@@ -39,7 +39,7 @@ from athenaeum.corrections import (
 )
 from athenaeum.models import EntityIndex, parse_frontmatter
 from athenaeum.rules import CorrectionSpec, build_correction_record
-from athenaeum.trust_graph import parse_edge
+from athenaeum.trust_graph import TrustGraphConfigError, parse_edge
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -4299,6 +4299,129 @@ class TestTrustGraphEvidenceKindUnknownAtSeams:
         # ordinary rank fallback decides instead.
         assert result.disposition == "deferred-lower-precedence"
         assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+
+class TestTrustGraphMalformedEdgesFailFastBeforeAnyWrite:
+    """Seer finding on PR #2405 (`corrections.py`, the pre-fix call site
+    was `:1722`, inside the per-record loop): a malformed
+    `librarian.source_trust_edges` entry must abort the WHOLE correction
+    phase before any write, not raise mid-batch after earlier records have
+    already been applied to disk. `run_correction_phase` now resolves and
+    validates the edges once, up front, gated on the flag exactly like
+    `process_correction_record`'s own per-record resolution."""
+
+    def _noop_escalate(self, result: object, outcome: object) -> bool:
+        return True
+
+    # A selector naming type `api` with no `:ref` -- `trust_graph.parse_edge`
+    # rejects this at validation time (`api` is in `_REF_REQUIRED_TYPES`).
+    _MALFORMED_EDGES = [{"domain": {"entity_type": "person"}, "over": "api", "under": "user"}]
+
+    def test_raises_and_writes_nothing(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        before_page = page.read_bytes()
+        before_mtime = page.stat().st_mtime
+
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "500"},
+                submitter="govdb-feed",
+                defaults={
+                    "op": "set",
+                    "field": "revenue",
+                    "source": "api:govdb",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+            )
+        )
+        before_batch = batch.read_bytes()
+
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=True, edges=self._MALFORMED_EDGES)
+
+        with pytest.raises(TrustGraphConfigError):
+            run_correction_phase(
+                raw_root=tmp_path / "raw",
+                wiki_root=wiki,
+                knowledge_root=tmp_path,
+                index=EntityIndex(wiki),
+                config=config,
+                escalate_one=self._noop_escalate,
+            )
+
+        # A test asserting only the exception type would pass even if the
+        # batch had already written -- assert the store is untouched, the
+        # same byte/mtime-invariance shape TestTrustDryRunReport uses.
+        assert page.read_bytes() == before_page
+        assert page.stat().st_mtime == before_mtime
+        assert batch.read_bytes() == before_batch
+        assert not (wiki / "_corrections_applied.jsonl").exists()
+        assert not (tmp_path / "registry.json").exists()
+
+    def test_flag_off_does_not_even_look_at_the_malformed_edges(self, tmp_path: Path) -> None:
+        """AC1: with the flag off, the SAME malformed edges list must not
+        be resolved at all -- not raise, not warn, not read -- exactly
+        today's (pre-fix) behaviour. Proves the new eager call is gated,
+        not merely that it fires later for a different reason."""
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "user:self-report",
+            },
+        )
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "500"},
+                submitter="govdb-feed",
+                defaults={
+                    "op": "set",
+                    "field": "revenue",
+                    "source": "api:govdb",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+            )
+        )
+
+        cfg = _fields_config(revenue={"shape": "scalar", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=False, edges=self._MALFORMED_EDGES)
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=self._noop_escalate,
+        )
+        # No exception, and the batch's ordinary (non-trust) rank compare
+        # ran to completion -- `api` (rank 3) is outranked by `user`
+        # (rank 1), so it defers, exactly as it would with no trust keys
+        # in config at all. The deferred value never gets written.
+        assert summary["dispositions"].get("deferred-lower-precedence") == 1
+        assert "500" not in page.read_text(encoding="utf-8")
 
 
 class TestTrustDryRunReport:

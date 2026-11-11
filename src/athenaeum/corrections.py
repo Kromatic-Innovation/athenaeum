@@ -3272,6 +3272,39 @@ def run_correction_phase(
     max_records_per_batch = resolve_corrections_max_records_per_batch(config)
     max_records_per_run = resolve_corrections_max_records_per_run(config)
 
+    # Issue athenaeum#2331 (TG3), Seer finding on PR #2405: resolve and
+    # validate `librarian.source_trust_edges` ONCE, here, before this phase
+    # performs any write -- including `retry_parked_corrections` just below,
+    # which writes -- rather than lazily inside the per-record loop
+    # (`process_correction_record` -> `_trust_edge_verdict` ->
+    # `resolve_source_trust_edges`). Lazily, a malformed edges list raises
+    # `trust_graph.TrustGraphConfigError` only once the per-record loop
+    # reaches the first record that actually consults it, by which point
+    # earlier records in this same run may already have written pages --
+    # orphaned files and duplicate entities on retry. The two conditions
+    # for that failure (the flag on, and a bad edge) coincide exactly at
+    # the moment an operator first flips `source_trust_enabled` on after a
+    # config edit -- the single most likely way this code is first
+    # exercised for real, so "fails fast, writes nothing" matters more
+    # here than an ordinary deferred validation would.
+    #
+    # This is a fail-fast REORDERING only, not a new error-handling policy:
+    # the exception type and its message (naming the malformed edge) are
+    # unchanged, propagated to this function's caller exactly as an
+    # unhandled `TrustGraphConfigError` from deeper in the call stack
+    # already would have been -- no catch, no retry, no partial-rollback
+    # or cleanup logic added here. config is the same already-loaded dict
+    # for the whole call, so resolving it again per-record below still
+    # re-validates deterministically; this discards its result and exists
+    # solely to force that validation BEFORE any write, not to cache it.
+    #
+    # Gated on the flag (AC1): with `librarian.source_trust_enabled` off,
+    # `source_trust_edges` is never parsed here, or anywhere else in this
+    # phase -- byte-identical to before this fix. Mirrors the identical
+    # gate `process_correction_record` already applies per record.
+    if resolve_source_trust_enabled(config):
+        resolve_source_trust_edges(config)
+
     summary: dict[str, Any] = {
         "batches_processed": 0,
         "batches_carried_over": 0,
