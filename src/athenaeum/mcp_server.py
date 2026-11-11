@@ -321,13 +321,17 @@ class TransportDefaults:
             ``remember`` write that supplied no ``sources``.
         session_subdir: The ``raw/<name>/`` subdirectory a ``remember`` call
             that supplied no ``source`` writes into.
-        env_session_attribution: Whether push-metrics may attribute a recall
-            to the session id in this PROCESS's environment when the request
-            carries no ``claudecode/toolUseId``. True under stdio, where the
+        env_session_attribution: Whether this process's ENVIRONMENT may be
+            treated as describing the caller. True under stdio, where the
             process env names the one conversation being served. False under
             a multi-client transport, where it names at best the operator's
-            shell and at worst a conversation that ended days ago — see
-            :meth:`athenaeum.push_metrics.ToolUseSessionResolver.resolve`.
+            shell and at worst a conversation that ended days ago. Gates two
+            things, both of which read that environment and neither of which
+            a caller can influence: push-metrics attribution for a request
+            carrying no ``claudecode/toolUseId``
+            (:meth:`athenaeum.push_metrics.ToolUseSessionResolver.resolve`),
+            and the ``model`` / ``originSessionId`` extras stamped alongside
+            a defaulted source (:func:`_default_inferred_extras`).
     """
 
     inferred_source: str
@@ -481,7 +485,9 @@ def _resolve_inferred_session_id() -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
-def _default_inferred_extras(content: str) -> dict:
+def _default_inferred_extras(
+    content: str, *, stamp_env_provenance: bool = True
+) -> dict:
     """Extras to inject alongside the ``claude:inferred`` default (issue athenaeum#2148).
 
     Stamps ``model`` and ``originSessionId`` — the two fields the
@@ -492,9 +498,29 @@ def _default_inferred_extras(content: str) -> dict:
     ``_inject_provenance_frontmatter`` applies these as an end-of-block
     merge, which would otherwise clobber a caller-supplied ``model:`` /
     ``originSessionId:`` that arrived pre-stamped in the markdown body.
+
+    **``stamp_env_provenance=False`` stamps NEITHER (issue athenaeum#2385).**
+    Both values are read from this PROCESS's environment —
+    :func:`_resolve_inferred_session_id` from ``CLAUDE_CODE_SESSION_ID``, and
+    :func:`_resolve_inferred_model` from ``ANTHROPIC_MODEL`` with that
+    session's transcript as a fallback. Under stdio that environment
+    describes the one conversation being served, which is the whole point of
+    athenaeum#2148. Under ``--transport http`` it describes the shell the
+    operator started the server in, so a remote host's note would be stamped
+    with a specific, real, WRONG session id and model — a worse provenance
+    lie than the bare scalar, because it names an identifiable session rather
+    than merely guessing a vendor. Omitting the keys is the honest answer: an
+    absent key already means "provenance unknown" throughout
+    ``docs/design/provenance-shape.md``, whereas a present one asserts
+    something. Note this is NOT the gate athenaeum#2148 already had — that
+    one declines only ``push_metrics.resolve_session_id()``'s wider
+    ``CLAUDE_SESSION_ID`` alias, and still reads ``CLAUDE_CODE_SESSION_ID``
+    on every transport.
     """
     existing_meta, _ = parse_frontmatter(content)
     extras: dict = {}
+    if not stamp_env_provenance:
+        return extras
     session_id = _resolve_inferred_session_id()
     if session_id and not existing_meta.get("originSessionId"):
         extras["originSessionId"] = session_id
@@ -2692,6 +2718,7 @@ def remember_write(
     bucket: str | None = None,
     valid_until: str | None = None,
     inferred_source: str = _DEFAULT_INFERRED_SOURCE,
+    stamp_env_provenance: bool = True,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -2794,6 +2821,13 @@ def remember_write(
             Claude inference. A parameter rather than a module-level branch
             because this function has no idea what transport it is under and
             should not grow one.
+        stamp_env_provenance: Whether the ``sources``-omitted default may also
+            stamp ``model`` / ``originSessionId`` read from this process's
+            environment (issue athenaeum#2148, gated by athenaeum#2385) — see
+            :func:`_default_inferred_extras`. Travels with *inferred_source*:
+            the MCP ``remember`` tool passes both out of the same
+            :class:`TransportDefaults`, so the two cannot diverge, and both
+            default to the stdio answer for every other caller.
 
     Returns:
         Confirmation message with the file path, or an error string.
@@ -2820,7 +2854,9 @@ def remember_write(
             # model inferred it and in WHICH session, without touching the
             # scalar itself (see the KEEP THIS SCALAR BYTE-IDENTICAL note on
             # `_DEFAULT_INFERRED_SOURCE` above).
-            extras: dict = _default_inferred_extras(content)
+            extras: dict = _default_inferred_extras(
+                content, stamp_env_provenance=stamp_env_provenance
+            )
             log.warning(
                 "remember(): no `sources` supplied; defaulting "
                 "wiki-level source to %r. Caller should declare a "
@@ -3888,6 +3924,7 @@ def create_server(
             bucket=bucket,
             valid_until=valid_until,
             inferred_source=_transport_defaults.inferred_source,
+            stamp_env_provenance=_transport_defaults.env_session_attribution,
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(

@@ -247,6 +247,92 @@ class TestInferredSourceDefaultPerTransport:
         )
 
 
+class TestEnvDerivedProvenanceExtrasPerTransport:
+    """AC1's other half, found by the async review bot on PR 2418.
+
+    The defaulted scalar was not the only thing claiming a Claude origin.
+    ``_default_inferred_extras`` also stamps ``model`` and ``originSessionId``
+    (issue athenaeum#2148), both read from the SERVER process's environment.
+    Under stdio that environment is the one conversation being served. Under
+    http it is the shell the operator ran ``athenaeum serve`` in, so a remote
+    host's note was stamped with a specific, real, wrong session id — a
+    sharper version of the mislabel AC1 exists to stop, since it names an
+    identifiable session rather than guessing a vendor.
+
+    The issue body's claim that ``_resolve_inferred_session_id`` "already
+    declines to stamp a session under HTTP" is true only of the WIDER
+    ``CLAUDE_SESSION_ID`` alias; it reads ``CLAUDE_CODE_SESSION_ID`` on every
+    transport. These tests are what distinguishes the two.
+    """
+
+    #: Set in the server's environment for both tests, so the ONLY difference
+    #: between them is the transport.
+    OPERATOR_ENV = {
+        "CLAUDE_CODE_SESSION_ID": "operator-shell-session",
+        "ANTHROPIC_MODEL": "claude-model-of-the-operators-shell",
+    }
+
+    def _write(
+        self, corpus: Path, monkeypatch: pytest.MonkeyPatch, transport: str | None
+    ) -> dict:
+        for name, value in self.OPERATOR_ENV.items():
+            monkeypatch.setenv(name, value)
+        _tool(_server(corpus, transport=transport), "remember")(content="A fact.")
+        subdir = "claude-session" if transport is None else "remote-session"
+        return _only_write(corpus, subdir)
+
+    def test_http_stamps_neither_model_nor_origin_session(
+        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        meta = self._write(corpus, monkeypatch, "http")
+        assert "originSessionId" not in meta
+        assert "model" not in meta
+        # Absent, not stamped `unknown`: an absent key already means
+        # "provenance unknown", while a present one asserts something.
+        assert self.OPERATOR_ENV["CLAUDE_CODE_SESSION_ID"] not in str(meta)
+        assert self.OPERATOR_ENV["ANTHROPIC_MODEL"] not in str(meta)
+
+    def test_stdio_still_stamps_both(
+        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control, and the athenaeum#2148 behaviour unchanged.
+
+        Without this, the assertion above would pass on a tree where the
+        extras stopped being stamped at all.
+        """
+        meta = self._write(corpus, monkeypatch, None)
+        assert meta["originSessionId"] == self.OPERATOR_ENV["CLAUDE_CODE_SESSION_ID"]
+        assert meta["model"] == self.OPERATOR_ENV["ANTHROPIC_MODEL"]
+
+    def test_the_helper_gate_is_the_only_difference(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The two answers straight off ``_default_inferred_extras``."""
+        from athenaeum.mcp_server import _default_inferred_extras
+
+        for name, value in self.OPERATOR_ENV.items():
+            monkeypatch.setenv(name, value)
+        assert _default_inferred_extras("A fact.") == {
+            "originSessionId": self.OPERATOR_ENV["CLAUDE_CODE_SESSION_ID"],
+            "model": self.OPERATOR_ENV["ANTHROPIC_MODEL"],
+        }
+        assert (
+            _default_inferred_extras("A fact.", stamp_env_provenance=False) == {}
+        )
+
+    def test_a_caller_declared_value_is_still_never_overridden(
+        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-stamped frontmatter wins on both transports, as before."""
+        for name, value in self.OPERATOR_ENV.items():
+            monkeypatch.setenv(name, value)
+        _tool(_server(corpus, transport="http"), "remember")(
+            content="---\noriginSessionId: declared-by-the-caller\n---\n\nA fact.\n"
+        )
+        meta = _only_write(corpus, "remote-session")
+        assert meta["originSessionId"] == "declared-by-the-caller"
+
+
 class TestSessionSubdirPerTransport:
     """AC2: the default ``raw/`` subdirectory, and that it is recallable."""
 
