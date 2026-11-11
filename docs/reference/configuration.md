@@ -5002,6 +5002,103 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
+### `resolve_serve_excluded_fields`
+
+- **YAML path:** `serve.excluded_fields`
+- **Environment variable:** `ATHENAEUM_SERVE_EXCLUDED_FIELDS`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the serve-time excluded-fields pin.
+
+Returns ``True`` (excluded values are resolvable, the historical
+behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
+`athenaeum.remote_policy.build_remote_policy` fall back to the
+active profile's default (``off`` under ``remote``) and keeps a server
+with no serve-time pins at all unchanged. A plain ``bool`` could not
+express that third state.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
+- ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
+- ``serve.excluded_fields`` — yaml string.
+- ``None`` — not set.
+
+The vocabulary is the words ``off`` / ``on``
+(`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
+bool, so YAML's permissive truthiness cannot quietly pick a side on a
+PII-egress boundary; anything else raises
+`athenaeum.remote_policy.RemotePolicyError` and
+``athenaeum serve`` exits non-zero, exactly as
+`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_profile`
+
+- **YAML path:** `serve.profile`
+- **Environment variable:** `ATHENAEUM_SERVE_PROFILE`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the serve-time profile preset.
+
+Returns a validated `athenaeum.remote_policy.VALID_SERVE_PROFILES`
+member, or ``None`` for no profile — which keeps every existing install
+unchanged. ``remote`` is the one profile today: it presets the serve-time
+tool allowlist and the excluded-fields pin for a server exposed to a
+third-party host (see `athenaeum.remote_policy`).
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` — the ``athenaeum serve --profile`` flag.
+- ``ATHENAEUM_SERVE_PROFILE`` — env var.
+- ``serve.profile`` — yaml string.
+- ``None`` — no profile.
+
+Raises `athenaeum.remote_policy.RemotePolicyError` on an
+unrecognized value rather than warning and falling back, so
+``athenaeum serve`` exits non-zero at startup instead of serving a WIDER
+surface than the operator asked for — the same fail-loud posture
+`resolve_screening` takes for the other serve-time safety pin, and
+the documented exception to this module's warn-and-fall-back policy for
+a knob whose silent default has a safety cost. No seed in ``_DEFAULTS``
+so the code default stays reachable.
+
+### `resolve_serve_tools`
+
+- **YAML path:** `serve.tools`
+- **Environment variable:** `ATHENAEUM_SERVE_TOOLS`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the serve-time tool ALLOWLIST.
+
+Returns the set of MCP tool names this server process may register, or
+``None`` for no allowlist (every tool, the existing behaviour). A tool
+outside a non-``None`` allowlist is never registered, so it is ABSENT
+from ``tools/list`` rather than present and refusing — see
+`athenaeum.remote_policy`.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` — the ``athenaeum serve --tools`` flag's comma-separated
+ value.
+- ``ATHENAEUM_SERVE_TOOLS`` — comma-separated env var.
+- ``serve.tools`` — a yaml list (or comma string).
+- ``None`` — no allowlist.
+
+Names are trimmed and case-folded but NOT validated here: whether a name
+is a real tool is only knowable from what ``create_server`` actually
+registers, so that check lives at startup in
+`athenaeum.remote_policy.RemotePolicy.validate_tool_names` rather
+than against a constant in this module that could drift. An explicitly
+EMPTY value resolves to ``None`` (no allowlist) for the same reason
+`resolve_audience` treats a blank flag as unset — to narrow the
+served surface you must name at least one tool. No seed in ``_DEFAULTS``.
+
 ## `spend`
 
 ### `resolve_spend_accounting_timezone`

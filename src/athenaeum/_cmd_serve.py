@@ -43,6 +43,51 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "are withheld. Unset = owner = full access. Overrides "
         "ATHENAEUM_AUDIENCE and serve.audience in athenaeum.yaml.",
     )
+    # Issue athenaeum#2383: the three serve-time remote-profile pins. Help text
+    # carries no issue ref on purpose -- `scripts/gen_cli_reference.py` strips
+    # the ref out of `docs/reference/cli.md` and would leave a dangling "Issue
+    # :" prefix on the operator-facing row.
+    serve_parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Apply a serve-time profile preset. "
+        "'remote' pins this server for exposure to a third-party host: the "
+        "three owner-only decision-queue mutators (resolve_question, "
+        "resolve_merge, review_audit_item) are not registered at all, while "
+        "remember and raise_decision stay available, and excluded fields are "
+        "withheld (see --excluded-fields). Overrides ATHENAEUM_SERVE_PROFILE "
+        "and serve.profile in athenaeum.yaml. Unset = no preset = unchanged "
+        "behaviour.",
+    )
+    serve_parser.add_argument(
+        "--tools",
+        type=str,
+        default=None,
+        help="Pin this server to an ALLOWLIST of MCP "
+        "tools. Comma-separated tool names (e.g. 'recall,read_entity'). A "
+        "tool outside the list is never registered, so it is absent from "
+        "tools/list rather than refusing when called; a name that is not a "
+        "tool of this deployment fails startup. Composes with --profile (a "
+        "tool must clear both). Overrides ATHENAEUM_SERVE_TOOLS and "
+        "serve.tools in athenaeum.yaml. Unset = no allowlist.",
+    )
+    serve_parser.add_argument(
+        "--excluded-fields",
+        type=str,
+        default=None,
+        choices=["off", "on"],
+        help="Whether this server may resolve excluded "
+        "(off-corpus) fields such as a person's contact data. 'on' is the "
+        "historical behaviour -- recall(with_pii=True) and "
+        "read_entity(include_excluded=True) return the values. 'off' "
+        "withholds them: recall returns a withheld notice instead, "
+        "read_entity returns none, and enumerate_entities refuses a "
+        "PII-scoped predicate or output field. Defaults to 'off' under "
+        "--profile remote, otherwise 'on'. Overrides "
+        "ATHENAEUM_SERVE_EXCLUDED_FIELDS and serve.excluded_fields in "
+        "athenaeum.yaml.",
+    )
     serve_parser.add_argument(
         "--cache-dir",
         type=Path,
@@ -82,8 +127,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_cache_dir,
         resolve_extra_intake_roots,
         resolve_screening,
+        resolve_serve_excluded_fields,
+        resolve_serve_profile,
+        resolve_serve_tools,
     )
     from athenaeum.mcp_server import create_server
+    from athenaeum.remote_policy import RemotePolicyError, build_remote_policy
 
     # Issue athenaeum#540 (M25): the MCP server process previously configured NO logging
     # at all — every mcp_server log line was dropped. Configure the shared
@@ -136,6 +185,39 @@ def cmd_serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # Issue athenaeum#2383: resolve the serve-time remote-profile pins (CLI >
+    # env > yaml, per pin). Fails fast on an invalid value for the same reason
+    # `resolve_screening` above does -- the only direction a mis-set safety pin
+    # must never fail in is "wider than the operator asked for".
+    try:
+        remote_policy = build_remote_policy(
+            profile=resolve_serve_profile(cfg, getattr(args, "profile", None)),
+            tools=resolve_serve_tools(cfg, getattr(args, "tools", None)),
+            excluded_fields=resolve_serve_excluded_fields(
+                cfg, getattr(args, "excluded_fields", None)
+            ),
+        )
+    except RemotePolicyError as exc:
+        print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)
+        return 1
+    if remote_policy is not None:
+        print(
+            "[remote-policy] excluded fields: "
+            f"{'on' if remote_policy.excluded_fields else 'off (withheld)'}"
+            + (
+                ""
+                if remote_policy.allowed_tools is None
+                else f"; tool allowlist: {', '.join(sorted(remote_policy.allowed_tools))}"
+            )
+            + (
+                ""
+                if not remote_policy.disabled_tools
+                else "; tools not served: "
+                f"{', '.join(sorted(remote_policy.disabled_tools))}"
+            ),
+            file=sys.stderr,
+        )
+
     # Warn on config/cache mismatch. The recall tool silently returns zero
     # hits when the configured backend's index is missing, so users with
     # `search_backend: vector` but an fts5-only cache (common when you flip
@@ -143,16 +225,24 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # but return nothing. Catch that up front.
     _warn_if_backend_cache_missing(backend, cache_dir)
 
-    server = create_server(
-        raw_root=raw_root,
-        wiki_root=wiki_root,
-        search_backend=backend,
-        cache_dir=cache_dir,
-        extra_roots=extra_roots,
-        caller_audience=caller_audience,
-        screening=screening,
-        config=cfg,
-    )
+    # The tool allowlist is validated INSIDE create_server, against the tools
+    # it actually registered -- the only drift-free place to check a name
+    # (issue athenaeum#2383).
+    try:
+        server = create_server(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            search_backend=backend,
+            cache_dir=cache_dir,
+            extra_roots=extra_roots,
+            caller_audience=caller_audience,
+            screening=screening,
+            remote_policy=remote_policy,
+            config=cfg,
+        )
+    except RemotePolicyError as exc:
+        print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)
+        return 1
     try:
         server.run()
     except KeyboardInterrupt:

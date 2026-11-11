@@ -9080,3 +9080,186 @@ def resolve_structured_upsert(
             keep_keys=_keys("keep_keys"),
         )
     return out
+
+
+def resolve_serve_profile(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str | None:
+    """Resolve the serve-time profile preset (issue athenaeum#2383).
+
+    Returns a validated :data:`athenaeum.remote_policy.VALID_SERVE_PROFILES`
+    member, or ``None`` for no profile — which keeps every existing install
+    unchanged. ``remote`` is the one profile today: it presets the serve-time
+    tool allowlist and the excluded-fields pin for a server exposed to a
+    third-party host (see :mod:`athenaeum.remote_policy`).
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --profile`` flag.
+    - ``ATHENAEUM_SERVE_PROFILE`` — env var.
+    - ``serve.profile`` — yaml string.
+    - ``None`` — no profile.
+
+    Raises :class:`athenaeum.remote_policy.RemotePolicyError` on an
+    unrecognized value rather than warning and falling back, so
+    ``athenaeum serve`` exits non-zero at startup instead of serving a WIDER
+    surface than the operator asked for — the same fail-loud posture
+    :func:`resolve_screening` takes for the other serve-time safety pin, and
+    the documented exception to this module's warn-and-fall-back policy for
+    a knob whose silent default has a safety cost. No seed in ``_DEFAULTS``
+    so the code default stays reachable.
+    """
+    from athenaeum.remote_policy import VALID_SERVE_PROFILES, RemotePolicyError
+
+    raw: str | None = None
+    source = "serve.profile"
+    if cli_value is not None:
+        raw = cli_value
+        source = "--profile"
+    else:
+        env = os.environ.get("ATHENAEUM_SERVE_PROFILE")
+        if env is not None:
+            raw = env
+            source = "ATHENAEUM_SERVE_PROFILE"
+        elif isinstance(config, dict):
+            serve_cfg = config.get("serve")
+            if isinstance(serve_cfg, dict):
+                candidate = serve_cfg.get("profile")
+                if isinstance(candidate, str):
+                    raw = candidate
+
+    if raw is None or not raw.strip():
+        # An explicitly EMPTY value at any tier means "no profile", matching
+        # `resolve_audience`'s empty-means-unset convention rather than
+        # erroring on a blank flag.
+        return None
+    profile = raw.strip().lower()
+    if profile not in VALID_SERVE_PROFILES:
+        raise RemotePolicyError(
+            f"{source}={raw!r} is not a valid serve profile; expected one of "
+            f"{sorted(VALID_SERVE_PROFILES)}."
+        )
+    return profile
+
+
+def resolve_serve_tools(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> frozenset[str] | None:
+    """Resolve the serve-time tool ALLOWLIST (issue athenaeum#2383).
+
+    Returns the set of MCP tool names this server process may register, or
+    ``None`` for no allowlist (every tool, the existing behaviour). A tool
+    outside a non-``None`` allowlist is never registered, so it is ABSENT
+    from ``tools/list`` rather than present and refusing — see
+    :mod:`athenaeum.remote_policy`.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --tools`` flag's comma-separated
+      value.
+    - ``ATHENAEUM_SERVE_TOOLS`` — comma-separated env var.
+    - ``serve.tools`` — a yaml list (or comma string).
+    - ``None`` — no allowlist.
+
+    Names are trimmed and case-folded but NOT validated here: whether a name
+    is a real tool is only knowable from what ``create_server`` actually
+    registers, so that check lives at startup in
+    :meth:`athenaeum.remote_policy.RemotePolicy.validate_tool_names` rather
+    than against a constant in this module that could drift. An explicitly
+    EMPTY value resolves to ``None`` (no allowlist) for the same reason
+    :func:`resolve_audience` treats a blank flag as unset — to narrow the
+    served surface you must name at least one tool. No seed in ``_DEFAULTS``.
+    """
+    if cli_value is not None:
+        names = _normalize_audience_roles(cli_value.split(","))
+        return frozenset(names) or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_TOOLS")
+    if env is not None:
+        names = _normalize_audience_roles(env.split(","))
+        return frozenset(names) or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            raw = serve_cfg.get("tools")
+            if isinstance(raw, str):
+                return frozenset(_normalize_audience_roles(raw.split(","))) or None
+            return frozenset(_normalize_audience_roles(raw)) or None
+    return None
+
+
+def resolve_serve_excluded_fields(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> bool | None:
+    """Resolve the serve-time excluded-fields pin (issue athenaeum#2383).
+
+    Returns ``True`` (excluded values are resolvable, the historical
+    behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
+    :func:`athenaeum.remote_policy.build_remote_policy` fall back to the
+    active profile's default (``off`` under ``remote``) and keeps a server
+    with no serve-time pins at all unchanged. A plain ``bool`` could not
+    express that third state.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
+    - ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
+    - ``serve.excluded_fields`` — yaml string.
+    - ``None`` — not set.
+
+    The vocabulary is the words ``off`` / ``on``
+    (:data:`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
+    bool, so YAML's permissive truthiness cannot quietly pick a side on a
+    PII-egress boundary; anything else raises
+    :class:`athenaeum.remote_policy.RemotePolicyError` and
+    ``athenaeum serve`` exits non-zero, exactly as
+    :func:`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.remote_policy import (
+        VALID_EXCLUDED_FIELDS_VALUES,
+        RemotePolicyError,
+    )
+
+    raw: str | None = None
+    source = "serve.excluded_fields"
+    if cli_value is not None:
+        raw = cli_value
+        source = "--excluded-fields"
+    else:
+        env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+        if env is not None:
+            raw = env
+            source = "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+        elif isinstance(config, dict):
+            serve_cfg = config.get("serve")
+            if isinstance(serve_cfg, dict):
+                candidate = serve_cfg.get("excluded_fields")
+                if isinstance(candidate, str):
+                    raw = candidate
+                elif candidate is not None:
+                    # A bare `serve.excluded_fields: false` is YAML's bool, not
+                    # this knob's vocabulary. Reject it rather than guessing
+                    # which of off/on the operator meant -- a wrong guess here
+                    # is a PII egress.
+                    raise RemotePolicyError(
+                        f"serve.excluded_fields={candidate!r} must be one of "
+                        f"{list(VALID_EXCLUDED_FIELDS_VALUES)} (as a quoted "
+                        "string), not a YAML boolean."
+                    )
+
+    if raw is None or not raw.strip():
+        # An explicitly EMPTY value at any tier means "not set", matching
+        # `resolve_serve_profile` and `resolve_audience` rather than erroring
+        # on the `ATHENAEUM_SERVE_EXCLUDED_FIELDS=` unset idiom.
+        return None
+    value = raw.strip().lower()
+    if value not in VALID_EXCLUDED_FIELDS_VALUES:
+        raise RemotePolicyError(
+            f"{source}={raw!r} is not a valid excluded-fields setting; "
+            f"expected one of {list(VALID_EXCLUDED_FIELDS_VALUES)}."
+        )
+    return value == "on"
