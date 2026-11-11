@@ -71,18 +71,67 @@ class TestWriteSettingsFile:
     def test_resolve_hook_command_finds_the_installed_console_script(self) -> None:
         # This lane's venv installs the package itself (`.[dev,types]`), so
         # the `athenaeum-claude-hook` console script
-        # (`pyproject.toml`'s [project.scripts]) must be on PATH.
+        # (`pyproject.toml`'s [project.scripts]) is resolvable here -- either
+        # tier of resolve_hook_command's own fallback would find it (PATH,
+        # since the lane prepends `.venv/bin`; or the sys.executable-sibling
+        # tier, since `.venv/bin` is also where `python` itself lives) --
+        # the three dedicated tier tests below pin each tier individually.
         resolved = resolve_hook_command()
-        assert resolved
-        assert os.path.isfile(resolved)
+        assert resolved, (
+            "resolve_hook_command() returned an empty string -- unexpected, "
+            "it should never return falsy"
+        )
+        assert os.path.isfile(resolved), (
+            f"{resolved!r} does not exist -- this test ambiently needs the "
+            "package itself installed in the active interpreter (editable "
+            'install, `pip install -e ".[dev,types]"`, same as this repo\'s '
+            "CONTRIBUTING.md setup); see resolve_hook_command's own three "
+            "fallback tiers, each pinned individually below, for what "
+            "'installed' means here"
+        )
 
-    def test_resolve_hook_command_raises_loudly_when_not_on_path(
+    def test_resolve_hook_command_prefers_path_when_available(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(harness.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(harness.shutil, "which", lambda _name: "/from/path/bin/hook")
 
-        with pytest.raises(RuntimeError, match=harness.HOOK_COMMAND_NAME):
-            resolve_hook_command()
+        assert resolve_hook_command() == "/from/path/bin/hook"
+
+    def test_resolve_hook_command_falls_back_to_sys_executable_sibling(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # issue athenaeum#2235 Seer finding: a venv's console scripts and its
+        # `python` binary always live side by side, even when the venv's
+        # `bin/` is not itself on PATH -- mirrors
+        # `tests/evals/rollout.py::_resolve_adapter_console_script`'s own
+        # fallback shape over the SAME console script.
+        fake_bin_dir = tmp_path / "bin"
+        fake_bin_dir.mkdir()
+        fake_python = fake_bin_dir / "python3"
+        fake_python.touch()
+        fake_hook = fake_bin_dir / harness.HOOK_COMMAND_NAME
+        fake_hook.touch()
+        monkeypatch.setattr(harness.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(harness.sys, "executable", str(fake_python))
+
+        assert resolve_hook_command() == str(fake_hook)
+
+    def test_resolve_hook_command_final_fallback_is_the_bare_command_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Neither PATH nor the sys.executable sibling resolves -- never
+        # raises (issue athenaeum#2235 Seer finding: a pre-flight
+        # RuntimeError here would fail the whole harness's setup over a
+        # condition a real spawn attempt surfaces just as loudly, and does
+        # so AFTER the two tiers above have already had their chance).
+        empty_bin_dir = tmp_path / "bin"
+        empty_bin_dir.mkdir()
+        fake_python = empty_bin_dir / "python3"
+        fake_python.touch()
+        monkeypatch.setattr(harness.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(harness.sys, "executable", str(fake_python))
+
+        assert resolve_hook_command() == harness.HOOK_COMMAND_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +164,37 @@ class TestBuildChildEnv:
         # The real contract: calling this helper with the REAL os.environ
         # as the base must not leak the child-only keys back into this
         # process's environment.
-        assert "ATHENAEUM_WITNESS_LEDGER_ENABLED" not in os.environ
+        #
+        # Seer finding on athenaeum#2235's review: this pre-check asserts
+        # on ambient shell state, which COULD fail for a reason unrelated
+        # to build_child_env (an operator's own shell already exporting
+        # this var while manually exercising the live harness). Considered
+        # routing it through `tests/env_contract.py::require` instead --
+        # declined: that module's `PROPERTIES` registry is for documented,
+        # genuinely-optional MACHINE capabilities (an extra not installed,
+        # a dependency layout, an OS enforcement capability) that CI always
+        # satisfies but a contributor env might not; "my own shell doesn't
+        # happen to already export this one specific var" is not that kind
+        # of property, and registering it there for one test would be a
+        # bigger change than this precondition is worth. Left as a plain
+        # assert, with the failure message spelling out exactly what
+        # ambient condition would need to change to make it fail.
+        assert "ATHENAEUM_WITNESS_LEDGER_ENABLED" not in os.environ, (
+            "this test's own process already has ATHENAEUM_WITNESS_LEDGER_ENABLED "
+            "set in os.environ -- unset it before running this test (e.g. you are "
+            "running inside a shell manually exercising the live harness); this "
+            "assertion is a precondition for the real contract check below, not "
+            "itself a build_child_env bug"
+        )
 
         child_env = build_child_env(os.environ, promptwitness_dir=tmp_path / "pw")
 
         assert child_env["ATHENAEUM_WITNESS_LEDGER_ENABLED"] == "true"
-        assert "ATHENAEUM_WITNESS_LEDGER_ENABLED" not in os.environ
+        assert "ATHENAEUM_WITNESS_LEDGER_ENABLED" not in os.environ, (
+            "build_child_env leaked ATHENAEUM_WITNESS_LEDGER_ENABLED into this "
+            "test process's own os.environ -- it must only ever appear in the "
+            "returned child-env dict"
+        )
 
     def test_claude_config_dir_and_launcher_are_optional(self, tmp_path: Path) -> None:
         promptwitness_dir = tmp_path / "pw"

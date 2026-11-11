@@ -46,6 +46,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -171,20 +172,32 @@ def write_settings_file(
 
 
 def resolve_hook_command() -> str:
-    """Resolve the installed :data:`HOOK_COMMAND_NAME` console script's
-    absolute path via :func:`shutil.which`.
+    """Resolve the installed :data:`HOOK_COMMAND_NAME` console script.
 
-    Raises :class:`RuntimeError` when it is not on ``PATH`` -- this harness
-    has nothing useful to do without it, and a loud failure here is better
-    than a settings file pointing at a command that silently never runs.
+    Three tiers, matching ``tests/evals/rollout.py``'s
+    ``_resolve_adapter_console_script`` precedent for resolving this SAME
+    console script (deliberately NOT a new fallback shape): :func:`shutil.
+    which` first (wherever the active venv's ``PATH`` entry puts it); then
+    a sibling of the running interpreter (``sys.executable``'s own
+    directory -- where a venv's console scripts and its ``python`` binary
+    always live side by side, even on a ``PATH`` that does not include the
+    venv's ``bin/`` directly -- Seer finding on athenaeum#2235's review:
+    the athenaeum#2161 operator session will very plausibly invoke pytest
+    without the venv's ``bin`` on ``PATH``, and this harness's hook
+    registration must not hard-fail at setup just because of that); then
+    the bare command name, so a spawn attempt fails loudly (a
+    :class:`FileNotFoundError` from the ``claude`` subprocess call, or a
+    clearly-broken hook command in the generated settings file) rather
+    than this function raising at setup time over a condition the two
+    earlier tiers already cover in every environment that actually matters.
     """
-    resolved = shutil.which(HOOK_COMMAND_NAME)
-    if resolved is None:
-        raise RuntimeError(
-            f"{HOOK_COMMAND_NAME!r} is not on PATH -- install this package "
-            "(`pip install -e .`) in the environment running this harness"
-        )
-    return resolved
+    found = shutil.which(HOOK_COMMAND_NAME)
+    if found:
+        return found
+    sibling = Path(sys.executable).parent / HOOK_COMMAND_NAME
+    if sibling.exists():
+        return str(sibling)
+    return HOOK_COMMAND_NAME
 
 
 def build_child_env(
@@ -303,14 +316,42 @@ class PtySession:
     process: subprocess.Popen[bytes]
 
     def close(self, *, timeout: float = 5.0) -> None:
-        """Best-effort teardown: SIGTERM, wait briefly, SIGKILL, close the
-        master fd last so no FD leak survives even a stuck child."""
+        """Best-effort teardown: SIGTERM the WHOLE process group, wait
+        briefly, SIGKILL the group, close the master fd last so no FD leak
+        survives even a stuck child.
+
+        Seer finding on athenaeum#2235's review: signaling only
+        ``self.process`` (the leader) leaves a descendant the ``claude``
+        session itself spawned (a sub-agent, a background-task runner) as
+        an orphan. Mirrors ``tests/test_shell_hooks.py``'s own
+        ``os.killpg(os.getpgid(proc.pid), ...)`` cleanup precedent, kept as
+        this class's existing SIGTERM-then-SIGKILL two-step rather than
+        that precedent's single SIGKILL.
+
+        This is ONLY safe because :func:`spawn_claude_pty` passes
+        ``start_new_session=True`` -- that makes the child a session AND
+        process-group leader in its own right (its pgid equals its own
+        pid), so ``killpg`` here can never reach the pytest runner's own
+        group. If that spawn-time flag ever changes, this method must
+        change with it (see that function's own docstring).
+        """
+
+        def _killpg(sig: signal.Signals) -> None:
+            try:
+                pgid = os.getpgid(self.process.pid)
+            except ProcessLookupError:
+                return
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                pass
+
         if self.process.poll() is None:
-            self.process.send_signal(signal.SIGTERM)
+            _killpg(signal.SIGTERM)
             try:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                _killpg(signal.SIGKILL)
                 self.process.wait(timeout=timeout)
         try:
             os.close(self.master_fd)
@@ -325,7 +366,12 @@ def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> P
     terminal, mirroring a real interactive launch rather than inheriting
     this test process's own (nonexistent, under pytest) controlling tty --
     :func:`promptwitness.harness.claude_code._probe_has_tty` reads the
-    CHILD's ``/proc/<pid>/stat`` tty field, not this process's.
+    CHILD's ``/proc/<pid>/stat`` tty field, not this process's. It also
+    makes the child the leader of its own process group, which is exactly
+    what lets :meth:`PtySession.close` ``killpg`` the whole group (the
+    ``claude`` process plus any descendant it spawns) without any risk of
+    reaching the pytest runner's own group -- the two are a matched pair;
+    see that method's own docstring.
     """
     master_fd, slave_fd = pty.openpty()
     try:
