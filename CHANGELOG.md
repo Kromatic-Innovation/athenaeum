@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cursor setup guide and clients.md row (issue athenaeum#2396).** Added
+  `docs/guides/cursor.md` covering `mcpServers` setup (`"type": "stdio"`,
+  `${userHome}` interpolation, the `--audience` flag, and the Cursor CLI
+  sharing the same config), the explicit-tool-call model (no per-turn
+  auto-recall), the Claude Code hook no-op under Cursor's "Include
+  Third-Party Plugins, Skills, and Other Configs" passthrough, the
+  search-index rebuild step, and egress/platform limitations. `clients.md`
+  gets its own Cursor table row and a reworded Cursor-support-issue
+  sentence that no longer promises auto-recall.
 - **Claude Code hook adapter no-ops under Grok Build (issue athenaeum#2371).** `claude_code_adapter.main`, `witness_session_end`, and `witness_session_end_anchor` now refuse to run — printing nothing, exit 0, no witness line, no push telemetry, no seen-file write — when `GROK_HOOK_EVENT` is set or the stdin payload is Grok-shaped, before any other side effect.
+- **Claude Code hook adapter also no-ops under Cursor (issue athenaeum#2394).** The same `claude_code_adapter.main` / `witness_session_end` / `witness_session_end_anchor` guard now additionally refuses to run when `CURSOR_VERSION` is set in the environment, or the stdin payload carries `cursor_version` or `conversation_id` — the markers Cursor's "Include Third-Party Plugins, Skills, and Other Configs" setting (on by default) sends when it loads Claude Code's `.claude/settings.json` hooks and maps `UserPromptSubmit` to its own `beforeSubmitPrompt` event. The Grok and Cursor checks now share one guard function.
 - **Tier-0 structured upsert for configured entity types (issue
   athenaeum#2360).** A pre-structured raw whose `type` is listed under
   `librarian.structured_upsert` and whose `uid` already resolves to a page is
