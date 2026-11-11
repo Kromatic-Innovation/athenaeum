@@ -2,10 +2,10 @@
 
 # ChatGPT as an athenaeum host, and the remote mode it needs
 
-**Status:** PROPOSED (Specify, not yet ratified). Epics athenaeum#2200 (ChatGPT host)
-and athenaeum#2199 (authenticated remote mode, the shared prerequisite). The open
-decisions in [§8](#8-open-decisions-for-the-operator) gate every build child. The
-operator's adoption order (Claude Code marketplace, then Cursor, then remote mode and
+**Status:** RATIFIED 2026-11-11. Epics athenaeum#2200 (ChatGPT host) and athenaeum#2199
+(authenticated remote mode, the shared prerequisite). The operator ruled on every
+decision in [§8](#8-open-decisions-for-the-operator) (athenaeum#2378,
+athenaeum#2379). The operator's adoption order (Claude Code marketplace, then Cursor, then remote mode and
 ChatGPT, then Grok) still applies: nothing here starts ahead of that order.
 
 Companion to [`security-posture.md`](security-posture.md) (audience scoping, the
@@ -341,9 +341,13 @@ can be found and retired by that source.
 
 ## 8. Open decisions for the operator
 
-Each decision has a recommendation. Decisions D1 to D5 are tracked on athenaeum#2378
-(the remote-mode gate, under athenaeum#2199), and D6 to D9 on athenaeum#2379 (under
-athenaeum#2200).
+**Ruled 2026-11-11.** D1 to D8 were accepted exactly as recommended below (D1 to D5
+on athenaeum#2378, D6 to D8 on athenaeum#2379). For D6 the operator added that
+"auto-recall" is reserved for per-turn push on every host, so Grok uses the same
+"steered recall" wording. D9: the operator holds no ChatGPT plan today and will buy
+one, at most Pro or Business/Team, as the first step of the live spike
+(athenaeum#2380). Business/Team is the minimum if write tools must be tested. Pro
+supports only a read-only spike. The deep-research shim (athenaeum#2388) is parked.
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
