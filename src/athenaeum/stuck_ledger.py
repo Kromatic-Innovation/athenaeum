@@ -311,3 +311,100 @@ def held_stuck_summary(
         "dominant_error_count": dominant_error_count,
         "error_counts": error_counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Never-ingest window hold-out ledger (issue athenaeum#2363 addendum).
+# ---------------------------------------------------------------------------
+#
+# A never-ingest-matched raw (issue athenaeum#968) is retained on disk BY
+# DESIGN -- refused idempotently every run, per athenaeum.never_ingest's own
+# module docstring -- and is therefore deliberately excluded from the
+# FAILURE half of the stuck-file ledger above (see
+# athenaeum.models.ProcessingResult.retain_raw_by_design): it must never
+# accrue toward the threshold/backoff that ledger drives.
+#
+# But that ledger was doing two jobs at once: failure accounting AND keeping
+# an unworkable file out of the ``max_files`` intake window (athenaeum#1322,
+# via athenaeum.librarian._hold_out_unworkable_raw). Opting a never-ingest
+# raw out of the ledger correctly opted it out of the first job -- and
+# silently opted it out of the second too, so it was rediscovered and
+# consumed a window slot every run, forever: the exact athenaeum#1322
+# starvation pathology this module's own measured incident documents
+# (50 permanently-stuck files filling a 50-slot window for six hours while
+# 4,181 healthy records behind them starved), arriving through a different
+# door.
+#
+# This sidecar ledger is the window-scheduling half, decoupled from failure
+# accounting: a ref present here (with a matching content hash) is held out
+# of the intake window by ``_hold_out_unworkable_raw``, but it is never
+# recorded as stuck, never surfaced in ``out_run_stats["stuck_files"]``, and
+# never subject to the exponential backoff schedule above. Same cost
+# discipline as the stuck ledger: only files already NAMED here are
+# content-hashed at hold-out time, never the whole backlog.
+
+NEVER_INGEST_HOLDOUT_MANIFEST_NAME = "_never_ingest_holdouts.json"
+
+
+def load_never_ingest_holdouts(wiki_root: Path) -> dict[str, dict[str, Any]]:
+    """Load the never-ingest window-holdout ledger. Missing/corrupt -> empty.
+
+    Same fail-open shape as :func:`load_stuck_ledger`: a parse error means
+    "no holdouts known," so at worst a never-ingest file is rediscovered and
+    re-classified (and re-recorded) on the very next run rather than
+    wedging the caller -- never a crash, and never treated as stuck.
+    """
+    path = wiki_root / NEVER_INGEST_HOLDOUT_MANIFEST_NAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {
+        ref: entry
+        for ref, entry in files.items()
+        if isinstance(entry, dict) and isinstance(entry.get("hash"), str)
+    }
+
+
+def write_never_ingest_holdouts(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> None:
+    """Persist the never-ingest window-holdout ledger, or remove it when empty.
+
+    Mirrors :func:`write_stuck_ledger`'s shape exactly: written beside the
+    wiki root so it rides the run's git snapshot like every other durable
+    cross-run sidecar here, removed when empty so a corpus with no
+    never-ingest matches left leaves no stale file behind.
+    """
+    from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.store import now_iso
+
+    path = wiki_root / NEVER_INGEST_HOLDOUT_MANIFEST_NAME
+    if not ledger:
+        if path.exists():
+            path.unlink()
+        return
+    payload = {"updated": now_iso(), "files": ledger}
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def record_never_ingest_holdout(
+    ledger: dict[str, dict[str, Any]],
+    raw: Any,
+    *,
+    detail: str,
+) -> None:
+    """Record/refresh *raw*'s entry in *ledger* (mutates *ledger* in place).
+
+    Called every time a transport's never-ingest gate refuses *raw* this
+    run (both the synchronous entity loop and the batch assembly loop reach
+    this, since each runs its own never-ingest check), so the ledger always
+    reflects the LATEST matching detail and content hash. There is no
+    failure count to accumulate here, unlike :func:`_record_stuck_failure`
+    (athenaeum.librarian) -- a never-ingest refusal is not a failure (issue
+    athenaeum#2363); it is simply "still matches, still hold out."
+    """
+    ledger[raw.ref] = {"hash": stuck_content_hash(raw), "detail": detail}

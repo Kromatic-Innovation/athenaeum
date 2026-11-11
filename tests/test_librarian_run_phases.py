@@ -178,6 +178,10 @@ class TestRunContext:
             # within their exponential-backoff window, mirroring stuck_files/
             # quarantined_files above (empty here — none set).
             "backoff_skipped_files": [],
+            # Issue athenaeum#2363 addendum: never-ingest raws held out of the
+            # max_files intake window, mirroring backoff_skipped_files above
+            # (empty here — none set).
+            "never_ingest_held_out_files": [],
             # Issue athenaeum#1144: batch refs left running at the run deadline,
             # exported the same way (empty here — the batch transport is not
             # exercised by this unit test).
