@@ -23,8 +23,23 @@ issue athenaeum#1419 — see :func:`write_correction_handoff`; undeclared in
 ``tests/fixtures/layer_declarations.py`` same as every other importer of it),
 :mod:`athenaeum.trust_graph` (module-scope, issue athenaeum#2331/TG3 — the
 pure `compare_sources` override layer; L1, so this stays a forward-only
-edge), and (function-local, per call site — see :func:`_resolve_email_handle`
-and the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. Must never import
+edge), :mod:`athenaeum.witness_attestation` (module-scope, issue
+athenaeum#2334/TG6 — :func:`_claim_attestation`'s fresh chain-intactness
+re-check; L2, same tier as this module, and it imports nothing of its own
+that leads back here, so this stays a forward-only edge too), and
+(function-local, per call site — see :func:`_resolve_email_handle` and
+the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. **Deliberately
+does NOT import** :mod:`athenaeum.transcript_receipts` — that module has
+a (function-local) edge to :mod:`athenaeum.intake`, which imports FROM
+this module (see below); importing it here would close a THREE-module
+import cycle (``corrections -> transcript_receipts -> intake ->
+corrections``), caught by `tests/test_import_graph_acyclic.py`'s whole-
+graph SCC guard. :func:`_lookup_receipt_by_witness_ref` therefore reads
+the `_transcript_receipts/*.jsonl` partitions with its OWN small,
+tolerant JSONL scan (deliberately duplicating
+`transcript_receipts._parse_jsonl_text`'s few lines rather than importing
+the module that owns it) instead of calling `transcript_receipts.
+iter_receipts`. Must never import
 :mod:`athenaeum.intake`,
 :mod:`athenaeum.librarian`, :mod:`athenaeum.merge`, or :mod:`athenaeum.tiers`
 — `intake.py` imports :func:`parse_batch_envelope` from here (the "valid
@@ -138,13 +153,18 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
 from athenaeum.store import FilesystemStore, Store, append_line_durable
 from athenaeum.trust_graph import (
+    EQUAL,
     INCOMPARABLE,
     OUTRANKED,
     OUTRANKS,
     UNKNOWN_EVIDENCE_KIND,
+    AttestedClaim,
     SourceTrustEdge,
+    attestation_for,
+    attestation_tiebreak,
     compare_sources,
 )
+from athenaeum.witness_attestation import AttestationIndex, resolve_default_witness_dir
 
 log = logging.getLogger(__name__)
 
@@ -981,6 +1001,121 @@ def _trust_edge_verdict(
     return None  # pragma: no cover - EQUAL never carries an "edge[" reason
 
 
+#: Duplicated from `transcript_receipts.RECEIPTS_DIRNAME` (issue
+#: athenaeum#2334) -- not imported, per the module docstring's "Deliberately
+#: does NOT import `athenaeum.transcript_receipts`" note (the import-cycle
+#: guard, `tests/test_import_graph_acyclic.py`).
+_RECEIPTS_DIRNAME = "_transcript_receipts"
+
+
+def _iter_receipt_dicts(wiki_root: Path) -> Iterable[dict[str, Any]]:
+    """Every receipt record across every monthly ``_transcript_receipts/
+    *.jsonl`` partition, as a raw ``dict`` (issue athenaeum#2334, TG6).
+
+    Deliberately a SEPARATE, small reimplementation of
+    `transcript_receipts.iter_receipts`/`_parse_jsonl_text` -- never an
+    import of that module, which would close an import cycle (see the
+    module docstring). Tolerates a torn trailing line exactly like the
+    original: a per-line ``json.JSONDecodeError`` is skipped, never
+    raised.
+    """
+    receipts_dir = wiki_root / _RECEIPTS_DIRNAME
+    if not receipts_dir.is_dir():
+        return
+    for path in sorted(receipts_dir.glob("*.jsonl")):
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # torn trailing write or hand-edit; skip
+            if isinstance(record, dict):
+                yield record
+
+
+def _lookup_receipt_by_witness_ref(wiki_root: Path, witness_ref: str) -> dict[str, Any] | None:
+    """Find the receipt record minted for *witness_ref* (issue
+    athenaeum#2334, TG6).
+
+    The join key IS `witness_ref` itself — the exact ``<ledger_id>:<seq>``
+    string `frontmatter_edit.witnessed_source_fields` writes onto a page's
+    own frontmatter is the SAME string `transcript_receipts.
+    write_receipt_for_origin` stamps onto the matching receipt's own
+    `witness_ref` field. No `(origin_scope, memory_digest)` lookup is
+    needed or possible here — a field-correction target is a structured
+    entity page, not the `AutoMemoryFile` claim shape that lookup key
+    assumes.
+
+    Ties (more than one receipt sharing a `witness_ref` — a re-run, or two
+    claims witnessed by the same ledger line) break on the most recently
+    recorded, matching every other receipt lookup in this codebase
+    (`transcript_receipts.lookup_receipt` / `ReceiptRun.lookup`).
+    """
+    candidates = [
+        r for r in _iter_receipt_dicts(wiki_root) if r.get("witness_ref") == witness_ref
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: str(r.get("recorded_at", "")))
+    return candidates[-1]
+
+
+def _claim_attestation(
+    source: Any,
+    meta: dict[str, Any],
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+) -> AttestedClaim:
+    """Decision-time attestation for one side of a `decide_verdict`
+    comparison (issue athenaeum#2334, TG6).
+
+    *meta* is the claim's own frontmatter dict. `witness_ref` is written
+    only alongside a page's page-level `source:`
+    (`frontmatter_edit.witnessed_source_fields`) — never onto a
+    `field_sources.<field>` entry, which carries only ``{value, source}``.
+    So this is consulted ONLY when *source* equals *meta*'s own
+    page-level `source` — a `field_sources` entry's source is a
+    DIFFERENT, more specific claim, and must never borrow the page's
+    attestation.
+
+    Loads a FRESH `witness_attestation.AttestationIndex` on every call
+    that actually has a `witness_ref` to check — deliberately never
+    cached across records (failure class F6, `docs/design/trust-graph.md`
+    §4): a chain break discovered after an earlier receipt was written
+    must demote THIS decision, not reproduce whatever `chain_ok` looked
+    like back when the receipt was written. On a store with no ledger
+    (AC5, today's host state) no claim ever carries a `witness_ref`, so
+    this returns `trust_graph.NO_ATTESTATION` with zero I/O.
+    """
+    witness_ref = meta.get("witness_ref")
+    if not isinstance(witness_ref, str) or not witness_ref or meta.get("source") != source:
+        return attestation_for(None)
+    try:
+        seq = int(witness_ref.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return attestation_for(None)
+    receipt = _lookup_receipt_by_witness_ref(wiki_root, witness_ref)
+    if receipt is None:
+        return attestation_for(None)
+    attestation_index = AttestationIndex.load(resolve_default_witness_dir(), config=config)
+    chain_intact = attestation_index.chain_intact_through(seq)
+    return attestation_for(
+        {
+            "witness_ref": witness_ref,
+            "chain_intact": chain_intact,
+            "witness_strength_verified": receipt.get("witness_strength_verified"),
+            "witness_anchor_source": receipt.get("witness_anchor_source"),
+        }
+    )
+
+
 def decide_verdict(
     *,
     existing_source: Any,
@@ -995,6 +1130,7 @@ def decide_verdict(
     trust_domain: dict[str, Any] | None = None,
     trust_edges: Sequence[SourceTrustEdge] = (),
     incoming_is_rule_compiled: bool = False,
+    attestation: tuple[AttestedClaim, AttestedClaim] | None = None,
 ) -> tuple[str, str]:
     """§6.2 conflict policy for a single value comparison.
 
@@ -1029,6 +1165,17 @@ def decide_verdict(
     entry, as opposed to falling back to the page-level ``source:``. Only
     consulted at the final "equal rank, indistinguishable dates" branch —
     see the module docstring's decisions list.
+
+    ``attestation`` (issue athenaeum#2334, TG6; default ``None`` so every
+    existing caller is byte-identical — AC1/AC5): a
+    ``(incoming, existing)`` pair of :class:`athenaeum.trust_graph.
+    AttestedClaim`, built by the caller (:func:`_claim_attestation`) ONLY
+    when ``librarian.source_trust_enabled`` resolves on. Consulted in
+    exactly ONE place below — the ``incoming_rank == existing_rank``
+    branch, BEFORE the ``observed_at`` tie-break — which is what makes
+    "attestation never overrides rank" (operator ruling OQ1) structural:
+    every branch that could have decided this on rank alone has already
+    returned by the time this parameter is ever read.
     """
     if existing_value == incoming_value:
         return "noop", "identical value (delta gate)"
@@ -1060,6 +1207,37 @@ def decide_verdict(
         return "apply", f"incoming rank {incoming_rank} outranks existing rank {existing_rank}"
     if incoming_rank > existing_rank:
         return "defer", f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}"
+
+    # Equal rank, differing value: TG6 (issue athenaeum#2334) attestation
+    # tie-break, consulted BEFORE the observed_at tie-break below (operator
+    # ruling OQ1 — see the `attestation` parameter's own docstring for why
+    # this placement is what keeps attestation from ever overriding rank).
+    # `attestation_tiebreak` returns EQUAL whenever neither side has an
+    # effective attestation above "none" (AC1: unverified/local-clock-only
+    # has no effect; AC2: a broken chain demotes to "none", which compares
+    # identically) — this falls straight through to observed_at, unchanged,
+    # exactly as if `attestation` had been omitted (AC5: a store with no
+    # ledger never has a `witness_ref` to attest in the first place).
+    if attestation is not None:
+        incoming_attestation, existing_attestation = attestation
+        att_relation = attestation_tiebreak(incoming_attestation, existing_attestation)
+        if att_relation == OUTRANKS:
+            return (
+                "apply",
+                "equal rank, attestation tie-break: incoming "
+                f"{incoming_attestation.effective_strength!r} outranks existing "
+                f"{existing_attestation.effective_strength!r}",
+            )
+        if att_relation == OUTRANKED:
+            return (
+                "defer",
+                "equal rank, attestation tie-break: existing "
+                f"{existing_attestation.effective_strength!r} outranks incoming "
+                f"{incoming_attestation.effective_strength!r}",
+            )
+        assert att_relation == EQUAL  # pragma: no branch - attestation_tiebreak is total
+        # EQUAL (including "neither side is attested") falls through to the
+        # observed_at tie-break below, unchanged.
 
     # Equal rank, differing value: break on observed_at (§6.2's own
     # tie-break). No per-value observed_at is persisted (§4's per-value
@@ -1808,6 +1986,23 @@ def process_correction_record(
             incumbent_attributed = (
                 isinstance(existing_fs, dict) and write_field in existing_fs
             )
+            # TG6 (issue athenaeum#2334): attestation tie-break inputs,
+            # gated on the SAME flag as the edge layer above (no new flag)
+            # -- `attestation` stays `None` (byte-identical, AC1/AC5) when
+            # the flag is off. `effective` is the compiled correction's
+            # own dict (never carries `witness_ref` at this seam -- see
+            # `_claim_attestation`'s docstring), so the incoming side
+            # resolves to `trust_graph.NO_ATTESTATION` with zero I/O.
+            attestation: tuple[AttestedClaim, AttestedClaim] | None = None
+            if resolve_source_trust_enabled(config):
+                attestation = (
+                    _claim_attestation(
+                        source, effective, wiki_root=index.wiki_root, config=config
+                    ),
+                    _claim_attestation(
+                        existing_source, read_meta, wiki_root=index.wiki_root, config=config
+                    ),
+                )
             verdict, reason = decide_verdict(
                 existing_source=existing_source,
                 incoming_source=source,
@@ -1821,6 +2016,7 @@ def process_correction_record(
                 trust_domain=trust_domain,
                 trust_edges=trust_edges,
                 incoming_is_rule_compiled=incoming_is_rule_compiled,
+                attestation=attestation,
             )
     elif op == "add":
         existing_list = read_meta.get(write_field)
