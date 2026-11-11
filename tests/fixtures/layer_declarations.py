@@ -323,6 +323,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_contact_surface_lint": 5,  # issue athenaeum#2218
     "_cmd_decompose_page": 5,
     "_cmd_correct_notes": 5,
+    "_cmd_corrections_trust_dryrun": 5,  # issue athenaeum#2331 (TG3)
     "_cmd_paste_cleanup": 5,
     "_cmd_authority": 5,
     "_cmd_axiom": 5,

@@ -1741,3 +1741,35 @@ class TestHelpFlagOrderingMatchesEagerParser:
         # from other groups must not.
         assert "memory-class" not in out
         assert "push-metrics" not in out
+
+
+class TestCorrectionsTrustDryrun:
+    """``athenaeum corrections-trust-dryrun`` (issue athenaeum#2331, TG3) —
+    end-to-end smoke test through real argv parsing + dispatch, on top of
+    the thorough unit coverage in
+    ``test_corrections.py::TestTrustDryRunReport``."""
+
+    def test_empty_store_reports_zero_edges_zero_flips(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "wiki").mkdir()
+        rc = main(["corrections-trust-dryrun", "--path", str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "0 trust edges configured" in out
+        assert "0 verdicts would change" in out
+
+    def test_json_flag_emits_valid_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "wiki").mkdir()
+        rc = main(["corrections-trust-dryrun", "--path", str(tmp_path), "--json"])
+        assert rc == 0
+        import json
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {
+            "edges": [],
+            "has_evidence_kind_scoped_edge": False,
+            "flips": [],
+        }
