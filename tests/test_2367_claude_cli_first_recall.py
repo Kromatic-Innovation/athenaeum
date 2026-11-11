@@ -35,6 +35,8 @@ Anthropic endpoint.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -49,10 +51,16 @@ from tests.test_session_end import _seed_knowledge_root, _write_tier0_raw
 # Environment isolation
 # ---------------------------------------------------------------------------
 
+#: ``athenaeum.provider.resolve_provider``'s two env tiers: the global default
+#: and the per-knob override (``ATHENAEUM_<KNOB>_LLM_PROVIDER``), which
+#: outranks it. Both are cleared below.
+_GLOBAL_PROVIDER_ENV = "ATHENAEUM_LLM_PROVIDER"
+_PER_KNOB_PROVIDER_ENV = re.compile(r"ATHENAEUM_[A-Z0-9_]+_LLM_PROVIDER")
+
 
 @pytest.fixture(autouse=True)
 def _pin_llm_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Delete the global provider env override unconditionally.
+    """Delete the global AND per-knob provider env overrides unconditionally.
 
     Every test in this module asserts on the provider its OWN yaml selects,
     and :func:`athenaeum.provider.resolve_provider`'s global chain reads
@@ -67,8 +75,17 @@ def _pin_llm_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
     an xdist worker — proven by an A/B run where the same source with one test
     file removed was green. A test that wants a specific value still sets it
     in its own body; this fixture runs first.
+
+    The per-knob family goes too (issue athenaeum#2421): the ``init``
+    disclosure this module asserts on resolves ``knob="topic"``, so an ambient
+    ``ATHENAEUM_TOPIC_LLM_PROVIDER`` outranks even the global variable, and the
+    disclosure silently names a provider the config never selected. Cleared by
+    pattern rather than by name so a knob added later cannot reintroduce the
+    same hole quietly.
     """
-    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv(_GLOBAL_PROVIDER_ENV, raising=False)
+    for name in [n for n in os.environ if _PER_KNOB_PROVIDER_ENV.fullmatch(n)]:
+        monkeypatch.delenv(name, raising=False)
 
 
 # ---------------------------------------------------------------------------

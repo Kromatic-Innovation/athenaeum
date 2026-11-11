@@ -36,8 +36,10 @@ in :mod:`athenaeum._cmd_drain`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,6 +47,43 @@ from typing import Any, Callable
 from athenaeum import spend
 
 log = logging.getLogger(__name__)
+
+#: The two environment variables :func:`run_drain` writes directly. The drain
+#: forces the API transport and maps its remaining budget onto the per-run
+#: ceiling that way because env wins over yaml inside
+#: :func:`athenaeum.librarian.run` (issue athenaeum#378) -- but both writes are
+#: scoped to the drain, so :func:`_env_restored` puts them back on the way out
+#: (issue athenaeum#2421).
+PROVIDER_ENV = "ATHENAEUM_LLM_PROVIDER"
+SPEND_CEILING_ENV = "ATHENAEUM_SPEND_MAX_USD_PER_RUN"
+
+
+@contextlib.contextmanager
+def _env_restored(*names: str) -> Iterator[None]:
+    """Restore *names* to their entry values -- including their ABSENCE -- on exit.
+
+    Issue athenaeum#2421: :func:`run_drain` assigns ``os.environ`` directly (it
+    has to -- env outranks yaml inside :func:`athenaeum.librarian.run`), and
+    used to leave both writes behind when it returned. Out of process that was
+    invisible; in process it is a cross-test leak, and it caused a real CI
+    flake. ``ATHENAEUM_LLM_PROVIDER`` is first in
+    :func:`athenaeum.provider._resolve_global_provider`'s chain, so a leaked
+    ``api`` silently outranks the ``llm.provider`` a later caller wrote to its
+    own yaml.
+
+    ``finally``, not a plain restore after the body, so the error paths
+    (zero-progress stop, a raising ``run_fn``) restore too.
+    """
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
 
 # ---------------------------------------------------------------------------
 # Drain orchestrator + pre-flight guards (the ETA advisor moved to
@@ -187,6 +226,10 @@ def run_drain(
     ``max_runtime=0`` on every window. Returns an int exit code (0 on a clean
     completion / ceiling stop; nonzero on a zero-progress stop).
 
+    Both env writes it makes -- the forced ``provider=api`` and the per-window
+    spend ceiling -- are RESTORED to their entry values (or absence) on every
+    exit path, including an exception (issue athenaeum#2421).
+
     *run_fn* / *backlog_fn* are injectable seams for testing; they default to
     :func:`athenaeum.librarian.run` and a live ``discover_raw_files`` count.
 
@@ -217,92 +260,97 @@ def run_drain(
 
     drain_start = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    # Force the API path: batch mode is Anthropic-endpoint-only (issue athenaeum#330), so
-    # a claude-cli-configured repo must be overridden for the drain. Loud, not
-    # silent — the operator asked for a batch drain.
-    if os.environ.get("ATHENAEUM_LLM_PROVIDER") != "api":
-        log.info("athenaeum drain: forcing provider=api (batch mode is API-only).")
-        os.environ["ATHENAEUM_LLM_PROVIDER"] = "api"
+    # Issue athenaeum#2421: both env writes below are SCOPED to this drain. They
+    # are assignments rather than a run_fn kwarg because env outranks yaml
+    # inside `librarian.run()`, and they used to outlive the call -- a leak
+    # that is invisible out of process and a cross-test contaminant in one.
+    with _env_restored(PROVIDER_ENV, SPEND_CEILING_ENV):
+        # Force the API path: batch mode is Anthropic-endpoint-only (issue
+        # athenaeum#330), so a claude-cli-configured repo must be overridden for
+        # the drain. Loud, not silent — the operator asked for a batch drain.
+        if os.environ.get(PROVIDER_ENV) != "api":
+            log.info("athenaeum drain: forcing provider=api (batch mode is API-only).")
+            os.environ[PROVIDER_ENV] = "api"
 
-    window = 0
-    while True:
-        spent = drain_spend_usd(ledger_path, since=drain_start)
-        remaining = max_usd - spent
-        if remaining <= 0:
-            log.warning(
-                "athenaeum drain: cumulative spend ceiling reached "
-                "($%.2f/$%.2f across %d window(s)) — stopping.",
+        window = 0
+        while True:
+            spent = drain_spend_usd(ledger_path, since=drain_start)
+            remaining = max_usd - spent
+            if remaining <= 0:
+                log.warning(
+                    "athenaeum drain: cumulative spend ceiling reached "
+                    "($%.2f/$%.2f across %d window(s)) — stopping.",
+                    spent,
+                    max_usd,
+                    window,
+                )
+                return 0
+            backlog = backlog_fn(raw_root)
+            if backlog <= 0:
+                log.info(
+                    "athenaeum drain: raw backlog empty — done "
+                    "(%d window(s), $%.2f spent).",
+                    window,
+                    spent,
+                )
+                return 0
+
+            # Map the drain's REMAINING budget onto the per-run dollar ceiling for
+            # THIS window (env wins over yaml inside run(), issue athenaeum#378). The
+            # cumulative guard is the loop re-reading spend from the ledger each pass.
+            os.environ[SPEND_CEILING_ENV] = f"{remaining:.6f}"
+            log.info(
+                "athenaeum drain: window %d — backlog %d, $%.2f of $%.2f spent, "
+                "$%.2f remaining this window.",
+                window + 1,
+                backlog,
                 spent,
                 max_usd,
-                window,
+                remaining,
             )
-            return 0
-        backlog = backlog_fn(raw_root)
-        if backlog <= 0:
-            log.info(
-                "athenaeum drain: raw backlog empty — done "
-                "(%d window(s), $%.2f spent).",
-                window,
-                spent,
-            )
-            return 0
 
-        # Map the drain's REMAINING budget onto the per-run dollar ceiling for
-        # THIS window (env wins over yaml inside run(), issue athenaeum#378). The
-        # cumulative guard is the loop re-reading spend from the ledger each pass.
-        os.environ["ATHENAEUM_SPEND_MAX_USD_PER_RUN"] = f"{remaining:.6f}"
-        log.info(
-            "athenaeum drain: window %d — backlog %d, $%.2f of $%.2f spent, "
-            "$%.2f remaining this window.",
-            window + 1,
-            backlog,
-            spent,
-            max_usd,
-            remaining,
-        )
-
-        rc = run_fn(
-            raw_root=raw_root,
-            wiki_root=wiki_root,
-            knowledge_root=knowledge_root,
-            max_files=max_files,
-            max_runtime=0,
-            batch_mode=True,
-            install_signal_handlers=False,
-            # Issue athenaeum#1230: see this function's docstring — thread the
-            # run lock's heartbeat into every window so a multi-hour batch
-            # drain's heartbeat age tracks progress, not the drain's total
-            # wall time.
-            heartbeat=heartbeat,
-        )
-        window += 1
-
-        new_backlog = backlog_fn(raw_root)
-        if new_backlog >= backlog:
-            log.error(
-                "athenaeum drain: window %d made ZERO progress (backlog %d → "
-                "%d) — stopping loudly to avoid a spin. Inspect "
-                "wiki/_deferred_work.md and any failed files.",
-                window,
-                backlog,
-                new_backlog,
+            rc = run_fn(
+                raw_root=raw_root,
+                wiki_root=wiki_root,
+                knowledge_root=knowledge_root,
+                max_files=max_files,
+                max_runtime=0,
+                batch_mode=True,
+                install_signal_handlers=False,
+                # Issue athenaeum#1230: see this function's docstring — thread the
+                # run lock's heartbeat into every window so a multi-hour batch
+                # drain's heartbeat age tracks progress, not the drain's total
+                # wall time.
+                heartbeat=heartbeat,
             )
-            return 1
-        if rc not in (0, EXIT_GRACEFUL_PARTIAL):
-            # A window that still made progress but exited nonzero (e.g. some
-            # files failed): log it and keep draining — the zero-progress guard
-            # above terminates the loop once only-undrainable files remain.
-            # Issue athenaeum#897: this drain loop forces max_runtime=0 and
-            # install_signal_handlers=False on every window, so neither
-            # EXIT_GRACEFUL_PARTIAL nor EXIT_EXTERNAL_KILL (124) can actually
-            # be returned here today — kept for defensive parity with
-            # `run()`'s general exit-code contract (docs/reference/exit-codes.md) should
-            # a future caller thread those flags through.
-            log.warning(
-                "athenaeum drain: window %d run exited %d but made progress "
-                "(%d → %d); continuing.",
-                window,
-                rc,
-                backlog,
-                new_backlog,
-            )
+            window += 1
+
+            new_backlog = backlog_fn(raw_root)
+            if new_backlog >= backlog:
+                log.error(
+                    "athenaeum drain: window %d made ZERO progress (backlog %d → "
+                    "%d) — stopping loudly to avoid a spin. Inspect "
+                    "wiki/_deferred_work.md and any failed files.",
+                    window,
+                    backlog,
+                    new_backlog,
+                )
+                return 1
+            if rc not in (0, EXIT_GRACEFUL_PARTIAL):
+                # A window that still made progress but exited nonzero (e.g. some
+                # files failed): log it and keep draining — the zero-progress guard
+                # above terminates the loop once only-undrainable files remain.
+                # Issue athenaeum#897: this drain loop forces max_runtime=0 and
+                # install_signal_handlers=False on every window, so neither
+                # EXIT_GRACEFUL_PARTIAL nor EXIT_EXTERNAL_KILL (124) can actually
+                # be returned here today — kept for defensive parity with
+                # `run()`'s general exit-code contract (docs/reference/exit-codes.md) should
+                # a future caller thread those flags through.
+                log.warning(
+                    "athenaeum drain: window %d run exited %d but made progress "
+                    "(%d → %d); continuing.",
+                    window,
+                    rc,
+                    backlog,
+                    new_backlog,
+                )
