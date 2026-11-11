@@ -293,11 +293,13 @@ class TestGenerators:
         XML `<string>` element, so there is no line-oriented word-splitting
         for a space to break.
 
-        The leading `<!--...-->` line is stripped before parsing only
-        because it is pre-existing, unrelated malformed XML (it contains a
-        literal `--` inside an XML comment body, which plistlib's strict
-        parser rejects) -- not something either review finding asked for;
-        reported separately rather than fixed here.
+        Parses the plist VERBATIM, with nothing stripped, so that this
+        test also pins the generated document being well-formed XML. An
+        earlier revision of this test filtered the leading comment line out
+        before parsing, which hid a real defect: the generated comment body
+        contained a literal `--`, which XML forbids and which plistlib (and
+        launchd's own parser) reject outright, so every generated macOS unit
+        would have been unloadable.
         """
         bin_path = tmp_path / "ath env" / "bin" / "athenaeum"
         knowledge_root = tmp_path / "know ledge" / "root"
@@ -305,10 +307,7 @@ class TestGenerators:
         content = schedule.generate_launchd_plist(
             bin_path, knowledge_root, key_source, hour=3, minute=0, log_path=tmp_path / "log"
         )
-        parseable = "\n".join(
-            line for line in content.splitlines() if not line.strip().startswith("<!--")
-        )
-        data = plistlib.loads(parseable.encode("utf-8"))
+        data = plistlib.loads(content.encode("utf-8"))
         assert data["ProgramArguments"] == [
             str(bin_path),
             "run",
