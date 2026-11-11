@@ -69,6 +69,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum enumerate`](#athenaeum-enumerate) (command) — Enumerate every entity of a declared type matching field predicates — no query text. The generalized form of the former `athenaeum people` (removed) — see docs/design/recall-architecture.md's capability-parity table.
 - [`athenaeum explain-routing`](#athenaeum-explain-routing) (command) — Read-only preview: resolved provider/model/batch/price per model knob. Prints what 'athenaeum run' would actually use for this athenaeum.yaml + environment -- no LLM call, no file processed, no routing behavior changed.
 - [`athenaeum fold-lint`](#athenaeum-fold-lint) (command) — Read-only check of the two fold-graph invariants: the folded_into graph is acyclic, and every fold set has exactly one live canonical page.
+- [`athenaeum import-memory`](#athenaeum-import-memory) (command) — Opt-in: discover existing Claude Code memory across projects and offer to compile it. Off by default — nothing is read without an explicit yes, and only the projects you select.
 - [`athenaeum ingest`](#athenaeum-ingest) (command) — Compile new/changed raw intake into the wiki on demand. --incremental (default) compiles only files new/changed since the last ingest; --full recompiles.
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
@@ -125,6 +126,9 @@ python scripts/gen_cli_reference.py
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
 - [`athenaeum run`](#athenaeum-run) (command) — Run the librarian pipeline
+- [`athenaeum schedule`](#athenaeum-schedule) (group) — Install or remove a recurring `athenaeum run` schedule: a launchd plist on macOS, or a systemd user timer or crontab entry on Linux, with absolute paths and the key source resolved without a login shell.
+- [`athenaeum schedule install`](#athenaeum-schedule-install) (command) — Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM key source is available, rather than installing a schedule that would fail every night.
+- [`athenaeum schedule remove`](#athenaeum-schedule-remove) (command) — Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
 - [`athenaeum schema`](#athenaeum-schema) (group) — Page schema-version maintenance: apply pending EAGER rule-based kernel migrations corpus-wide.
 - [`athenaeum schema migrate`](#athenaeum-schema-migrate) (command) — Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MIGRATIONS) — dry-run unless --apply. Never touches a model-derivation migration (those advance only via 'athenaeum audit') and never overwrites an already-populated field.
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
@@ -794,6 +798,7 @@ Read-only health check of an athenaeum install — package version, interpreter,
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
 | `--claude-config-dir` | — | — | Claude Code config directory holding settings.json/.claude.json (default: CLAUDE_CONFIG_DIR env, else ~/.claude) |
+| `--home` | — | — | Home directory to check the `athenaeum schedule` state under (; default: the real home directory). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum drain`
@@ -866,6 +871,22 @@ Read-only check of the two fold-graph invariants: the folded_into graph is acycl
 |---|---|---|---|
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum import-memory`
+
+Opt-in: discover existing Claude Code memory across projects and offer to compile it. Off by default — nothing is read without an explicit yes, and only the projects you select.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the resumable import-memory state (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--max-calls` | `100` | — | Cap API calls this run (default 100, same ruling as --max-files). |
+| `--max-files` | `20` | — | Cap files compiled this run (default 20, ruling 3 — same cap as). Raise it for a larger batch; re-running with no flag change resumes where the cap stopped. |
+| `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+| `--project` | — | — | Select a discovered project by its scope name (the directory name under the Claude Code projects root). Repeatable. Given at least once, this bypasses the interactive picker entirely — the scripts/tests path (ruling 4). Omitted: an interactive picker runs, with nothing selected by default. |
+| `--projects-root` | — | — | Override the Claude Code projects root to scan (default: ~/.claude/projects, honoring CLAUDE_CONFIG_DIR). For tests/scripts. |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+| `--yes` | `False` | — | Skip the 'proceed?' confirmation after the cost/cap summary prints. Does NOT select any project by itself — selection still requires --project or an interactive pick. |
 
 ## `athenaeum ingest`
 
@@ -1614,6 +1635,39 @@ Run the librarian pipeline
 | `--verbose`, `-v` | `False` | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki output directory (default: ~/knowledge/wiki) |
+
+## `athenaeum schedule`
+
+Install or remove a recurring `athenaeum run` schedule: a launchd plist on macOS, or a systemd user timer or crontab entry on Linux, with absolute paths and the key source resolved without a login shell.
+
+Subcommands:
+
+- `athenaeum schedule install` — Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM key source is available, rather than installing a schedule that would fail every night.
+- `athenaeum schedule remove` — Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
+
+## `athenaeum schedule install`
+
+Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM key source is available, rather than installing a schedule that would fail every night.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--backend` | — | launchd, systemd, cron | Force a backend instead of auto-detecting from the platform (macOS is always launchd; Linux auto-detects systemd when `systemctl` is on PATH, else cron). |
+| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
+| `--home` | — | — | Home directory the unit is written under / read from (default: the real home directory). Mainly for testing an unusual HOME layout. |
+| `--hour` | — | — | Hour (0-23, local time) to run at (default: 3). |
+| `--minute` | — | — | Minute (0-59) to run at (default: 0). |
+| `--path` | `~/knowledge` | — | Knowledge directory the generated unit runs `athenaeum run` against (default: ~/knowledge) |
+
+## `athenaeum schedule remove`
+
+Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--backend` | — | launchd, systemd, cron | Force a backend instead of auto-detecting from the platform (macOS is always launchd; Linux auto-detects systemd when `systemctl` is on PATH, else cron). |
+| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
+| `--home` | — | — | Home directory the unit is written under / read from (default: the real home directory). Mainly for testing an unusual HOME layout. |
+| `--path` | `~/knowledge` | — | Knowledge directory the generated unit runs `athenaeum run` against (default: ~/knowledge) |
 
 ## `athenaeum schema`
 

@@ -124,6 +124,12 @@ configuration) ends up invoking this hook, it silently no-ops; set
 `[compat.claude] hooks = false` in Grok's `config.toml` if you would rather
 Grok skip Claude Code's hooks entirely.
 
+If Cursor ends up invoking this hook (it also reads Claude Code's
+`.claude/settings.json` when its "Include Third-Party Plugins, Skills, and
+Other Configs" setting — Settings → Agents → Third-Party Imports — is on,
+which is on by default), it silently no-ops, and turning that setting off
+is the user-side opt-out.
+
 **Rollback.** Turning off per-turn recall means removing the
 `UserPromptSubmit` hook block (or setting `AUTO_RECALL=false`) — there is
 no second live implementation to switch back to. The previous

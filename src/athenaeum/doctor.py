@@ -601,6 +601,42 @@ def check_last_compile(cache_dir: Path) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Check 8: schedule state -- scheduled or not (issue athenaeum#2304 AC4).
+# ---------------------------------------------------------------------------
+
+
+def check_schedule_state(
+    *,
+    home: Path | None = None,
+    platform_override: Literal["launchd", "systemd", "cron"] | None = None,
+) -> CheckResult:
+    """Whether a recurring ``athenaeum run`` schedule is installed, and
+    which platform's generator applies (issue athenaeum#2304 AC4).
+
+    Always ``"ok"`` -- reports BOTH the scheduled and the unscheduled state
+    (an unscheduled install is a normal, common state, not a broken one;
+    real-host verification that an installed schedule actually FIRES is
+    athenaeum#2366, out of scope here). ``"skip"`` only for a platform with
+    no generator (Windows). Delegates entirely to
+    :func:`athenaeum.schedule.status`, which is itself read-only.
+    ``platform_override`` mirrors that function's own injection, for tests.
+    """
+    from athenaeum import schedule
+
+    result = schedule.status(home=home, platform_override=platform_override)
+    if result.platform is None:
+        return CheckResult(name="schedule", status="skip", detail=result.detail)
+    if result.scheduled:
+        return CheckResult(name="schedule", status="ok", detail=f"scheduled: {result.detail}")
+    return CheckResult(
+        name="schedule",
+        status="ok",
+        detail=f"not scheduled ({result.platform}): {result.detail} -- run "
+        "`athenaeum schedule install` to add one",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration + rendering.
 # ---------------------------------------------------------------------------
 
@@ -611,13 +647,16 @@ def run_checks(
     cache_dir: Path | None = None,
     claude_config_dir: Path | None = None,
     fetch: FetchFn | None = None,
+    home: Path | None = None,
 ) -> list[CheckResult]:
     """Run every check and return the full list (issue athenaeum#2298 AC1-AC3).
 
     Strictly read-only (AC5): every argument is resolved exactly the way the
     hooks/MCP server already resolve it (:func:`athenaeum.config.load_config`,
     :func:`athenaeum.config.resolve_cache_dir`, :func:`default_claude_config_dir`),
-    and no check below writes anything.
+    and no check below writes anything. ``home`` (issue athenaeum#2304) is the
+    same injection :func:`athenaeum.schedule.status` takes, defaulting to the
+    real home directory.
     """
     from athenaeum.config import load_config, resolve_cache_dir
 
@@ -635,6 +674,7 @@ def run_checks(
         check_key_mode(config, resolved_cache_dir),
         check_search_index(resolved_cache_dir, config),
         check_last_compile(resolved_cache_dir),
+        check_schedule_state(home=home),
     ]
 
 

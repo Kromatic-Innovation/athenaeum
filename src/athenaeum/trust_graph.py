@@ -51,6 +51,18 @@ Evidence-kind vocabulary (pinned for this work order; see
   was never written with that claim in mind. See
   :func:`_evidence_kind_matches`.
 
+**TG6 (issue athenaeum#2334): attestation tie-break and demote-on-broken-
+chain.** Per operator ruling OQ1 (`docs/design/trust-graph.md` §8),
+witness attestation never overrides rank — it only breaks a tie between
+two sources :func:`compare_sources` already found :data:`EQUAL`, or
+demotes a claim whose witness chain no longer verifies. See
+:func:`attestation_for` and :func:`attestation_tiebreak` near the end of
+this module. The adapter is deliberately dumb: it takes already-joined
+plain fields (never a receipt, a ledger, or a ``promptwitness`` type) so
+this module's "no ``promptwitness`` import, no I/O" invariant below
+extends to TG6 unchanged — the caller (`corrections._claim_attestation`)
+owns the join and the ledger read.
+
 Layering: L1 primitive. Imports only :mod:`athenaeum.precedence` and
 :mod:`athenaeum.provenance` (both L1). No config, no LLM client, no
 ``promptwitness`` import, and no I/O of any kind — every function here is a
@@ -60,6 +72,7 @@ pure function over already-parsed Python values.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Sequence
 
@@ -74,10 +87,15 @@ __all__ = [
     "OUTRANKS",
     "COMPARISON_RELATIONS",
     "UNKNOWN_EVIDENCE_KIND",
+    "ATTESTATION_STRENGTHS",
+    "NO_ATTESTATION",
+    "AttestedClaim",
     "ComparisonResult",
     "SourceTrustDomain",
     "SourceTrustEdge",
     "TrustGraphConfigError",
+    "attestation_for",
+    "attestation_tiebreak",
     "compare_sources",
     "find_contradictory_edges",
     "parse_edge",
@@ -513,3 +531,150 @@ def compare_sources(
             OUTRANKED, f"source_rank fallback: rank {rank_a} outranked by rank {rank_b}"
         )
     return ComparisonResult(EQUAL, f"source_rank fallback: both rank {rank_a}")
+
+
+# ---------------------------------------------------------------------------
+# TG6: attestation tie-break and demote-on-broken-chain (issue athenaeum#2334)
+# ---------------------------------------------------------------------------
+#
+# Operator ruling OQ1 (`docs/design/trust-graph.md` §8): attestation is a
+# TIE-BREAK and a DEMOTION only — it never overrides rank and never
+# promotes a claim across tiers. The only legal caller of this section is
+# `corrections.decide_verdict`'s own `incoming_rank == existing_rank`
+# branch (TG3, issue athenaeum#2331): that branch is unreachable once a
+# rank difference has already decided the verdict, so "never overrides
+# rank" is structural (a property of WHERE this is called), not a rule
+# enforced by anything checked in this section.
+#
+# **No `promptwitness` import anywhere in this module (issue athenaeum#2334
+# AC6).** `ATTESTATION_STRENGTHS` below is a deliberate, hand-maintained
+# duplicate of `promptwitness.signing.STRENGTHS` — never imported, because
+# this module's whole layering point (L1, no `promptwitness`) is that
+# trust code must never need to know a signing key exists. The two are
+# kept from silently drifting apart by a MEMBERSHIP test in athenaeum's
+# own suite (`tests/test_trust_graph.py::test_attestation_strengths_match_
+# promptwitness_vocabulary`), never by an import here.
+#
+# **Nothing here does I/O, and nothing here reads a receipt directly
+# (issue athenaeum#2334 AC4).** `attestation_for` is a pure function over
+# already-joined plain fields its caller assembles —
+# `corrections._claim_attestation` is that caller: it re-reads the
+# matching `transcript_receipts.ReceiptEntry` and re-derives chain-
+# intactness via a FRESH `witness_attestation.AttestationIndex` on every
+# call, never cached across decisions (failure class F6, `docs/design/
+# trust-graph.md` §4) and never written back to memory frontmatter or
+# anywhere else.
+
+#: Decision-time attestation-strength vocabulary, weakest to strongest —
+#: see the section note above for why this is a duplicate, never an
+#: import, of `promptwitness.signing.STRENGTHS`.
+ATTESTATION_STRENGTHS: tuple[str, ...] = (
+    "none",
+    "software-file",
+    "os-keystore",
+    "hardware-nonexportable",
+    "hardware-presence",
+)
+
+#: Anchor sources that do NOT count as "anchored" for the tie-break
+#: (`docs/design/trust-graph.md` G2/F7): the mandatory local-clock
+#: fallback anchorer proves only that a machine claimed a time, never a
+#: third-party source. `None` (nothing anchors this line at all) is
+#: equally inert.
+_UNANCHORED_SOURCES: frozenset[str | None] = frozenset({None, "local-clock"})
+
+
+class AttestedClaim(NamedTuple):
+    """One claim's decision-time attestation summary (issue athenaeum#2334).
+
+    ``effective_strength`` is always a member of :data:`ATTESTATION_STRENGTHS`
+    — ``"none"`` means "no effective attestation". An unwitnessed claim, an
+    unverified/local-clock-only witnessed claim, and a demoted (broken-
+    chain) witnessed claim all produce the identical value, which is what
+    makes AC1 (inertness) and AC2 (demotion) the same code path rather
+    than two separately-maintained ones. Built fresh by
+    :func:`attestation_for` on every call — never cached, never persisted
+    (AC4).
+    """
+
+    effective_strength: str
+
+
+#: The "no effective attestation" sentinel every unwitnessed claim starts
+#: from, and the value a demoted (broken-chain) or unverified/local-clock-
+#: only witnessed claim collapses to (AC1, AC2) — both compare identically
+#: via :func:`attestation_tiebreak`.
+NO_ATTESTATION = AttestedClaim(effective_strength="none")
+
+
+def attestation_for(meta: Mapping[str, Any] | None) -> AttestedClaim:
+    """Decision-time attestation for one claim, from already-joined fields.
+
+    *meta* is the CALLER's own join (issue athenaeum#2334's adapter
+    contract) of:
+
+    - ``witness_ref`` — the claim's own frontmatter pointer, written only
+      by :func:`athenaeum.frontmatter_edit.witnessed_source_fields` (which
+      writes no strength of its own);
+    - ``witness_strength_verified`` / ``witness_anchor_source`` — the
+      matching receipt's fields (`athenaeum.transcript_receipts.
+      ReceiptEntry`, populated by TG5's signature verification);
+    - ``chain_intact`` — a bool the CALLER re-derives fresh, at decision
+      time, via `athenaeum.witness_attestation.AttestationIndex.
+      chain_intact_through` — never reused from whatever it was when the
+      receipt was originally written (failure class F6).
+
+    This function is pure: no I/O, no ``promptwitness`` import, and
+    nothing it reads is written anywhere. Every one of the demotion/
+    inertness rules below collapses to the identical :data:`NO_ATTESTATION`
+    value, which is what lets AC1 and AC2 share one code path:
+
+    - no ``witness_ref`` at all — an ordinary, unwitnessed claim, the ONLY
+      shape any claim has on a store with no ledger (AC5);
+    - ``chain_intact`` is ``False`` — AC2: a broken chain demotes to
+      ``"none"``, which compares identically to an ordinary
+      ``user:``/unwitnessed claim ("falls back to user: rank handling",
+      per the issue text);
+    - ``witness_strength_verified`` is ``None``, ``"none"``, or not a
+      recognized :data:`ATTESTATION_STRENGTHS` member — AC1: unverified
+      attestation has no effect on any comparison;
+    - ``witness_anchor_source`` is absent or ``"local-clock"`` — AC1: a
+      local-clock-only anchor has no effect either (G2/F7 in
+      `docs/design/trust-graph.md`).
+    """
+    if not isinstance(meta, Mapping):
+        return NO_ATTESTATION
+    if not meta.get("witness_ref"):
+        return NO_ATTESTATION
+    if meta.get("chain_intact", True) is False:
+        return NO_ATTESTATION
+    strength = meta.get("witness_strength_verified")
+    if (
+        not isinstance(strength, str)
+        or strength not in ATTESTATION_STRENGTHS
+        or strength == "none"
+    ):
+        return NO_ATTESTATION
+    anchor_source = meta.get("witness_anchor_source")
+    if not isinstance(anchor_source, str) or anchor_source in _UNANCHORED_SOURCES:
+        return NO_ATTESTATION
+    return AttestedClaim(effective_strength=strength)
+
+
+def attestation_tiebreak(a: AttestedClaim, b: AttestedClaim) -> str:
+    """Compare two :class:`AttestedClaim`\\ s for the TG6 tie-break (issue
+    athenaeum#2334, operator ruling OQ1).
+
+    Returns one of :data:`OUTRANKS` / :data:`OUTRANKED` / :data:`EQUAL` —
+    never :data:`INCOMPARABLE` (:data:`ATTESTATION_STRENGTHS` is a total
+    order, unlike the edge-based comparison, which can contradict itself).
+    The only legal caller is `corrections.decide_verdict`'s own
+    ``incoming_rank == existing_rank`` branch: this function has no notion
+    of rank at all, so "attestation never overrides rank" is enforced by
+    WHERE it is called, not by anything checked in here.
+    """
+    rank_a = ATTESTATION_STRENGTHS.index(a.effective_strength)
+    rank_b = ATTESTATION_STRENGTHS.index(b.effective_strength)
+    if rank_a == rank_b:
+        return EQUAL
+    return OUTRANKS if rank_a > rank_b else OUTRANKED
