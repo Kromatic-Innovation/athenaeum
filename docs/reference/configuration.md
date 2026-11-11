@@ -5002,6 +5002,149 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
+### `resolve_serve_auth_allowed_identities`
+
+- **YAML path:** `serve.auth.allowed_identities`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the identity allowlist.
+
+Returns the set of ``sub`` values and issuer-verified email addresses
+permitted to use this server, case-folded and de-duplicated, or ``None``
+when nothing is configured. A verified token whose identity is not in the
+set is refused with the same 401 an invalid token gets, so the endpoint is
+not an oracle for the allowlist.
+
+An EMPTY value resolves to ``None``, not to the empty set: the two would
+be indistinguishable here, and the distinction is drawn one level up --
+`athenaeum.serve_auth.build_serve_auth` refuses an empty allowlist
+outright when any other ``serve.auth.*`` pin IS set, rather than reading
+it as "every identity the issuer vouches for". That is the one reading a
+typo produces, and on a public authorization server it means everyone who
+can sign up.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` -- the ``--auth-allowed-identities`` flag's
+ comma-separated value.
+- ``ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES`` -- comma-separated env var.
+- ``serve.auth.allowed_identities`` -- a yaml list (or comma string).
+- ``None`` -- no allowlist configured.
+
+Raises `athenaeum.serve_auth.ServeAuthError` on a yaml value that
+is neither a list nor a string, and on a list entry that is not a string.
+No seed in ``_DEFAULTS``.
+
+### `resolve_serve_auth_issuer`
+
+- **YAML path:** `serve.auth.issuer`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_ISSUER`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the OAuth authorization server issuer.
+
+Returns the issuer identifier whose signatures this resource server
+trusts -- the value a bearer token's ``iss`` claim must carry, and the
+base the JSON Web Key Set URI is derived from
+(`athenaeum.serve_auth.JWKS_PATH`). ``None`` means no auth is
+configured, which is the shipped default and keeps
+``athenaeum serve --transport http`` refusing every non-loopback bind.
+
+athenaeum never issues a token. Setting this names someone ELSE's
+authorization server; see ``docs/modules/mcp.md``.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` -- the ``athenaeum serve --auth-issuer`` flag.
+- ``ATHENAEUM_SERVE_AUTH_ISSUER`` -- env var.
+- ``serve.auth.issuer`` -- yaml string.
+- ``None`` -- no auth.
+
+Raises `athenaeum.serve_auth.ServeAuthError` on a non-string yaml
+value rather than falling through to ``None``. Falling through is the
+unsafe direction for this one knob specifically: ``None`` here is what
+LIFTS nothing and keeps the loopback-only refusal, but a half-read issuer
+next to a configured resource would make the whole block look unset. The
+URL itself is validated once, with the resource, by
+`athenaeum.serve_auth.build_serve_auth`. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_auth_resource`
+
+- **YAML path:** `serve.auth.resource`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_RESOURCE`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve this server's canonical public resource URL.
+
+Returns the URL that IS this process's audience: the value every bearer
+token's ``aud`` claim must carry, the ``resource`` advertised in RFC 9728
+protected resource metadata, and the identifier a client passes as the
+``resource`` parameter when it asks the authorization server for a token.
+One process serves exactly one audience (decision D3), which is why this
+is a serve-time pin and not a per-request value.
+
+It is NEVER read back from a token claim or a request parameter. A token
+that carries an audience-like claim naming something broader is still
+served this process's pin -- see
+`athenaeum.serve_auth`'s module docstring.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` -- the ``athenaeum serve --auth-resource`` flag.
+- ``ATHENAEUM_SERVE_AUTH_RESOURCE`` -- env var.
+- ``serve.auth.resource`` -- yaml string.
+- ``None`` -- no auth.
+
+Raises `athenaeum.serve_auth.ServeAuthError` on a non-string yaml
+value, for the same reason `resolve_serve_auth_issuer` does. No seed
+in ``_DEFAULTS``.
+
+### `resolve_serve_auth_scopes`
+
+- **YAML path:** `serve.auth.scopes`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_SCOPES`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the read/write scope names.
+
+Returns ``{"read": <name>, "write": <name>}`` -- the OAuth scope a caller
+must hold to invoke a read tool and a write tool respectively -- or
+``None`` to take `athenaeum.serve_auth.DEFAULT_READ_SCOPE` /
+`athenaeum.serve_auth.DEFAULT_WRITE_SCOPE`. The read/write class of
+each tool is NOT configurable: it is read off the tool's own MCP
+``readOnlyHint`` annotation at registration, so it cannot drift from what
+the server actually serves.
+
+A mapping is the yaml spelling; a ``read=<name>,write=<name>`` string is
+the CLI/env spelling. Both roles are required in both spellings --
+`athenaeum.serve_auth.parse_scope_pair` refuses a single name rather
+than applying it to both roles, because that would make the read scope
+sufficient for every write tool.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` -- the ``--auth-scopes`` flag.
+- ``ATHENAEUM_SERVE_AUTH_SCOPES`` -- env var, same ``read=,write=`` form.
+- ``serve.auth.scopes`` -- a yaml mapping (or the same string form).
+- ``None`` -- the default pair.
+
+Raises `athenaeum.serve_auth.ServeAuthError` on anything it cannot
+read as a complete pair, rather than falling back to the defaults: a
+deployment that renamed its scopes and typo'd the rename would otherwise
+silently enforce ``athenaeum:read``/``athenaeum:write``, which its
+authorization server never issues, and every tool call would fail for a
+reason the operator cannot see from the configuration. No seed in
+``_DEFAULTS``.
+
 ### `resolve_serve_excluded_fields`
 
 - **YAML path:** `serve.excluded_fields`

@@ -71,6 +71,11 @@ MODULE_LAYER: dict[str, int] = {
     # server can depend on it.
     "remote_policy": 0,
     "schema_migrations": 0,
+    # Issue athenaeum#2384: the serve-time OAuth 2.1 resource-server pins --
+    # own docstring states "Layering: L0 -- stdlib-only ..., no athenaeum
+    # imports at all", the same shape as remote_policy above and for the same
+    # reason: the L2 config resolvers and the L5 MCP server both depend on it.
+    "serve_auth": 0,
     "t1_census": 0,
     "vecmath": 0,
     # L1 -- data model.
