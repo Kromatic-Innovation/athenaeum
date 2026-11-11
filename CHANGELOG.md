@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote profile: serve-time tool allowlist and excluded-fields pin (issue
+  athenaeum#2383).** `athenaeum serve` gains `--profile` / `--tools` /
+  `--excluded-fields` (also `ATHENAEUM_SERVE_PROFILE` /
+  `ATHENAEUM_SERVE_TOOLS` / `ATHENAEUM_SERVE_EXCLUDED_FIELDS` and
+  `serve.profile` / `serve.tools` / `serve.excluded_fields`), resolved
+  CLI > env > yaml and pinned into `create_server` as arguments rather than
+  tool parameters. `serve.tools` is an allowlist: a tool outside it is never
+  registered, so it is absent from `tools/list` rather than refusing, and a
+  name that is not a tool of the deployment fails startup.
+  `serve.excluded_fields: off` withholds every excluded (off-corpus) value —
+  `recall(with_pii=True)` returns a count-free withheld notice (closing both
+  the per-hit join and the handle-shaped reverse lookup), `read_entity`
+  returns none, and `enumerate_entities` refuses a PII-scoped predicate or
+  output field. `serve.profile: remote` presets both: `remember` and
+  `raise_decision` stay on; `resolve_question`, `resolve_merge` and
+  `review_audit_item` are not served. With none of the keys set, the served
+  `tools/list` and every tool's output are unchanged.
+- **Opt-in streamable HTTP transport for `athenaeum serve` (issue
+  athenaeum#2382).** `athenaeum serve --transport http` serves MCP over
+  FastMCP's streamable HTTP transport on `--host` (default `127.0.0.1`),
+  `--port` (default `8000`) and `--path-prefix` (default `/mcp`); `stdio`
+  remains the default and calls `server.run()` exactly as before.
+  `--transport`, `--host` and `--port` resolve CLI > `ATHENAEUM_SERVE_*` env >
+  `serve.transport` / `serve.host` / `serve.port` in `athenaeum.yaml`. With no
+  auth issuer configured the server REFUSES any non-loopback bind, exiting
+  non-zero before a socket is opened and naming the missing
+  `serve.auth.issuer` setting; the guard is a positive allowlist of loopback
+  address literals (`127.0.0.0/8`, `::1` bracketed or bare, IPv4-mapped
+  loopback forms) and never resolves a hostname. The `mcp` extra's `fastmcp`
+  floor rises to 2.11.1, the lowest release carrying both the `http` transport
+  literal (2.9.0) and the `RemoteAuthProvider` resource-server export (2.11.1)
+  the auth child needs.
 - **Cursor instructed-recall example rule (issue athenaeum#2399).** Added
   `examples/cursor/athenaeum.mdc`, an always-applied Cursor rule example that
   tells the agent to call `recall` before answering when the request
