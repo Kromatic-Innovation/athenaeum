@@ -630,12 +630,13 @@ class TestDraftAttributionThresholdProposal:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         _seed_attribution_disagreement(
-            wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
+            wiki_root, question_class="names-other", overturned=0, confirmed=10
         )
-        # No explicit threshold override and no shipped calibration record
-        # patched in -> threshold_for_class returns None -> nothing to move.
+        # No explicit threshold override and the shipped record's names-other
+        # entry failed its bar (athenaeum#2260) -> threshold_for_class returns
+        # None -> nothing to move.
         draft = draft_attribution_threshold_proposal(
-            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
+            "names-other", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert draft is None
 

@@ -339,6 +339,52 @@ class TestCalibratedProbability:
         entry = _entry()
         assert pii_attribution.calibrated_probability(entry, float("nan")) == 0.0
 
+    def test_an_agreement_k3_entry_ignores_a_single_self_reported_score(self) -> None:
+        """A bin measured over K=3 agreement is not a map for one call's score.
+
+        Regression for the Sentry finding on the athenaeum#2260 calibration
+        record: ``source-context`` ships ``agreement-k3`` bins of
+        ``(1.0, 1.0, 1.0)``, and the runtime makes ONE call and feeds the
+        model's own ``score`` to the mapping. Without the signal gate a
+        self-reported 1.0 read as "all three calls agreed" and cleared a
+        threshold of 1.0.
+        """
+        entry = _entry(
+            pii_attribution.QUESTION_CLASS_SOURCE_CONTEXT,
+            signal=pii_attribution.SIGNAL_AGREEMENT_K3,
+            bins=((1.0, 1.0, 1.0),),
+            threshold=1.0,
+        )
+        assert pii_attribution.calibrated_probability(entry, 1.0) == 0.0
+        assert (
+            pii_attribution.calibrated_probability(
+                entry, 1.0, signal=pii_attribution.SIGNAL_SELF_REPORTED
+            )
+            == 0.0
+        )
+
+    def test_an_agreement_k3_entry_maps_a_score_that_is_an_agreement_share(self) -> None:
+        entry = _entry(
+            pii_attribution.QUESTION_CLASS_SOURCE_CONTEXT,
+            signal=pii_attribution.SIGNAL_AGREEMENT_K3,
+            bins=((1.0, 1.0, 1.0),),
+            threshold=1.0,
+        )
+        assert (
+            pii_attribution.calibrated_probability(
+                entry, 1.0, signal=pii_attribution.SIGNAL_AGREEMENT_K3
+            )
+            == 1.0
+        )
+
+    def test_a_self_reported_entry_ignores_an_agreement_score(self) -> None:
+        assert (
+            pii_attribution.calibrated_probability(
+                _entry(), 0.95, signal=pii_attribution.SIGNAL_AGREEMENT_K3
+            )
+            == 0.0
+        )
+
     def test_for_class_returns_zero_without_a_valid_entry(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -457,18 +503,27 @@ class TestThresholdForClass:
         )
 
 
-class TestShippedRecordIsNotAutoFiling:
-    """The shipped record must not auto-file anything, for any class."""
+class TestShippedRecordAutoFilesOnlyPassingClasses:
+    """The measured record (athenaeum#2260) auto-files a class only when it
+    passes; names-other failed the bar and must stay with a human."""
 
-    def test_every_shipped_class_has_no_threshold_and_no_model(self) -> None:
+    def test_names_other_has_no_threshold_and_no_model(self) -> None:
+        assert pii_attribution.threshold_for_class("names-other") is None
+        assert pii_attribution.recommended_model_for_class("names-other") is None
+        assert (
+            pii_attribution.calibrated_probability_for_class("names-other", 1.0)
+            == 0.0
+        )
+
+    def test_passing_classes_carry_their_recorded_model(self) -> None:
         record = pii_attribution.load_calibration_record()
         assert set(record) == set(pii_attribution.QUESTION_CLASSES)
-        for question_class in pii_attribution.QUESTION_CLASSES:
-            assert pii_attribution.threshold_for_class(question_class) is None
-            assert pii_attribution.recommended_model_for_class(question_class) is None
-            assert (
-                pii_attribution.calibrated_probability_for_class(question_class, 1.0)
-                == 0.0
+        for question_class, entry in record.items():
+            if question_class == "names-other":
+                continue
+            assert entry.passes is True
+            assert pii_attribution.recommended_model_for_class(question_class) == (
+                entry.model
             )
 
 
@@ -1085,6 +1140,47 @@ class TestHumanQueueTriggers:
         )
         assert outcome.placement is None
         assert "without naming an" in self._queued(outcome)
+
+    def test_a_single_self_reported_1_0_on_an_agreement_k3_class_does_not_auto_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sentry finding on the athenaeum#2260 record, end to end.
+
+        ``source-context`` is calibrated on agreement over K=3 calls; the
+        escalation makes one call and gets a self-reported ``score``. A
+        self-reported 1.0 must not be read as unanimous agreement, so the
+        item goes to a human even though the bins and the threshold are
+        both 1.0.
+        """
+        _patch_record(
+            monkeypatch,
+            _entry(
+                pii_attribution.QUESTION_CLASS_SOURCE_CONTEXT,
+                signal=pii_attribution.SIGNAL_AGREEMENT_K3,
+                bins=((1.0, 1.0, 1.0),),
+                threshold=1.0,
+            ),
+        )
+        context = _context(tmp_path)
+        verdict = _suspect_verdict(
+            context,
+            checks=(
+                pii_attribution.CheckEvidence(
+                    check_id=pii_attribution.CHECK_C3_SOURCE_CONTEXT, label="label:from"
+                ),
+            ),
+        )
+        outcome = _escalate(
+            context,
+            verdict,
+            client=_judge_client(verdict="other-known", owner_uid=_HOLDER_UID, score=1.0),
+            apply=True,
+        )
+        assert outcome.question_class == pii_attribution.QUESTION_CLASS_SOURCE_CONTEXT
+        assert outcome.calibrated_p == 0.0
+        assert outcome.above_threshold is False
+        assert outcome.placement is None
+        assert "below this class's threshold" in self._queued(outcome)
 
     def test_the_recheck_returning_suspect(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
