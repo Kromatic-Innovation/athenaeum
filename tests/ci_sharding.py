@@ -33,54 +33,63 @@ from collections.abc import Iterable
 SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
 
 #: Measured worker-seconds under 4-way xdist contention on a GitHub-hosted
-#: 4-vCPU runner (per-worker timelines of athenaeum#2242's PR runs, after the
-#: nightly tier took the print tables and hook sweeps out of the default
-#: selection). Units missing here weigh DEFAULT_SECONDS_PER_TEST per test.
+#: 4-vCPU runner, from the per-worker `-v` timelines of TWO full CI runs:
+#: run 42511111865 (the develop tree at 0d63b08c, athenaeum#2233's baseline)
+#: and run 42965256518 (this PR's first run). Both were parsed with the
+#: method the issue states -- per worker, the gap between consecutive results
+#: attributed to the module of the later result -- and that parser reproduces
+#: every figure in the issue's own table from the baseline run, so the two
+#: sides are directly comparable. Units missing here weigh
+#: DEFAULT_SECONDS_PER_TEST per test.
 #:
-#: Re-measured for athenaeum#2233's second pass from CI run 42511111865 (the
-#: run that executed the develop tree at 0d63b08c; see the issue body for why
-#: that PR run and not a develop push run). Every entry whose cost that run
-#: re-measured is set from it, scaled where this pass made the module cheaper
-#: by this lane's own local before/after ratio -- the method the first pass
-#: used and recorded above, kept for continuity. The PR body carries the raw
-#: local pairs and the post-change CI figures.
+#: An entry is set only where the two runs AGREE. Where they disagree by more
+#: than about 25% the unit is left unpriced, or carries a noted midpoint: the
+#: weights only steer balance, never correctness, so a confidently wrong
+#: number is worse than the per-test default. Left unpriced for that reason:
+#: `test_layer_boundary.py` (10.1 then 44.0) and
+#: `test_import_graph_acyclic.py` (21.1 then 11.9).
 #:
-#: Entries with no measurement in that run (json_utils, eval_corpus_leakage,
-#: rollout_mode_labelling, rollout_push_breadcrumb_spike,
-#: hook_byte_equivalence_1912) are left exactly as they were -- a stale weight
-#: costs wall clock and can never drop a test, so inventing a number for one
-#: would be worse than leaving it.
-#:
-#: ``test_measure_retrieval_entry_point.py`` and
-#: ``tests/evals/test_attribution_dataset.py`` gain entries here for the first
-#: time: both were priced at the per-test default (2.2s and 2.5s respectively)
-#: while actually costing 165.5 and 107.6 worker-seconds, which is most of why
-#: shard 1 ran 91s longer than shard 2.
+#: Several entries were badly stale in a way that actively corrupted the bin
+#: packing rather than merely failing to help it: `test_json_utils.py` was
+#: priced at 50.0 against a measured 1.1 in BOTH runs,
+#: `test_rollout_mode_labelling.py` at 37.0 against 10.3, and
+#: `test_hook_byte_equivalence_1912.py` at 6.3 against 1.4. Five genuinely
+#: heavy units (29-47s, stable across both runs) had no entry at all.
 UNIT_WEIGHT_SECONDS: dict[str, float] = {
-    # Re-measured at 202.5 and NOT changed by this pass: its cost is real
+    # 202.5 then 190.8, and NOT changed by athenaeum#2233: its cost is real
     # nested MCP round trips (a fake `claude` child plus a
     # `-m athenaeum.cli_tool_bridge` grandchild, each cold-importing the mcp
-    # SDK), run once per arm for two full 9-arm groups. Cutting the number of
-    # round trips would cut what the module proves, and the alternative --
-    # reworking `provider.run_tool_loop`'s per-call bridge isolation -- is a
-    # production design change, not a test cost fix. See the PR body.
-    "tests/evals/test_north_star_preflight.py": 202.0,
-    "tests/test_shell_hooks.py": 118.0,
-    "tests/test_eval_corpus_generator.py": 109.0,
-    # 165.5 -> 24.0: the five tests driving `main()` end to end no longer
-    # perform the harness's real stdlib-wide page-cache eviction.
-    "tests/test_measure_retrieval_entry_point.py": 24.0,
-    # 107.6 -> 18.0: cases.yaml is parsed once per process, not per test.
-    "tests/evals/test_attribution_dataset.py": 18.0,
-    # 57.8 -> 32.0: one full-tree scan per process, not three.
-    "tests/test_declared_imports.py": 32.0,
+    # SDK), once per arm across two full 9-arm groups. Fewer round trips
+    # would mean less proven, and reworking `provider.run_tool_loop`'s
+    # per-call bridge isolation is a production design change rather than a
+    # test cost fix. This single unit is the floor of whichever shard holds
+    # it -- see PR #2392 for the arithmetic.
+    "tests/evals/test_north_star_preflight.py": 191.0,
+    "tests/test_shell_hooks.py": 115.0,
+    "tests/test_eval_corpus_generator.py": 103.0,
+    "tests/evals/test_attribution_eval_stub.py": 47.0,
+    "tests/test_eval_corpus_leakage.py": 46.0,
+    # 34.5 then 55.0. One test, so there is nothing to average over within a
+    # run; the midpoint beats the per-test default either way.
+    "tests/evals/test_rollout_push_breadcrumb_spike.py": 45.0,
+    "tests/test_cmd_attribution.py": 43.0,
+    "tests/test_batch_mode.py": 39.0,
     "tests/evals/test_recall_covers_grep.py[medium]": 33.0,
+    "tests/evals/test_attribution_eval_harness.py": 33.0,
+    "tests/test_llm_surface.py": 29.0,
     "tests/evals/test_recall_covers_grep.py[core]": 28.0,
-    "tests/test_json_utils.py": 50.0,
-    "tests/test_eval_corpus_leakage.py": 40.0,
-    "tests/evals/test_rollout_mode_labelling.py": 37.0,
-    "tests/evals/test_rollout_push_breadcrumb_spike.py": 31.0,
-    "tests/evals/test_hook_byte_equivalence_1912.py": 6.3,
+    # 57.8 -> 27.4: one full-tree scan per process, not three. What is left
+    # is the gate's own single scan, which is the gate's actual work.
+    "tests/test_declared_imports.py": 27.0,
+    "tests/evals/test_rollout_mode_labelling.py": 11.0,
+    # 107.6 -> 9.4: cases.yaml is parsed once per process, not per test.
+    "tests/evals/test_attribution_dataset.py": 9.0,
+    # 165.5 -> 5.9: the five tests driving `main()` end to end no longer
+    # perform the harness's real stdlib-wide page-cache eviction, which also
+    # stops them evicting it out from under the sibling xdist workers.
+    "tests/test_measure_retrieval_entry_point.py": 6.0,
+    "tests/evals/test_hook_byte_equivalence_1912.py": 1.5,
+    "tests/test_json_utils.py": 1.1,
 }
 
 DEFAULT_SECONDS_PER_TEST = 0.1
