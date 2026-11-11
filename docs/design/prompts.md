@@ -490,7 +490,7 @@ was found (or be empty).
 - **Constant:** `athenaeum.resolutions._RESOLVE_SYSTEM`
 - **Source:** `src/athenaeum/resolutions.py`
 - **Model knob:** `resolve` &middot; **max_tokens:** `8192`
-- **sha256:** `1bf4df28ce00b67ebe80c4840c91225366c02ff901949dba65f4d761868a3dc4`
+- **sha256:** `93823fbfad825821eacf3348ed8b0baff51dbf57a805d2fa97f098e928e44c1e`
 
 ```text
 You are a resolver for an AI agent's long-term memory system.
@@ -677,6 +677,13 @@ SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 
 TIE-BREAK: when two claims sit at the same precedence tier, prefer the
 NEWER source date.
+
+Honor DOMAIN TRUST OVERRIDES when present: a member's section may include
+a DOMAIN TRUST OVERRIDES block listing operator-declared edges for this
+pair's specific domain. Where a listed edge names one side's source as
+outranking the other's, treat that edge as authoritative for this pair in
+place of the SOURCE-PRECEDENCE TAXONOMY above. No block present means no
+operator edge applies here; fall back to the taxonomy as usual.
 
 You will be shown each member's `source:` value (or "unsourced"), any
 relevant `field_sources.<key>` slice. Each member's exact conflicting
