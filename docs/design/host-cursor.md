@@ -2,7 +2,8 @@
 
 # Cursor as an athenaeum host
 
-**Status:** PROPOSED (Vitruvius Specify, 2026-11-11). Scopes the epic
+**Status:** DESIGN OF RECORD (Vitruvius Specify, 2026-11-11; operator rulings
+in §9, 2026-11-11). Scopes the epic
 athenaeum#2202. The shared remote (HTTPS) prerequisite is owned by
 athenaeum#2199 and is not designed here; this page states only what Cursor
 needs from it (§6).
@@ -383,11 +384,12 @@ athenaeum#2199.
 **Cursor desktop and the CLI do not need remote mode.** The adoption order
 (athenaeum#2296 → athenaeum#2202 → athenaeum#2199 → athenaeum#2200 →
 athenaeum#2201, ruling of 2026-11-05) is sequencing, not a technical
-dependency. Today the remote-mode roots athenaeum#2381, athenaeum#2382 and
-athenaeum#2383, and the epic athenaeum#2199 itself, are `blocked_by` the
-whole Cursor epic. That makes remote mode wait on `~operator` probes and a
-live measurement that have nothing to do with it. §9 decision 1 proposes a
-lighter edge.
+dependency. The remote-mode roots athenaeum#2381, athenaeum#2382 and
+athenaeum#2383, and the epic athenaeum#2199 itself, used to be `blocked_by`
+the whole Cursor epic. That made remote mode wait on `~operator` probes and a
+live measurement that have nothing to do with it. Under the §9 decision 1
+ruling, the three roots now wait only on athenaeum#2394 and athenaeum#2396,
+and athenaeum#2199 is not blocked by athenaeum#2202.
 
 If Cursor cloud agents are ever in scope, they put these requirements on
 athenaeum#2382, athenaeum#2383 and athenaeum#2384:
@@ -446,31 +448,33 @@ athenaeum#2382, athenaeum#2383 and athenaeum#2384:
 
 ---
 
-## 9. Open operator decisions
+## 9. Operator decisions (ruled 2026-11-11)
 
-1. **The 2202 → 2199 edge.** Re-point athenaeum#2381, athenaeum#2382 and
-   athenaeum#2383 from the epic athenaeum#2202 to the children that mark
-   "Cursor desktop works": the hook guard and the setup guide. Drop the
-   epic-to-epic edge on athenaeum#2199. *Recommended: yes.* The adoption order
-   still holds, because remote mode starts only after Cursor desktop ships,
-   but it no longer waits on Cursor's live probe and measurement.
-2. **Hook-guard discriminator.** Explicit Cursor markers, or positive
-   identification of Claude Code (`session_id` required). *Recommended:
-   explicit markers, plus `GROK_HOOK_EVENT`, in one shared guard with
-   athenaeum#2371.* Positive identification is cleaner but changes the
-   `"unknown"` fallback for genuine Claude Code payloads, and so needs its own
-   evidence that Claude Code always sends `session_id`.
-3. **Snapshot adapter shape.** A packaged console script
-   (`athenaeum-cursor-hook`, like `athenaeum-claude-hook`), or an example
-   under `examples/cursor/`. *Recommended: packaged, but only after the probe
-   shows `sessionStart` injection landing.*
-4. **Epic title.** Retitle athenaeum#2202 to drop "including auto-recall", as
-   athenaeum#2201 was. *Recommended: yes.*
+Items 1 to 3 were ruled on athenaeum#2397 (closed), and every recommendation
+was accepted. Item 4 was applied under the 2026-11-11 wording ruling.
+
+1. **The 2202 → 2199 edge. Ruled: re-point.** athenaeum#2381,
+   athenaeum#2382 and athenaeum#2383 are now `blocked_by` the children that
+   mark "Cursor desktop works", athenaeum#2394 (the hook guard) and
+   athenaeum#2396 (the setup guide), instead of the epic athenaeum#2202. The
+   epic-to-epic edge on athenaeum#2199 is dropped. The adoption order still
+   holds, because remote mode starts only after Cursor desktop ships, but it no
+   longer waits on Cursor's live probe and measurement.
+2. **Hook-guard discriminator. Ruled: explicit markers.** The guard keys on
+   the Cursor markers (`CURSOR_VERSION`, `cursor_version`,
+   `conversation_id`) plus the athenaeum#2371 Grok check, in one shared
+   guard. There is no strict `session_id` requirement for now. Positive
+   identification would change the `"unknown"` fallback for genuine Claude
+   Code payloads, and would need evidence that Claude Code always sends
+   `session_id`.
+3. **Snapshot adapter shape. Ruled: packaged.** A console script,
+   `athenaeum-cursor-hook`, like `athenaeum-claude-hook`. It is built only
+   after the athenaeum#2395 probe confirms that `sessionStart` injection
+   reaches the model. Until then athenaeum#2398 stays `~planning`.
+4. **Epic title. Applied.** athenaeum#2202 no longer says "including
+   auto-recall".
 5. **Re-check cadence.** Re-verify §3 on or after **2027-02-11**, or sooner if
    Cursor adds context injection to `beforeSubmitPrompt`.
-
-Decisions 1 to 3 are tracked in athenaeum#2397. Decision 4 was applied under
-the 2026-11-11 wording ruling.
 
 ---
 
@@ -480,8 +484,8 @@ the 2026-11-11 wording ruling.
 |---|---|---|---|
 | athenaeum#2394 | Claude Code hook no-ops under Cursor (§4). `moscow:should` | `ready` | athenaeum#2371 |
 | athenaeum#2396 | Cursor setup guide and `clients.md` row | `ready` | athenaeum#2394, athenaeum#2372 |
-| athenaeum#2397 | Decision: §9 items 1 to 3 | `needs-decision` | — |
+| athenaeum#2397 | Decision: §9 items 1 to 3 | closed (ruled 2026-11-11) | — |
 | athenaeum#2395 | Probe on a real Cursor install (§3.3, §3.4, §3.5) | `~operator` | — |
 | athenaeum#2399 | Instructed recall: example `alwaysApply` rule | `ready` | athenaeum#2396 |
-| athenaeum#2398 | `sessionStart` context-snapshot adapter | `~planning` until the probe shows injection landing | athenaeum#2395, athenaeum#2396, athenaeum#2397 |
+| athenaeum#2398 | `athenaeum-cursor-hook`: `sessionStart` context-snapshot adapter | `~planning` until the probe shows injection landing | athenaeum#2395, athenaeum#2396, athenaeum#2397 |
 | athenaeum#2400 | Measure recall against the Claude Code hook baseline | `~operator` | athenaeum#2398, athenaeum#2399 |
