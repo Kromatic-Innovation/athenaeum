@@ -137,10 +137,16 @@ def healthy_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
 
+    # issue athenaeum#2304: a fresh, never-used home dir so `check_schedule_state`
+    # deterministically reports "not scheduled" regardless of the actual
+    # runner's real home directory.
+    home_dir = tmp_path / "schedule-home"
+
     return {
         "knowledge_root": knowledge_root,
         "cache_dir": cache_dir,
         "claude_dir": claude_dir,
+        "home_dir": home_dir,
     }
 
 
@@ -151,6 +157,7 @@ def _run_healthy(healthy_install: dict, **overrides) -> list[doctor.CheckResult]
         "cache_dir": healthy_install["cache_dir"],
         "claude_config_dir": healthy_install["claude_dir"],
         "fetch": _fake_fetch_matching(installed_version),
+        "home": healthy_install["home_dir"],
     }
     kwargs.update(overrides)
     return doctor.run_checks(healthy_install["knowledge_root"], **kwargs)
@@ -175,6 +182,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "key_mode",
         "search_index",
         "last_compile",
+        "schedule",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
@@ -486,6 +494,42 @@ def test_last_compile_no_runs_yet(tmp_path: Path) -> None:
     result = doctor.check_last_compile(cache_dir)
     assert result.status == "ok"
     assert "no compile run recorded yet" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# AC4 (issue athenaeum#2304): `athenaeum doctor` reports BOTH the scheduled
+# and the unscheduled state — never "fail" either way.
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_unscheduled_is_ok_not_fail(tmp_path: Path) -> None:
+    result = doctor.check_schedule_state(home=tmp_path / "empty-home")
+    assert result.status == "ok"
+    assert "not scheduled" in result.detail
+
+
+def test_schedule_scheduled_is_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from athenaeum import schedule
+
+    _pin_llm_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    home = tmp_path / "home"
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir()
+    schedule.install(
+        knowledge_root,
+        home=home,
+        loader=lambda argv, input_text=None: schedule.LoaderResult(0, "", ""),
+        platform_override="launchd",
+        config={},
+        cache_dir=tmp_path / "cache",
+        athenaeum_bin=Path("/opt/example-knowledge/venv/bin/athenaeum"),
+    )
+
+    result = doctor.check_schedule_state(home=home, platform_override="launchd")
+    assert result.status == "ok"
+    assert "scheduled" in result.detail
+    assert "not scheduled" not in result.detail
 
 
 def test_interpreter_below_floor_fails(healthy_install: dict) -> None:

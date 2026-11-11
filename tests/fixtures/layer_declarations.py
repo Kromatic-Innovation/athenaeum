@@ -303,6 +303,9 @@ MODULE_LAYER: dict[str, int] = {
     # issue athenaeum#2298: "athenaeum doctor"'s checks -- own docstring states
     # "Layering: L4 domain/pipeline".
     "doctor": 4,
+    # issue athenaeum#2304: schedule install/remove generators -- own
+    # docstring states "Layering: L4 domain/pipeline".
+    "schedule": 4,
     # issue athenaeum#2156: SessionEnd anchor-step orchestration (budget/deadline
     # arithmetic, receipt-partition digesting via receipt_sealers.py L2, and
     # promptwitness anchoring) -- kept OUT of claude_code_adapter.py (L5)
@@ -364,6 +367,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
     "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
+    "_cmd_schedule": 5,  # issue athenaeum#2304
     "_cmd_schema": 5,
     "_cmd_serve": 5,
     "_cmd_storage": 5,
