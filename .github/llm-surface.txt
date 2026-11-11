@@ -60,6 +60,7 @@ src/athenaeum/comparator.py::content_relation
 src/athenaeum/contradictions.py::detect_contradictions
 src/athenaeum/decay_bucket.py::classify_decay_bucket
 src/athenaeum/memory_class_backfill.py::classify_residual
+src/athenaeum/name_collisions.py::resolve_name_collisions
 src/athenaeum/page_description.py::describe_pages
 src/athenaeum/paste_cleanup.py::propose_page
 src/athenaeum/paste_cleanup.py::verify_page
