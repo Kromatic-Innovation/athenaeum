@@ -32,7 +32,12 @@ from athenaeum.models import TokenUsage
 @pytest.fixture(autouse=True)
 def _restore_environ() -> None:
     """Snapshot/restore os.environ — run_drain mutates it directly (per-window
-    ceiling + forced provider), which would otherwise leak across tests."""
+    ceiling + forced provider).
+
+    Belt and braces since issue athenaeum#2421: ``run_drain`` now restores both
+    writes itself, so this fixture no longer carries the isolation (an
+    unguarded caller elsewhere in the suite was the leak, and the fix had to be
+    at the source). Kept because the tests below assert on the env directly."""
     saved = dict(os.environ)
     yield
     os.environ.clear()
@@ -519,11 +524,88 @@ class TestRunDrainLoop:
         assert drain.run_drain(max_usd=10.0, **kwargs) == 1  # loud nonzero
         assert calls["n"] == 1
 
-    def test_forces_provider_api(self, tmp_path: Path) -> None:
-        os.environ["ATHENAEUM_LLM_PROVIDER"] = "claude-cli"
+    def test_forces_provider_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue athenaeum#2421: the forcing is asserted from INSIDE the window,
+        # which is the only place it matters (`librarian.run()` reads the env
+        # there), and the entry value is asserted restored afterwards. The old
+        # shape of this test read the env AFTER run_drain returned, which
+        # pinned the leak as if it were the contract.
+        monkeypatch.setenv(drain.PROVIDER_ENV, "claude-cli")
+        kwargs, _calls, _ = self._harness(tmp_path, 100, [(50, 0.0), (50, 0.0)])
+        seen: list[str | None] = []
+        scripted = kwargs["run_fn"]
+
+        def recording_run(**call_kwargs):
+            seen.append(os.environ.get(drain.PROVIDER_ENV))
+            return scripted(**call_kwargs)
+
+        kwargs["run_fn"] = recording_run
+        assert drain.run_drain(max_usd=10.0, **kwargs) == 0
+        assert seen == ["api", "api"]  # every window, not just the first
+        assert os.environ[drain.PROVIDER_ENV] == "claude-cli"
+
+    def test_an_absent_provider_env_is_absent_again_afterwards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Restoring a missing variable means DELETING it, not writing "". A
+        # leaked empty string would be falsy to most readers but still present
+        # to `os.environ.get`, and `_resolve_global_provider` treats blank as
+        # unset -- so this would look fine and hide the next regression.
+        monkeypatch.delenv(drain.PROVIDER_ENV, raising=False)
         kwargs, _calls, _ = self._harness(tmp_path, 50, [(50, 0.0)])
-        drain.run_drain(max_usd=10.0, **kwargs)
-        assert os.environ["ATHENAEUM_LLM_PROVIDER"] == "api"
+        assert drain.run_drain(max_usd=10.0, **kwargs) == 0
+        assert drain.PROVIDER_ENV not in os.environ
+
+    def test_provider_env_restored_on_the_zero_progress_error_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The loud nonzero return is a RETURN out of the middle of the loop,
+        # so it needs the `finally`, not a restore appended after the body.
+        monkeypatch.setenv(drain.PROVIDER_ENV, "claude-cli")
+        kwargs, calls, _ = self._harness(tmp_path, 100, [(0, 0.0)])
+        assert drain.run_drain(max_usd=10.0, **kwargs) == 1
+        assert calls["n"] == 1
+        assert os.environ[drain.PROVIDER_ENV] == "claude-cli"
+
+    def test_provider_env_restored_when_a_window_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other error path: an exception out of `run_fn` (the real one
+        # calls `librarian.run`, which can raise) must not strand the forced
+        # value either.
+        monkeypatch.setenv(drain.PROVIDER_ENV, "claude-cli")
+        kwargs, _calls, _ = self._harness(tmp_path, 50, [(50, 0.0)])
+
+        def exploding_run(**_call_kwargs):
+            raise RuntimeError("window blew up")
+
+        kwargs["run_fn"] = exploding_run
+        with pytest.raises(RuntimeError, match="window blew up"):
+            drain.run_drain(max_usd=10.0, **kwargs)
+        assert os.environ[drain.PROVIDER_ENV] == "claude-cli"
+
+    def test_per_window_spend_ceiling_env_is_also_scoped_to_the_drain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The second direct `os.environ` write in `run_drain`, leaking the same
+        # way for the same reason. `_env_restored` covers both or the half of
+        # the fix that is missing comes back as the next flake -- this one
+        # outranking an operator's own `spend.max_usd_per_run` yaml.
+        monkeypatch.setenv(drain.SPEND_CEILING_ENV, "1.000000")
+        kwargs, _calls, _ = self._harness(tmp_path, 50, [(50, 0.0)])
+        scripted = kwargs["run_fn"]
+        seen: list[str | None] = []
+
+        def recording_run(**call_kwargs):
+            seen.append(os.environ.get(drain.SPEND_CEILING_ENV))
+            return scripted(**call_kwargs)
+
+        kwargs["run_fn"] = recording_run
+        assert drain.run_drain(max_usd=10.0, **kwargs) == 0
+        assert seen == ["10.000000"]  # the drain's remaining budget, not the $1
+        assert os.environ[drain.SPEND_CEILING_ENV] == "1.000000"
 
     def test_aborts_when_ledger_unwritable(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
