@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Claude Code hook adapter no-ops under Grok Build (issue athenaeum#2371).** `claude_code_adapter.main`, `witness_session_end`, and `witness_session_end_anchor` now refuse to run — printing nothing, exit 0, no witness line, no push telemetry, no seen-file write — when `GROK_HOOK_EVENT` is set or the stdin payload is Grok-shaped, before any other side effect.
 - **Tier-0 structured upsert for configured entity types (issue
   athenaeum#2360).** A pre-structured raw whose `type` is listed under
   `librarian.structured_upsert` and whose `uid` already resolves to a page is

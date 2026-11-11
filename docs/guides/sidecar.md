@@ -119,6 +119,11 @@ and its cache directory from `ATHENAEUM_CACHE_DIR` (or the same
 blocks a turn: a recall failure, a missing index, or no matching pages all
 exit `0` with nothing printed, rather than surfacing hook noise.
 
+If Grok Build (xAI's terminal agent, which also reads Claude Code's hook
+configuration) ends up invoking this hook, it silently no-ops; set
+`[compat.claude] hooks = false` in Grok's `config.toml` if you would rather
+Grok skip Claude Code's hooks entirely.
+
 **Rollback.** Turning off per-turn recall means removing the
 `UserPromptSubmit` hook block (or setting `AUTO_RECALL=false`) — there is
 no second live implementation to switch back to. The previous
