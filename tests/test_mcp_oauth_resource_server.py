@@ -892,6 +892,46 @@ class TestEveryRejectionIsA401WithAChallenge:
         )
         assert status == 200
 
+    def test_a_mixed_case_subject_matches_a_lower_case_allowlist_entry(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """Regression, caught in review of PR athenaeum#2420.
+
+        `normalize_identities` case-folds the allowlist, so the claim side has
+        to fold too or an issuer that mints a mixed-case subject identifier
+        (Okta's user ids are the live example) can never be allowlisted at
+        all: every valid token from it answers 401 for a reason visible
+        nowhere in the operator's configuration. Both directions are covered,
+        because folding only one side is exactly the defect.
+        """
+        status, _ = _post_initialize(
+            corpus, issuer, _serve_auth(), issuer.mint(sub=ALLOWED_SUBJECT.upper())
+        )
+        assert status == 200
+
+    def test_a_lower_case_subject_matches_a_mixed_case_allowlist_entry(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        mixed = _serve_auth(allowed_identities=frozenset({"OKTA|00U1a2B3c4D5e6F7g8H9"}))
+        status, _ = _post_initialize(
+            corpus, issuer, mixed, issuer.mint(sub="okta|00u1a2b3c4d5e6f7g8h9")
+        )
+        assert status == 200
+
+    def test_case_folding_does_not_widen_to_a_different_subject(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The negative control for the two above.
+
+        Folding both sides must make the comparison case-insensitive, not
+        permissive: a subject that differs by more than capitalisation is
+        still refused.
+        """
+        status, _ = _post_initialize(
+            corpus, issuer, _serve_auth(), issuer.mint(sub=STRANGER_SUBJECT.upper())
+        )
+        assert status == 401
+
     def test_an_unverified_email_is_not_accepted(
         self, corpus: Path, issuer: _FakeIssuer
     ) -> None:

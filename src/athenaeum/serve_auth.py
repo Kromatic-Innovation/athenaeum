@@ -182,8 +182,8 @@ class ServeAuth:
         ``test_mcp_oauth_resource_server.py`` pins.
         """
         subject = claims.get("sub")
-        if isinstance(subject, str) and subject in self.allowed_identities:
-            return subject
+        if isinstance(subject, str) and subject.casefold() in self.allowed_identities:
+            return subject.casefold()
         if claims.get("email_verified") is True:
             email = claims.get("email")
             if isinstance(email, str) and email.casefold() in self.allowed_identities:
@@ -273,12 +273,22 @@ def _canonical_resource_url(value: str) -> str:
 def normalize_identities(values: Iterable[object]) -> frozenset[str]:
     """Trim, case-fold and de-duplicate an identity allowlist.
 
-    Case-folded because the two accepted shapes are both case-insensitive in
-    practice (an email's domain always, and every issuer this targets mints
-    lowercase subject identifiers), and because an allowlist that silently
-    misses on capitalisation fails in the direction of locking the operator
-    out — recoverable, but only after a confusing 401. :meth:`ServeAuth.
-    identity_of` folds the claim side to match.
+    :meth:`ServeAuth.identity_of` folds the CLAIM side to match, for both
+    accepted shapes. Keeping the two sides in step is the whole point: an
+    earlier revision folded only the entries and the ``email`` claim, which
+    meant an issuer minting a mixed-case subject identifier (Okta's user ids
+    are the live example) could never be allowlisted at all — every valid
+    token from it got a 401 for a reason visible nowhere in the operator's
+    configuration. Caught in review of PR athenaeum#2420.
+
+    Folding ``sub`` does make the allowlist case-INSENSITIVE for subject
+    identifiers, which OIDC defines as case-sensitive, so the trade is stated
+    rather than assumed: it would matter only for an issuer that mints two
+    DISTINCT subjects differing solely in case, which no identity provider
+    does — a subject identifier is an opaque unique string, not a name. The
+    failure it prevents is real and the failure it admits is hypothetical, and
+    an allowlist that silently misses on capitalisation fails by locking the
+    operator out of their own server.
     """
     out: set[str] = set()
     for value in values:
@@ -354,7 +364,14 @@ def build_serve_auth(
         _require_absolute_url(resource, "serve.auth.resource")
     )
 
-    identities = allowed_identities or frozenset()
+    # Re-normalized here, not trusted from the resolver -- defence in depth,
+    # the same posture the scope pair gets below. The resolver already folds,
+    # but `ServeAuth` is constructed in exactly one place and the
+    # folded-on-both-sides invariant `ServeAuth.identity_of` relies on is
+    # cheaper to hold here than to depend on every caller for. A programmatic
+    # caller handing an unfolded set would otherwise reintroduce the lockout
+    # this function's sibling docstring describes.
+    identities = normalize_identities(allowed_identities or frozenset())
     if not identities:
         raise ServeAuthError(
             "serve.auth.allowed_identities is empty; name at least one `sub` "
