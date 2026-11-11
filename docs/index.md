@@ -38,6 +38,9 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
 - [Cursor](guides/cursor.md) — MCP setup, the explicit-tool-call model, and the Claude Code hook passthrough.
 - [Other clients and platforms](guides/clients.md) — Claude Desktop, Cursor, ChatGPT/Grok, Codex; macOS, Linux, Windows.
+- [Remote mode](guides/remote.md) — serving over HTTPS to a host that cannot launch a
+  local process: TLS proxy, external OIDC provider, the `remote` profile, scheduling,
+  rotation, and what egress to a host provider means.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
