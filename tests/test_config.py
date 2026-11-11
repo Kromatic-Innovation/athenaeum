@@ -981,6 +981,7 @@ class TestLoadConfig:
         assert fresh["recall"]["extra_intake_roots"] == [
             "raw/auto-memory",
             "raw/claude-session",
+            "raw/remote-session",
         ]
         assert fresh["vector"]["provider"] == "chromadb"
 
@@ -1142,10 +1143,12 @@ class TestNonDictSectionsDegradeGracefully:
 
 
 class TestRecallExtraIntakeRootsDefault:
-    """The default config advertises ``raw/auto-memory`` and
-    ``raw/claude-session`` as extra roots so agent-written memories and
-    ``remember``-saved notes (issue athenaeum#2313) participate in recall
-    without ceremony.
+    """The default config advertises ``raw/auto-memory``,
+    ``raw/claude-session`` and ``raw/remote-session`` as extra roots so
+    agent-written memories and ``remember``-saved notes (issue
+    athenaeum#2313 for the stdio subdirectory, athenaeum#2385 for the
+    host-neutral one a ``--transport http`` server writes to) participate
+    in recall without ceremony.
     """
 
     def test_default_includes_auto_memory(self, tmp_path: Path) -> None:
@@ -1153,6 +1156,7 @@ class TestRecallExtraIntakeRootsDefault:
         assert cfg["recall"]["extra_intake_roots"] == [
             "raw/auto-memory",
             "raw/claude-session",
+            "raw/remote-session",
         ]
 
     def test_user_override_replaces_list(self, tmp_path: Path) -> None:
@@ -1176,9 +1180,10 @@ class TestResolveExtraIntakeRoots:
         should emit a WARNING so operators notice a typo'd or unmounted
         path rather than silently losing recall coverage.
 
-        Both default entries (``raw/auto-memory``, ``raw/claude-session``,
-        issue athenaeum#2313) are missing here, so one warning fires per
-        entry.
+        All three default entries (``raw/auto-memory``,
+        ``raw/claude-session`` and ``raw/remote-session``, issues
+        athenaeum#2313 and athenaeum#2385) are missing here, so one warning
+        fires per entry.
         """
         with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
             resolved = resolve_extra_intake_roots(tmp_path)
@@ -1189,10 +1194,11 @@ class TestResolveExtraIntakeRoots:
             if r.levelno == logging.WARNING
             and "extra_intake_root not found" in r.getMessage()
         ]
-        assert len(warnings) == 2
+        assert len(warnings) == 3
         messages = " ".join(w.getMessage() for w in warnings)
         assert "raw/auto-memory" in messages
         assert "raw/claude-session" in messages
+        assert "raw/remote-session" in messages
 
     def test_accepts_absolute_path(self, tmp_path: Path) -> None:
         extra = tmp_path / "extra"

@@ -172,13 +172,21 @@ _DEFAULTS: dict[str, Any] = {
         # are resolved relative to ``knowledge_root``. ``raw/auto-memory``
         # is the agent-auto-memory intake tree (per-scope agent-written
         # notes); ``raw/claude-session`` is where the ``remember`` MCP
-        # tool itself writes (issue athenaeum#2313) -- without it, a fact
-        # saved via ``remember`` returned nothing from `recall` until the
-        # next compile. Both show up in recall, labelled ``[uncompiled]``
-        # and ranked below the compiled wiki, without separate plumbing.
+        # tool itself writes under the stdio transport (issue
+        # athenaeum#2313) -- without it, a fact saved via ``remember``
+        # returned nothing from `recall` until the next compile; and
+        # ``raw/remote-session`` is the same thing for a server started
+        # with ``--transport http`` (issue athenaeum#2385), which must not
+        # file an unknown host's writes in a directory named for Claude.
+        # All three show up in recall, labelled ``[uncompiled]`` and
+        # ranked below the compiled wiki, without separate plumbing.
         # Set to an empty list to restrict recall to the compiled wiki
         # only.
-        "extra_intake_roots": ["raw/auto-memory", "raw/claude-session"],
+        "extra_intake_roots": [
+            "raw/auto-memory",
+            "raw/claude-session",
+            "raw/remote-session",
+        ],
     },
     # NOTE (issue athenaeum#231): only seed a key here when this dict is its single
     # source of truth. Keys whose defaults live next to their consumer code

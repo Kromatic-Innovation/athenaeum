@@ -296,6 +296,21 @@ class ToolUseSessionResolver:
     :data:`ATTRIBUTION_ENV_UNRESOLVED`. It never raises, and it never sweeps
     every scope directory looking for a match — an unbounded hunt for a
     plausible answer is how a wrong one gets found.
+
+    **``env_fallback=False`` (issue athenaeum#2385).** The paragraph above
+    assumes the env id is a MEANINGFUL fallback, which is true only when this
+    process serves exactly one conversation. Under
+    ``athenaeum serve --transport http`` one process serves many
+    conversations from many clients for days, and ``os.environ`` names at
+    best the operator's shell at start time — so attributing every client's
+    recall to it files unrelated sessions' pushes under one id, which is a
+    worse answer than no answer. Constructed with ``env_fallback=False``,
+    every fallback path returns an EMPTY session id (still stamped
+    :data:`ATTRIBUTION_ENV_UNRESOLVED`, so a caller that logs the stamp sees
+    why), and :func:`athenaeum.mcp_server.recall_search` already skips
+    ``record_push`` on a falsy session id — no new branch at the call site.
+    A genuine ``toolUseId`` → transcript join still resolves and is still
+    recorded: this turns off the GUESS, not the attribution.
     """
 
     def __init__(
@@ -307,7 +322,9 @@ class ToolUseSessionResolver:
         attempts: int = _TRANSCRIPT_LOOKUP_ATTEMPTS,
         retry_delay: float = _TRANSCRIPT_LOOKUP_DELAY_S,
         sleep: Any = None,
+        env_fallback: bool = True,
     ) -> None:
+        self._env_fallback = env_fallback
         self._projects_root = projects_root
         self._tail_bytes = tail_bytes
         self._max_candidates = max_candidates
@@ -321,8 +338,14 @@ class ToolUseSessionResolver:
     # -- public -------------------------------------------------------------
 
     def resolve(self, tool_use_id: str | None) -> SessionAttribution:
-        """Resolve *tool_use_id* to the calling session, or fall back loudly."""
-        env_id = resolve_session_id()
+        """Resolve *tool_use_id* to the calling session, or fall back loudly.
+
+        With ``env_fallback=False`` (issue athenaeum#2385) every fallback
+        path yields an EMPTY session id instead of this process's
+        environment id, which ``recall_search`` reads as "do not record a
+        push at all". See the constructor's *env_fallback*.
+        """
+        env_id = resolve_session_id() if self._env_fallback else ""
         if not tool_use_id:
             # No id on the wire (a CLI caller, or a client that does not set
             # the key): straight to the stamped fallback, zero I/O, zero wait.

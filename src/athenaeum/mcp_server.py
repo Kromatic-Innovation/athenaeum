@@ -52,10 +52,13 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 from __future__ import annotations
 
 import functools
+import importlib.resources
+import inspect
 import json
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -107,7 +110,7 @@ from athenaeum.recall_overflow import (
     render_access_withheld_line,
     render_overflow_line,
 )
-from athenaeum.remote_policy import RemotePolicy
+from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.serve_auth import ServeAuth
 from athenaeum.storage import (
@@ -298,6 +301,117 @@ def _with_excluded_fields_withheld_notice(rendered: str) -> str:
 # touching the scalar itself.
 _DEFAULT_INFERRED_SOURCE = "claude:inferred"
 
+#: The ``remember`` tool's raw subdirectory under the stdio transport — the
+#: value its ``source`` parameter defaulted to literally before issue
+#: athenaeum#2385 made the default transport-dependent. A
+#: ``recall.extra_intake_roots`` default entry (issue athenaeum#2313).
+_DEFAULT_SESSION_SUBDIR = "claude-session"
+
+#: Host-neutral peer of :data:`_DEFAULT_INFERRED_SOURCE`, stamped in its place
+#: when this server was started under a MULTI-CLIENT transport (issue
+#: athenaeum#2385). Under ``--transport http`` the caller is not known to be
+#: Claude Code — it is whatever host registered this endpoint — so stamping
+#: ``claude:inferred`` would record a non-Claude host's undeclared write as a
+#: Claude inference, which is a provenance lie and not a recoverable one
+#: (``repair --backfill-sources`` would then look for a Claude transcript that
+#: never existed). ``remote:`` rather than a host name because athenaeum has
+#: no host label to read: see :func:`transport_defaults` on why.
+_REMOTE_INFERRED_SOURCE = "remote:inferred"
+
+#: Host-neutral peer of :data:`_DEFAULT_SESSION_SUBDIR` (issue
+#: athenaeum#2385): the ``raw/`` subdirectory a ``remember`` call with no
+#: explicit ``source`` lands in under ``--transport http``. Separate from
+#: ``claude-session`` so the two provenances stay separable on disk — the
+#: directory name is the only provenance signal a later reader of the raw tree
+#: has before the frontmatter is parsed. Carried as a
+#: ``recall.extra_intake_roots`` default (``athenaeum.config._DEFAULTS``) and
+#: created by ``athenaeum init`` (``athenaeum.init._SUBDIRS``) so a note
+#: written here is indexed and recallable, per issue athenaeum#2313's
+#: extra-root refresh.
+_REMOTE_SESSION_SUBDIR = "remote-session"
+
+
+@dataclass(frozen=True)
+class TransportDefaults:
+    """The per-transport defaults a ``create_server`` call resolves once.
+
+    Three defaults, grouped because they answer ONE question — "is the caller
+    on the other end of this server known to be the single Claude Code
+    conversation that spawned it?" — and because grouping them makes the
+    branch a single lookup that a test can assert as one object rather than
+    three scattered conditionals (issue athenaeum#2385).
+
+    Nothing here is in any tool's input schema. These are server-construction
+    defaults, exactly like ``remote_policy`` and ``caller_audience``, so a
+    client has nothing to pass that could change them — and ``tools/list`` is
+    identical on both transports, which is the issue's "branch only the
+    defaults, never the tool schema" constraint.
+
+    Attributes:
+        inferred_source: The wiki-level ``source`` scalar stamped on a
+            ``remember`` write that supplied no ``sources``.
+        session_subdir: The ``raw/<name>/`` subdirectory a ``remember`` call
+            that supplied no ``source`` writes into.
+        env_session_attribution: Whether this process's ENVIRONMENT may be
+            treated as describing the caller. True under stdio, where the
+            process env names the one conversation being served. False under
+            a multi-client transport, where it names at best the operator's
+            shell and at worst a conversation that ended days ago. Gates two
+            things, both of which read that environment and neither of which
+            a caller can influence: push-metrics attribution for a request
+            carrying no ``claudecode/toolUseId``
+            (:meth:`athenaeum.push_metrics.ToolUseSessionResolver.resolve`),
+            and the ``model`` / ``originSessionId`` extras stamped alongside
+            a defaulted source (:func:`_default_inferred_extras`).
+    """
+
+    inferred_source: str
+    session_subdir: str
+    env_session_attribution: bool
+
+
+#: Stdio: byte-identical to the pre-athenaeum#2385 behaviour, deliberately.
+STDIO_TRANSPORT_DEFAULTS = TransportDefaults(
+    inferred_source=_DEFAULT_INFERRED_SOURCE,
+    session_subdir=_DEFAULT_SESSION_SUBDIR,
+    env_session_attribution=True,
+)
+
+#: Streamable HTTP: one process, many conversations, many hosts.
+HTTP_TRANSPORT_DEFAULTS = TransportDefaults(
+    inferred_source=_REMOTE_INFERRED_SOURCE,
+    session_subdir=_REMOTE_SESSION_SUBDIR,
+    env_session_attribution=False,
+)
+
+
+def transport_defaults(transport: str | None) -> TransportDefaults:
+    """The :class:`TransportDefaults` for *transport* (issue athenaeum#2385).
+
+    ``"http"`` — the one multi-client transport ``athenaeum serve`` offers
+    (``config.SERVE_TRANSPORTS``) — gets the host-neutral set; everything
+    else, including ``None`` and an unrecognized name, gets the stdio set.
+    Defaulting an UNKNOWN transport to stdio is the conservative direction
+    here and the only one that is safe by construction: a future transport
+    name that nobody taught this function about would otherwise silently
+    inherit "assume multi-client", which would change the `remember` write
+    path for it sight unseen. A new multi-client transport is expected to add
+    itself here in the same change that adds itself to ``SERVE_TRANSPORTS``.
+
+    **No host label is read, because athenaeum has none to read.** The issue's
+    criterion allows ``remote:inferred`` to give way to a host label "such as
+    ``chatgpt``" if the transport child's settings carry one. As of
+    athenaeum#2382 they do not: ``serve.transport`` / ``serve.host`` /
+    ``serve.port`` are a transport name and a BIND address, and
+    :class:`athenaeum.remote_policy.RemotePolicy` carries a tool allowlist and
+    an excluded-fields pin, not an identity. Inventing a ``serve.host_label``
+    knob here would be guessing at a setting a later child should design
+    against a real registration flow, so the fallback IS the shipped
+    behaviour and this is the seam a host label would land on.
+    """
+    return HTTP_TRANSPORT_DEFAULTS if transport == "http" else STDIO_TRANSPORT_DEFAULTS
+
+
 #: Capped tail-read size (bytes) when resolving the model id from a session
 #: transcript for the ``claude:inferred`` default (issue athenaeum#2148). The
 #: newest assistant turn's ``message.model`` is almost always within the last
@@ -402,7 +516,9 @@ def _resolve_inferred_session_id() -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
-def _default_inferred_extras(content: str) -> dict:
+def _default_inferred_extras(
+    content: str, *, stamp_env_provenance: bool = True
+) -> dict:
     """Extras to inject alongside the ``claude:inferred`` default (issue athenaeum#2148).
 
     Stamps ``model`` and ``originSessionId`` — the two fields the
@@ -413,9 +529,29 @@ def _default_inferred_extras(content: str) -> dict:
     ``_inject_provenance_frontmatter`` applies these as an end-of-block
     merge, which would otherwise clobber a caller-supplied ``model:`` /
     ``originSessionId:`` that arrived pre-stamped in the markdown body.
+
+    **``stamp_env_provenance=False`` stamps NEITHER (issue athenaeum#2385).**
+    Both values are read from this PROCESS's environment —
+    :func:`_resolve_inferred_session_id` from ``CLAUDE_CODE_SESSION_ID``, and
+    :func:`_resolve_inferred_model` from ``ANTHROPIC_MODEL`` with that
+    session's transcript as a fallback. Under stdio that environment
+    describes the one conversation being served, which is the whole point of
+    athenaeum#2148. Under ``--transport http`` it describes the shell the
+    operator started the server in, so a remote host's note would be stamped
+    with a specific, real, WRONG session id and model — a worse provenance
+    lie than the bare scalar, because it names an identifiable session rather
+    than merely guessing a vendor. Omitting the keys is the honest answer: an
+    absent key already means "provenance unknown" throughout
+    ``docs/design/provenance-shape.md``, whereas a present one asserts
+    something. Note this is NOT the gate athenaeum#2148 already had — that
+    one declines only ``push_metrics.resolve_session_id()``'s wider
+    ``CLAUDE_SESSION_ID`` alias, and still reads ``CLAUDE_CODE_SESSION_ID``
+    on every transport.
     """
     existing_meta, _ = parse_frontmatter(content)
     extras: dict = {}
+    if not stamp_env_provenance:
+        return extras
     session_id = _resolve_inferred_session_id()
     if session_id and not existing_meta.get("originSessionId"):
         extras["originSessionId"] = session_id
@@ -1372,8 +1508,9 @@ def _is_uncompiled_display_prefix(display_prefix: str) -> bool:
     """True when *display_prefix* names a raw-intake (pre-compile) hit.
 
     Issue athenaeum#2313 (AC5): a hit resolved from one of
-    ``recall.extra_intake_roots`` (today ``raw/auto-memory`` and
-    ``raw/claude-session``) has not been through the librarian at all —
+    ``recall.extra_intake_roots`` (today ``raw/auto-memory``,
+    ``raw/claude-session`` and ``raw/remote-session``) has not been through
+    the librarian at all —
     unlike a compiled ``wiki/`` page, or an off-corpus hit (issue athenaeum#984),
     which is federated from a DIFFERENT corpus, not raw intake. Decided purely
     from :func:`_resolve_hit_path`'s ``display_prefix`` string, which already
@@ -2481,6 +2618,16 @@ def _recall_via_backend(
     return result
 
 
+#: Serializes :func:`_refresh_extra_root_index`'s manifest read-modify-write
+#: (issue athenaeum#2385). Module-level rather than per-server because the
+#: artifact it protects is a file on disk, and because a second server in one
+#: interpreter is a test shape, not a deployment: paying a few milliseconds of
+#: needless serialization there is a better trade than keying a lock table by
+#: ``cache_dir``. See :func:`_refresh_extra_root_index` for the measurement
+#: that justifies it existing at all.
+_INDEX_REFRESH_LOCK = threading.Lock()
+
+
 def _refresh_extra_root_index(
     search_backend: str,
     *,
@@ -2535,6 +2682,31 @@ def _refresh_extra_root_index(
     not turn a successful `remember` into an error — the same "must never
     fail over telemetry" posture this module already applies to push-metrics
     instrumentation, just above.
+
+    **Serialized under :data:`_INDEX_REFRESH_LOCK` (issue athenaeum#2385).**
+    This is the measured race, not a defensive guess: ``build_index(
+    incremental=True)`` LOADS the manifest sidecar, diffs the corpus against
+    it, applies the delta and WRITES the manifest back, so two refreshes
+    running concurrently both diff against the same pre-image and the second
+    writer's manifest drops the first writer's entry. 24 `remember` calls
+    interleaved with 24 `recall` calls recorded 24 files on disk but only
+    14-22 of them in the manifest across runs, against 24/24 run serially —
+    i.e. the FILES never raced (``storage.write_raw_intake`` mints a
+    uuid4-suffixed name and renames atomically), only the index did, and a
+    note missing from the manifest is a note `recall` cannot find. That is
+    exactly the "every write lands exactly once, and the index is consistent
+    afterwards" criterion, and the lock is where it is bought.
+
+    A ``threading.Lock`` is the right scope and a cross-process lock is not:
+    the concurrency this issue is about is many clients inside ONE long-lived
+    ``--transport http`` process, and FastMCP dispatches a synchronous tool
+    function on a worker thread, so the contending refreshes are threads of
+    this interpreter. It is also why the repo's ``_acquire_or_exit`` run-lock
+    idiom is deliberately NOT reused: that lock EXITS the process on
+    contention, which is correct for a batch ``_cmd_*`` entry point and
+    unthinkable on an interactive tool call. Under stdio the lock is
+    uncontended — acquired and released around the same work, no waiting, no
+    behaviour change.
     """
     if search_backend not in ("fts5", "vector"):
         return
@@ -2544,15 +2716,24 @@ def _refresh_extra_root_index(
         from athenaeum.config import resolve_extra_intake_roots
         from athenaeum.search import get_backend
 
-        extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
-        get_backend(search_backend).build_index(
-            wiki_root,
-            cache_dir,
-            extra_roots=extra_roots,
-            incremental=True,
-            full_rehash_max_age_days=math.inf,
-            config=config,
-        )
+        with _INDEX_REFRESH_LOCK:
+            # Re-resolved INSIDE the lock, not before it: the root list only
+            # ever GROWS (a `remember` write creates its subdirectory before
+            # calling this), so resolving under the lock guarantees a later
+            # refresh sees at least the roots an earlier one did. Resolved
+            # outside, a thread that resolved before a sibling created
+            # `raw/<subdir>` could run AFTER that sibling's build and, seeing
+            # a narrower corpus than the manifest records, diff the sibling's
+            # freshly-indexed entries as REMOVED.
+            extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
+            get_backend(search_backend).build_index(
+                wiki_root,
+                cache_dir,
+                extra_roots=extra_roots,
+                incremental=True,
+                full_rehash_max_age_days=math.inf,
+                config=config,
+            )
     except Exception:  # a refresh failure must not fail `remember`
         log.debug("remember: post-write index refresh failed", exc_info=True)
 
@@ -2567,6 +2748,8 @@ def remember_write(
     screening: dict | None = None,
     bucket: str | None = None,
     valid_until: str | None = None,
+    inferred_source: str = _DEFAULT_INFERRED_SOURCE,
+    stamp_env_provenance: bool = True,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -2658,6 +2841,24 @@ def remember_write(
             fail-open here (dropped, matching every other ``valid_until``
             reader/writer in this codebase — see ``models._coerce_iso_date``),
             not rejected like ``bucket``.
+        inferred_source: The wiki-level ``source`` scalar to stamp when
+            ``sources`` is omitted (issue athenaeum#2385). Defaults to
+            :data:`_DEFAULT_INFERRED_SOURCE`, so every pre-existing caller —
+            the CLI, the tests, a stdio server — is byte-identical. The MCP
+            ``remember`` tool passes its server's
+            :attr:`TransportDefaults.inferred_source`, which is how a write
+            arriving over ``--transport http`` is stamped
+            :data:`_REMOTE_INFERRED_SOURCE` instead of claiming to be a
+            Claude inference. A parameter rather than a module-level branch
+            because this function has no idea what transport it is under and
+            should not grow one.
+        stamp_env_provenance: Whether the ``sources``-omitted default may also
+            stamp ``model`` / ``originSessionId`` read from this process's
+            environment (issue athenaeum#2148, gated by athenaeum#2385) — see
+            :func:`_default_inferred_extras`. Travels with *inferred_source*:
+            the MCP ``remember`` tool passes both out of the same
+            :class:`TransportDefaults`, so the two cannot diverge, and both
+            default to the stdio answer for every other caller.
 
     Returns:
         Confirmation message with the file path, or an error string.
@@ -2677,19 +2878,21 @@ def remember_write(
     # ``sources`` argument is rejected before we touch the filesystem.
     try:
         if sources is None:
-            wiki_source: str | dict | None = _DEFAULT_INFERRED_SOURCE
+            wiki_source: str | dict | None = inferred_source
             field_sources_map: dict | None = None
             # Issue athenaeum#2148: stamp `model` + `originSessionId` alongside
             # the defaulted scalar so a `claude:inferred` write records WHICH
             # model inferred it and in WHICH session, without touching the
             # scalar itself (see the KEEP THIS SCALAR BYTE-IDENTICAL note on
             # `_DEFAULT_INFERRED_SOURCE` above).
-            extras: dict = _default_inferred_extras(content)
+            extras: dict = _default_inferred_extras(
+                content, stamp_env_provenance=stamp_env_provenance
+            )
             log.warning(
                 "remember(): no `sources` supplied; defaulting "
                 "wiki-level source to %r. Caller should declare a "
                 "source on every write (issue athenaeum#90).",
-                _DEFAULT_INFERRED_SOURCE,
+                inferred_source,
             )
         else:
             wiki_source, field_sources_map = resolve_remember_sources(sources)
@@ -2896,6 +3099,68 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
         Returns:
             Matching wiki pages with relevance scores and content snippets.
         """
+
+
+#: Issue athenaeum#2387: the packaged remote-profile steering texts. Prompt
+#: wording is content, not code (``policies/prompt-text-is-content.md``), so
+#: both live as ``.md`` files under ``src/athenaeum/prompts/`` and are read
+#: through ``importlib.resources`` -- the same packaged-prompt idiom
+#: :func:`athenaeum.recall_overflow.load_overflow_template` uses.
+REMOTE_INSTRUCTIONS_TEMPLATE_NAME = "remote_server_instructions.md"
+
+#: The remote ``recall`` description's LEAD, prepended to
+#: :func:`recall_tool_docstring`'s unchanged text -- see
+#: :func:`remote_recall_tool_docstring`.
+REMOTE_RECALL_LEAD_TEMPLATE_NAME = "remote_recall_lead.md"
+
+
+def _load_packaged_prompt(name: str) -> str:
+    """Read a packaged ``athenaeum.prompts`` file, whitespace-trimmed.
+
+    Loaded fresh on every call (the files are tiny, and this runs once per
+    server construction) rather than cached at import time, matching
+    :func:`athenaeum.recall_overflow.load_overflow_template`. Trimmed because
+    the caller here serves the whole STRING rather than rendering it into a
+    line: a file's trailing newline would otherwise spend part of the first
+    512 characters a host reads (issue athenaeum#2387).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(name)
+    return resource.read_text(encoding="utf-8").strip()
+
+
+def remote_server_instructions() -> str:
+    """The remote profile's MCP ``instructions`` text (issue athenaeum#2387).
+
+    Served INSTEAD of ``create_server``'s inline default when the serve-time
+    policy pins ``serve.profile: remote``, and only then -- the default
+    string is untouched, so a host with a per-turn hook (Claude Code, which
+    has its recall PUSHED to it) reads exactly what it read before.
+
+    What differs: this text opens with the instruction to call ``recall``
+    before answering, because a pull-only host has no other lever. OpenAI's
+    Apps SDK guidance asks for the key details in the first 512 characters,
+    and the inline default spends them on ``remember``. It promises nothing:
+    the text says what to call, never that a recall happens on its own.
+    """
+    return _load_packaged_prompt(REMOTE_INSTRUCTIONS_TEMPLATE_NAME)
+
+
+def remote_recall_tool_docstring(entity_classes_str: str) -> str:
+    """The remote profile's ``recall`` description (issue athenaeum#2387).
+
+    A packaged LEAD prepended to :func:`recall_tool_docstring`'s text, not a
+    rewrite of it: the backend, handle-query and ``**Links:**`` guidance, and
+    every parameter description under it, stay the ones the default path
+    serves -- word for word, so the two descriptions cannot drift apart as
+    the shared half is edited. Only the opening is new.
+
+    :func:`inspect.cleandoc` normalizes the shared half's docstring
+    indentation BEFORE the join: an unindented lead glued onto an
+    8-space-indented body leaves no common prefix for FastMCP's own
+    docstring parse to strip, which serves the ``Args:`` block as prose.
+    """
+    lead = _load_packaged_prompt(REMOTE_RECALL_LEAD_TEMPLATE_NAME)
+    return f"{lead}\n\n{inspect.cleandoc(recall_tool_docstring(entity_classes_str))}"
 
 
 #: The ``recall`` MCP tool's JSON input schema, hand-written to mirror what
@@ -3134,6 +3399,7 @@ def create_server(
     serve_auth: ServeAuth | None = None,
     jwks_http_client: Any | None = None,
     config: dict | None = None,
+    transport: str | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
 
@@ -3250,6 +3516,15 @@ def create_server(
             honored at query time — a class routed to a ``recallable: false``
             surface is never returned by ``recall``. ``None`` (default) is a
             no-op for the default configuration (every class all-true).
+        transport: The transport this server will be ``run`` on, as resolved
+            by ``config.resolve_serve_transport`` (issue athenaeum#2385).
+            Governs the three :class:`TransportDefaults` ONLY — the provenance
+            defaults a `remember` call falls into, and whether push-metrics
+            may attribute a recall to this process's environment. ``None``
+            (the default) and any unrecognized name resolve to the stdio set,
+            so every existing caller is byte-identical. It does NOT change
+            which tools are registered or any tool's schema: ``tools/list``
+            is identical on both transports, by construction and by test.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -3335,10 +3610,23 @@ def create_server(
             serve_auth, jwks_http_client=jwks_http_client
         )
 
+    # Issue athenaeum#2387: under ``serve.profile: remote`` the served
+    # ``instructions`` and ``recall`` description are the packaged steering
+    # texts; every other install -- including every pre-athenaeum#2383 one,
+    # where ``remote_policy`` is ``None`` -- keeps the inline default below,
+    # byte for byte. Read off the POLICY rather than taken as a separate
+    # ``create_server`` argument: ``build_remote_policy`` already holds the
+    # profile name, so nothing new has to be threaded through ``athenaeum
+    # serve``, and the pin stays as unforgeable from the client side as the
+    # other two (it is in no tool's input schema).
+    _steer_for_remote = remote_policy is not None and remote_policy.profile == REMOTE_PROFILE
+
     mcp = FastMCP(
         "athenaeum",
         auth=_auth_provider,
-        instructions=(
+        instructions=remote_server_instructions()
+        if _steer_for_remote
+        else (
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
             "Use `recall` to search the compiled wiki for relevant knowledge — narrow "
@@ -3444,14 +3732,46 @@ def create_server(
 
         return _register
 
-    # Issue athenaeum#1541: ONE resolver per server process. A stdio MCP
-    # server is spawned once per conversation, so "the life of this object" is
-    # "the life of this connection" — which is what makes its scope-directory
-    # and last-transcript caches sound, and what keeps a hot-path `recall`
-    # down to a single tail read of one already-known file.
+    # Issue athenaeum#1541: ONE resolver per server process, and issue
+    # athenaeum#2385 on what that means under each transport.
+    #
+    # STDIO. A stdio MCP server is spawned once per conversation, so "the life
+    # of this object" is "the life of this connection" — which is what makes
+    # its scope-directory and last-transcript caches sound, and what keeps a
+    # hot-path `recall` down to a single tail read of one already-known file.
+    #
+    # HTTP. That premise is false: one process serves many conversations, from
+    # many clients, for days. The caches are nonetheless sound here, for two
+    # reasons that are properties of THIS code and not aspirations:
+    #
+    # - `_joined` is keyed by `toolUseId`, which is unique per tool call. A
+    #   second conversation can never read a first conversation's entry,
+    #   whatever order the calls interleave in, and `dict` mutation under the
+    #   GIL cannot corrupt it.
+    # - the `_scope_dir` and `_last_transcript` caches are only ever REACHED
+    #   from `resolve(tool_use_id)` with a truthy id. `active_tool_use_id()`
+    #   returns `None` for every host that does not set Claude Code's
+    #   `claudecode/toolUseId` meta key, and `resolve(None)` short-circuits
+    #   before touching either cache — zero I/O, zero mutation. So on a
+    #   non-Claude remote host the whole resolver is inert, not merely
+    #   harmless, and `tests/test_mcp_remote_mode_safety.py` pins that over
+    #   many calls from two simulated sessions.
+    #
+    # What was NOT sound under HTTP, and is what `env_session_attribution`
+    # fixes: `resolve(None)` used to fall back to the session id in this
+    # PROCESS's environment. On a stdio server that id names the one
+    # conversation being served and is the useful answer. On an HTTP server it
+    # names, at best, the operator's shell at `athenaeum serve` time — so
+    # every client's recall was recorded under one unrelated session id, which
+    # is worse than recording nothing. Under http the fallback is off, the
+    # resolved session id is empty, and `recall_search` writes no push record
+    # at all.
     from athenaeum import push_metrics as _push_metrics
 
-    _session_resolver = _push_metrics.ToolUseSessionResolver()
+    _transport_defaults = transport_defaults(transport)
+    _session_resolver = _push_metrics.ToolUseSessionResolver(
+        env_fallback=_transport_defaults.env_session_attribution
+    )
 
     def recall(
         query: str,
@@ -3532,7 +3852,11 @@ def create_server(
     # SAME real description rather than a paraphrase that could drift from
     # it. This call site is unchanged in behavior, only in where the text
     # lives.
-    recall.__doc__ = recall_tool_docstring(_entity_classes_str)
+    recall.__doc__ = (
+        remote_recall_tool_docstring(_entity_classes_str)
+        if _steer_for_remote
+        else recall_tool_docstring(_entity_classes_str)
+    )
     _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(recall)
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
@@ -3731,7 +4055,7 @@ def create_server(
     @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def remember(
         content: str,
-        source: str = "claude-session",
+        source: str | None = None,
         sources: str | dict | None = None,
         bucket: str | None = None,
         valid_until: str | None = None,
@@ -3744,9 +4068,16 @@ def create_server(
         Args:
             content: The knowledge to save (markdown string).
             source: SESSION identifier — selects the ``raw/<session>/``
-                subdirectory the file lands in. Examples:
-                ``"claude-session"``, ``"manual"``. **Not** a per-claim
-                provenance source — pass ``sources`` for that.
+                subdirectory the file lands in. Example: ``"manual"``.
+                **Not** a per-claim provenance source — pass ``sources`` for
+                that. Omitted (the default) means "let this server pick",
+                which it does from the transport it is serving (issue
+                athenaeum#2385): ``claude-session`` under stdio, which one
+                Claude Code conversation owns, and ``remote-session`` under
+                ``--transport http``, which many clients and many hosts
+                share. The parameter's own schema is the same on both
+                transports — there is nothing here for a caller to read a
+                host identity out of.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
 
@@ -3759,7 +4090,11 @@ def create_server(
                   per-field attribution.
 
                 Omitting ``sources`` defaults to ``source: claude:inferred``
-                and logs a server-side warning. Always declare a source.
+                under stdio, or the host-neutral ``source: remote:inferred``
+                under ``--transport http`` (issue athenaeum#2385 — a write
+                from an unknown host must not be recorded as a Claude
+                inference), and logs a server-side warning either way.
+                Always declare a source.
                 The default also stamps ``model:`` / ``originSessionId:``
                 (issue athenaeum#2148, ``docs/design/provenance-shape.md`` §10.6)
                 so a later audit can trace WHICH model guessed and in WHICH
@@ -3799,12 +4134,21 @@ def create_server(
         result = remember_write(
             raw_root,
             content,
-            source,
+            # An explicit `None` check, NOT `source or <default>`: under
+            # stdio an empty-string `source` must keep returning
+            # `remember_write`'s "must contain at least one alphanumeric
+            # character" error exactly as it did before this parameter grew
+            # a default, and `or` would have quietly turned that error into
+            # a successful write to the default subdirectory. Stdio stays
+            # byte-identical down to the error strings.
+            _transport_defaults.session_subdir if source is None else source,
             wiki_root=wiki_root,
             sources=sources,
             screening=screening,
             bucket=bucket,
             valid_until=valid_until,
+            inferred_source=_transport_defaults.inferred_source,
+            stamp_env_provenance=_transport_defaults.env_session_attribution,
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(

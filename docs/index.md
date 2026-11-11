@@ -136,6 +136,15 @@ does not answer.
 - [Trust graph](design/trust-graph.md) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
+- [Cursor as a host](design/host-cursor.md) — what Cursor desktop, the CLI and cloud agents
+  can reach today, why Cursor's prompt hook cannot carry auto-recall, the session-start
+  context snapshot, and the hazard of Cursor running Claude Code's hooks.
+- [ChatGPT host and remote mode](design/host-chatgpt.md) — ratified: ChatGPT's verified
+  connector requirements, an OAuth resource-server remote mode, what "auto-recall" can
+  honestly mean without a per-turn hook, and the operator rulings.
+- [Grok as a host](design/host-grok.md) — Grok's three surfaces (Grok Build, the Grok
+  apps, the xAI API), what each can reach today, what "auto-recall" can honestly mean on
+  each, and the cross-host hook hazard.
 
 ## Measurements
 
