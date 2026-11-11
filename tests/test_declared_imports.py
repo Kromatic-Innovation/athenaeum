@@ -15,6 +15,7 @@ question about the repo's own declarations.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import sys
 from pathlib import Path
@@ -32,6 +33,45 @@ sys.modules[_spec.name] = check_declared_imports
 _spec.loader.exec_module(check_declared_imports)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# athenaeum#2233: one full-tree scan per process, shared by every caller.
+#
+# Three tests here need a sweep of the whole repo: the gate
+# (`test_gate_passes_on_the_current_tree`, through `main()`'s own internal
+# call), `test_scan_tree_finds_the_known_httpx_sites`, and
+# `test_sibling_test_modules_are_first_party`. Each sweep reads and parses
+# every `.py` file under `src/` and `tests/`, so the module was paying for
+# the same scan three times over. `scan_tree`'s own docstring already
+# recorded the intent ("one full-tree scan serves both checks"), but `main()`
+# scans internally, so no test-level fixture could dedupe it -- hence
+# memoising the functions on THIS module's private copy of the script,
+# loaded by path above. Nothing outside this test module is affected, and
+# the real CLI, which scans exactly once per process, is unchanged.
+#
+# Safe because a scan is a pure function of (root, scan_dirs) and the tree
+# does not change mid-run; both arguments are hashable, so a different root
+# (`test_empty_scan_refuses_to_report_success` passes a tmp_path) still gets
+# its own real scan. Each caller gets a fresh container over shared,
+# read-only `ImportSite` records, so the cache cannot couple two tests.
+
+
+def _memoize_copying(func, copy_result):
+    cached = functools.lru_cache(maxsize=None)(func)
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        assert not kwargs, "memoized scan helpers are called positionally"
+        return copy_result(cached(*args))
+
+    return wrapper
+
+
+check_declared_imports.scan_tree = _memoize_copying(
+    check_declared_imports.scan_tree, list
+)
+check_declared_imports.first_party_names = _memoize_copying(
+    check_declared_imports.first_party_names, set
+)
 
 
 def test_gate_passes_on_the_current_tree(capsys: pytest.CaptureFixture[str]) -> None:

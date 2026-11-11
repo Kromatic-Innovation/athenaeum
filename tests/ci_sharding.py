@@ -37,25 +37,46 @@ SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
 #: nightly tier took the print tables and hook sweeps out of the default
 #: selection). Units missing here weigh DEFAULT_SECONDS_PER_TEST per test.
 #:
-#: athenaeum#2233 re-measured the five heaviest entries from a live develop CI
-#: run (run 42089871339) BEFORE this issue's changes, then re-estimated each
-#: one the issue touched by applying this lane's own local before/after
-#: ratio to that CI baseline (local absolute numbers are noisy in this
-#: container -- see the PR body for the raw before/after pairs). Entries
-#: below NOT touched by athenaeum#2233 (json_utils, declared_imports,
-#: eval_corpus_leakage, rollout_mode_labelling, rollout_push_breadcrumb_spike)
-#: are left exactly as they were -- no new measurement exists for them.
-#: ``test_hook_byte_equivalence_1912.py`` was already fixed by athenaeum#2242
-#: (its 48-probe sweep moved to the nightly tier); its weight below was
-#: simply stale and is corrected to the re-measured default-suite cost.
+#: Re-measured for athenaeum#2233's second pass from CI run 42511111865 (the
+#: run that executed the develop tree at 0d63b08c; see the issue body for why
+#: that PR run and not a develop push run). Every entry whose cost that run
+#: re-measured is set from it, scaled where this pass made the module cheaper
+#: by this lane's own local before/after ratio -- the method the first pass
+#: used and recorded above, kept for continuity. The PR body carries the raw
+#: local pairs and the post-change CI figures.
+#:
+#: Entries with no measurement in that run (json_utils, eval_corpus_leakage,
+#: rollout_mode_labelling, rollout_push_breadcrumb_spike,
+#: hook_byte_equivalence_1912) are left exactly as they were -- a stale weight
+#: costs wall clock and can never drop a test, so inventing a number for one
+#: would be worse than leaving it.
+#:
+#: ``test_measure_retrieval_entry_point.py`` and
+#: ``tests/evals/test_attribution_dataset.py`` gain entries here for the first
+#: time: both were priced at the per-test default (2.2s and 2.5s respectively)
+#: while actually costing 165.5 and 107.6 worker-seconds, which is most of why
+#: shard 1 ran 91s longer than shard 2.
 UNIT_WEIGHT_SECONDS: dict[str, float] = {
-    "tests/evals/test_north_star_preflight.py": 160.0,
-    "tests/test_shell_hooks.py": 142.0,
-    "tests/test_eval_corpus_generator.py": 56.0,
-    "tests/evals/test_recall_covers_grep.py[medium]": 22.0,
-    "tests/evals/test_recall_covers_grep.py[core]": 20.0,
+    # Re-measured at 202.5 and NOT changed by this pass: its cost is real
+    # nested MCP round trips (a fake `claude` child plus a
+    # `-m athenaeum.cli_tool_bridge` grandchild, each cold-importing the mcp
+    # SDK), run once per arm for two full 9-arm groups. Cutting the number of
+    # round trips would cut what the module proves, and the alternative --
+    # reworking `provider.run_tool_loop`'s per-call bridge isolation -- is a
+    # production design change, not a test cost fix. See the PR body.
+    "tests/evals/test_north_star_preflight.py": 202.0,
+    "tests/test_shell_hooks.py": 118.0,
+    "tests/test_eval_corpus_generator.py": 109.0,
+    # 165.5 -> 24.0: the five tests driving `main()` end to end no longer
+    # perform the harness's real stdlib-wide page-cache eviction.
+    "tests/test_measure_retrieval_entry_point.py": 24.0,
+    # 107.6 -> 18.0: cases.yaml is parsed once per process, not per test.
+    "tests/evals/test_attribution_dataset.py": 18.0,
+    # 57.8 -> 32.0: one full-tree scan per process, not three.
+    "tests/test_declared_imports.py": 32.0,
+    "tests/evals/test_recall_covers_grep.py[medium]": 33.0,
+    "tests/evals/test_recall_covers_grep.py[core]": 28.0,
     "tests/test_json_utils.py": 50.0,
-    "tests/test_declared_imports.py": 47.0,
     "tests/test_eval_corpus_leakage.py": 40.0,
     "tests/evals/test_rollout_mode_labelling.py": 37.0,
     "tests/evals/test_rollout_push_breadcrumb_spike.py": 31.0,
