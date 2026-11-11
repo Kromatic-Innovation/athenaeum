@@ -53,6 +53,27 @@ person/company/project/concept/source into `<path>/templates/`) and
 installing them changes nothing until you promote one to `mode: live`).
 `--force` overwrites existing template/rule files at the destination.
 
+**Which provider a fresh root picks, and what `init` tells you.** On a
+*brand-new* knowledge directory, `init` prints which LLM provider the
+written `athenaeum.yaml` selected and what it draws on:
+
+- No `ANTHROPIC_API_KEY` in the environment, and a logged-in `claude`
+  binary already on `PATH` — the config selects `llm.provider: claude-cli`,
+  and `init` says so: compiles run on your Claude Code plan's subscription
+  login, so they draw on that plan's usage limits rather than a metered
+  API bill.
+- `ANTHROPIC_API_KEY` set — unchanged: the config selects `llm.provider:
+  api`, and compiles draw on your Anthropic API usage/billing.
+- Neither a key nor a usable `claude` binary — the config still defaults to
+  `api` (nothing to select), and `init` prints exactly what is missing and
+  how to fix it, the same check `athenaeum doctor` runs. `remember`/`recall`
+  still work in this state (a saved fact surfaces labelled `[uncompiled]`
+  until a compile can run); only the compile step itself needs the
+  credential.
+
+An *existing* `athenaeum.yaml` is never rewritten by `init` — this selection
+only happens once, the moment the file is first created.
+
 ## I want to supply an API key (without 1Password)
 
 `athenaeum run` needs `ANTHROPIC_API_KEY` in its own environment, unless you

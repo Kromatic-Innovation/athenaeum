@@ -51,11 +51,13 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import importlib.resources
+import inspect
 import json
 import logging
 import os
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -80,6 +82,7 @@ from athenaeum.entity_schema import (
 )
 from athenaeum.enumeration import DEFAULT_LIMIT as _ENUMERATE_DEFAULT_LIMIT
 from athenaeum.enumeration import enumerate_entities as _enumerate_entities
+from athenaeum.enumeration import is_pii_gated_field as _is_pii_gated_field
 from athenaeum.enumeration import predicate_from_dict as _predicate_from_dict
 from athenaeum.footnote_markers import INLINE_MARKER_RE, resolve_markers
 from athenaeum.killswitch import is_disabled
@@ -105,6 +108,7 @@ from athenaeum.recall_overflow import (
     render_access_withheld_line,
     render_overflow_line,
 )
+from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import (
     is_excluded,
@@ -171,6 +175,89 @@ def _forbidden_result() -> dict:
         "block": None,
         "error": _FORBIDDEN_MSG,
     }
+
+
+# Excluded-fields pin (issue athenaeum#2383): ONE reason string, shared by the
+# three surfaces the pin covers — ``recall``'s withheld notice, the
+# ``read_entity`` payload's ``excluded_fields_withheld`` key, and
+# ``enumerate_entities``' refusal — so a caller gets the same explanation
+# whichever tool it asked.
+#
+# The string itself carries no value and no length: it is a flat statement
+# with nothing in it to read off, which matters because it is handed to the
+# remote caller the pin exists to keep values away from.
+#
+# What it claims is exactly what the pin delivers, and no more. A withheld
+# read still REPORTS a field as withheld (`pii.RedactionMarker`, which names
+# the field and how many values are on file but never a value) — deliberately,
+# per that class's own docstring: "withheld" and "absent" must not collapse,
+# or a caller reading "no email" cannot tell whether to route around the
+# person. The pin does not narrow that marker, so a remote caller sees exactly
+# what a caller that never asked for excluded values already sees today, and
+# the wording here does not promise otherwise. `docs/design/security-posture.md`
+# §2.1's remote-profile row states the residual disclosure explicitly.
+#
+# A literal here rather than a packaged template under ``src/athenaeum/prompts/``
+# for the reason :mod:`athenaeum.recall_overflow` gives for ITS two lines: a
+# template exists there because three independent callers (the MCP tool, the
+# CLI and the sidecar) must render the same wording. This notice has one
+# caller — the serve-time-pinned MCP server — and sits next to the
+# ``[redacted - N value(s) on file]`` marker it stands in for, which is
+# likewise a literal in this module.
+EXCLUDED_FIELDS_WITHHELD_REASON = (
+    "this server was started with serve.excluded_fields: off, so no excluded "
+    "value reaches any caller on this process; a withheld field is still "
+    "reported as withheld, exactly as it is for a caller that did not ask "
+    "for excluded values"
+)
+
+#: The markdown form appended to a ``recall(with_pii=True)`` result when the
+#: pin withheld the join (issue athenaeum#2383). Appended rather than
+#: substituted per hit: with the pin on, ``with_pii`` never reaches the
+#: excluded-surface join at all, so there is no per-hit block to replace and
+#: nothing in the output that could betray WHICH hits have a record.
+EXCLUDED_FIELDS_WITHHELD_NOTICE = (
+    f"\n_Excluded fields withheld - {EXCLUDED_FIELDS_WITHHELD_REASON}._\n"
+)
+
+
+def _with_excluded_fields_withheld_notice(rendered: str) -> str:
+    """Attach the withheld notice to a ``recall`` result of EITHER shape.
+
+    ``recall_search`` returns two different media on two different paths:
+    markdown for the similarity search, and a strict JSON document for a
+    handle-shaped query (``identity_resolution.resolve_handle_query``'s
+    :class:`~athenaeum.identity_resolution.HandleResolution`). Appending prose
+    to the JSON one would leave trailing markdown after the closing brace, so
+    a client that correctly reads that payload as JSON gets a parse error
+    instead of a result (Seer review on PR athenaeum#2416, confirmed by
+    reproduction before fixing).
+
+    So the notice goes INSIDE the object on the JSON path, under the same
+    ``excluded_fields_withheld`` key :func:`entity_read` uses — one key name
+    across every structured surface the pin touches — and is appended as a
+    markdown line only to markdown.
+
+    The JSON path is detected by PARSING, not by guessing from the first
+    character: a leading ``{`` that does not parse (or parses to something
+    other than an object) falls through to the markdown branch rather than
+    being mangled. Re-dumped with the same ``indent``/``sort_keys``/``default``
+    the handle path itself uses, so the shape a client reads is unchanged
+    apart from the added key.
+    """
+    from athenaeum import pii
+
+    if rendered.lstrip().startswith("{"):
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            payload["excluded_fields_withheld"] = EXCLUDED_FIELDS_WITHHELD_REASON
+            return json.dumps(
+                payload, indent=2, sort_keys=True, default=pii.json_date_default
+            )
+    return rendered + EXCLUDED_FIELDS_WITHHELD_NOTICE
 
 # Default wiki-level source stamped onto remember() writes when the caller
 # does not supply ``sources``. ``claude:inferred`` is intentionally
@@ -655,6 +742,7 @@ def entity_read(
     config: dict[str, Any] | None = None,
     not_found_label: str = "entity",
     cache_dir: Path | None = None,
+    excluded_fields: bool = True,
 ) -> str:
     """Read one entity's page by uid, with excluded-field inclusion gated by a flag.
 
@@ -701,14 +789,39 @@ def entity_read(
             Gating (the audience check below) is unaffected either way: it
             re-parses frontmatter fresh from disk regardless of how *uid* was
             located.
+        excluded_fields: The serve-time excluded-fields pin (issue
+            athenaeum#2383), resolved by
+            :func:`athenaeum.config.resolve_serve_excluded_fields` and pinned
+            onto the server process by :func:`create_server` -- never a tool
+            argument, so a remote caller cannot pass ``True`` for itself.
+            ``True`` (the default, and every pre-athenaeum#2383 caller) is
+            unchanged behaviour. ``False`` forces *include_excluded* off HERE,
+            at the argument :func:`athenaeum.pii.assemble_excluded_read` gates
+            its value assembly on, so a withheld read never materialises an
+            excluded value in this process at all -- rather than assembling
+            one and editing it out of the rendered payload afterwards.
 
     Returns:
         A JSON string: the module's fail-closed refusal shape
         (:func:`_forbidden_result`) for an unauthorized restricted caller, a
         ``{"ok": False, "error": ...}`` message for an unknown uid, or
-        :meth:`athenaeum.pii.EntityRead.to_dict`.
+        :meth:`athenaeum.pii.EntityRead.to_dict` -- plus, when
+        *excluded_fields* is ``False``, an ``excluded_fields_withheld`` key
+        naming the reason (:data:`EXCLUDED_FIELDS_WITHHELD_REASON`) so a
+        caller can tell the pin from an entity that simply has no record.
     """
     from athenaeum import pii
+
+    if not excluded_fields:
+        # Issue athenaeum#2383. Forced at the ASSEMBLY argument, before any
+        # index or record is touched: `include_excluded` is what
+        # `pii.assemble_excluded_read` branches on to put real values into
+        # `EntityRead.contact`, so clearing it here means no excluded value is
+        # ever read, held or rendered on this path. `usage_classes` goes with
+        # it -- it only ever filters WITHIN that assembly, so keeping it would
+        # be inert at best and a second place to get this wrong at worst.
+        include_excluded = False
+        usage_classes = None
 
     wiki_root = knowledge_root / "wiki"
     entity_index = entity_index_for_uid(wiki_root, uid, cache_dir=cache_dir)
@@ -764,7 +877,14 @@ def entity_read(
     # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
     # value straight from a bare YAML date — coerce it to ISO-8601 rather
     # than letting `json.dumps` raise on it.
-    return json.dumps(result.to_dict(), indent=2, default=pii.json_date_default)
+    payload = result.to_dict()
+    if not excluded_fields:
+        # Issue athenaeum#2383: say the pin acted. Without this, a withheld
+        # read is indistinguishable from an entity with no excluded record,
+        # and a caller retries the same call forever. The reason string names
+        # no value and no count -- see EXCLUDED_FIELDS_WITHHELD_REASON.
+        payload["excluded_fields_withheld"] = EXCLUDED_FIELDS_WITHHELD_REASON
+    return json.dumps(payload, indent=2, default=pii.json_date_default)
 
 
 #: Prefix federated off-corpus hits are tagged with before being merged into
@@ -2751,6 +2871,68 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
         """
 
 
+#: Issue athenaeum#2387: the packaged remote-profile steering texts. Prompt
+#: wording is content, not code (``policies/prompt-text-is-content.md``), so
+#: both live as ``.md`` files under ``src/athenaeum/prompts/`` and are read
+#: through ``importlib.resources`` -- the same packaged-prompt idiom
+#: :func:`athenaeum.recall_overflow.load_overflow_template` uses.
+REMOTE_INSTRUCTIONS_TEMPLATE_NAME = "remote_server_instructions.md"
+
+#: The remote ``recall`` description's LEAD, prepended to
+#: :func:`recall_tool_docstring`'s unchanged text -- see
+#: :func:`remote_recall_tool_docstring`.
+REMOTE_RECALL_LEAD_TEMPLATE_NAME = "remote_recall_lead.md"
+
+
+def _load_packaged_prompt(name: str) -> str:
+    """Read a packaged ``athenaeum.prompts`` file, whitespace-trimmed.
+
+    Loaded fresh on every call (the files are tiny, and this runs once per
+    server construction) rather than cached at import time, matching
+    :func:`athenaeum.recall_overflow.load_overflow_template`. Trimmed because
+    the caller here serves the whole STRING rather than rendering it into a
+    line: a file's trailing newline would otherwise spend part of the first
+    512 characters a host reads (issue athenaeum#2387).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(name)
+    return resource.read_text(encoding="utf-8").strip()
+
+
+def remote_server_instructions() -> str:
+    """The remote profile's MCP ``instructions`` text (issue athenaeum#2387).
+
+    Served INSTEAD of ``create_server``'s inline default when the serve-time
+    policy pins ``serve.profile: remote``, and only then -- the default
+    string is untouched, so a host with a per-turn hook (Claude Code, which
+    has its recall PUSHED to it) reads exactly what it read before.
+
+    What differs: this text opens with the instruction to call ``recall``
+    before answering, because a pull-only host has no other lever. OpenAI's
+    Apps SDK guidance asks for the key details in the first 512 characters,
+    and the inline default spends them on ``remember``. It promises nothing:
+    the text says what to call, never that a recall happens on its own.
+    """
+    return _load_packaged_prompt(REMOTE_INSTRUCTIONS_TEMPLATE_NAME)
+
+
+def remote_recall_tool_docstring(entity_classes_str: str) -> str:
+    """The remote profile's ``recall`` description (issue athenaeum#2387).
+
+    A packaged LEAD prepended to :func:`recall_tool_docstring`'s text, not a
+    rewrite of it: the backend, handle-query and ``**Links:**`` guidance, and
+    every parameter description under it, stay the ones the default path
+    serves -- word for word, so the two descriptions cannot drift apart as
+    the shared half is edited. Only the opening is new.
+
+    :func:`inspect.cleandoc` normalizes the shared half's docstring
+    indentation BEFORE the join: an unindented lead glued onto an
+    8-space-indented body leaves no common prefix for FastMCP's own
+    docstring parse to strip, which serves the ``Args:`` block as prose.
+    """
+    lead = _load_packaged_prompt(REMOTE_RECALL_LEAD_TEMPLATE_NAME)
+    return f"{lead}\n\n{inspect.cleandoc(recall_tool_docstring(entity_classes_str))}"
+
+
 #: The ``recall`` MCP tool's JSON input schema, hand-written to mirror what
 #: FastMCP generates from the real ``recall(...)`` function signature above
 #: (issue athenaeum#1733) -- so ``tests/evals/rollout.py``'s api-mode tool
@@ -2923,6 +3105,57 @@ READ_ENTITY_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+# Issue athenaeum#2381: shared `mcp.tool(annotations=...)` groups for every tool
+# registered in `create_server` below. Grouped rather than inlined per tool so
+# the four annotations stay byte-identical across every tool in a category —
+# a per-tool literal would drift the moment one call site's dict is edited
+# without the others. `openWorldHint: false` on every group: this deployment
+# only ever reads/writes its own local knowledge store, never an external
+# service (the MCP spec's own worked contrast is a memory tool vs. a web
+# search tool). `idempotentHint` is set ONLY where the tool body actually
+# guarantees it (per `mcp.types.ToolAnnotations`, it is meaningful only when
+# `readOnlyHint` is false) — never asserted speculatively.
+#
+# `scan_retraction_cascade` is NOT in the read-only group despite being named
+# alongside the other nine read tools in the issue: its body
+# (`athenaeum.retraction_cascade.scan_retraction_cascade`, via
+# `athenaeum.store.append_line_durable`) durably appends newly-flagged
+# `(merge, retracted source)` pairs to `wiki/_pending_retractions.jsonl`,
+# which `list_pending_decisions` then surfaces as `type: "retraction"` items
+# — a real, user-visible modification of the decision queue, not a cache or
+# telemetry side-channel. It is grouped with `remember`/`raise_decision`
+# instead: append-only (never edits or removes an existing record, never
+# touches a completed merge), non-destructive, and — unlike those two —
+# explicitly documented as idempotent ("a re-scan emits only newly-flagged
+# pairs"), so it gets `idempotentHint: true` where they get none. See
+# `docs/modules/mcp.md`'s annotation table for the full per-tool rationale,
+# including the two side effects that were checked and judged NOT
+# disqualifying for the read-only group: `recall`'s best-effort push-metrics
+# telemetry append (wrapped so a failure can never surface, and never
+# touches wiki/decision-queue content) and `enumerate_entities`'/
+# `read_entity`'s persisted search-index/entity-index CACHE refresh (derived,
+# rebuildable plumbing for the read itself, not user-authored content).
+_READ_ONLY_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "openWorldHint": False,
+}
+_APPEND_ONLY_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "openWorldHint": False,
+}
+_APPEND_ONLY_IDEMPOTENT_TOOL_ANNOTATIONS: dict[str, Any] = {
+    **_APPEND_ONLY_TOOL_ANNOTATIONS,
+    "idempotentHint": True,
+}
+_ADJUDICATION_TOOL_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "openWorldHint": False,
+    "idempotentHint": True,
+}
+
+
 def create_server(
     raw_root: Path,
     wiki_root: Path,
@@ -2932,6 +3165,7 @@ def create_server(
     extra_roots: list[Path] | None = None,
     caller_audience: set[str] | None = None,
     screening: dict | None = None,
+    remote_policy: RemotePolicy | None = None,
     config: dict | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
@@ -2972,6 +3206,37 @@ def create_server(
             a read-time ``access:`` level before the append-only write. Pinned
             HERE (not a ``remember()`` tool argument) so a caller cannot
             disable its own screening.
+        remote_policy: Resolved serve-time remote-profile pins (issue
+            athenaeum#2383) from
+            :func:`athenaeum.remote_policy.build_remote_policy`. ``None``
+            (default) is every pre-athenaeum#2383 install: the full tool set
+            is registered and ``with_pii``/``include_excluded`` behave exactly
+            as before. A non-``None`` policy pins two things for the life of
+            this process, next to *caller_audience* and *screening* and for
+            the identical reason -- so a remote caller cannot widen its own
+            surface:
+
+            - **Tool allowlist.** A tool the policy disables is NEVER
+              REGISTERED, so it is absent from ``tools/list`` rather than
+              served and refusing. An allowlist naming a tool this deployment
+              does not have raises
+              :class:`athenaeum.remote_policy.RemotePolicyError` from this
+              function, so ``athenaeum serve`` fails at startup instead of
+              quietly serving less than the operator asked for.
+            - **Excluded fields.** With ``excluded_fields`` false, ``recall``
+              coerces ``with_pii`` off before the search runs (so neither the
+              similarity path's ``_excluded_block_for_hit`` join nor the
+              handle-resolution reverse lookup ever reads the excluded
+              surface) and appends
+              :data:`EXCLUDED_FIELDS_WITHHELD_NOTICE`; ``read_entity`` coerces
+              ``include_excluded`` off at the assembly argument; and
+              ``enumerate_entities`` refuses a PII-scoped predicate or output
+              field outright. Nothing filters a rendered value back out --
+              the values are never assembled.
+
+            Pinned HERE, not as a tool parameter: no tool's input schema gains
+            anything, which is what makes the pins unforgeable from the client
+            side (``tests/test_mcp_remote_profile.py`` asserts that).
         config: Resolved ``athenaeum.yaml`` config (issue athenaeum#532), threaded to
             ``recall`` so the storage-adapter ``recallable`` corpus policy is
             honored at query time — a class routed to a ``recallable: false``
@@ -3042,9 +3307,22 @@ def create_server(
 
     _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
 
+    # Issue athenaeum#2387: under ``serve.profile: remote`` the served
+    # ``instructions`` and ``recall`` description are the packaged steering
+    # texts; every other install -- including every pre-athenaeum#2383 one,
+    # where ``remote_policy`` is ``None`` -- keeps the inline default below,
+    # byte for byte. Read off the POLICY rather than taken as a separate
+    # ``create_server`` argument: ``build_remote_policy`` already holds the
+    # profile name, so nothing new has to be threaded through ``athenaeum
+    # serve``, and the pin stays as unforgeable from the client side as the
+    # other two (it is in no tool's input schema).
+    _steer_for_remote = remote_policy is not None and remote_policy.profile == REMOTE_PROFILE
+
     mcp = FastMCP(
         "athenaeum",
-        instructions=(
+        instructions=remote_server_instructions()
+        if _steer_for_remote
+        else (
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
             "Use `recall` to search the compiled wiki for relevant knowledge — narrow "
@@ -3070,6 +3348,35 @@ def create_server(
             "athenaeum#885, athenaeum#886)."
         ),
     )
+
+    # Issue athenaeum#2383: every tool below registers through this wrapper
+    # instead of calling ``mcp.tool()`` directly, so the serve-time allowlist
+    # is applied at REGISTRATION -- a disabled tool is absent from
+    # ``tools/list``, not served and refusing. Two properties this shape buys:
+    #
+    # - ``_candidate_tool_names`` records what this deployment WOULD serve with
+    #   no policy, so the allowlist is validated against the live registration
+    #   set (below, after the last one) rather than against a constant that
+    #   could drift from it.
+    # - ``**kwargs`` passes straight through to ``mcp.tool(...)``, so anything
+    #   a registration needs to hand FastMCP keeps working unchanged.
+    #
+    # With ``remote_policy`` ``None`` this is exactly ``mcp.tool(**kwargs)``
+    # -- same call, same arguments, same return value -- which is what keeps
+    # the default ``tools/list`` byte-identical.
+    _candidate_tool_names: list[str] = []
+
+    def _register_tool(**kwargs: Any) -> Callable[[Any], Any]:
+        def _register(fn: Any) -> Any:
+            _candidate_tool_names.append(fn.__name__)
+            if remote_policy is not None and not remote_policy.tool_enabled(fn.__name__):
+                # Return the undecorated function: the name stays bound to a
+                # callable (so nothing in this closure breaks), but FastMCP
+                # never learns the tool exists.
+                return fn
+            return mcp.tool(**kwargs)(fn)
+
+        return _register
 
     # Issue athenaeum#1541: ONE resolver per server process. A stdio MCP
     # server is spawned once per conversation, so "the life of this object" is
@@ -3109,7 +3416,22 @@ def create_server(
         from athenaeum.config import resolve_extra_intake_roots
 
         live_extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
-        return recall_search(
+        # Issue athenaeum#2383: the serve-time excluded-fields pin, applied by
+        # coercing `with_pii` OFF before the search runs -- deliberately
+        # EARLIER than the `_excluded_block_for_hit` assembly site the issue's
+        # plan names, and strictly stronger. `recall_search` reaches the
+        # excluded surface by TWO routes, not one: the similarity path's
+        # Layer-C join, and `identity_resolution.resolve_handle_query`'s
+        # reverse lookup for a handle-shaped query (an email address typed as
+        # the query), which runs before any ranking. A gate inside
+        # `_excluded_block_for_hit` would have closed the first and left the
+        # second wide open. One flag governs both, and with it false no
+        # excluded value is assembled on either route -- nothing is rendered
+        # and then filtered back out.
+        withheld = (
+            with_pii and remote_policy is not None and not remote_policy.excluded_fields
+        )
+        rendered = recall_search(
             wiki_root,
             query,
             top_k,
@@ -3118,12 +3440,15 @@ def create_server(
             extra_roots=live_extra_roots,
             caller_audience=caller_audience,
             config=config,
-            with_pii=with_pii,
+            with_pii=False if withheld else with_pii,
             history=history,
             type_filter=type,
             tool_use_id=active_tool_use_id(),
             session_resolver=_session_resolver,
         )
+        if withheld:
+            return _with_excluded_fields_withheld_notice(rendered)
+        return rendered
 
     # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's
     # description FastMCP puts in the generated tool schema — is built HERE,
@@ -3141,10 +3466,14 @@ def create_server(
     # SAME real description rather than a paraphrase that could drift from
     # it. This call site is unchanged in behavior, only in where the text
     # lives.
-    recall.__doc__ = recall_tool_docstring(_entity_classes_str)
-    mcp.tool()(recall)
+    recall.__doc__ = (
+        remote_recall_tool_docstring(_entity_classes_str)
+        if _steer_for_remote
+        else recall_tool_docstring(_entity_classes_str)
+    )
+    _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(recall)
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def entity_schema() -> dict:
         """Report the entity classes this deployment declares and/or observes.
 
@@ -3206,6 +3535,34 @@ def create_server(
     ) -> dict:
         try:
             parsed_predicates = [_predicate_from_dict(p) for p in (predicates or [])]
+            # Issue athenaeum#2383: under the excluded-fields pin, a PII-scoped
+            # field is REFUSED rather than silently dropped from the result.
+            # Checked on the PARSED predicates (so a predicate's field-fallback
+            # list is covered, not just the literal the caller spelled) and on
+            # the requested output fields, through `enumeration`'s own
+            # `is_pii_gated_field` -- the same predicate the `with_pii` gate
+            # uses, so the two can never disagree about what counts as
+            # PII-scoped. `with_pii` is also forced off below: that makes the
+            # enumeration layer's own gate a second, independent refusal rather
+            # than relying on this one being complete.
+            withheld = remote_policy is not None and not remote_policy.excluded_fields
+            if withheld:
+                refused = sorted(
+                    {
+                        name
+                        for name in (
+                            *(f for p in parsed_predicates for f in p.fields),
+                            *(fields or []),
+                        )
+                        if _is_pii_gated_field(name)
+                    }
+                )
+                if refused:
+                    raise ValueError(
+                        f"Field(s) {refused} are PII-scoped and cannot be used "
+                        "as a predicate or requested output field: "
+                        f"{EXCLUDED_FIELDS_WITHHELD_REASON}."
+                    )
             result = _enumerate_entities(
                 wiki_root,
                 _enumerate_cache_dir,
@@ -3216,7 +3573,7 @@ def create_server(
                 limit=limit,
                 cursor=cursor,
                 fields=fields or [],
-                with_pii=with_pii,
+                with_pii=False if withheld else with_pii,
                 caller_audience=caller_audience,
                 extra_roots=extra_roots,
                 config=config,
@@ -3307,9 +3664,9 @@ def create_server(
             `with_pii=True`, or a cursor minted under a different query
             shape — an `error` string with `hits`/`next_cursor` empty.
         """
-    mcp.tool()(enumerate_entities)
+    _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(enumerate_entities)
 
-    @mcp.tool()
+    @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def remember(
         content: str,
         source: str = "claude-session",
@@ -3396,7 +3753,7 @@ def create_server(
             )
         return result
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_questions(offset: int = 0, limit: int | None = None) -> dict:
         """List unanswered pending questions, bounded and paginated (issue athenaeum#1431).
 
@@ -3458,7 +3815,7 @@ def create_server(
         )
         return paginate(all_items, offset=offset, limit=limit)
 
-    @mcp.tool()
+    @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def resolve_question(id: str, answer: str) -> dict:
         """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
@@ -3549,7 +3906,7 @@ def create_server(
             "error": None,
         }
 
-    @mcp.tool()
+    @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def raise_decision(
         question: str = "",
         context: str = "",
@@ -3693,7 +4050,7 @@ def create_server(
             alternative=alternative,
         )
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_merges(full_body: bool = False) -> list[dict]:
         """List unresolved merge proposals (issue athenaeum#169).
 
@@ -3740,7 +4097,7 @@ def create_server(
             knowledge_root=wiki_root.parent,
         )
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_pending_decisions(offset: int = 0, limit: int | None = None) -> dict:
         """List pending human decisions — questions AND merges (issue athenaeum#401).
 
@@ -3852,12 +4209,17 @@ def create_server(
             caller_audience=caller_audience,
             config=config,
             cache_dir=cache_dir,
+            # Issue athenaeum#2383: the serve-time pin, not a tool argument.
+            # `entity_read` turns this into `include_excluded=False` at the
+            # assembly argument, so a caller passing `include_excluded=True`
+            # gets a withheld read rather than an error it could retry around.
+            excluded_fields=(remote_policy is None or remote_policy.excluded_fields),
         )
 
     read_entity.__doc__ = read_entity_tool_docstring()
-    mcp.tool()(read_entity)
+    _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(read_entity)
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def list_axiom_audit() -> list[dict]:
         """Axiom assignment audit — every slug's status + promote/demote history (athenaeum#434).
 
@@ -3882,7 +4244,7 @@ def create_server(
 
         return _list_axiom_audit(wiki_root)
 
-    @mcp.tool()
+    @_register_tool(annotations=_APPEND_ONLY_IDEMPOTENT_TOOL_ANNOTATIONS)
     def scan_retraction_cascade() -> dict:
         """Flag completed merges that relied on a now-retracted source (athenaeum#435).
 
@@ -3910,7 +4272,7 @@ def create_server(
         newly = _scan(wiki_root, contacts_root)
         return {"flagged": len(newly), "items": newly}
 
-    @mcp.tool()
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
     def calibration_summary() -> dict:
         """Per-tier tier-audit calibration counts (issue athenaeum#438).
 
@@ -3948,7 +4310,7 @@ def create_server(
 
         return _summary(wiki_root)
 
-    @mcp.tool()
+    @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
         """Record a human's confirm/overturn of a sampled audit item (athenaeum#438,
         deferred apply per athenaeum#908).
@@ -4040,7 +4402,7 @@ def create_server(
             "error": None,
         }
 
-    @mcp.tool()
+    @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
         """Record approve/reject on a pending merge (issue athenaeum#908: deferred apply).
 
@@ -4145,5 +4507,14 @@ def create_server(
             "block": None,
             "error": None,
         }
+
+    # Issue athenaeum#2383, AC2's counter-example: validate the allowlist
+    # against what was ACTUALLY registered, after the last registration. An
+    # allowlist naming a tool this deployment does not have raises
+    # RemotePolicyError here, which `athenaeum serve` reports and exits
+    # non-zero on -- rather than silently serving a smaller surface than the
+    # operator wrote down.
+    if remote_policy is not None:
+        remote_policy.validate_tool_names(_candidate_tool_names)
 
     return mcp

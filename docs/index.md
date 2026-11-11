@@ -36,6 +36,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
   constraint in `wiki/_schema/` and what happens when a write violates it.
 - [Codex context file](guides/codex.md) — Tier-2 snapshot adapter for OpenAI Codex.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
+- [Cursor](guides/cursor.md) — MCP setup, the explicit-tool-call model, and the Claude Code hook passthrough.
 - [Other clients and platforms](guides/clients.md) — Claude Desktop, Cursor, ChatGPT/Grok, Codex; macOS, Linux, Windows.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
@@ -138,6 +139,12 @@ does not answer.
 - [Cursor as a host](design/host-cursor.md) — what Cursor desktop, the CLI and cloud agents
   can reach today, why Cursor's prompt hook cannot carry auto-recall, the session-start
   context snapshot, and the hazard of Cursor running Claude Code's hooks.
+- [ChatGPT host and remote mode](design/host-chatgpt.md) — ratified: ChatGPT's verified
+  connector requirements, an OAuth resource-server remote mode, what "auto-recall" can
+  honestly mean without a per-turn hook, and the operator rulings.
+- [Grok as a host](design/host-grok.md) — Grok's three surfaces (Grok Build, the Grok
+  apps, the xAI API), what each can reach today, what "auto-recall" can honestly mean on
+  each, and the cross-host hook hazard.
 
 ## Measurements
 

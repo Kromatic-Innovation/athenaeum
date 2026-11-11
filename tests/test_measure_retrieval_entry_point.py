@@ -12,15 +12,34 @@ properties that decide whether that number means anything:
 * the candidate entry points genuinely differ in import path and genuinely
   return hits, so the comparison between them is a comparison of imports;
 * the verdict is stated against an explicit budget with the measured number.
+
+Cost note (athenaeum#2233). Every test that drives ``harness.main()`` end to
+end used to perform the harness's REAL cold-start sweep: ``_evictable_paths``
+walks the whole stdlib plus ``site-packages`` (about 21,000 files here) and
+``_go_cold`` then issues ``posix_fadvise(POSIX_FADV_DONTNEED)`` over every
+one of them,
+twice per call (one cold warm-up plus one cold run). None of those tests
+asserts anything about cold measurement -- they assert the verdict's shape,
+the record's provenance and the usage errors -- so the sweep was pure cost,
+and on a GitHub runner (where ``posix_fadvise`` is NOT inert, unlike this
+container's overlay mount) it also evicted the page cache out from under the
+other xdist workers sharing the shard. ``narrow_eviction`` below scopes the
+sweep to the two paths the run is actually about. The breadth of the real
+sweep is pinned directly, and cheaply, by
+``TestColdStart::test_evictable_paths_covers_the_interpreter_trees``; the
+real ``_go_cold`` and ``_cold_effect`` are still exercised by their own
+sibling tests there.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -65,6 +84,34 @@ def _build_index(path: Path, pages: int) -> Path:
     return path
 
 
+@pytest.fixture
+def narrow_eviction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scope the harness's cold-start sweep to the paths under measurement.
+
+    ``_evictable_paths`` deliberately returns the whole interpreter: stdlib,
+    ``purelib`` and ``platlib``, every ``.py``/``.pyc``/``.so`` in them. That
+    breadth is the measurement contract for a real run (see the module
+    docstring), and it is asserted directly by
+    ``test_evictable_paths_covers_the_interpreter_trees``. A test that only
+    needs ``main()`` to reach its verdict does not need tens of thousands of
+    ``posix_fadvise`` calls, nor the cold interpreter starts they cause in
+    this process and in every sibling xdist worker on the same runner.
+
+    The sweep itself still runs for real, on a real list -- ``_go_cold`` is
+    called, bytecode is still dropped, ``posix_fadvise`` is still issued --
+    just over the index and the interpreter binary rather than the whole
+    tree. No test using this fixture asserts a cold-vs-warm magnitude, so the
+    narrower list cannot change a verdict (athenaeum#2233).
+    """
+    real = harness._evictable_paths
+
+    def _narrow(index_db: Path, python: Path) -> list[Path]:
+        return [index_db, Path(python).resolve()]
+
+    monkeypatch.setattr(harness, "_evictable_paths", _narrow)
+    assert real is not harness._evictable_paths  # the patch took
+
+
 class TestToyIndexRefusal:
     """athenaeum#1357 AC3: a number taken against a toy corpus is not a number."""
 
@@ -81,7 +128,7 @@ class TestToyIndexRefusal:
             harness.main(["--index", str(index), "--min-pages", "1000"])
         assert "7 pages" in capsys.readouterr().err
 
-    def test_accepts_an_index_at_the_threshold(self, tmp_path):
+    def test_accepts_an_index_at_the_threshold(self, tmp_path, narrow_eviction):
         """The gate is a floor, not a moving target: exactly --min-pages passes."""
         index = _build_index(tmp_path / "wiki-index.db", pages=25)
         assert harness._index_pages(index) == 25
@@ -179,7 +226,9 @@ class TestCandidates:
 class TestVerdict:
     """athenaeum#1357 AC2: go/no-go stated against the threshold, with the number."""
 
-    def test_verdict_names_the_budget_and_the_measurement(self, tmp_path, capsys):
+    def test_verdict_names_the_budget_and_the_measurement(
+        self, tmp_path, capsys, narrow_eviction
+    ):
         index = _build_index(tmp_path / "wiki-index.db", pages=30)
         harness.main(
             [
@@ -200,7 +249,7 @@ class TestVerdict:
         assert isinstance(verdict["measured_ms"], float)
         assert verdict["basis"] == "cold p95 of the cheapest candidate"
 
-    def test_budget_is_overridable_and_the_verdict_follows_it(self, tmp_path):
+    def test_budget_is_overridable_and_the_verdict_follows_it(self, tmp_path, narrow_eviction):
         """A verdict that ignored --budget-ms would be stated against nothing."""
         index = _build_index(tmp_path / "wiki-index.db", pages=30)
         out = tmp_path / "out.json"
@@ -217,7 +266,7 @@ class TestVerdict:
         assert record["verdict"]["budget_ms"] == 0.001
         assert rc == 1
 
-    def test_record_carries_the_index_provenance(self, tmp_path):
+    def test_record_carries_the_index_provenance(self, tmp_path, narrow_eviction):
         """A number with no stated corpus cannot be judged for realism."""
         index = _build_index(tmp_path / "wiki-index.db", pages=30)
         out = tmp_path / "out.json"
@@ -276,7 +325,7 @@ class TestCandidateSelection:
         assert excinfo.value.code == 2
         assert "unknown reference" in capsys.readouterr().err
 
-    def test_references_none_is_not_an_error(self, tmp_path):
+    def test_references_none_is_not_an_error(self, tmp_path, narrow_eviction):
         """'none' skips the reference sweep; it is not an unknown reference name."""
         index = _build_index(tmp_path / "wiki-index.db", pages=30)
         rc = harness.main(
@@ -305,6 +354,47 @@ class TestStats:
 
 
 class TestColdStart:
+    def test_evictable_paths_covers_the_interpreter_trees(self, tmp_path):
+        """The sweep's BREADTH is the cold-start contract, so assert it here.
+
+        Everything a cold run should have to fault back in: the index, the
+        interpreter binary, and the stdlib/purelib/platlib trees. This used
+        to be covered only incidentally -- by five unrelated tests paying for
+        the full sweep as a side effect -- which made it both expensive and
+        invisible. Asserting the returned LIST is cheap; performing the
+        eviction is what cost (athenaeum#2233).
+        """
+        index = _build_index(tmp_path / "wiki-index.db", pages=5)
+        paths = harness._evictable_paths(index, Path(sys.executable))
+
+        assert index in paths
+        assert Path(sys.executable).resolve() in paths
+
+        roots = {
+            key: sysconfig.get_paths()[key]
+            for key in ("stdlib", "purelib", "platlib")
+            if sysconfig.get_paths().get(key)
+            and os.path.isdir(sysconfig.get_paths()[key])
+        }
+        assert roots, "no interpreter tree to evict -- the sweep would be vacuous"
+        for key, root in roots.items():
+            assert any(
+                str(path).startswith(root) for path in paths
+            ), f"{key} tree ({root}) contributed nothing to the eviction sweep"
+
+        # What the trees contribute is loadable code -- that is where a cold
+        # interpreter start pays. (The index and the interpreter binary are
+        # named explicitly above and are not suffix-filtered.)
+        tree_paths = [
+            path
+            for path in paths
+            if any(str(path).startswith(root) for root in roots.values())
+        ]
+        assert tree_paths
+        assert all(
+            str(path).endswith((".py", ".pyc", ".so")) for path in tree_paths
+        )
+
     def test_go_cold_drops_bytecode(self, tmp_path):
         script = tmp_path / "entry.py"
         script.write_text("print(1)\n", encoding="utf-8")

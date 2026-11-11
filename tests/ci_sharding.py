@@ -33,33 +33,67 @@ from collections.abc import Iterable
 SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
 
 #: Measured worker-seconds under 4-way xdist contention on a GitHub-hosted
-#: 4-vCPU runner (per-worker timelines of athenaeum#2242's PR runs, after the
-#: nightly tier took the print tables and hook sweeps out of the default
-#: selection). Units missing here weigh DEFAULT_SECONDS_PER_TEST per test.
+#: 4-vCPU runner, from the per-worker `-v` timelines of TWO full CI runs:
+#: run 42511111865 (the develop tree at 0d63b08c, athenaeum#2233's baseline)
+#: and run 42965256518 (this PR's first run). Both were parsed with the
+#: method the issue states -- per worker, the gap between consecutive results
+#: attributed to the module of the later result -- and that parser reproduces
+#: every figure in the issue's own table from the baseline run, so the two
+#: sides are directly comparable. Units missing here weigh
+#: DEFAULT_SECONDS_PER_TEST per test.
 #:
-#: athenaeum#2233 re-measured the five heaviest entries from a live develop CI
-#: run (run 42089871339) BEFORE this issue's changes, then re-estimated each
-#: one the issue touched by applying this lane's own local before/after
-#: ratio to that CI baseline (local absolute numbers are noisy in this
-#: container -- see the PR body for the raw before/after pairs). Entries
-#: below NOT touched by athenaeum#2233 (json_utils, declared_imports,
-#: eval_corpus_leakage, rollout_mode_labelling, rollout_push_breadcrumb_spike)
-#: are left exactly as they were -- no new measurement exists for them.
-#: ``test_hook_byte_equivalence_1912.py`` was already fixed by athenaeum#2242
-#: (its 48-probe sweep moved to the nightly tier); its weight below was
-#: simply stale and is corrected to the re-measured default-suite cost.
+#: An entry is set only where the two runs AGREE. Where they disagree by more
+#: than about 25% the unit is left unpriced, or carries a noted midpoint: the
+#: weights only steer balance, never correctness, so a confidently wrong
+#: number is worse than the per-test default. Left unpriced for that reason:
+#: `test_layer_boundary.py` (10.1 then 44.0) and
+#: `test_import_graph_acyclic.py` (21.1 then 11.9).
+#:
+#: Several entries were badly stale in a way that actively corrupted the bin
+#: packing rather than merely failing to help it: `test_json_utils.py` was
+#: priced at 50.0 against a measured 1.1 in BOTH runs,
+#: `test_rollout_mode_labelling.py` at 37.0 against 10.3, and
+#: `test_hook_byte_equivalence_1912.py` at 6.3 against 1.4. Five genuinely
+#: heavy units (29-47s, stable across both runs) had no entry at all.
 UNIT_WEIGHT_SECONDS: dict[str, float] = {
-    "tests/evals/test_north_star_preflight.py": 160.0,
-    "tests/test_shell_hooks.py": 142.0,
-    "tests/test_eval_corpus_generator.py": 56.0,
-    "tests/evals/test_recall_covers_grep.py[medium]": 22.0,
-    "tests/evals/test_recall_covers_grep.py[core]": 20.0,
-    "tests/test_json_utils.py": 50.0,
-    "tests/test_declared_imports.py": 47.0,
-    "tests/test_eval_corpus_leakage.py": 40.0,
-    "tests/evals/test_rollout_mode_labelling.py": 37.0,
-    "tests/evals/test_rollout_push_breadcrumb_spike.py": 31.0,
-    "tests/evals/test_hook_byte_equivalence_1912.py": 6.3,
+    # 202.5 then 190.8, and NOT changed by athenaeum#2233: its cost is real
+    # nested MCP round trips (a fake `claude` child plus a
+    # `-m athenaeum.cli_tool_bridge` grandchild, each cold-importing the mcp
+    # SDK), once per arm across two full 9-arm groups. Fewer round trips
+    # would mean less proven, and reworking `provider.run_tool_loop`'s
+    # per-call bridge isolation is a production design change rather than a
+    # test cost fix. This single unit is the floor of whichever shard holds
+    # it: see athenaeum#2233's PR for the arithmetic. Measured 202.5 before
+    # this issue's changes, then 190.8 and 150.7 on two runs after -- the
+    # module is untouched, so that spread is runner contention, which is why
+    # the entry stays at the conservative end: overpricing the heaviest unit
+    # is what makes the packer isolate it.
+    "tests/evals/test_north_star_preflight.py": 191.0,
+    "tests/test_shell_hooks.py": 115.0,
+    "tests/test_eval_corpus_generator.py": 103.0,
+    "tests/evals/test_attribution_eval_stub.py": 47.0,
+    "tests/test_eval_corpus_leakage.py": 46.0,
+    # 34.5 then 55.0. One test, so there is nothing to average over within a
+    # run; the midpoint beats the per-test default either way.
+    "tests/evals/test_rollout_push_breadcrumb_spike.py": 45.0,
+    "tests/test_cmd_attribution.py": 43.0,
+    "tests/test_batch_mode.py": 39.0,
+    "tests/evals/test_recall_covers_grep.py[medium]": 33.0,
+    "tests/evals/test_attribution_eval_harness.py": 33.0,
+    "tests/test_llm_surface.py": 29.0,
+    "tests/evals/test_recall_covers_grep.py[core]": 28.0,
+    # 57.8 -> 27.4: one full-tree scan per process, not three. What is left
+    # is the gate's own single scan, which is the gate's actual work.
+    "tests/test_declared_imports.py": 27.0,
+    "tests/evals/test_rollout_mode_labelling.py": 11.0,
+    # 107.6 -> 9.4: cases.yaml is parsed once per process, not per test.
+    "tests/evals/test_attribution_dataset.py": 9.0,
+    # 165.5 -> 5.9: the five tests driving `main()` end to end no longer
+    # perform the harness's real stdlib-wide page-cache eviction, which also
+    # stops them evicting it out from under the sibling xdist workers.
+    "tests/test_measure_retrieval_entry_point.py": 6.0,
+    "tests/evals/test_hook_byte_equivalence_1912.py": 1.5,
+    "tests/test_json_utils.py": 1.1,
 }
 
 DEFAULT_SECONDS_PER_TEST = 0.1
