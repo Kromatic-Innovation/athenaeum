@@ -99,7 +99,12 @@ Two things it deliberately does **not** refuse:
 
 - **No `sources` supplied.** The write still lands, stamped `source: claude:inferred`, with
   a server-side warning logged — a caller that forgets provenance is not blocked, just
-  flagged.
+  flagged. A server started with `--transport http` stamps the host-neutral
+  `source: remote:inferred` instead: under stdio the caller IS the
+  Claude Code conversation that spawned the process, but one HTTP process serves many
+  clients and many hosts, and recording an unknown host's undeclared write as a Claude
+  inference would send `repair --backfill-sources` looking for a transcript that never
+  existed.
 - **A restricted MCP audience.** `remember` stays open for every pinned audience (see
   [mcp](mcp.md)) — intake screening, not audience gating, is what classifies sensitive
   content on the way in.

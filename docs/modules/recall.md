@@ -86,8 +86,10 @@ rewritten, or refused on this number.
   vector store, selected by `search_backend` (yaml, default `vector`) / `--backend`
   (`athenaeum context` and `codex-context`, default `fts5`).
 - `recall.extra_intake_roots` — additional roots folded into the search surface beyond the
-  compiled wiki (default `["raw/auto-memory", "raw/claude-session"]`; `[]` restricts recall
-  to the wiki alone). Every hit from one of these roots is labelled `[uncompiled]` and ranked
+  compiled wiki (default `["raw/auto-memory", "raw/claude-session", "raw/remote-session"]`;
+  `[]` restricts recall to the wiki alone). `raw/claude-session` is where the `remember`
+  tool writes under the stdio transport and `raw/remote-session` is where it writes under
+  `--transport http`, so both are recallable by default. Every hit from one of these roots is labelled `[uncompiled]` and ranked
   below every compiled wiki page, regardless of its raw relevance score.
 - The audience pinned at process start, applied as a predicate *inside* the query's `WHERE`
   clause — never as a post-filter — so a forbidden or wrong-typed page can never occupy a
