@@ -73,8 +73,17 @@ Operationally, in `auto` mode that class stays in observe: it has no
 recommended model (`recommended_model_for_class` returns `None` for a
 non-passing entry) and no usable threshold, so every `names-other` item goes to
 a human. That is the safe direction, and it is also the cost: the abstain share
-for this class is effectively 100%, far above the 0.30 the bar allows. The other
-four classes are eligible for enforcement subject to athenaeum#2220's own gates.
+for this class is effectively 100%, far above the 0.30 the bar allows. Three of the other four
+classes (`held-elsewhere`, `non-person-target`, `role-unmatched`) are eligible
+for enforcement subject to athenaeum#2220's own gates.
+
+`source-context` is recorded as passing on the `agreement-k3` signal, but the
+runtime makes one call per suspect and has no caller that computes a K=3
+agreement score. `calibrated_probability` therefore treats an `agreement-k3`
+entry as no map for a single self-reported score and returns 0.0, so every
+`source-context` item goes to a human until a caller supplies an agreement
+score. Wiring K=3 into the escalation changes the production call count and
+cost, so it is a separate decision.
 
 ### The failing cases
 
