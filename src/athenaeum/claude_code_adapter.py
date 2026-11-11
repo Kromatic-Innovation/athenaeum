@@ -151,6 +151,57 @@ for the same reason (a process-level concern: stdin parsing, exit codes,
 JSON output), but deliberately NOT one of the ``_cmd_*.py`` siblings
 ``cli.py``'s factoring rule governs, since it is deliberately unreachable
 through ``athenaeum.cli``.
+
+**Foreign-host guard (issue athenaeum#2371).** Grok Build, xAI's terminal
+agent, reads Claude Code's own ``.claude/settings.json`` hook wiring, so an
+operator who installed this adapter as a ``UserPromptSubmit`` hook (and,
+per :func:`witness_session_end` / :func:`witness_session_end_anchor` below,
+a ``SessionEnd`` hook calling ``athenaeum session-end``) can have it invoked
+by a host it was never written for. :func:`_is_foreign_host_invocation`
+gates :func:`main` BEFORE :func:`_witness_turn` runs (and the two
+``witness_session_end*`` functions gate on the same signal at their own
+entry), printing nothing and returning 0/no-op on either of two signals,
+checked in this order:
+
+1. ``GROK_HOOK_EVENT`` present in the environment — Grok Build sets this on
+   every hook subprocess it launches, for every event type, documented at
+   https://docs.x.ai/build/features/hooks (verified 2026-11-10). Specific
+   and free of ambiguity, but only catches Grok.
+2. The stdin payload carrying any of ``hookEventName`` / ``sessionId`` /
+   ``workspaceRoot`` — the camelCase spelling Grok's own hook payload uses
+   for the keys Claude Code spells ``hook_event_name`` / ``session_id`` /
+   (Claude Code has no ``workspaceRoot`` equivalent at all). This is a
+   **blocklist**, not an allowlist: it is checked as "does this payload
+   look like Grok's", never as "does this payload look like Claude Code's".
+
+Both signals were deliberately chosen as things to reject, not things to
+require. The issue's own second candidate discriminator — requiring
+Claude's ``hook_event_name`` key to be present and treating its absence as
+non-Claude — was considered and rejected: this module's own test suite
+(``tests/test_claude_code_adapter.py``) exercises the adapter with minimal
+stdin payloads of exactly ``{"prompt": ..., "session_id": ...}``, with no
+``hook_event_name`` key at all, and :func:`_read_hook_input` has never
+required one. An allowlist shaped that way would silently no-op the hook
+for every one of those genuine Claude Code invocations — the exact failure
+mode this guard exists to avoid inflicting on *this* host, in the course of
+defending against a *different* one. A blocklist of camelCase markers that
+Claude Code itself never emits carries the opposite, strictly smaller risk:
+it stays blind to some future third host that happens to send neither
+``GROK_HOOK_EVENT`` nor any of these three keys, rather than ever
+mis-firing on a real Claude Code turn.
+
+``athenaeum session-end`` (:func:`witness_session_end` /
+:func:`witness_session_end_anchor`'s caller,
+:func:`athenaeum._cmd_index.cmd_session_end`) takes no stdin payload at
+all — it is a plain argparse CLI command, not a JSON-stdin hook reader —
+so only the ``GROK_HOOK_EVENT`` signal applies there; see each function's
+own docstring. It IS reachable from a Grok ``SessionEnd`` hook: both
+``examples/claude-code/settings-snippet.json``'s ``SessionEnd`` block and
+this module's own "Witness ledger wiring" section above describe wiring a
+``SessionEnd`` hook command straight to ``athenaeum session-end``, and Grok
+Build's hook loading is not scoped to ``UserPromptSubmit`` — it reads
+``.claude/settings.json``'s hook arrays generally, per the same source this
+section opened with.
 """
 
 from __future__ import annotations
@@ -179,6 +230,46 @@ from athenaeum.config import (
 #: -- the two are deliberately independent knobs (the hook never loads
 #: athenaeum.yaml) but share the same default on purpose.
 _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT = 15
+
+
+#: Keys unique to Grok Build's camelCase hook payload (issue athenaeum#2371)
+#: -- Claude Code's genuine payload spells the same concepts
+#: ``hook_event_name`` / ``session_id`` and has no ``workspaceRoot``
+#: equivalent at all, so a payload carrying ANY of these could only have
+#: been built by a non-Claude-Code host. See the module docstring's
+#: "Foreign-host guard" section for why this is a blocklist, not an
+#: allowlist built around the genuine, snake_case key instead.
+_FOREIGN_HOST_PAYLOAD_MARKER_KEYS = ("hookEventName", "sessionId", "workspaceRoot")
+
+
+def _grok_env_marker_present() -> bool:
+    """``GROK_HOOK_EVENT`` -- Grok Build sets this on every hook subprocess
+    it launches, for every event type (issue athenaeum#2371;
+    https://docs.x.ai/build/features/hooks, verified 2026-11-10). Any
+    non-empty value counts; this adapter has no reason to care which event
+    fired, only that the launching host was Grok."""
+    return bool(os.environ.get("GROK_HOOK_EVENT"))
+
+
+def _is_foreign_host_invocation(raw: str) -> bool:
+    """``True`` if *raw* (the ``UserPromptSubmit`` stdin payload) or the
+    current environment identifies the caller as a non-Claude-Code host
+    (issue athenaeum#2371). See the module docstring's "Foreign-host guard"
+    section for the two signals checked and why both are blocklist checks.
+
+    Never raises: a malformed payload simply fails the payload-shape check
+    (the same fail-safe posture as :func:`_read_hook_input`), falling back
+    to the environment-only signal.
+    """
+    if _grok_env_marker_present():
+        return True
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return any(key in payload for key in _FOREIGN_HOST_PAYLOAD_MARKER_KEYS)
 
 
 def _load_config_env(cache_dir: Path) -> None:
@@ -408,7 +499,16 @@ def witness_session_end(cache_dir: Path) -> None:
     command. A witness that can break the thing it observes is worse than
     no witness: the entire point of this path is that it cannot affect the
     caller's result or exit code. :func:`main` already wraps its own
-    ``_load_config_env`` call for the same reason."""
+    ``_load_config_env`` call for the same reason.
+
+    **Foreign-host guard (issue athenaeum#2371).** Checked first, before
+    even ``_load_config_env`` -- ``athenaeum session-end`` takes no stdin
+    payload (it is a plain argparse CLI command), so only the
+    ``GROK_HOOK_EVENT`` environment signal applies here; see the module
+    docstring's "Foreign-host guard" section for why this call site is
+    reachable from a Grok ``SessionEnd`` hook."""
+    if _grok_env_marker_present():
+        return
     try:
         _load_config_env(cache_dir)
         if not _witness_ledger_enabled():
@@ -442,7 +542,14 @@ def witness_session_end_anchor(cache_dir: Path, wiki_root: Path) -> None:
     source, and a wall-clock budget is unavoidably arithmetic. This
     function is therefore, like :func:`witness_session_end`, a single
     delegation call with no arithmetic of its own.
+
+    **Foreign-host guard (issue athenaeum#2371).** Same check, same
+    reasoning, same place in the sequence as :func:`witness_session_end`'s
+    own guard -- see that function's docstring and the module docstring's
+    "Foreign-host guard" section.
     """
+    if _grok_env_marker_present():
+        return
     try:
         _load_config_env(cache_dir)
         if not _witness_ledger_enabled():
@@ -575,6 +682,16 @@ def main(argv: list[str] | None = None) -> int:
         # recall path itself is about to skip (AUTO_RECALL off, or a prompt
         # shorter than 8 characters), so it runs BEFORE both of those gates.
         raw = sys.stdin.read()
+
+        # Foreign-host guard (issue athenaeum#2371): must run before
+        # `_witness_turn` -- a non-Claude-Code host must write no witness
+        # line, record no push telemetry, and append to no seen-file, and
+        # every one of those effects is downstream of `_witness_turn`/the
+        # recall call below. See the module docstring's "Foreign-host
+        # guard" section.
+        if _is_foreign_host_invocation(raw):
+            return 0
+
         _witness_turn(cache_dir, raw)
 
         # Issue athenaeum#2204 AC9: parsed here, before the AUTO_RECALL and

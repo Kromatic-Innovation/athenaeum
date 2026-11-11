@@ -1625,3 +1625,325 @@ class TestHookBudgetSharing:
         assert latest is not None
         assert latest["event"] == "step_timeout"
         assert latest["hook"] == "user-prompt"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2371 -- the adapter must no-op when a non-Claude-Code host
+# (Grok Build) invokes it, and that no-op must happen BEFORE `_witness_turn`.
+# ---------------------------------------------------------------------------
+
+
+def _grok_shaped_payload(*, with_prompt: bool) -> dict[str, object]:
+    """The exact Grok ``UserPromptSubmit`` payload shape named in the
+    issue's acceptance criteria, with camelCase keys Claude Code never
+    emits."""
+    payload: dict[str, object] = {
+        "hookEventName": "UserPromptSubmit",
+        "sessionId": "grok-session-1",
+        "cwd": "/workspace/example",
+        "workspaceRoot": "/workspace/example",
+    }
+    if with_prompt:
+        payload["prompt"] = "a sufficiently long test prompt"
+    return payload
+
+
+class TestGrokHostGuardMain:
+    """Counter-example this defeats: an adapter that treats Grok's hook
+    invocation as an ordinary (if slightly malformed) Claude Code turn --
+    writing a witness line, recording push telemetry, and/or appending to
+    the shared ``unknown`` seen-file for a host it was never written for.
+    """
+
+    def _patched_recorders(
+        self, monkeypatch: pytest.MonkeyPatch, context_mod: object
+    ) -> dict[str, list]:
+        """Patch the witness recorder, the push-telemetry recorder, and the
+        seen-file appender -- the three AC-named side effects beyond
+        stdout/exit-code -- each as its own spy, so a regression that
+        reaches any ONE of them is caught independently rather than only
+        via the end-state stdout check."""
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.harness.claude_code as cc_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: dict[str, list] = {"witness": [], "push": [], "seen": []}
+        monkeypatch.setattr(
+            cc_mod, "record_turn", lambda *a, **k: calls["witness"].append((a, k))
+        )
+        monkeypatch.setattr(
+            context_mod,
+            "record_context_push",
+            lambda *a, **k: calls["push"].append((a, k)),
+        )
+        monkeypatch.setattr(
+            context_mod, "_append_seen", lambda *a, **k: calls["seen"].append((a, k))
+        )
+        return calls
+
+    def _assert_full_noop(
+        self,
+        rc: int,
+        stdout: str,
+        calls: dict[str, list],
+        tmp_path: Path,
+    ) -> None:
+        assert rc == 0
+        assert stdout == ""
+        assert calls["witness"] == [], "witness recorder was called"
+        assert calls["push"] == [], "push-telemetry recorder was called"
+        assert calls["seen"] == [], "seen-file appender was called"
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+    def test_grok_env_var_noops_with_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        calls = self._patched_recorders(monkeypatch, context_mod)
+        monkeypatch.setenv("GROK_HOOK_EVENT", "UserPromptSubmit")
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = adapter.main()
+
+        self._assert_full_noop(rc, buf.getvalue(), calls, tmp_path)
+
+    def test_grok_env_var_noops_without_prompt_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        calls = self._patched_recorders(monkeypatch, context_mod)
+        monkeypatch.setenv("GROK_HOOK_EVENT", "SessionStart")
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys, "stdin", io.StringIO(json.dumps({"sessionId": "grok-session-2"}))
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = adapter.main()
+
+        self._assert_full_noop(rc, buf.getvalue(), calls, tmp_path)
+
+    def test_grok_shaped_payload_noops_with_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """No ``GROK_HOOK_EVENT`` set at all -- the payload shape alone must
+        be enough to trigger the guard."""
+        adapter, context_mod = imported_adapter
+        calls = self._patched_recorders(monkeypatch, context_mod)
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps(_grok_shaped_payload(with_prompt=True))),
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = adapter.main()
+
+        self._assert_full_noop(rc, buf.getvalue(), calls, tmp_path)
+
+    def test_grok_shaped_payload_noops_without_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        calls = self._patched_recorders(monkeypatch, context_mod)
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps(_grok_shaped_payload(with_prompt=False))),
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = adapter.main()
+
+        self._assert_full_noop(rc, buf.getvalue(), calls, tmp_path)
+
+    def test_guard_runs_before_witness_turn_for_env_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """Ordering assertion, not an end-state one: patches `_witness_turn`
+        itself to record whether it was reached at all. If the guard were
+        moved to AFTER `_witness_turn` in `main()`, this call would still
+        record a hit even though the end-state (no witness LINE written,
+        since the call is faked) would look identical -- this is exactly
+        the gap the brief warns a pure end-state test leaves open."""
+        adapter, _context_mod = imported_adapter
+        reached: list[bool] = []
+        monkeypatch.setattr(
+            adapter, "_witness_turn", lambda *a, **k: reached.append(True)
+        )
+        monkeypatch.setenv("GROK_HOOK_EVENT", "UserPromptSubmit")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert reached == [], "_witness_turn was reached under a Grok payload"
+
+    def test_guard_runs_before_witness_turn_for_payload_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """Same ordering claim as above, triggered purely by payload shape
+        (no ``GROK_HOOK_EVENT``), and `_witness_turn` RAISES rather than
+        just recording -- if the guard ran after it, `main()`'s own outer
+        `except Exception` would swallow the raise and still return 0,
+        which is exactly why this is paired with the record-based variant
+        above rather than relied on alone."""
+        adapter, _context_mod = imported_adapter
+
+        def _boom(*a: object, **k: object) -> None:
+            raise AssertionError("_witness_turn was reached under a Grok payload")
+
+        monkeypatch.setattr(adapter, "_witness_turn", _boom)
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps(_grok_shaped_payload(with_prompt=True))),
+        )
+
+        rc = adapter.main()
+
+        # If this is 0 with no error log, `_witness_turn` was never called
+        # (the AssertionError, being a subclass of Exception, WOULD have
+        # been swallowed by main()'s own broad except -- so this assertion
+        # alone would not distinguish "never called" from "called and
+        # swallowed". The companion record-based test above is what
+        # actually tells those two apart; this test is the belt to that
+        # test's braces, pinning that `_witness_turn` is not even reached
+        # well enough that a raise inside it would be a surprise.)
+        assert rc == 0
+
+    def test_genuine_claude_payload_is_not_caught_by_the_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """Negative control: the adapter's OWN minimal payload shape
+        (``{"prompt": ..., "session_id": ...}``, no camelCase keys, no
+        ``GROK_HOOK_EVENT``) must NOT trip the guard -- this is the same
+        shape every pre-existing test in this file already sends, so a
+        guard that broke this would have broken the whole suite, but this
+        test pins the claim directly against `_is_foreign_host_invocation`
+        rather than only via the full `main()` round-trip."""
+        adapter, _context_mod = imported_adapter
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        raw = json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+        assert adapter._is_foreign_host_invocation(raw) is False
+
+    def test_malformed_payload_is_not_treated_as_foreign(
+        self, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """A malformed/absent payload degrades to "not foreign" (the
+        existing AC3 fail-safe path handles it from there) -- the guard
+        itself must never raise on bad JSON."""
+        adapter, _context_mod = imported_adapter
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        assert adapter._is_foreign_host_invocation("{not valid json") is False
+        assert adapter._is_foreign_host_invocation("") is False
+
+
+class TestGrokHostGuardSessionEnd:
+    """Mirrors `TestGrokHostGuardMain` for `witness_session_end` and
+    `witness_session_end_anchor` -- the issue's own instruction to mirror
+    the guard there if `athenaeum session-end` is reachable from a Grok
+    `SessionEnd` hook. It is: both `examples/claude-code/settings-snippet.json`
+    and this module's own docstring describe wiring a `SessionEnd` hook
+    command straight to `athenaeum session-end`, and Grok Build's hook
+    loading is not scoped to `UserPromptSubmit`.
+
+    Neither function takes a stdin payload (``athenaeum session-end`` is a
+    plain argparse CLI command), so only the ``GROK_HOOK_EVENT``
+    environment signal applies here.
+    """
+
+    def test_witness_session_end_noops_under_grok_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.harness.claude_code as cc_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: list[object] = []
+        monkeypatch.setattr(cc_mod, "session_close", lambda *a, **k: calls.append(True))
+        monkeypatch.setenv("GROK_HOOK_EVENT", "SessionEnd")
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+
+        adapter.witness_session_end(tmp_path)
+
+        assert calls == []
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+    def test_witness_session_end_anchor_noops_under_grok_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            from athenaeum import witness_anchor as anchor_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: list[object] = []
+        monkeypatch.setattr(
+            anchor_mod, "run_session_end_anchor", lambda *a, **k: calls.append(True)
+        )
+        monkeypatch.setenv("GROK_HOOK_EVENT", "SessionEnd")
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+
+        adapter.witness_session_end_anchor(tmp_path, tmp_path / "wiki")
+
+        assert calls == []
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+    def test_witness_session_end_without_grok_env_runs_as_before(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported_adapter
+    ) -> None:
+        """Negative control: with the ledger enabled and NO Grok signal,
+        `witness_session_end` still reaches `session_close` -- proving the
+        no-op above is the guard, not an unrelated break."""
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.harness.claude_code as cc_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: list[object] = []
+        monkeypatch.setattr(cc_mod, "session_close", lambda *a, **k: calls.append(True))
+        monkeypatch.delenv("GROK_HOOK_EVENT", raising=False)
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+
+        adapter.witness_session_end(tmp_path)
+
+        assert calls == [True]
