@@ -17,7 +17,10 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from promptwitness import canon
+from tests.integration import test_claude_entry_paths as harness
 from tests.integration.test_claude_entry_paths import (
     CLAUDE_AI_BRIDGE_LIVE_ENV,
     ENTRY_PATH_CASES,
@@ -72,6 +75,14 @@ class TestWriteSettingsFile:
         resolved = resolve_hook_command()
         assert resolved
         assert os.path.isfile(resolved)
+
+    def test_resolve_hook_command_raises_loudly_when_not_on_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(harness.shutil, "which", lambda _name: None)
+
+        with pytest.raises(RuntimeError, match=harness.HOOK_COMMAND_NAME):
+            resolve_hook_command()
 
 
 # ---------------------------------------------------------------------------
