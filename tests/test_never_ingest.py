@@ -849,3 +849,102 @@ class TestRunLevelNeverIngestSurvival:
             assert raw_path.exists()
 
         client.messages.create.assert_not_called()
+
+
+class TestNeverIngestWindowStarvation:
+    """Issue athenaeum#2363 addendum (Seer finding, coordinator-verified true
+    positive). A never-ingest raw is retained on disk by design and
+    deliberately excluded from the stuck-file ledger -- but
+    `_hold_out_unworkable_raw` (`athenaeum.librarian`, issue athenaeum#1322)
+    only holds a file out of the `max_files` intake window when it is NAMED
+    IN THE STUCK LEDGER. Opting never-ingest out of that ledger silently
+    opted it out of the window-scheduling job too: before this fix, a
+    never-ingest raw was rediscovered and consumed a window slot on every
+    run, forever -- the exact athenaeum#1322 starvation pathology
+    (`_hold_out_unworkable_raw`'s own docstring: 50 permanently-stuck files
+    filling a 50-slot window for six hours while 4,181 healthy records
+    behind them never got a slot) arriving through a different door.
+
+    This test pins the fix with the shape that actually catches a
+    regression: not merely "the hold-out ledger has N entries" (which would
+    pass even if the hold-out were never consulted at window-fill time), but
+    that a WORKABLE file sorted BEHIND more never-ingest files than
+    `max_files` allows still gets a slot within a few runs, and that every
+    never-ingest raw is still on disk throughout. Removing the hold-out
+    (reverting to pre-fix behavior) makes this test fail because the
+    workable file would never be created at all.
+    """
+
+    def test_workable_file_gets_a_slot_despite_never_ingest_backlog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = _seed_run_level_root(tmp_path)
+        sessions = root / "raw" / "sessions"
+
+        # Three never-ingest raws, timestamped so discovery (oldest-first)
+        # places all three AHEAD of the workable raw below -- the exact
+        # "permanently blocks the front of the queue" shape the issue
+        # describes. max_files=2 below is smaller than 3, so pre-fix this
+        # window is filled by never-ingest files on EVERY run, forever.
+        ni_paths = []
+        for i in range(3):
+            p = sessions / f"2026010{i + 1}T120000Z-ni0000{i}.md"
+            p.write_text(_RUN_LEVEL_MATCHING_CONTENT, encoding="utf-8")
+            ni_paths.append(p)
+
+        # A workable, LLM-free raw (tier0_passthrough-eligible: uid/type/name
+        # already wiki-shaped) sorted LAST by timestamp -- the healthy record
+        # standing behind the never-ingest backlog.
+        workable_path = sessions / "20260104T120000Z-wrk00001.md"
+        workable_path.write_text(
+            "---\nuid: wrk00001\ntype: company\nname: Workable Co\n---\n"
+            "A workable raw that needs no LLM call.\n",
+            encoding="utf-8",
+        )
+
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError(
+            "this test's raws are never-ingest or tier0-passthrough-eligible "
+            "-- neither reaches an LLM tier"
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        # Run twice: run 1 has no holdout ledger yet (first encounter), so
+        # the window (max_files=2) fills with the two earliest never-ingest
+        # raws and the workable file gets nothing. Run 2's hold-out should
+        # keep those two already-recorded never-ingest raws OUT of the
+        # window, freeing both slots for the third never-ingest raw AND the
+        # workable file.
+        for _ in range(2):
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_api_calls=100,
+                max_files=2,
+            )
+            assert rc == 0
+
+        # The workable file got its slot: promoted to wiki, raw deleted.
+        assert not workable_path.exists(), (
+            "workable raw was never given a window slot -- the "
+            "never-ingest backlog starved it (issue athenaeum#1322/athenaeum#2363 "
+            "regression)"
+        )
+        assert (root / "wiki" / "wrk00001-workable-co.md").exists()
+
+        # AC1 still holds: every never-ingest raw survives, untouched, on
+        # BOTH runs -- the hold-out must never delete what it excludes.
+        for p in ni_paths:
+            assert p.exists()
+            assert p.read_text(encoding="utf-8") == _RUN_LEVEL_MATCHING_CONTENT
+
+        # And no never-ingest raw was ever counted as stuck.
+        from athenaeum.librarian import _load_stuck_ledger
+
+        assert _load_stuck_ledger(root / "wiki") == {}
