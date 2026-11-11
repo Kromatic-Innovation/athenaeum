@@ -2425,6 +2425,153 @@ class TestAllMcpToolWrappers:
 
 
 # ---------------------------------------------------------------------------
+# Tool annotations (issue athenaeum#2381)
+# ---------------------------------------------------------------------------
+
+
+class TestToolAnnotations:
+    """``readOnlyHint``/``destructiveHint``/``openWorldHint``/``idempotentHint``
+    on every tool registered by a REAL ``create_server(...)`` instance."""
+
+    # Bound to the live tool set (asserted in
+    # ``test_readonly_mapping_membership_is_bound_to_live_tool_set`` below) so
+    # adding or removing a registered tool without updating this mapping
+    # fails loudly, rather than silently leaving a new tool unchecked. See
+    # ``docs/modules/mcp.md``'s annotation table for the per-tool rationale,
+    # including why `scan_retraction_cascade` is NOT `True` here despite
+    # being named among the issue's candidate read-only tools: the code-level
+    # side-effect check that AC requires found a durable, user-visible write
+    # (a new review item in the decision queue), not a cache/telemetry
+    # side-channel, and reclassified it accordingly.
+    _EXPECTED_READ_ONLY = {
+        "recall": True,
+        "entity_schema": True,
+        "enumerate_entities": True,
+        "read_entity": True,
+        "list_pending_questions": True,
+        "list_pending_merges": True,
+        "list_pending_decisions": True,
+        "list_axiom_audit": True,
+        "calibration_summary": True,
+        "remember": False,
+        "raise_decision": False,
+        "scan_retraction_cascade": False,
+        "resolve_question": False,
+        "resolve_merge": False,
+        "review_audit_item": False,
+    }
+
+    #: The three tools that adjudicate the human-decision queue — the only
+    #: ones the issue calls for `destructiveHint: true` on.
+    _EXPECTED_DESTRUCTIVE = {"resolve_question", "resolve_merge", "review_audit_item"}
+
+    def _server(self, tmp_path: Path):
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        return create_server(raw_root=raw, wiki_root=wiki)
+
+    def _tools_by_name(self, server) -> dict:
+        import asyncio
+
+        async def _run():
+            return {t.name: t for t in await server.list_tools()}
+
+        return asyncio.run(_run())
+
+    def test_every_registered_tool_has_annotations(self, tmp_path: Path) -> None:
+        tools = self._tools_by_name(self._server(tmp_path))
+        missing = [
+            name
+            for name, tool in tools.items()
+            if tool.annotations is None or tool.annotations.read_only_hint is None
+        ]
+        assert not missing, f"tool(s) registered with no readOnlyHint: {missing}"
+
+    def test_counter_example_unannotated_tool_fails_the_coverage_check(
+        self, tmp_path: Path
+    ) -> None:
+        """Proves the check above actually bites: a newly-registered tool
+        with NO ``annotations=`` on a real server fails it, so the previous
+        test cannot be vacuously true (e.g. from an empty tool list or a
+        check that never runs)."""
+        server = self._server(tmp_path)
+
+        @server.tool()
+        def unannotated_probe(x: str) -> str:  # pragma: no cover - never called
+            return x
+
+        tools = self._tools_by_name(server)
+        assert "unannotated_probe" in tools
+        missing = [
+            name
+            for name, tool in tools.items()
+            if tool.annotations is None or tool.annotations.read_only_hint is None
+        ]
+        assert missing == ["unannotated_probe"]
+
+    def test_readonly_mapping_membership_is_bound_to_live_tool_set(
+        self, tmp_path: Path
+    ) -> None:
+        registered = set(self._tools_by_name(self._server(tmp_path)))
+        assert registered == set(self._EXPECTED_READ_ONLY), (
+            "MCP tool set drifted from the readOnlyHint mapping -- add or remove "
+            f"the matching entry: registered-only={registered - set(self._EXPECTED_READ_ONLY)}, "
+            f"mapping-only={set(self._EXPECTED_READ_ONLY) - registered}"
+        )
+
+    @pytest.mark.parametrize("name", sorted(_EXPECTED_READ_ONLY))
+    def test_readonly_hint_matches_mapping(self, tmp_path: Path, name: str) -> None:
+        tools = self._tools_by_name(self._server(tmp_path))
+        assert tools[name].annotations is not None
+        assert tools[name].annotations.read_only_hint is self._EXPECTED_READ_ONLY[name], (
+            f"{name}.readOnlyHint={tools[name].annotations.read_only_hint!r}, "
+            f"expected {self._EXPECTED_READ_ONLY[name]!r}"
+        )
+
+    def test_every_tool_has_open_world_hint_false(self, tmp_path: Path) -> None:
+        tools = self._tools_by_name(self._server(tmp_path))
+        for name, tool in tools.items():
+            assert tool.annotations is not None
+            assert tool.annotations.open_world_hint is False, (
+                f"{name}.openWorldHint={tool.annotations.open_world_hint!r}, expected False"
+            )
+
+    def test_remember_and_raise_decision_are_append_only(self, tmp_path: Path) -> None:
+        tools = self._tools_by_name(self._server(tmp_path))
+        for name in ("remember", "raise_decision"):
+            ann = tools[name].annotations
+            assert ann.read_only_hint is False
+            assert ann.destructive_hint is False
+
+    def test_adjudication_tools_are_destructive_and_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        tools = self._tools_by_name(self._server(tmp_path))
+        for name in self._EXPECTED_DESTRUCTIVE:
+            ann = tools[name].annotations
+            assert ann.read_only_hint is False
+            assert ann.destructive_hint is True
+            assert ann.idempotent_hint is True
+
+    def test_scan_retraction_cascade_is_nondestructive_and_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        """Reclassified out of the read-only group (see the mapping's
+        docstring above) but still non-destructive and explicitly
+        idempotent, matching the tool's own docstring guarantee."""
+        tools = self._tools_by_name(self._server(tmp_path))
+        ann = tools["scan_retraction_cascade"].annotations
+        assert ann.read_only_hint is False
+        assert ann.destructive_hint is False
+        assert ann.idempotent_hint is True
+
+
+# ---------------------------------------------------------------------------
 # README <-> registered-tool parity (issue athenaeum#1380)
 #
 # Derives BOTH sides at runtime -- the registered tool names (and their
