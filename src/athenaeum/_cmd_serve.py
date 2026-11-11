@@ -411,6 +411,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
             screening=screening,
             remote_policy=remote_policy,
             config=cfg,
+            # Issue athenaeum#2385: the resolved transport, threaded in so
+            # `create_server` can pick HOST-NEUTRAL provenance defaults for a
+            # multi-client process (`remote:inferred` / `raw/remote-session`,
+            # and no env-based push attribution). It governs defaults only —
+            # the registered tool set and every tool's schema are identical
+            # on both transports.
+            transport=transport,
         )
     except RemotePolicyError as exc:
         print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)

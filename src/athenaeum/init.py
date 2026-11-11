@@ -86,6 +86,11 @@ _SUBDIRS = [
     # its extra-roots list from first start rather than only after the
     # directory happens to be created by a later `remember` call.
     "raw/claude-session",
+    # Issue athenaeum#2385: the same write target for a server started with
+    # `--transport http`, where the caller is not known to be Claude Code.
+    # Also a `recall.extra_intake_roots` default entry, and created up front
+    # for the same reason as `raw/claude-session` above.
+    "raw/remote-session",
     "wiki",
     "wiki/_schema",
 ]

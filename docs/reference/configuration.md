@@ -4559,7 +4559,7 @@ are legitimate name-recall targets and must stay indexed by default.
 - **YAML path:** `recall.extra_intake_roots`
 - **Environment variable:** —
 - **CLI flag:** —
-- **Default:** `[]` (yaml default is `["raw/auto-memory", "raw/claude-session"]`; relative entries resolve against `knowledge_root` and entries that aren't real directories are dropped with a warning)
+- **Default:** `[]` (yaml default is `["raw/auto-memory", "raw/claude-session", "raw/remote-session"]`; relative entries resolve against `knowledge_root` and entries that aren't real directories are dropped with a warning)
 - **Precedence:** `athenaeum.yaml` > code default
 
 Resolve configured extra intake roots to absolute `Path` values.

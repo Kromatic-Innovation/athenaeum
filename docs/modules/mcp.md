@@ -66,6 +66,43 @@ nothing binds. See [configuration](../reference/configuration.md) and
 **TLS is not athenaeum's concern.** Terminate HTTPS at a reverse proxy in front of the
 process; the server itself speaks plain HTTP to that proxy over loopback.
 
+### What changes under `http`, and what does not
+
+Under stdio, one process serves one conversation and one client, and the server is allowed
+to assume that: the caller IS Claude Code, and the session id in the process environment
+names the conversation being served. Under `http`, one process serves many conversations,
+from whatever hosts registered the endpoint, for days. Three **defaults** follow the
+transport as a result:
+
+| | `stdio` | `http` |
+|---|---|---|
+| `remember`'s default `source` (the `raw/` subdirectory) | `claude-session` | `remote-session` |
+| Defaulted wiki-level `source` when `sources` is omitted | `claude:inferred` | `remote:inferred` |
+| Push-metrics attribution from the process environment when a request carries no `claudecode/toolUseId` | used | not used; nothing is recorded |
+
+`raw/remote-session` is a `recall.extra_intake_roots` default and is created by
+`athenaeum init`, so a note written there is indexed and recallable in the same session as
+the write, exactly as `raw/claude-session` is.
+
+The stdio column is byte-identical to the behaviour that shipped before this split, down to
+the error strings — `claude:inferred` in particular must stay byte-identical because
+`repair --backfill-sources` selects its candidates by equality on that scalar.
+
+What does **not** change is the served surface. `tools/list` is identical on both
+transports: the transport is a `create_server` argument, no tool gained a parameter, and
+nothing in any tool's schema reveals which transport answered. An agent writes the same
+calls either way.
+
+Tracker for the multi-client work:
+<https://github.com/Kromatic-Innovation/athenaeum/issues/2385>.
+
+Concurrency is handled at one point: the post-`remember` index refresh re-reads the search
+manifest, diffs the corpus and writes it back, so concurrent refreshes are serialized with
+an in-process lock. Without it, two `remember` calls landing together each diffed the same
+pre-image and the second dropped the first's entry — the file was on disk but invisible to
+`recall`. The file writes themselves never needed serializing; each mints a unique name and
+is renamed into place atomically.
+
 ## Tool annotations
 
 Every tool carries an MCP `ToolAnnotations` hint so a remote host can decide
@@ -142,7 +179,8 @@ KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
 
 ## What it writes
 
-- `remember` appends one file under `raw/<source>/`. Nothing else touches `raw/`.
+- `remember` appends one file under `raw/<source>/` — `raw/claude-session` by default under
+  stdio, `raw/remote-session` under `--transport http`. Nothing else touches `raw/`.
 - The three decision-queue mutators edit the queue files and, for an approved merge, the
   merged wiki page.
 - `scan_retraction_cascade` appends newly-flagged review items to
