@@ -148,6 +148,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "receipts": ("athenaeum._cmd_receipts", "add_receipts_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
+    "schedule": ("athenaeum._cmd_schedule", "add_schedule_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
@@ -259,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
+    from athenaeum._cmd_schedule import add_schedule_subparser
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_split_oversize import add_split_oversize_subparser
@@ -350,6 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_attribution_subparser(subparsers)
     # contact-surface-lint (issue athenaeum#2218)
     add_contact_surface_lint_subparser(subparsers)
+    # schedule install|remove (issue athenaeum#2304)
+    add_schedule_subparser(subparsers)
 
     return parser
 

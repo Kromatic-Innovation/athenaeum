@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cursor instructed-recall example rule (issue athenaeum#2399).** Added
+  `examples/cursor/athenaeum.mdc`, an always-applied Cursor rule example that
+  tells the agent to call `recall` before answering when the request
+  concerns people, projects, or prior decisions, and to call `remember` for
+  durable facts, plus `examples/cursor/README.md` on installing it as a
+  project or user rule. `docs/guides/cursor.md` gains an "Instructed recall
+  (rule)" section explaining this is instructed recall, not auto-recall.
 - **Cursor setup guide and clients.md row (issue athenaeum#2396).** Added
   `docs/guides/cursor.md` covering `mcpServers` setup (`"type": "stdio"`,
   `${userHome}` interpolation, the `--audience` flag, and the Cursor CLI
