@@ -2,7 +2,7 @@
 
 # Grok as an athenaeum host
 
-**Status:** DESIGN OF RECORD (Vitruvius Specify, 2026-11-10). Scopes the epic
+**Status:** DESIGN OF RECORD (Vitruvius Specify, 2026-11-10; operator rulings 2026-11-11, §9). Scopes the epic
 athenaeum#2201. The shared remote (HTTPS) prerequisite is owned by
 athenaeum#2199 and is not designed here; this page states only what Grok
 needs from it (§6).
@@ -362,19 +362,19 @@ The remote-mode children of athenaeum#2199 that this list feeds:
 
 ---
 
-## 9. Open operator decisions
+## 9. Operator rulings (2026-11-11)
 
-1. **Order of work.** Do Grok Build now, without remote mode, and keep the
-   Grok apps gated on athenaeum#2199? *Recommended: yes.*
-2. **Vocabulary.** Reserve "auto-recall" for Tier 1, and use "context
-   snapshot" and "instructed recall" elsewhere, across every host and not
-   only Grok? *Recommended: yes.* The ChatGPT epic athenaeum#2200 faces the
-   same question.
-3. **Tier 2 writer shape.** Either generalise `codex-context` into one
-   host-parameterised `context-file` command, or document running
-   `codex-context --output` for Grok. *Recommended: generalise, but only
-   after the probe names Grok's instruction file.*
+All five recommendations were accepted.
+
+1. **Order of work.** Build Grok Build now, without remote mode. The Grok
+   apps wait on athenaeum#2199 (transport athenaeum#2382, auth
+   athenaeum#2384).
+2. **Vocabulary.** "Auto-recall" means Tier 1 per-turn push only, on every
+   host. Elsewhere, say "context snapshot" or "instructed recall".
+3. **Tier 2 writer shape.** Generalise `codex-context` into one
+   host-parameterised context-file command, after the athenaeum#2370 probe
+   names Grok's instruction file (athenaeum#2373).
 4. **Remote tool surface for Grok.** Read-only by default, with writes as an
-   explicit opt-in? *Recommended: read-only default.*
+   explicit opt-in. Consistent with D4 and D5 on athenaeum#2378.
 5. **Re-check cadence.** Re-verify §3 against xAI docs on or after
    **2027-02-10**, or sooner if xAI announces hook context injection.
