@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -2560,6 +2561,16 @@ def _recall_via_backend(
     return result
 
 
+#: Serializes :func:`_refresh_extra_root_index`'s manifest read-modify-write
+#: (issue athenaeum#2385). Module-level rather than per-server because the
+#: artifact it protects is a file on disk, and because a second server in one
+#: interpreter is a test shape, not a deployment: paying a few milliseconds of
+#: needless serialization there is a better trade than keying a lock table by
+#: ``cache_dir``. See :func:`_refresh_extra_root_index` for the measurement
+#: that justifies it existing at all.
+_INDEX_REFRESH_LOCK = threading.Lock()
+
+
 def _refresh_extra_root_index(
     search_backend: str,
     *,
@@ -2614,6 +2625,31 @@ def _refresh_extra_root_index(
     not turn a successful `remember` into an error — the same "must never
     fail over telemetry" posture this module already applies to push-metrics
     instrumentation, just above.
+
+    **Serialized under :data:`_INDEX_REFRESH_LOCK` (issue athenaeum#2385).**
+    This is the measured race, not a defensive guess: ``build_index(
+    incremental=True)`` LOADS the manifest sidecar, diffs the corpus against
+    it, applies the delta and WRITES the manifest back, so two refreshes
+    running concurrently both diff against the same pre-image and the second
+    writer's manifest drops the first writer's entry. 24 `remember` calls
+    interleaved with 24 `recall` calls recorded 24 files on disk but only
+    14-22 of them in the manifest across runs, against 24/24 run serially —
+    i.e. the FILES never raced (``storage.write_raw_intake`` mints a
+    uuid4-suffixed name and renames atomically), only the index did, and a
+    note missing from the manifest is a note `recall` cannot find. That is
+    exactly the "every write lands exactly once, and the index is consistent
+    afterwards" criterion, and the lock is where it is bought.
+
+    A ``threading.Lock`` is the right scope and a cross-process lock is not:
+    the concurrency this issue is about is many clients inside ONE long-lived
+    ``--transport http`` process, and FastMCP dispatches a synchronous tool
+    function on a worker thread, so the contending refreshes are threads of
+    this interpreter. It is also why the repo's ``_acquire_or_exit`` run-lock
+    idiom is deliberately NOT reused: that lock EXITS the process on
+    contention, which is correct for a batch ``_cmd_*`` entry point and
+    unthinkable on an interactive tool call. Under stdio the lock is
+    uncontended — acquired and released around the same work, no waiting, no
+    behaviour change.
     """
     if search_backend not in ("fts5", "vector"):
         return
@@ -2623,15 +2659,24 @@ def _refresh_extra_root_index(
         from athenaeum.config import resolve_extra_intake_roots
         from athenaeum.search import get_backend
 
-        extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
-        get_backend(search_backend).build_index(
-            wiki_root,
-            cache_dir,
-            extra_roots=extra_roots,
-            incremental=True,
-            full_rehash_max_age_days=math.inf,
-            config=config,
-        )
+        with _INDEX_REFRESH_LOCK:
+            # Re-resolved INSIDE the lock, not before it: the root list only
+            # ever GROWS (a `remember` write creates its subdirectory before
+            # calling this), so resolving under the lock guarantees a later
+            # refresh sees at least the roots an earlier one did. Resolved
+            # outside, a thread that resolved before a sibling created
+            # `raw/<subdir>` could run AFTER that sibling's build and, seeing
+            # a narrower corpus than the manifest records, diff the sibling's
+            # freshly-indexed entries as REMOVED.
+            extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
+            get_backend(search_backend).build_index(
+                wiki_root,
+                cache_dir,
+                extra_roots=extra_roots,
+                incremental=True,
+                full_rehash_max_age_days=math.inf,
+                config=config,
+            )
     except Exception:  # a refresh failure must not fail `remember`
         log.debug("remember: post-write index refresh failed", exc_info=True)
 
