@@ -5034,6 +5034,61 @@ PII-egress boundary; anything else raises
 ``athenaeum serve`` exits non-zero, exactly as
 `resolve_serve_profile` does. No seed in ``_DEFAULTS``.
 
+### `resolve_serve_host`
+
+- **YAML path:** `serve.host`
+- **Environment variable:** `ATHENAEUM_SERVE_HOST`
+- **CLI flag:** —
+- **Default:** `'127.0.0.1'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the HTTP-transport bind address.
+
+Precedence CLI > env > yaml > default, matching
+`resolve_serve_transport`:
+
+- ``cli_value`` — the ``--host`` flag.
+- ``ATHENAEUM_SERVE_HOST`` — env var.
+- ``serve.host`` — yaml.
+- `DEFAULT_SERVE_HOST` (``127.0.0.1``).
+
+The value is returned verbatim (whitespace-trimmed) and is deliberately
+NOT validated here. This resolver answers only "which address did the
+operator ask for"; whether that address may be bound with no auth issuer
+configured is a separate, security-bearing decision, made by the loopback
+bind guard in the ``serve`` command itself. Keeping the two
+apart is what stops a mistyped or hostile address from falling back to
+the loopback default and binding something nobody asked for — a resolver
+that "corrected" it would make the refusal unreachable. Ignored entirely
+under the ``stdio`` transport, which binds nothing.
+
+### `resolve_serve_port`
+
+- **YAML path:** `serve.port`
+- **Environment variable:** `ATHENAEUM_SERVE_PORT`
+- **CLI flag:** —
+- **Default:** `8000`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the HTTP-transport TCP port.
+
+Precedence CLI > env > yaml > default, matching
+`resolve_serve_transport`:
+
+- ``cli_value`` — the ``--port`` flag.
+- ``ATHENAEUM_SERVE_PORT`` — env var.
+- ``serve.port`` — yaml.
+- `DEFAULT_SERVE_PORT` (``8000``).
+
+Only a port in the usable TCP range 1-65535 is accepted; a non-numeric,
+``bool``, or out-of-range value at any tier WARNs and falls through to
+the next, per this module's malformed-value policy. Port 0 — which asks
+the kernel for an arbitrary free port — is deliberately NOT accepted:
+nobody can connect to a port they were never told, so a server whose
+address changes on every restart is not something configuration should
+be able to express. Ignored entirely under the ``stdio`` transport,
+which binds nothing.
+
 ### `resolve_serve_profile`
 
 - **YAML path:** `serve.profile`
@@ -5098,6 +5153,33 @@ than against a constant in this module that could drift. An explicitly
 EMPTY value resolves to ``None`` (no allowlist) for the same reason
 `resolve_audience` treats a blank flag as unset — to narrow the
 served surface you must name at least one tool. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_transport`
+
+- **YAML path:** `serve.transport`
+- **Environment variable:** `ATHENAEUM_SERVE_TRANSPORT`
+- **CLI flag:** —
+- **Default:** `'stdio'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the ``athenaeum serve`` transport.
+
+Precedence follows the repo convention CLI > env > yaml > default — the
+same shape `resolve_audience` uses for the sibling ``serve``
+section's audience pin:
+
+- ``cli_value`` — the ``--transport`` flag.
+- ``ATHENAEUM_SERVE_TRANSPORT`` — env var.
+- ``serve.transport`` — yaml.
+- `DEFAULT_SERVE_TRANSPORT` (``stdio``).
+
+The value is filtered against the closed vocabulary
+`SERVE_TRANSPORTS` (case-insensitive, whitespace-trimmed). An
+out-of-vocabulary value at any tier WARNs and falls through to the next
+tier, per this module's malformed-value policy (see
+`_env_number`). The fallback direction is the safe one here:
+every rejected value eventually lands on ``stdio``, which binds no
+socket, so a typo cannot start a listener.
 
 ## `spend`
 
@@ -5527,7 +5609,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/_cmd_paste_cleanup.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
+| `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/config.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
 | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | `src/athenaeum/provider.py` |
 | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_MAX_TOKENS` | `src/athenaeum/comparator.py`, `src/athenaeum/shadow_parity.py` |
 | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING` | `src/athenaeum/comparator.py` |
@@ -5589,7 +5671,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_TIER4_DEDUP` | `src/athenaeum/tiers.py` |
-| `ATHENAEUM_TOPIC_LLM_PROVIDER` | `src/athenaeum/query_topics.py` |
+| `ATHENAEUM_TOPIC_LLM_PROVIDER` | `src/athenaeum/_cmd_lifecycle.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MAX_TOKENS` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |

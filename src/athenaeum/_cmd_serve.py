@@ -12,12 +12,29 @@ down.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import sys
 from pathlib import Path
 
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, SERVE_TRANSPORTS
 from athenaeum.logconf import configure_logging
+
+#: Default URL path the streamable-HTTP endpoint is mounted at (issue
+#: athenaeum#2382). CLI-only, deliberately: ``--transport``/``--host``/
+#: ``--port`` each resolve CLI > env > yaml because an operator plausibly
+#: pins them per deployment, whereas the mount path is a property of the
+#: client registration and has no yaml key or env var in this issue's scope.
+DEFAULT_SERVE_PATH_PREFIX = "/mcp"
+
+#: The ``athenaeum.yaml`` setting an operator must supply before athenaeum
+#: will bind anything other than a loopback address (issue athenaeum#2382).
+#: NOTHING in this module reads it yet: the OAuth 2.1 resource-server
+#: settings are the auth child's (athenaeum#2384) to add, and until they
+#: exist the refusal below is unconditional for a non-loopback address. The
+#: name is named here anyway so the refusal tells the operator what is
+#: missing rather than only what is forbidden.
+AUTH_ISSUER_SETTING = "serve.auth.issuer"
 
 
 def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -98,6 +115,48 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "so recall could serve a stale/empty index when the compiler wrote "
         "elsewhere.",
     )
+    serve_parser.add_argument(
+        "--transport",
+        choices=SERVE_TRANSPORTS,
+        default=None,
+        help="MCP transport (default: stdio). 'stdio' speaks MCP over this "
+        "process's own stdin/stdout and binds no socket -- the historical, "
+        "unchanged behaviour. 'http' serves FastMCP's streamable HTTP "
+        "transport on --host/--port under --path-prefix. HTTP is opt-in "
+        "because it binds a listening socket, and while no auth issuer is "
+        "configured it refuses any non-loopback --host before binding. "
+        "Overrides ATHENAEUM_SERVE_TRANSPORT and serve.transport in "
+        "athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Bind address for --transport http (default: 127.0.0.1). While "
+        "no auth issuer is configured only a loopback address literal is "
+        "accepted: any 127.0.0.0/8 address, the IPv6 loopback [::1] (brackets "
+        "optional), or an IPv4-mapped IPv6 loopback. Every other address, and "
+        "every hostname (names are never resolved), is refused with a "
+        "non-zero exit before anything binds. Ignored under stdio. Overrides "
+        "ATHENAEUM_SERVE_HOST and serve.host in athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="TCP port for --transport http (default: 8000, FastMCP's own "
+        "default). Ignored under stdio. Overrides ATHENAEUM_SERVE_PORT and "
+        "serve.port in athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--path-prefix",
+        type=str,
+        default=DEFAULT_SERVE_PATH_PREFIX,
+        help="URL path the streamable HTTP endpoint is mounted at (default: "
+        "/mcp). Ignored under stdio. CLI-only: unlike --transport, --host and "
+        "--port this knob has no environment variable and no athenaeum.yaml "
+        "key.",
+    )
     serve_parser.set_defaults(func=cmd_serve)
 
 
@@ -120,6 +179,100 @@ def _resolve_serve_roots(target: Path) -> tuple[Path, Path]:
     return raw_root, wiki_root
 
 
+def _parse_bind_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse *host* as an IP address literal, or ``None`` if it is not one.
+
+    Accepts the bracketed IPv6 form (``[::1]``) a URL or a copy-pasted
+    endpoint carries, since that is what an operator reads off a client
+    configuration. A name is NEVER resolved: resolution would make the
+    loopback decision depend on ``/etc/hosts``, DNS and search domains, so a
+    hostname that resolves to ``127.0.0.1`` today could resolve elsewhere
+    tomorrow with no change to athenaeum's configuration. Anything that is
+    not an address literal returns ``None`` and is therefore not loopback --
+    which is also what makes a name that merely LOOKS loopback
+    (``127.0.0.1.example.invalid``) and a non-literal numeric form
+    (``0177.0.0.1``, which the dotted-octal reading would make loopback)
+    refusals rather than accidental allowances.
+    """
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        return ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+
+
+def _is_loopback_bind_address(host: str) -> bool:
+    """True only for an address literal that is definitely loopback.
+
+    A positive allowlist, deliberately -- the question asked is "is this one
+    of the addresses we permit", never "does this look dangerous". The three
+    accepted shapes are IPv4 loopback (``127.0.0.0/8``), IPv6 loopback
+    (``::1``, bare or bracketed) and an IPv4-MAPPED IPv6 loopback
+    (``::ffff:127.0.0.1``). The last needs its own branch:
+    ``IPv6Address.is_loopback`` is ``True`` only for ``::1`` itself, so
+    ``::ffff:127.0.0.1`` -- which binds the IPv4 loopback interface -- would
+    otherwise be refused as if it were routable. Every other input,
+    ``0.0.0.0`` and ``::`` included, is False.
+    """
+    address = _parse_bind_address(host)
+    if address is None:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback
+    return address.is_loopback
+
+
+def _normalized_bind_host(host: str) -> str:
+    """The form of *host* the socket layer can actually bind.
+
+    :func:`_parse_bind_address` deliberately accepts the BRACKETED IPv6
+    literal, because that is the shape an operator copies out of a URL or a
+    client configuration -- but ``[::1]`` is a URL authority, not an address:
+    ``getaddrinfo`` rejects it, so passing it through would turn an accepted
+    host into an ugly bind failure. Normalising through the parsed literal
+    hands ``::1`` to uvicorn instead. A value that does not parse is returned
+    trimmed and unchanged; that path is unreachable while the loopback guard
+    holds, and guessing at a non-literal is not this function's business.
+    """
+    address = _parse_bind_address(host)
+    return str(address) if address is not None else host.strip()
+
+
+def _non_loopback_bind_refusal(host: str) -> str | None:
+    """The refusal message for binding *host*, or ``None`` if it may be bound.
+
+    This is the security property ``--transport http`` exists behind: an
+    unauthenticated streamable-HTTP endpoint on a routable address publishes
+    the whole knowledge store to whoever can reach it. The refusal is
+    evaluated BEFORE ``server.run`` is called, so a refused invocation never
+    opens a listening socket, and it names the missing setting
+    (:data:`AUTH_ISSUER_SETTING`) rather than only reporting that the address
+    is not allowed. Once that setting exists (athenaeum#2384) the auth child
+    lifts the refusal for a configured issuer; until then it holds for every
+    non-loopback address.
+    """
+    if _is_loopback_bind_address(host):
+        return None
+    message = (
+        f"[transport] refusing to bind {host!r}: with no auth issuer configured, "
+        f"`athenaeum serve --transport http` accepts only a loopback bind address. "
+        f"Nothing was bound.\n"
+        f"       Set `{AUTH_ISSUER_SETTING}` in athenaeum.yaml to serve a "
+        f"non-loopback address, or bind a loopback one: 127.0.0.0/8 "
+        f"(e.g. 127.0.0.1), ::1 or [::1], or an IPv4-mapped loopback such as "
+        f"::ffff:127.0.0.1."
+    )
+    if _parse_bind_address(host) is None:
+        message += (
+            f"\n       {host!r} is not an IP address literal: the bind address is "
+            f"matched against a loopback allowlist and no name is ever resolved, "
+            f"so even `localhost` is refused -- pass 127.0.0.1 or ::1 instead."
+        )
+    return message
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
@@ -128,8 +281,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_extra_intake_roots,
         resolve_screening,
         resolve_serve_excluded_fields,
+        resolve_serve_host,
+        resolve_serve_port,
         resolve_serve_profile,
         resolve_serve_tools,
+        resolve_serve_transport,
     )
     from athenaeum.mcp_server import create_server
     from athenaeum.remote_policy import RemotePolicyError, build_remote_policy
@@ -149,6 +305,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(target)
+
+    # Issue athenaeum#2382: resolve the transport (CLI > env > yaml) and, for
+    # the HTTP transport, settle the bind address BEFORE any other work --
+    # earliest possible failure, and in particular before `server.run` could
+    # open a listening socket.
+    transport = resolve_serve_transport(cfg, getattr(args, "transport", None))
+    serve_host = resolve_serve_host(cfg, getattr(args, "host", None))
+    serve_port = resolve_serve_port(cfg, getattr(args, "port", None))
+    path_prefix = getattr(args, "path_prefix", DEFAULT_SERVE_PATH_PREFIX)
+    if transport == "http":
+        refusal = _non_loopback_bind_refusal(serve_host)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return 1
+        serve_host = _normalized_bind_host(serve_host)
+
     backend = cfg.get("search_backend", "fts5")
     # Issue athenaeum#521 (H9): route serve's cache dir through the shared resolver so
     # ATHENAEUM_CACHE_DIR (and --cache-dir) are honoured — previously hardcoded,
@@ -244,7 +416,26 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)
         return 1
     try:
-        server.run()
+        if transport == "http":
+            # A bare IPv6 literal needs bracketing to be a valid URL
+            # authority, and this line is what an operator copies into a
+            # client's server configuration.
+            authority = f"[{serve_host}]" if ":" in serve_host else serve_host
+            print(
+                f"[transport] streamable HTTP on "
+                f"http://{authority}:{serve_port}{path_prefix}",
+                file=sys.stderr,
+            )
+            server.run(
+                transport="http",
+                host=serve_host,
+                port=serve_port,
+                path=path_prefix,
+            )
+        else:
+            # stdio stays byte-identical to the pre-athenaeum#2382 call: no
+            # transport argument, no host/port, nothing bound.
+            server.run()
     except KeyboardInterrupt:
         pass
     return 0
