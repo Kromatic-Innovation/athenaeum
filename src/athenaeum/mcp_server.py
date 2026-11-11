@@ -3132,7 +3132,7 @@ def create_server(
     screening: dict | None = None,
     remote_policy: RemotePolicy | None = None,
     serve_auth: ServeAuth | None = None,
-    jwks_transport: Any | None = None,
+    jwks_http_client: Any | None = None,
     config: dict | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
@@ -3239,10 +3239,12 @@ def create_server(
             Pinned HERE, not as a tool parameter: no tool's input schema
             gains anything
             (``tests/test_mcp_oauth_resource_server.py`` asserts that).
-        jwks_transport: Optional transport for the issuer's key-set fetch,
-            passed through to :func:`athenaeum.mcp_auth.build_auth_provider`.
-            The test seam for an in-process fake issuer with no socket open;
-            production passes nothing. Inert unless *serve_auth* is set.
+        jwks_http_client: Optional pre-built async HTTP client for the
+            issuer's key-set fetch, passed through to
+            :func:`athenaeum.mcp_auth.build_auth_provider`. The test seam for
+            an in-process fake issuer with no socket open; production passes
+            nothing and FastMCP opens its own. Inert unless *serve_auth* is
+            set.
         config: Resolved ``athenaeum.yaml`` config (issue athenaeum#532), threaded to
             ``recall`` so the storage-adapter ``recallable`` corpus policy is
             honored at query time — a class routed to a ``recallable: false``
@@ -3329,7 +3331,9 @@ def create_server(
     if serve_auth is not None:
         from athenaeum.mcp_auth import build_auth_provider
 
-        _auth_provider = build_auth_provider(serve_auth, jwks_transport=jwks_transport)
+        _auth_provider = build_auth_provider(
+            serve_auth, jwks_http_client=jwks_http_client
+        )
 
     mcp = FastMCP(
         "athenaeum",

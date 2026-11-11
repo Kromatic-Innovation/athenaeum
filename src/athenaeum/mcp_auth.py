@@ -129,7 +129,7 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
 def build_auth_provider(
     serve_auth: ServeAuth,
     *,
-    jwks_transport: Any | None = None,
+    jwks_http_client: Any | None = None,
 ) -> RemoteAuthProvider:
     """Build the resource-server auth provider for *serve_auth*.
 
@@ -152,30 +152,28 @@ def build_auth_provider(
     Args:
         serve_auth: The resolved pins. Never ``None`` — a caller with no auth
             configured must not build a provider at all.
-        jwks_transport: Optional transport for the JWKS fetch, for an
-            in-process issuer. This is the seam
-            ``tests/test_mcp_oauth_resource_server.py`` uses to serve a key
-            set from an ASGI app with no socket open; production passes
-            nothing and FastMCP opens its own client. It is an operator-side
-            argument on an operator-side object, so — like every other
-            serve-time pin — there is nothing a remote caller can pass here.
+        jwks_http_client: Optional pre-built async HTTP client for the JWKS
+            fetch — FastMCP's ``JWTVerifier`` takes one directly, and this
+            passes it straight through. Production passes nothing and FastMCP
+            opens its own client per fetch; the test suite passes a client
+            bound to an in-process ASGI app, which is how
+            ``tests/test_mcp_oauth_resource_server.py`` serves a key set with
+            no socket open. The CLIENT rather than a transport, deliberately:
+            constructing one here would mean importing FastMCP's HTTP library
+            into ``src/``, i.e. declaring a runtime dependency athenaeum does
+            not otherwise have, for a seam only tests use. The caller owns the
+            client's lifecycle — FastMCP does not close a client it was
+            handed. It is an operator-side argument on an operator-side
+            object, so — like every other serve-time pin — there is nothing a
+            remote caller can pass here.
     """
-    http_client = None
-    if jwks_transport is not None:
-        import httpx2
-
-        http_client = httpx2.AsyncClient(
-            transport=jwks_transport,
-            timeout=httpx2.Timeout(10.0),
-        )
-
     verifier = _IdentityAllowlistVerifier(
         serve_auth,
         jwks_uri=serve_auth.jwks_uri,
         issuer=serve_auth.issuer,
         audience=serve_auth.resource,
         algorithm=SIGNING_ALGORITHM,
-        http_client=http_client,
+        http_client=jwks_http_client,
     )
     return _PinnedResourceAuthProvider(
         serve_auth.resource,

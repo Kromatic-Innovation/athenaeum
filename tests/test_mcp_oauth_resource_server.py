@@ -27,7 +27,7 @@ One class per acceptance criterion:
 
 **No network, anywhere.** The fake issuer's key set is served by an in-process
 ASGI callable over ``httpx2.ASGITransport``, handed to FastMCP's ``JWTVerifier``
-as its HTTP client (``create_server(jwks_transport=...)``); the MCP client
+as its HTTP client (``create_server(jwks_http_client=...)``); the MCP client
 talks to ``create_server``'s own ``http_app`` over ``httpx2.ASGITransport``
 too. Nothing opens a socket, so the suite is safe under ``-n auto`` with no
 port allocation. :meth:`_FakeIssuer.fetches` is the positive control that the
@@ -152,11 +152,21 @@ class _FakeIssuer:
         )
         await send({"type": "http.response.body", "body": body})
 
-    @property
-    def transport(self) -> Any:
+    def http_client(self) -> Any:
+        """A fresh client bound to this issuer's key-set app, no socket.
+
+        A client rather than a transport because that is what FastMCP's
+        ``JWTVerifier`` takes, and building one inside ``src/`` would mean
+        declaring its HTTP library as an athenaeum runtime dependency for a
+        seam only this file uses. FastMCP does not close a client it was
+        handed, so a fresh one per server is correct and cheap.
+        """
         import httpx2
 
-        return httpx2.ASGITransport(app=self._app)
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=self._app),
+            timeout=httpx2.Timeout(10.0),
+        )
 
     def mint(self, *, signer: Any = None, kid: str = SIGNING_KID, **claims: Any) -> str:
         """A signed JWT. *claims* overrides and extends the valid baseline."""
@@ -259,7 +269,7 @@ def _build_app(corpus: Path, issuer: _FakeIssuer, serve_auth: Any, **kwargs: Any
         wiki_root=corpus / "wiki",
         cache_dir=corpus.parent / "cache",
         serve_auth=serve_auth,
-        jwks_transport=issuer.transport if serve_auth is not None else None,
+        jwks_http_client=issuer.http_client() if serve_auth is not None else None,
         **kwargs,
     )
     return server.http_app(path=MCP_PATH)
@@ -995,7 +1005,7 @@ class TestAValidTokenReachesTheToolSurface:
                 wiki_root=corpus / "wiki",
                 cache_dir=corpus.parent / "cache",
                 serve_auth=_serve_auth(),
-                jwks_transport=issuer.transport,
+                jwks_http_client=issuer.http_client(),
             )
         )
         assert plain, "sanity: the unauthenticated server registered no tools"
