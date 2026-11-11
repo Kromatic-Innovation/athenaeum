@@ -541,21 +541,21 @@ class TestLayeringAndNoCallers:
         ]
 
     def test_no_other_src_module_imports_trust_graph_yet(self) -> None:
-        """TG4/resolutions.py (the LLM-resolver rendering seam) remains
-        later work and must not import this module yet. TG3
-        (`corrections.py`, issue athenaeum#2331) wires the first real
+        """TG3 (`corrections.py`, issue athenaeum#2331) wires the first real
         caller -- seams 1 and 2, tier-0 field corrections and tier-0 list
-        removal -- so it is now expected alongside `config.py`'s existing
-        lazy, function-local import. This test's job is unchanged: catch
-        an UNEXPECTED new importer (in particular `resolutions.py`, which
-        stays out of scope until TG4), not merely count mentions."""
+        removal. TG4 (`resolutions.py`, issue athenaeum#2332) wires the
+        second -- seam 3, the LLM-resolver's per-pair
+        ``DOMAIN TRUST OVERRIDES`` rendering. Both are now expected
+        alongside `config.py`'s existing lazy, function-local import.
+        This test's job is unchanged: catch an UNEXPECTED new importer,
+        not merely count mentions."""
         src_dir = Path(__file__).resolve().parents[1] / "src" / "athenaeum"
         importers = sorted(
             path.name
             for path in src_dir.glob("*.py")
             if path.name != "trust_graph.py" and "trust_graph" in path.read_text()
         )
-        assert importers == ["config.py", "corrections.py"]
+        assert importers == ["config.py", "corrections.py", "resolutions.py"]
 
 
 # ---------------------------------------------------------------------------
