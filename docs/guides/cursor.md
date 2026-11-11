@@ -65,10 +65,25 @@ tool call**: Cursor decides when to call a tool, the same as any other local
 Code's passive, every-turn context injection (see [Passive recall via
 hooks](sidecar.md)) is implemented as a Claude Code `UserPromptSubmit` hook;
 Cursor has no equivalent per-turn injection point of its own, and the hook
-passthrough described below is an explicit no-op for athenaeum today. A
-future deliberate "context snapshot" or "instructed recall" step — run on
-request rather than injected on every turn — is the only shape anything
-like it could take later; nothing like that ships now.
+passthrough described below is an explicit no-op for athenaeum today. The
+closest thing Cursor supports is an always-applied rule that instructs the
+agent to call `recall` itself — see the next section.
+
+## Instructed recall (rule)
+
+A Cursor rule with `alwaysApply: true` is applied to every chat session,
+including cloud agents, so it can carry an explicit instruction to call
+`recall` and `remember` where Cursor has no auto-recall hook of its own
+([Rules](https://cursor.com/docs/context/rules)). An example rule ships at
+`examples/cursor/athenaeum.mdc` — see its
+[README](../../examples/cursor/README.md) for how to install it as a
+project or user rule.
+
+This is **instructed recall, not auto-recall**: Cursor guarantees the rule
+is loaded into every chat, but whether the agent actually calls `recall`
+before answering, or `remember` when the user states a durable fact, still
+depends on the model following the instruction. Treat it as a tier with an
+instruction, not a guarantee, until it has been measured.
 
 ## Claude Code hooks under Cursor
 

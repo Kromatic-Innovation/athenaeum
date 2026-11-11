@@ -1,0 +1,14 @@
+---
+description: Call recall before answering when context may already exist; call remember to save durable facts the user states.
+alwaysApply: true
+---
+
+Before answering, when the request concerns people, projects, prior
+decisions, or context the user expects you to already know, call the
+`recall` tool first and use what it returns.
+
+When the user states a durable fact worth keeping — a decision, a
+preference, a status — call the `remember` tool to save it.
+
+This is instructed recall: it depends on you actually following these
+instructions on every turn. It is not automatic.
