@@ -325,6 +325,15 @@ def cmd_init(args: argparse.Namespace) -> int:
             "no rules were copied.",
             file=sys.stderr,
         )
+    # Issue athenaeum#2316 ruling 1: init OFFERS the opt-in memory-compile
+    # command but never runs it — no discovery, no read, no per-run pipeline
+    # logic added here. A plain print, unconditional, so this stays exactly
+    # what init.py's factoring rule requires of this module too.
+    print(
+        "\nTip: if you have existing Claude Code memory files, "
+        "'athenaeum import-memory' can offer to compile them (opt-in; "
+        "reads nothing until you agree)."
+    )
     return 0
 
 
