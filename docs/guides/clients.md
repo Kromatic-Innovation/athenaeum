@@ -2,10 +2,12 @@
 
 # Other clients and platforms
 
-Athenaeum's MCP server (`athenaeum serve`) speaks MCP over **stdio only**, with no
-network listener and no authentication. Auto-recall (context injected on every turn
-without a tool call) exists only through Claude Code's hooks. Those two facts decide
-what works where.
+Athenaeum's MCP server (`athenaeum serve`) speaks MCP over **stdio by default** — no
+network listener, no authentication — and over **streamable HTTP** when you opt in and
+deploy it yourself behind TLS and an external OIDC provider, which is
+[Remote mode](remote.md). Auto-recall (context injected on every turn without a tool
+call) exists only through Claude Code's hooks. Those two facts decide what works
+where.
 
 | Client | Status | What you get |
 |---|---|---|
@@ -13,8 +15,8 @@ what works where.
 | Cursor | Works | All MCP tools by explicit call; see [Cursor guide](cursor.md) |
 | Claude Desktop, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
 | Grok Build | Works | All MCP tools by explicit call, no auto-recall — see [I want to use Grok Build](#i-want-to-use-grok-build) |
-| ChatGPT | Not supported | — (needs a remote HTTPS MCP server) |
-| Grok apps (grok.com, iOS, Android) | Not supported | — (needs remote mode) |
+| ChatGPT | Needs remote mode | All MCP tools by explicit call, no auto-recall — once you deploy [Remote mode](remote.md) |
+| Grok apps (grok.com, iOS, Android) | Needs remote mode | All MCP tools by explicit call, no auto-recall — once you deploy [Remote mode](remote.md) |
 | xAI API | Not supported | — (out of scope) |
 | OpenAI Codex | Static snapshot | A periodically refreshed context file — see [Codex context file](codex.md) |
 
@@ -108,20 +110,28 @@ gets Tier-1 auto-recall), see the
 
 ## I want to use ChatGPT, Grok apps, or the xAI API
 
-Not supported. ChatGPT, the Grok apps (grok.com, iOS, Android), and the xAI API
-all connect only to a **remote MCP server over HTTPS**; none of them can launch
-a local process, and athenaeum has no HTTP transport and no authentication.
-(Grok Build is different — see
-[I want to use Grok Build](#i-want-to-use-grok-build) above.) Work is tracked in
-the
-[ChatGPT epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2200), the
-[Grok epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2201), and their
-shared prerequisite, the
-[remote (HTTPS) mode placeholder](https://github.com/Kromatic-Innovation/athenaeum/issues/2199).
+ChatGPT, the Grok apps (grok.com, iOS, Android), and the xAI API all connect only to
+a **remote MCP server over HTTPS**; none of them can launch a local process. (Grok
+Build is different — see [I want to use Grok Build](#i-want-to-use-grok-build)
+above.)
+
+For **ChatGPT and the Grok apps**, that server is what remote mode is: `athenaeum
+serve --transport http` running as an OAuth 2.1 resource server behind your own TLS
+proxy and your own OIDC provider. Read **[Remote mode](remote.md)** before deploying
+one — every result a remote host reads is egress to that host's provider, and most of
+the guide is about the decisions that follow from it. Host-specific connector setup is
+tracked in the
+[ChatGPT epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2200) and the
+[Grok epic](https://github.com/Kromatic-Innovation/athenaeum/issues/2201).
+
+The **xAI API** stays out of scope, for a different reason: it is a model API you
+call, not a host that registers a connector, so there is nothing to serve it to.
 
 **Do not expose `athenaeum serve` through a stdio-to-HTTP proxy and a public tunnel**
-to work around this. The server has no authentication: anyone who finds the URL can
-read and write your entire knowledge store.
+to work around any of this. That server has no authentication: anyone who finds the
+URL can read and write your entire knowledge store. Remote mode is the supported path
+precisely because it does not skip the authorization server — and with no issuer
+configured, `athenaeum serve --transport http` refuses a non-loopback bind outright.
 
 ## I want to use OpenAI Codex
 

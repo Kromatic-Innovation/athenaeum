@@ -64,7 +64,10 @@ nothing binds. See [configuration](../reference/configuration.md) and
 [the CLI reference](../reference/cli.md).
 
 **TLS is not athenaeum's concern.** Terminate HTTPS at a reverse proxy in front of the
-process; the server itself speaks plain HTTP to that proxy over loopback.
+process; the server itself speaks plain HTTP to that proxy over loopback. For the
+end-to-end deployment this implies — the proxy, the authorization server's own
+requirements, scheduling the compile on a server, logs, rotation and revocation — see
+[Remote mode](../guides/remote.md).
 
 ### What changes under `http`, and what does not
 
@@ -345,7 +348,7 @@ This is a single-owner read filter, not a multi-user ACL.
 
 ## See also
 
-- Guides — [Claude Code integration](../guides/claude-code.md) · [Sidecar](../guides/sidecar.md) · [Answering decisions](../guides/decisions.md)
+- Guides — [Claude Code integration](../guides/claude-code.md) · [Sidecar](../guides/sidecar.md) · [Answering decisions](../guides/decisions.md) · [Remote mode](../guides/remote.md)
 - Modules — [recall](recall.md) · [intake](intake.md) · [sensitivity](sensitivity.md)
 - Design — [security posture](../design/security-posture.md) · [authorized reader contract](../extending/authorized-reader-contract.md)
 - Reference — [configuration](../reference/configuration.md) · [exit codes](../reference/exit-codes.md)
