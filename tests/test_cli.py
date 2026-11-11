@@ -1773,3 +1773,83 @@ class TestCorrectionsTrustDryrun:
             "has_evidence_kind_scoped_edge": False,
             "flips": [],
         }
+
+    def test_text_rendering_with_edges_and_a_flip(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A real athenaeum.yaml (not a hand-built config dict) with two
+        edges -- one that matches and flips a verdict, one that names an
+        `evidence_kind` and can never fire at this seam -- to exercise the
+        text renderer's edge-listing, flip-listing and evidence-kind-
+        warning branches end-to-end through real argv dispatch."""
+        import yaml
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "p.md").write_text(
+            "---\n"
+            "uid: person-a\n"
+            "type: person\n"
+            "name: A\n"
+            "revenue: 100\n"
+            "source: user:self-report\n"
+            "---\n\n# A\n"
+        )
+        raw = tmp_path / "raw" / "govdb-feed"
+        raw.mkdir(parents=True)
+        envelope = {
+            "record": "batch",
+            "schema_version": 1,
+            "submitter": "govdb-feed",
+            "batch_id": "20260806T030000Z-1a2b3c4d",
+            "created_at": "2026-08-06T03:00:00Z",
+            "defaults": {
+                "op": "set",
+                "field": "revenue",
+                "source": "api:govdb",
+                "observed_at": "2026-08-06T00:00:00Z",
+            },
+        }
+        record = {"record": "correction", "target": {"uid": "person-a"}, "value": "500"}
+        import json as json_mod
+
+        (raw / "20260806T030000Z-1a2b3c4d.jsonl").write_text(
+            json_mod.dumps(envelope) + "\n" + json_mod.dumps(record) + "\n"
+        )
+        (tmp_path / "athenaeum.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "librarian": {
+                        "corrections": {
+                            "fields": {"revenue": {"shape": "scalar", "writers": ["govdb-feed"]}}
+                        },
+                        "source_trust_enabled": False,
+                        "source_trust_edges": [
+                            {
+                                "domain": {"entity_type": "person", "field": "revenue"},
+                                "over": "api:govdb",
+                                "under": "user",
+                            },
+                            {
+                                "domain": {
+                                    "entity_type": "person",
+                                    "field": "revenue",
+                                    "evidence_kind": "document",
+                                },
+                                "over": "api:govdb",
+                                "under": "user",
+                            },
+                        ],
+                    }
+                }
+            )
+        )
+        rc = main(["corrections-trust-dryrun", "--path", str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NOTE: one or more configured edges name a `domain.evidence_kind`" in out
+        assert "2 trust edge(s) configured:" in out
+        assert "edge[0]:" in out and "edge[1]:" in out
+        assert "1 verdict(s) would change:" in out
+        assert "today:      deferred-lower-precedence" in out
+        assert "if enabled: applied" in out

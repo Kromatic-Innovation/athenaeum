@@ -3719,6 +3719,80 @@ def test_value_key_treats_dates_and_iso_strings_alike() -> None:
 # ---------------------------------------------------------------------------
 
 
+class TestTrustGraphListRemovalFlip:
+    """Seam 2 (tier-0 list removal): a matching edge flips the
+    `op == "remove"` verdict exactly like it flips `decide_verdict`'s --
+    the control proving `_trust_edge_verdict`'s result is actually
+    threaded through the non-monotone branch of
+    `process_correction_record`'s own `elif op == "remove"` arm, not just
+    unreachable dead code."""
+
+    def _page(self, wiki: Path) -> Path:
+        return _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "verified_domains": ["example.com"],
+                "field_sources": {
+                    "verified_domains": [{"value": "example.com", "source": "user:conv-1"}]
+                },
+            },
+        )
+
+    def _record(self) -> dict:
+        return {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "remove",
+            "field": "verified_domains",
+            "value": "example.com",
+            "source": "api:govdb",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+
+    def test_flag_off_defers_like_today(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        cfg = _fields_config(verified_domains={"shape": "list", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=False, edges=[])
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+    def test_matching_edge_flips_to_applied(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        self._page(wiki)
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "verified_domains"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        cfg = _fields_config(verified_domains={"shape": "list", "writers": ["govdb-feed"]})
+        config = _with_trust(cfg, enabled=True, edges=edges)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "applied"
+        assert "edge[0]" in result.reason
+
+
 class TestTrustGraphFlagOffByteIdentical:
     """AC1: "with the flag off, or with no edges, decide_verdict output and
     the list-removal behaviour are byte-identical over the existing test
@@ -3825,6 +3899,45 @@ class TestTrustGraphFlagOffByteIdentical:
             config=config,
         )
         assert result.disposition == "applied"
+        assert "edge[0]" in result.reason
+
+    def test_flag_on_matching_edge_can_also_defer(self, tmp_path: Path) -> None:
+        """The OUTRANKED side of the same edge: incoming is the edge's
+        `under` selector, so it is now the DEMOTED side -- without the
+        edge, `user:` (rank 1) would trivially outrank `api:` (rank 3) and
+        apply. Exercises `_trust_edge_verdict`'s OUTRANKED branch, not just
+        OUTRANKS/INCOMPARABLE."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "revenue": "100",
+                "source": "api:govdb",
+            },
+        )
+        edges = [
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        ]
+        config = _with_trust(self._config(), enabled=True, edges=edges)
+        record = dict(self._record())
+        record["source"] = "user:self-report"
+        result = process_correction_record(
+            record,
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+        assert result.disposition == "deferred-lower-precedence"
         assert "edge[0]" in result.reason
 
 
@@ -3960,6 +4073,36 @@ class TestTrustGraphIncomparableEscalates:
         )
         assert verdict == "escalate"
         assert "edge[0]" in reason and "edge[1]" in reason
+
+
+def test_trust_edge_verdict_f5_guard_survives_a_malformed_existing_source() -> None:
+    """`_trust_edge_verdict`'s F5 guard parses `existing_source` to decide
+    whether to disable the edges (user:/witnessed: incumbent) -- it must
+    never be the first thing in this module to raise on a bad source value
+    it did not create, matching `precedence.source_rank`'s own defensive
+    handling. A malformed source can't parse to user/witnessed, so the
+    guard does not disable the edges; `compare_sources`'s own (separately
+    tested) defensive handling takes it from there -- this test's job is
+    only "does not raise", not re-deriving that result."""
+    from athenaeum.corrections import _trust_edge_verdict
+
+    edges = [
+        parse_edge(
+            {
+                "domain": {"entity_type": "person", "field": "revenue"},
+                "over": "api:govdb",
+                "under": "user",
+            }
+        )
+    ]
+    result = _trust_edge_verdict(
+        incoming_source="api:govdb",
+        existing_source=" bad",  # leading whitespace -- parse_source raises ValueError
+        trust_domain={"entity_type": "person", "field": "revenue", "evidence_kind": "unknown"},
+        trust_edges=edges,
+        incoming_is_rule_compiled=True,
+    )
+    assert result is None or result[0] in ("apply", "defer", "escalate")
 
 
 class TestTrustGraphRuleOriginGuardF5:
