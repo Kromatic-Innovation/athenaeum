@@ -135,6 +135,9 @@ does not answer.
 - [Trust graph](design/trust-graph.md) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
+- [ChatGPT host and remote mode](design/host-chatgpt.md) — proposed: ChatGPT's verified
+  connector requirements, an OAuth resource-server remote mode, what "auto-recall" can
+  honestly mean without a per-turn hook, and the open operator decisions.
 
 ## Measurements
 
