@@ -423,16 +423,22 @@ class TestCalibrationRecordLoader:
         record = pii_attribution.load_calibration_record()
         assert set(record) == set(pii_attribution.QUESTION_CLASSES)
 
-    def test_shipped_record_never_passes_yet(self) -> None:
-        """This issue ships the record with every entry `passes: false` —
-        no live eval was run from this build lane."""
+    def test_shipped_record_is_the_measured_2026_11_11_run(self) -> None:
+        """The record is the live calibration run (athenaeum#2260): every
+        entry is measured, and only names-other fails the bar."""
         record = pii_attribution.load_calibration_record()
-        for entry in record.values():
-            assert entry.passes is False
+        for question_class, entry in record.items():
+            assert entry.measured is True
+            assert entry.measured_at == "2026-11-11"
+            assert entry.passes is (question_class != "names-other")
 
-    def test_recommended_model_is_none_for_every_class(self) -> None:
+    def test_recommended_model_follows_the_measured_record(self) -> None:
         for question_class in pii_attribution.QUESTION_CLASSES:
-            assert pii_attribution.recommended_model_for_class(question_class) is None
+            model = pii_attribution.recommended_model_for_class(question_class)
+            if question_class == "names-other":
+                assert model is None
+            else:
+                assert model is not None
 
     def test_entry_from_dict_rejects_unknown_class(self) -> None:
         raw = _valid_entry_dict()

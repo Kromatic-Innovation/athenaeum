@@ -2377,7 +2377,12 @@ __all__ += [
 # ---------------------------------------------------------------------------
 
 
-def calibrated_probability(entry: CalibrationEntry, score: float) -> float:
+def calibrated_probability(
+    entry: CalibrationEntry,
+    score: float,
+    *,
+    signal: str = SIGNAL_SELF_REPORTED,
+) -> float:
     """Map a raw *score* through *entry*'s bins to a calibrated probability.
 
     Design §6.5: ``score`` is any scalar, and the calibration record maps it
@@ -2407,6 +2412,19 @@ def calibrated_probability(entry: CalibrationEntry, score: float) -> float:
     (design §8.1). It never returns a default-HIGH probability: a wrongly
     placed address is not recoverable the way a false referral to a human is.
 
+    **The score must be the kind the bins were measured on.** *signal* names
+    what the caller's *score* IS (default :data:`SIGNAL_SELF_REPORTED`, the
+    one thing the single-call escalation can supply). An entry whose own
+    ``signal`` differs -- ``agreement-k3`` bins describe the share of three
+    permuted calls that agreed, not one call's confidence -- is **not a map
+    for that score** and yields ``0.0``, so the item goes to a human
+    (design §6.5, §8.1). Without this gate a self-reported ``1.0`` read as
+    "all three calls agreed" and cleared an agreement-calibrated threshold
+    of ``1.0`` that no single call had earned (the Sentry finding on the
+    athenaeum#2260 calibration record). No caller yet supplies an
+    agreement score, so an ``agreement-k3`` class fails closed until one
+    does.
+
     :data:`SIGNAL_CLASS_LEVEL` is handled explicitly, BEFORE any bin
     arithmetic. Design §6.5 signal 3: the score is a constant, so "the
     threshold degenerates to 'this class auto-files or it does not'". A
@@ -2419,6 +2437,8 @@ def calibrated_probability(entry: CalibrationEntry, score: float) -> float:
     """
     if entry.signal == SIGNAL_CLASS_LEVEL:
         return 1.0 if entry.passes else 0.0
+    if signal != entry.signal:
+        return 0.0
     if not entry.bins:
         return 0.0
     try:
@@ -2451,7 +2471,12 @@ def _valid_calibration_entry(question_class: str) -> CalibrationEntry | None:
     return entry
 
 
-def calibrated_probability_for_class(question_class: str, score: float) -> float:
+def calibrated_probability_for_class(
+    question_class: str,
+    score: float,
+    *,
+    signal: str = SIGNAL_SELF_REPORTED,
+) -> float:
     """:func:`calibrated_probability` against the SHIPPED record's entry.
 
     ``0.0`` when *question_class* has no valid calibration entry
@@ -2461,7 +2486,7 @@ def calibrated_probability_for_class(question_class: str, score: float) -> float
     entry = _valid_calibration_entry(question_class)
     if entry is None:
         return 0.0
-    return calibrated_probability(entry, score)
+    return calibrated_probability(entry, score, signal=signal)
 
 
 def threshold_for_class(
