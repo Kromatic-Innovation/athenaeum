@@ -10,7 +10,8 @@ what works where.
 | Client | Status | What you get |
 |---|---|---|
 | Claude Code | Supported | All MCP tools **and** auto-recall via hooks — see [Passive recall via hooks](sidecar.md) |
-| Claude Desktop, Cursor, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
+| Cursor | Works | All MCP tools by explicit call; see [Cursor guide](cursor.md) |
+| Claude Desktop, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
 | Grok Build | Works | All MCP tools by explicit call, no auto-recall — see [I want to use Grok Build](#i-want-to-use-grok-build) |
 | ChatGPT | Not supported | — (needs a remote HTTPS MCP server) |
 | Grok apps (grok.com, iOS, Android) | Not supported | — (needs remote mode) |
@@ -27,7 +28,9 @@ Full support. Register the server and wire the hooks: [Install](install.md) and
 Any client that can launch a local process over stdio can run `athenaeum serve`.
 The model gets every MCP tool (`remember`, `recall`, the decision-queue tools), but
 it calls them only when it decides to — there is no per-turn auto-recall outside
-Claude Code. Support for Cursor, including auto-recall, is tracked in the
+Claude Code. **Cursor has its own guide** — see [Cursor](cursor.md) for setup, the
+Claude Code hook passthrough, and what stays unsupported. Further Cursor work is
+tracked in the
 [Cursor support issue](https://github.com/Kromatic-Innovation/athenaeum/issues/2202).
 
 1. Install with the MCP extra — see [Install](install.md#i-want-agents-to-write-and-read-memory-through-mcp)
@@ -48,9 +51,10 @@ Claude Code. Support for Cursor, including auto-recall, is tracked in the
    }
    ```
 
-   Cursor and most other stdio clients take the same `mcpServers` shape (for Cursor:
-   `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project). Use absolute paths for
-   both the binary and `--path`.
+   Most other stdio clients take the same `mcpServers` shape. **Cursor's config
+   additionally takes a `"type": "stdio"` field** (`~/.cursor/mcp.json`, or
+   `.cursor/mcp.json` in a project) — see [Cursor](cursor.md) for the full example.
+   Use absolute paths for both the binary and `--path`.
 4. Restart the client.
 
 `serve` itself needs **no API key** — it only reads and writes files. Two things
@@ -138,5 +142,5 @@ Codex reads. See [Codex context file](codex.md).
 
 ## See also
 
-- Guides — [Install](install.md) · [Passive recall via hooks](sidecar.md) · [Codex context file](codex.md) · [Troubleshooting](troubleshooting.md)
+- Guides — [Cursor](cursor.md) · [Install](install.md) · [Passive recall via hooks](sidecar.md) · [Codex context file](codex.md) · [Troubleshooting](troubleshooting.md)
 - Modules — [mcp](../modules/mcp.md) · [recall](../modules/recall.md)
