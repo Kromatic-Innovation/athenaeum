@@ -136,6 +136,9 @@ does not answer.
 - [Trust graph](design/trust-graph.md) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
+- [Grok as a host](design/host-grok.md) — Grok's three surfaces (Grok Build, the Grok
+  apps, the xAI API), what each can reach today, what "auto-recall" can honestly mean on
+  each, and the cross-host hook hazard.
 
 ## Measurements
 
