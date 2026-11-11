@@ -2619,6 +2619,16 @@ def process_one(
         )
         if ni_refusal is not None:
             result.skipped.append(f"never-ingest:{ni_refusal.class_slug}")
+            # Issue athenaeum#2363: the "NEVER deleted from disk" promise above
+            # was previously undermined downstream -- a normal return with
+            # only ``skipped`` set is exactly what the entity loop's unlink
+            # branch treats as "safe to delete". ``retain_raw`` keeps the
+            # file on disk; ``retain_raw_by_design`` tells the entity loop
+            # this retention is the permanent, by-design outcome (see
+            # ``athenaeum.never_ingest``'s module docstring) rather than a
+            # transient failure to track toward the stuck-file threshold.
+            result.retain_raw = True
+            result.retain_raw_by_design = True
             return result
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---
@@ -8902,6 +8912,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     )
 
                 if ctx.batch_mode and not ctx.dry_run and classify_client is not None:
+                    # Issue athenaeum#2363: loaded here (rather than only in the
+                    # synchronous branch's own copy below) so the batch
+                    # transport's assembly loop can refuse a never-ingest
+                    # match too -- this function's own tier-0 replica never
+                    # calls `process_one`, so without threading the manifest
+                    # through, the gate process_one enforces simply would
+                    # not exist on this transport.
+                    never_ingest_manifest = load_authority_manifest(
+                        resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
+                    )
                     # Issue athenaeum#236: phased fan-out via the Messages Batch API.
                     # The synchronous loop below is untouched when the flag
                     # is off. Issue athenaeum#337 note: `processed_count` is
@@ -8956,6 +8976,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # before it is rewritten — same hook, same closure,
                         # as the synchronous transport (process_one below).
                         audit_hook=ctx.build_audit_hook(),
+                        # Issue athenaeum#2363: same never-ingest gate the
+                        # synchronous transport's process_one call enforces
+                        # below (`never_ingest_manifest=never_ingest_manifest`).
+                        never_ingest_manifest=never_ingest_manifest,
                     )
                     ctx.total_created = outcome.created
                     ctx.total_updated = outcome.updated
@@ -9596,18 +9620,28 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # raw is skipped and surfaced as stuck until its
                             # content changes or a human intervenes.
                             log.warning("  Retained (not deleted): %s", raw.path)
-                            _crossed = _record_stuck_failure(
-                                stuck_ledger,
-                                raw,
-                                error=result.skipped[-1]
-                                if result.skipped
-                                else "structured-upsert-refused",
-                                action="tier0_structured_upsert",
-                                threshold=stuck_threshold,
-                                now=ctx.now,
-                            )
-                            if _crossed is not None:
-                                _surface_newly_stuck(ctx, raw, _crossed)
+                            # Issue athenaeum#2363: a never-ingest refusal sets
+                            # ``retain_raw_by_design`` -- it is re-evaluated
+                            # and re-refused idempotently every run (see
+                            # ``athenaeum.never_ingest``'s module docstring),
+                            # so unlike the structured-upsert refusal above it
+                            # is never "progress pending" and must NOT accrue
+                            # toward the stuck-file threshold/backoff: every
+                            # never-ingest file would otherwise inevitably
+                            # cross it purely by being what it is.
+                            if not getattr(result, "retain_raw_by_design", False):
+                                _crossed = _record_stuck_failure(
+                                    stuck_ledger,
+                                    raw,
+                                    error=result.skipped[-1]
+                                    if result.skipped
+                                    else "structured-upsert-refused",
+                                    action="tier0_structured_upsert",
+                                    threshold=stuck_threshold,
+                                    now=ctx.now,
+                                )
+                                if _crossed is not None:
+                                    _surface_newly_stuck(ctx, raw, _crossed)
                         elif not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)

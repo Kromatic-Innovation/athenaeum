@@ -3303,6 +3303,19 @@ class ProcessingResult:
     #: ``process_one`` returned normally, so without this flag a refusal would
     #: silently destroy the only copy of the update.
     retain_raw: bool = False
+    #: True when ``retain_raw``'s refusal is BY DESIGN and expected on every
+    #: run, rather than a failure accruing toward recovery (issue
+    #: athenaeum#2363). The structured-upsert refusal above is a transient
+    #: failure the athenaeum#663 stuck-file ledger / athenaeum#1185 backoff
+    #: should track toward its threshold -- it is expected to clear once the
+    #: target page's conflict is resolved. A never-ingest match
+    #: (:mod:`athenaeum.never_ingest`) is different: its own module docstring
+    #: documents the gate as re-evaluated and re-refused idempotently every
+    #: run, so retaining it is never "progress pending" -- it is the
+    #: permanent, correct outcome. Without this flag, every never-ingest
+    #: file would inevitably cross the stuck threshold purely by being what
+    #: it is. Ignored when ``retain_raw`` is False.
+    retain_raw_by_design: bool = False
     #: Count of Tier-2 classification responses that dropped ALL entities
     #: because no parseable JSON array could be recovered (issue athenaeum#472). Almost
     #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.

@@ -81,6 +81,7 @@ import anthropic
 from athenaeum import batch_state, spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.authority import AuthorityManifest
 from athenaeum.compile_routing import (
     CompileRouteRecord,
     classify_route,
@@ -102,6 +103,7 @@ from athenaeum.models import (
     render_frontmatter,
     resolve_page_type,
 )
+from athenaeum.never_ingest import NEVER_INGEST_TIER_ENTITY, check_and_refuse
 from athenaeum.pii_attribution import build_attribution_context
 from athenaeum.provider import (
     AnthropicBatchClientBackend,
@@ -1196,6 +1198,7 @@ def process_batch_run(
     batch_classify: bool = True,
     batch_write: bool = True,
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
+    never_ingest_manifest: AuthorityManifest | None = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -1271,6 +1274,17 @@ def process_batch_run(
     what :func:`collect_pending_batches` uses, so a collected batch is applied
     by THIS function rather than by a second write path. When *resume* is
     supplied, *raw_files* is not read: the states come from the handle.
+
+    Issue athenaeum#2363: *never_ingest_manifest* threads in the same
+    :mod:`athenaeum.never_ingest` gate :func:`athenaeum.librarian.process_one`
+    checks for the synchronous transport. This function does not call
+    ``process_one`` (it replicates the tier-0 steps inline, same as the
+    ``tier0_structured_upsert`` call just below), so without this parameter
+    a never-ingest-matched raw would reach Tier 2/3 classification
+    unrefused on the batch transport and then be unlinked at finalize —
+    both transports must refuse and retain the same files identically.
+    ``None`` (every pre-athenaeum#2363 caller) is a complete no-op, matching
+    :func:`athenaeum.librarian.process_one`'s own default.
     """
     effective_write_client = write_client if write_client is not None else client
     effective_cache_dir = (
@@ -1317,6 +1331,37 @@ def process_batch_run(
         states.append(st)
         log.info("Processing (batch): %s", raw.ref)
         try:
+            # Issue athenaeum#2363: the never-ingest class gate, entity tier --
+            # mirrors athenaeum.librarian.process_one's own check (the only
+            # other entity-tier call site of check_and_refuse) so the batch
+            # transport refuses the same files the synchronous transport
+            # does, before Tier 0 passthrough or any LLM tier sees the raw.
+            # A no-op unless a manifest was threaded in AND it declares at
+            # least one never_ingest_classes entry -- dark by default,
+            # identical contract to process_one's own check. A refused file
+            # is excluded from this run and left on disk -- never deleted
+            # (see athenaeum.never_ingest's module docstring).
+            if (
+                never_ingest_manifest is not None
+                and never_ingest_manifest.never_ingest_classes
+            ):
+                _ni_meta, _ni_body = parse_frontmatter(raw.content)
+                ni_refusal = check_and_refuse(
+                    _ni_meta,
+                    _ni_body,
+                    manifest=never_ingest_manifest,
+                    origin_scope=raw.source,
+                    filename=raw.path.name,
+                    tier=NEVER_INGEST_TIER_ENTITY,
+                    cache_dir=effective_cache_dir,
+                    dry_run=False,
+                )
+                if ni_refusal is not None:
+                    st.skipped.append(f"never-ingest:{ni_refusal.class_slug}")
+                    st.retain_raw = True
+                    st.done = True
+                    continue
+
             passthrough = tier0_passthrough(raw, index, wiki_root, valid_types)
             if passthrough is not None:
                 log.info(
