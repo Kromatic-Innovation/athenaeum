@@ -203,6 +203,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_contact_surface_lint",
         "add_contact_surface_lint_subparser",
     ),
+    "import-memory": (
+        "athenaeum._cmd_import_memory",
+        "add_import_memory_subparser",
+    ),
 }
 
 
@@ -238,6 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_explain_routing import add_explain_routing_subparser
     from athenaeum._cmd_fold_lint import add_fold_lint_subparser
+    from athenaeum._cmd_import_memory import add_import_memory_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
@@ -350,6 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_attribution_subparser(subparsers)
     # contact-surface-lint (issue athenaeum#2218)
     add_contact_surface_lint_subparser(subparsers)
+    # import-memory (issue athenaeum#2316)
+    add_import_memory_subparser(subparsers)
 
     return parser
 
