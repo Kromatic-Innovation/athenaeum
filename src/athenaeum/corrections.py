@@ -1093,19 +1093,36 @@ def _claim_attestation(
     like back when the receipt was written. On a store with no ledger
     (AC5, today's host state) no claim ever carries a `witness_ref`, so
     this returns `trust_graph.NO_ATTESTATION` with zero I/O.
+
+    Demotes to `chain_intact=False` (never trusts `chain_intact_through`
+    at all) when the loaded index has no live ledger
+    (`ledger_present` is `False`) or when the `ledger_id` named in
+    `witness_ref` doesn't match this index's own ledger (Seer finding on
+    PR athenaeum#2410): `chain_intact_through` answers "is THIS chain
+    unbroken through seq N" with no notion of WHICH ledger `seq` came
+    from, so an absent ledger (`first_break_seq` vacuously `None`) or a
+    `seq` that collides with a foreign ledger's own numbering must never
+    read as "verified" — that would let an unverifiable receipt's stored
+    strength decide a tie-break, exactly the promotion-in-disguise AC1
+    forbids.
     """
     witness_ref = meta.get("witness_ref")
     if not isinstance(witness_ref, str) or not witness_ref or meta.get("source") != source:
         return attestation_for(None)
     try:
-        seq = int(witness_ref.rsplit(":", 1)[1])
+        ref_ledger_id, seq_text = witness_ref.rsplit(":", 1)
+        seq = int(seq_text)
     except (IndexError, ValueError):
         return attestation_for(None)
     receipt = _lookup_receipt_by_witness_ref(wiki_root, witness_ref)
     if receipt is None:
         return attestation_for(None)
     attestation_index = AttestationIndex.load(resolve_default_witness_dir(), config=config)
-    chain_intact = attestation_index.chain_intact_through(seq)
+    chain_intact = (
+        attestation_index.ledger_present
+        and attestation_index.ledger_id == ref_ledger_id
+        and attestation_index.chain_intact_through(seq)
+    )
     return attestation_for(
         {
             "witness_ref": witness_ref,

@@ -4923,6 +4923,109 @@ class TestAttestationEndToEnd:
         assert result.disposition == "deferred-lower-precedence"
         assert result.reason == "incoming rank 3 outranked by existing rank 1"
 
+    def test_witness_ref_with_no_live_ledger_is_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2410 (issue athenaeum#2334): a claim
+        carries a `witness_ref` and a receipt exists for it (an orphaned
+        receipt from a ledger that was later deleted, or never enabled on
+        this host after the claim was written), but the LOCAL ledger
+        directory has no partitions at all. `chain_intact_through` is
+        vacuously `True` on an absent ledger (nothing to find a break in) --
+        that vacuous truth must never be read as "verified". AC1/AC5: this
+        must stay byte-identical to the flag-off / unwitnessed path, exactly
+        like the broken-chain and unverified-strength cases above."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "no-such-ledger-dir"))
+        witness_ref = "pw-0000000000000000:1"
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+        assert "attestation" not in result.reason
+
+    def test_witness_ref_naming_a_foreign_ledger_is_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2410 (issue athenaeum#2334): the
+        LOCAL ledger is present with its own fully intact chain, but the
+        claim's `witness_ref` names a DIFFERENT ledger_id entirely (a store
+        migrated from elsewhere, or a receipt copied in from another host).
+        `chain_intact_through` has no notion of which ledger its `seq`
+        argument came from, so a `seq` that merely collides with the local
+        ledger's own numbering must not be trusted as verifying a chain it
+        never actually named. AC1: unverified attestation has no effect on
+        any comparison."""
+        local_witness_dir = tmp_path / "witness-local"
+        _append_witness_line(local_witness_dir)  # local ledger: present, intact
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(local_witness_dir))
+
+        foreign_witness_dir = tmp_path / "witness-foreign"
+        foreign_line = _append_witness_line(foreign_witness_dir)
+        witness_ref = f"{foreign_line.ledger_id}:{foreign_line.seq}"
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+        assert "attestation" not in result.reason
+
     def test_nothing_persisted_when_attestation_decides_the_verdict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
