@@ -9,6 +9,7 @@ import json
 import subprocess
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -39,7 +40,8 @@ from athenaeum.corrections import (
 )
 from athenaeum.models import EntityIndex, parse_frontmatter
 from athenaeum.rules import CorrectionSpec, build_correction_record
-from athenaeum.trust_graph import TrustGraphConfigError, parse_edge
+from athenaeum.transcript_receipts import ReceiptEntry, ledger_dir
+from athenaeum.trust_graph import NO_ATTESTATION, AttestedClaim, TrustGraphConfigError, parse_edge
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -4531,3 +4533,558 @@ class TestTrustDryRunReport:
         )
         assert report.has_evidence_kind_scoped_edge is True
         assert report.flips == ()
+
+
+# ---------------------------------------------------------------------------
+# TG6 (issue athenaeum#2334): attestation tie-break and demote-on-broken-
+# chain, wired into the tier-0 seam TG3 established. Two layers:
+#
+# - `TestDecideVerdictAttestation*`: `decide_verdict` directly, with a
+#   caller-supplied `attestation=(incoming, existing)` pair -- no ledger,
+#   no receipt, proving the tie-break's PLACEMENT (before observed_at,
+#   never overriding rank) in isolation.
+# - `TestAttestationEndToEnd`: through `process_correction_record` against
+#   a real fixture witness ledger + receipt, proving the actual join
+#   (`corrections._claim_attestation`) and the demotion re-check are wired,
+#   not just the pure decide_verdict plumbing.
+# ---------------------------------------------------------------------------
+
+
+class TestDecideVerdictAttestationPlacement:
+    """`attestation` is consulted ONLY in the `incoming_rank ==
+    existing_rank` branch, and BEFORE the `observed_at` tie-break
+    (operator ruling OQ1)."""
+
+    def _kwargs(self, **overrides) -> dict:
+        base = dict(
+            existing_source="api:apollo",
+            incoming_source="api:enrichment-vendor",
+            existing_value="CTO",
+            incoming_value="VP Engineering",
+            observed_at="2026-08-06",
+            monotone=False,
+            op="set",
+            existing_updated="2026-08-01",
+        )
+        base.update(overrides)
+        return base
+
+    def test_attestation_omitted_is_byte_identical_to_pre_tg6(self) -> None:
+        """AC1/AC5: every pre-existing caller omits `attestation` --
+        `None` must reproduce exactly today's observed_at tie-break."""
+        verdict, reason = decide_verdict(**self._kwargs())
+        assert verdict == "apply"
+        assert "newer" in reason
+
+    def test_incoming_attestation_outranks_wins_even_though_observed_at_would_say_otherwise(
+        self,
+    ) -> None:
+        """Places attestation strictly BEFORE observed_at: incoming is
+        OLDER (would defer on dates alone) but more strongly attested."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                observed_at="2026-08-01",
+                existing_updated="2026-08-06",
+                attestation=(
+                    AttestedClaim(effective_strength="hardware-nonexportable"),
+                    NO_ATTESTATION,
+                ),
+            )
+        )
+        assert verdict == "apply"
+        assert "attestation tie-break" in reason
+
+    def test_existing_attestation_outranks_defers_even_though_observed_at_would_say_otherwise(
+        self,
+    ) -> None:
+        """Mirror of the above: existing is NEWER (would also defer on
+        dates alone, so this alone wouldn't distinguish the two code
+        paths) -- made unambiguous by starting from a date pair that
+        favors INCOMING, so only the attestation tie-break can produce
+        "defer" here."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                observed_at="2026-08-06",
+                existing_updated="2026-08-01",
+                attestation=(
+                    NO_ATTESTATION,
+                    AttestedClaim(effective_strength="hardware-presence"),
+                ),
+            )
+        )
+        assert verdict == "defer"
+        assert "attestation tie-break" in reason
+
+    def test_equal_attestation_falls_through_to_observed_at(self) -> None:
+        """AC1: neither side attested (the common case) -- behaves exactly
+        as if `attestation` were omitted."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                observed_at="2026-08-06",
+                existing_updated="2026-08-01",
+                attestation=(NO_ATTESTATION, NO_ATTESTATION),
+            )
+        )
+        assert verdict == "apply"
+        assert "newer" in reason
+        assert "attestation" not in reason
+
+    def test_attestation_never_consulted_for_a_rank_difference(self) -> None:
+        """AC3: a strongly attested LOWER-ranked claim must not win. Here
+        incoming (`api:govdb`, rank 3) carries the strongest possible
+        attestation and existing (`user:`, rank 1) carries none at all --
+        existing still wins outright, because this branch is never
+        reached once a rank difference has already decided the verdict."""
+        verdict, reason = decide_verdict(
+            existing_source="user:self-report",
+            incoming_source="api:govdb",
+            existing_value="100",
+            incoming_value="999999",
+            observed_at="2026-08-06",
+            monotone=False,
+            op="set",
+            existing_updated="2020-01-01",
+            attestation=(
+                AttestedClaim(effective_strength="hardware-presence"),
+                NO_ATTESTATION,
+            ),
+        )
+        assert verdict == "defer"
+        assert "rank" in reason
+        assert "attestation" not in reason
+
+    def test_attestation_never_consulted_for_a_monotone_op(self) -> None:
+        """F9 (shared with the edge layer): attestation is an edge-
+        adjacent override and must never grant monotone unset either."""
+        verdict, reason = decide_verdict(
+            existing_source="api:govdb",
+            incoming_source="api:govdb",
+            existing_value=True,
+            incoming_value=None,
+            observed_at="2026-08-06",
+            monotone=True,
+            op="set",
+            existing_updated="2026-08-01",
+            attestation=(
+                AttestedClaim(effective_strength="hardware-presence"),
+                NO_ATTESTATION,
+            ),
+        )
+        assert verdict == "defer"
+        assert "monotone" in reason
+
+
+def _append_witness_line(d: Path, **overrides: object) -> Any:
+    from promptwitness import canon, ledger
+
+    defaults: dict[str, object] = {
+        "kind": "turn",
+        "harness": "claude-code",
+        "harness_version": "1.0.0",
+        "hook_version": "promptwitness 0.1.0",
+        "session": "s1",
+        "turn": 1,
+        "prompt_id": "p1",
+        "prompt_kind": "human",
+        "prompt_digest": canon.digest(canon.normalize("hello")),
+        "raw_digest": canon.digest("hello"),
+        "prompt_chars": 5,
+        "channel": "interactive",
+        "resumed": False,
+        "signals": {"entrypoint": "cli"},
+    }
+    defaults.update(overrides)
+    return ledger.append_line(d, **defaults)  # type: ignore[arg-type]
+
+
+def _tamper_witness_line(d: Path, position: int) -> None:
+    """Edits line *position*'s content in place -- the same technique
+    `tests/test_witness_attestation.py::_edit_content`/`_rewrite` use --
+    which surfaces as a chain break at `position + 1` (a content edit to
+    line N breaks the chain AT N+1, never at N itself)."""
+    from promptwitness import canon, ledger
+
+    names = ledger.list_partitions(d)
+    assert len(names) == 1
+    partition = d / names[0]
+    lines = [ln for ln in partition.read_bytes().split(b"\n") if ln.strip()]
+    objs = [json.loads(ln) for ln in lines]
+    objs[position]["prompt_chars"] = 999999
+    partition.write_bytes(b"".join(canon.canonical_json(o) + b"\n" for o in objs))
+
+
+def _write_receipt(wiki: Path, **overrides: object) -> ReceiptEntry:
+    defaults: dict[str, object] = dict(
+        origin_scope="wiki",
+        memory_digest="unused-for-this-join",
+        channel="witnessed",
+        recorded_at="2026-08-01T00:00:00Z",
+        witness_tag="typed",
+    )
+    defaults.update(overrides)
+    entry = ReceiptEntry(**defaults)  # type: ignore[arg-type]
+    d = ledger_dir(wiki)
+    d.mkdir(parents=True, exist_ok=True)
+    month = entry.recorded_at[:7]
+    path = d / f"{month}.jsonl"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry.to_dict()) + "\n")
+    return entry
+
+
+class TestAttestationEndToEnd:
+    """The real join (`corrections._claim_attestation`), through
+    `process_correction_record` against a fixture witness ledger +
+    receipt -- not just `decide_verdict`'s own plumbing."""
+
+    def _config(self) -> dict:
+        cfg = _fields_config(payout_amount={"shape": "scalar", "writers": ["govdb-feed"]})
+        return _with_trust(cfg, enabled=True, edges=[])
+
+    def _record(self, **overrides: object) -> dict:
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "set",
+            "field": "payout_amount",
+            "value": "999",
+            "source": "witnessed:s1#turn1",
+            "observed_at": "2026-08-01T00:00:00Z",
+        }
+        record.update(overrides)
+        return record
+
+    def test_verified_anchored_intact_attestation_beats_a_newer_incoming_date(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC (OQ1 tie-break): the EXISTING claim is `witnessed:`, strongly
+        attested, chain-intact -- it wins the tie against an incoming
+        claim of the SAME rank with a NEWER `observed_at`, which the
+        pre-TG6 observed_at tie-break alone would have applied."""
+        witness_dir = tmp_path / "witness"
+        line = _append_witness_line(witness_dir)
+        witness_ref = f"{line.ledger_id}:{line.seq}"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert "attestation tie-break" in result.reason
+
+    def test_unverified_attestation_has_no_effect_observed_at_decides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: the SAME setup, but the receipt's strength is `"none"`
+        (unverified) -- the newer incoming date wins exactly as it would
+        with the flag off."""
+        witness_dir = tmp_path / "witness"
+        line = _append_witness_line(witness_dir)
+        witness_ref = f"{line.ledger_id}:{line.seq}"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="none",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+
+    def test_broken_chain_demotes_exactly_like_unverified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: same strong receipt as the first test, but the ledger's
+        chain has since broken -- the demotion must be re-derived FRESH at
+        decision time (failure class F6), not read off whatever the
+        receipt said when it was written."""
+        witness_dir = tmp_path / "witness"
+        line0 = _append_witness_line(witness_dir, prompt_id="p0", turn=0)
+        line1 = _append_witness_line(witness_dir, prompt_id="p1", turn=1)
+        _tamper_witness_line(witness_dir, 0)  # breaks the chain AT line1's seq
+        witness_ref = f"{line0.ledger_id}:{line0.seq}"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        assert line1.seq == line0.seq + 1  # sanity: the tamper target precedes line1
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+        assert "attestation" not in result.reason
+
+    def test_no_ledger_at_all_is_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: today's host state -- no ledger directory exists at all.
+        No claim ever carries a `witness_ref`, so this must behave
+        identically to the flag being off, with zero crashes from the
+        missing ledger dir."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "no-such-ledger-dir"))
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "user:self-report",
+            },
+        )
+        result = process_correction_record(
+            self._record(source="api:govdb", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert result.reason == "incoming rank 3 outranked by existing rank 1"
+
+    def test_witness_ref_with_no_live_ledger_is_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2410 (issue athenaeum#2334): a claim
+        carries a `witness_ref` and a receipt exists for it (an orphaned
+        receipt from a ledger that was later deleted, or never enabled on
+        this host after the claim was written), but the LOCAL ledger
+        directory has no partitions at all. `chain_intact_through` is
+        vacuously `True` on an absent ledger (nothing to find a break in) --
+        that vacuous truth must never be read as "verified". AC1/AC5: this
+        must stay byte-identical to the flag-off / unwitnessed path, exactly
+        like the broken-chain and unverified-strength cases above."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "no-such-ledger-dir"))
+        witness_ref = "pw-0000000000000000:1"
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+        assert "attestation" not in result.reason
+
+    def test_witness_ref_naming_a_foreign_ledger_is_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2410 (issue athenaeum#2334): the
+        LOCAL ledger is present with its own fully intact chain, but the
+        claim's `witness_ref` names a DIFFERENT ledger_id entirely (a store
+        migrated from elsewhere, or a receipt copied in from another host).
+        `chain_intact_through` has no notion of which ledger its `seq`
+        argument came from, so a `seq` that merely collides with the local
+        ledger's own numbering must not be trusted as verifying a chain it
+        never actually named. AC1: unverified attestation has no effect on
+        any comparison."""
+        local_witness_dir = tmp_path / "witness-local"
+        _append_witness_line(local_witness_dir)  # local ledger: present, intact
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(local_witness_dir))
+
+        foreign_witness_dir = tmp_path / "witness-foreign"
+        foreign_line = _append_witness_line(foreign_witness_dir)
+        witness_ref = f"{foreign_line.ledger_id}:{foreign_line.seq}"
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+                "updated": "2026-08-01",
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "newer observed_at wins" in result.reason
+        assert "attestation" not in result.reason
+
+    def test_nothing_persisted_when_attestation_decides_the_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: in this seam, a compiled correction's own record never
+        carries a `witness_ref` (`docs/design/trust-graph.md` §2.3.1 --
+        seam 1's compiled dict has no evidence-kind/attestation-shaped
+        field), so the ONLY claim the tie-break can ever make effectively
+        attested is the EXISTING page -- and the only observable outcome
+        of that is "defer" (this test's own first scenario, reused here
+        with the stronger REAL-write assertion): the page is written to
+        disk with `dry_run=False` and must come back byte-for-byte
+        unchanged, and in particular must gain no new
+        `witness_strength_verified`/`witness_anchor_source`/`attestation`-
+        shaped key anywhere."""
+        witness_dir = tmp_path / "witness"
+        line = _append_witness_line(witness_dir)
+        witness_ref = f"{line.ledger_id}:{line.seq}"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "payout_amount": "100",
+                "source": "witnessed:s1#turn1",
+                "source_type": "witnessed",
+                "witness_ref": witness_ref,
+            },
+        )
+        _write_receipt(
+            wiki,
+            witness_ref=witness_ref,
+            witness_strength_verified="hardware-nonexportable",
+            witness_anchor_source="sentry",
+        )
+
+        before = (wiki / "p.md").read_bytes()
+        result = process_correction_record(
+            self._record(source="witnessed:s1#turn1", observed_at="2026-09-01T00:00:00Z"),
+            _envelope(submitter="govdb-feed"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+            dry_run=False,
+        )
+        assert result.disposition == "deferred-lower-precedence"
+        assert "attestation tie-break" in result.reason
+        after = (wiki / "p.md").read_bytes()
+        assert after == before
+        after_text = after.decode("utf-8")
+        for forbidden in (
+            "witness_strength_verified",
+            "witness_anchor_source",
+            "effective_strength",
+            "chain_intact",
+        ):
+            assert forbidden not in after_text
