@@ -51,6 +51,7 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -108,6 +109,7 @@ from athenaeum.recall_overflow import (
 )
 from athenaeum.remote_policy import RemotePolicy
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
+from athenaeum.serve_auth import ServeAuth
 from athenaeum.storage import (
     is_excluded,
     is_recallable,
@@ -160,6 +162,33 @@ _FORBIDDEN_MSG = (
     "athenaeum: this decision-queue action is owner-only and is not available "
     "to a restricted caller_audience (issue athenaeum#538)."
 )
+
+
+# OAuth scope guard (issue athenaeum#2384): under a configured
+# `serve.auth.*` block every tool call must carry the scope its read/write
+# class requires. The class is read off the tool's own MCP `readOnlyHint`
+# annotation at registration (see `_register_tool`), never from a second name
+# list that could drift from what `create_server` actually registers.
+#
+# Unlike the audience write-guard above this raises rather than returning a
+# structured refusal: a scope shortfall is an AUTHORIZATION failure on the
+# transport's own terms, and FastMCP's `InsufficientScopeError` turns it into
+# the RFC 6750 §3 `insufficient_scope` step-up naming exactly which scope to
+# re-authorize for. A dict refusal would read to the agent as a successful
+# call that returned "no", and would tell it nothing it could act on.
+def _insufficient_scope_message(tool_name: str, required_scope: str) -> str:
+    """The refusal text for a tool call missing *required_scope*.
+
+    Names the tool and the scope and NOTHING ELSE -- in particular not the
+    token, not its subject, and not the scopes it does carry. The first would
+    be a credential in an error channel the caller's own logs capture; the
+    other two tell an unauthorized caller what it managed to authenticate as.
+    """
+    return (
+        f"athenaeum: `{tool_name}` requires the {required_scope!r} OAuth scope, "
+        "which this access token does not carry. Re-authorize with that scope "
+        "and retry."
+    )
 
 
 def _forbidden_result() -> dict:
@@ -3102,6 +3131,8 @@ def create_server(
     caller_audience: set[str] | None = None,
     screening: dict | None = None,
     remote_policy: RemotePolicy | None = None,
+    serve_auth: ServeAuth | None = None,
+    jwks_transport: Any | None = None,
     config: dict | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
@@ -3173,6 +3204,45 @@ def create_server(
             Pinned HERE, not as a tool parameter: no tool's input schema gains
             anything, which is what makes the pins unforgeable from the client
             side (``tests/test_mcp_remote_profile.py`` asserts that).
+        serve_auth: Resolved OAuth 2.1 resource-server pins (issue
+            athenaeum#2384) from
+            :func:`athenaeum.serve_auth.build_serve_auth`. ``None`` (default)
+            is every pre-athenaeum#2384 install and every ``stdio`` server:
+            no auth provider is attached, no tool gains a scope check, and
+            ``tools/list`` is byte-identical to before. A non-``None`` value
+            makes this process an OAuth 2.1 **resource server** — it verifies
+            tokens an external authorization server issued and never issues
+            one — and pins three things for the life of the process, next to
+            *caller_audience*, *screening* and *remote_policy* and for the
+            identical reason (so a remote caller cannot widen its own
+            surface):
+
+            - **The trusted issuer.** Only a token signed by
+              ``serve.auth.issuer``'s published key set, carrying that
+              issuer's ``iss`` and an unexpired ``exp``/``nbf``, verifies.
+            - **The audience.** ``serve.auth.resource`` is this process's ONE
+              audience (decision D3): it is what a token's ``aud`` must
+              carry, what RFC 9728 protected resource metadata advertises,
+              and what the ``WWW-Authenticate`` challenge points at. It is
+              NEVER read back from a token claim or a request parameter, so a
+              token presenting an audience-like claim that names something
+              broader is still served this pin — and *caller_audience*, the
+              read scope that actually governs what ``recall`` returns, is
+              likewise untouched by any claim.
+            - **The identity allowlist and the scope split.** A verified
+              token whose ``sub`` (or issuer-verified ``email``) is not in
+              ``serve.auth.allowed_identities`` is refused with the same 401
+              an invalid token gets. A tool call must additionally carry the
+              scope its class requires, read from that tool's own
+              ``readOnlyHint`` annotation — see ``_register_tool`` below.
+
+            Pinned HERE, not as a tool parameter: no tool's input schema
+            gains anything
+            (``tests/test_mcp_oauth_resource_server.py`` asserts that).
+        jwks_transport: Optional transport for the issuer's key-set fetch,
+            passed through to :func:`athenaeum.mcp_auth.build_auth_provider`.
+            The test seam for an in-process fake issuer with no socket open;
+            production passes nothing. Inert unless *serve_auth* is set.
         config: Resolved ``athenaeum.yaml`` config (issue athenaeum#532), threaded to
             ``recall`` so the storage-adapter ``recallable`` corpus policy is
             honored at query time — a class routed to a ``recallable: false``
@@ -3243,8 +3313,27 @@ def create_server(
 
     _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
 
+    # Issue athenaeum#2384: with `serve.auth.*` configured, this process is an
+    # OAuth 2.1 RESOURCE SERVER. The provider is built here, from the pins the
+    # operator's `athenaeum serve` invocation already resolved, and handed to
+    # FastMCP's constructor -- which is what installs bearer-token enforcement
+    # on the HTTP endpoint and the RFC 9728 protected-resource route. With
+    # `serve_auth` None (every stdio server, and every install that configures
+    # no issuer) `auth` stays None and FastMCP is constructed exactly as it was
+    # before this issue: no middleware, no routes, no scope checks.
+    #
+    # The `fastmcp`-dependent half lives in `athenaeum.mcp_auth`, imported
+    # function-locally here for the same reason `FastMCP` itself is -- so the
+    # dependency stays optional for every non-serve code path.
+    _auth_provider = None
+    if serve_auth is not None:
+        from athenaeum.mcp_auth import build_auth_provider
+
+        _auth_provider = build_auth_provider(serve_auth, jwks_transport=jwks_transport)
+
     mcp = FastMCP(
         "athenaeum",
+        auth=_auth_provider,
         instructions=(
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
@@ -3289,6 +3378,42 @@ def create_server(
     # the default ``tools/list`` byte-identical.
     _candidate_tool_names: list[str] = []
 
+    def _scope_guarded(fn: Any, required_scope: str) -> Any:
+        """Wrap *fn* so a call without *required_scope* is refused.
+
+        Issue athenaeum#2384. Only ever applied when ``serve_auth`` is set, so
+        the default (and every stdio) registration is the bare function.
+
+        ``functools.wraps`` is load-bearing, not cosmetic: FastMCP builds each
+        tool's input schema from ``inspect.signature``, which follows
+        ``__wrapped__``, so the served schema is the wrapped function's own.
+        That is what keeps the scope guard invisible to ``tools/list`` -- the
+        pin adds no parameter a caller could pass, which is the property that
+        makes it unforgeable from the client side.
+
+        The token is read from FastMCP's request context, never from an
+        argument, for the same reason. A request that reaches a tool body at
+        all has already passed the transport's bearer-token enforcement, so
+        the usual case here is a token that is valid but narrower than this
+        tool needs; an absent token still fails closed.
+        """
+
+        @functools.wraps(fn)
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            from fastmcp.exceptions import InsufficientScopeError
+            from fastmcp.server.dependencies import get_access_token
+
+            access = get_access_token()
+            granted = set(access.scopes) if access is not None else set()
+            if required_scope not in granted:
+                raise InsufficientScopeError(
+                    [required_scope],
+                    message=_insufficient_scope_message(fn.__name__, required_scope),
+                )
+            return fn(*args, **kwargs)
+
+        return _guarded
+
     def _register_tool(**kwargs: Any) -> Callable[[Any], Any]:
         def _register(fn: Any) -> Any:
             _candidate_tool_names.append(fn.__name__)
@@ -3297,7 +3422,21 @@ def create_server(
                 # callable (so nothing in this closure breaks), but FastMCP
                 # never learns the tool exists.
                 return fn
-            return mcp.tool(**kwargs)(fn)
+            registered = fn
+            if serve_auth is not None:
+                # Issue athenaeum#2384: the read/write class comes from the
+                # tool's OWN `readOnlyHint` annotation -- the one already
+                # passed to this call -- so a tool added to `create_server`
+                # tomorrow is scope-gated with no edit here, and the gate can
+                # never disagree with the annotation a client reads. A tool
+                # registered with no annotation requires the WRITE scope
+                # (`ServeAuth.required_scope` fails closed).
+                annotations = kwargs.get("annotations") or {}
+                registered = _scope_guarded(
+                    fn,
+                    serve_auth.required_scope(read_only=annotations.get("readOnlyHint")),
+                )
+            return mcp.tool(**kwargs)(registered)
 
         return _register
 
