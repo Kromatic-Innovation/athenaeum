@@ -76,8 +76,11 @@ GitHub permalinks below all anchor on `b0ee25c`.
     optionally followed by `---\n<merged body>`. `tier3_merge` returns
     `(body_or_None, EscalationItem(conflict_type="principled"))`.
 - **Provenance behavior (post-athenaeum#90):** Stamps `meta["updated"]` with today's date
-  inside `tier3_write` (line 446). Does not touch `field_sources`. Existing
-  body is passed in plain; the merged body is written verbatim from the LLM.
+  via `stamp_merge_provenance`, called from `tiers.py:tier3_derive_actions`
+  (the LLM-call phase; see §4) immediately after a successful merge — not
+  from `tier3_write`, which no production caller reaches (§4). Does not
+  touch `field_sources`. Existing body is passed in plain; the merged body
+  is written verbatim from the LLM.
 - **Known edge cases:**
   - When the LLM returns `ESCALATE:` without a `---` separator, `body=None` is
     returned and the caller does NOT update the existing page — the escalation
@@ -86,16 +89,31 @@ GitHub permalinks below all anchor on `b0ee25c`.
     is fully delegated to the LLM and the prompt's three-class taxonomy. **Bug
     finding filed as separate issue** — see PR body.
 
-## 4. `tiers.py:tier3_write`
+## 4. `tiers.py:tier3_derive_actions` + caller-owned flush (post-athenaeum#898)
 
-- **File:** [`src/athenaeum/tiers.py` lines 401–457](https://github.com/Kromatic-Innovation/athenaeum/blob/b0ee25c/src/athenaeum/tiers.py#L401-L457)
+- **File:** [`src/athenaeum/tiers.py:tier3_derive_actions`](https://github.com/Kromatic-Innovation/athenaeum/blob/b0ee25c/src/athenaeum/tiers.py)
+  (the LLM-call phase, writes nothing) and
+  `src/athenaeum/librarian.py:_apply_tier3_results` (the flush). The
+  production caller, `librarian.py:process_one`, calls
+  `tier3_derive_actions` directly and owns the flush itself — it does
+  **not** call `tiers.py:tier3_write`. `tier3_write` still exists as a thin
+  wrapper (calls `tier3_derive_actions` then flushes unconditionally) but
+  has no caller left in `src/` outside its own test suite; it is kept for
+  back-compat, not production use.
 - **Trigger:** Wraps the per-action loop for a single raw file.
-- **Resolution rule:** **No write-time locking. Last-write-wins on disk.** All
-  Tier 3 LLM calls run first and accumulate `pending_updates`; only after every
-  call succeeds does the loop write to disk (lines 454–455). This gives an
-  all-or-nothing semantic per raw file but does NOT coordinate concurrent writers.
-  Two pipelines processing different raw files that target the same wiki entity
-  will race on the filesystem.
+- **Resolution rule:** **No write-time locking. Last-write-wins on disk.**
+  All Tier 3 LLM calls run first via `tier3_derive_actions`, which
+  accumulates `pending_updates` and returns them without writing; only
+  after the call returns cleanly does `_apply_tier3_results` write to disk.
+  This gives an all-or-nothing semantic per raw file but does NOT
+  coordinate concurrent writers. Two pipelines processing different raw
+  files that target the same wiki entity will race on the filesystem.
+  Issue athenaeum#898 split the LLM phase out of `tier3_write` specifically so
+  `process_one` can checkpoint BETWEEN "all this file's LLM calls are done"
+  and "this file's writes land on disk" — on an over-budget trip
+  (`RawFileOverBudgetError`, issue athenaeum#994) the caller still flushes the
+  partial progress durably via `_apply_tier3_results` before re-raising,
+  rather than discarding completed, billed work.
 - **Provenance behavior (post-athenaeum#90):** `meta["updated"]` is set to today before
   rendering. `field_sources` is preserved if it exists on the existing page;
   it is neither added to nor pruned.
@@ -242,26 +260,32 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   2026-04-01 and one starting 2026-04-01 SHARE that day and are NOT disjoint. A
   missing or malformed bound coerces to `None` (open) and therefore OVERLAPS by
   default (fail-open → detection proceeds).
-- **Resolution rules (four surfaces):**
-  1. **Pre-detection short-circuit (`merge.py`).** In the primary detector loop,
-     after `_filter_declared_pairs` prunes declared pairs, if
-     `_all_pairs_disjoint(filtered)` (EVERY surviving pair disjoint; any
-     overlapping/open pair falls through), the Haiku call is skipped and the
-     cluster records `ContradictionResult(detected=False,
-     rationale="disjoint-validity")`. The similarity-sweep path applies the same
-     skip per 2-member pair. Mirrors the declared-relationship short-circuit
-     (§ athenaeum#167).
-  2. **Post-detection guard (`merge.py`).** When the cluster is only partially
-     disjoint the detector still runs, and may flag a specific disjoint pair.
-     `_detected_pair_disjoint(result, filtered)` re-checks the two flagged
-     members (guarding for the detector's 0/1-member echo) and downgrades to
-     `detected=False, rationale="disjoint-validity"` BEFORE the escalation /
-     pending-question write.
-  3. **Resolver synthetic (`resolutions.py`).** If a flagged disjoint pair still
+- **Resolution rules (four surfaces, but only #3 and #4 are reachable in the
+  live pipeline today — see below):**
+  1. **Pre-detection short-circuit (`merge.py`) — removed, not just uncalled.**
+     This described the primary cluster-detector loop pruning declared pairs
+     via `_filter_declared_pairs` then skipping the Haiku call when
+     `_all_pairs_disjoint(filtered)`. That loop called `detect_contradictions`,
+     which `merge.py` no longer does (issue athenaeum#1256) — and
+     `_all_pairs_disjoint` itself no longer exists in `merge.py`. Historical
+     record only.
+  2. **Post-detection guard (`merge.py`) — removed, not just uncalled.** Same
+     retirement: `_detected_pair_disjoint`, which re-checked a detector's
+     flagged pair and downgraded it to `disjoint-validity`, no longer exists
+     in `merge.py` either, for the same reason as #1.
+  3. **Resolver synthetic (`resolutions.py`) — still live.** `_disjoint_validity_verdict`
+     keeps a real caller: the `athenaeum pending` re-resolve path
+     (`tiers.py:reresolve_open_questions` → `resolutions.propose_resolution`)
+     reconstructs a `ContradictionResult` for an already-escalated pending
+     question and can still reach this check. If a flagged disjoint pair still
      reaches `propose_resolution`, `_disjoint_validity_verdict` returns
      `not_a_conflict` at `confidence=1.0` with NO Opus call — checked FIRST,
      before the declared-winner short-circuit.
-  4. **Scope header (`contradictions.py`).** `_member_scope_header` renders a
+  4. **Scope header (`contradictions.py`) — live only via `athenaeum measure
+     shadow-parity`.** `detect_contradictions` itself only runs from that
+     measurement path today (see the status note atop
+     [`docs/design/contradiction-detection.md`](contradiction-detection.md)),
+     but `_member_scope_header` renders a
      single TRUSTED `scope:` line per member (`valid: <from> → <until> · source:
      <source_type> · updated: <date>`, each segment omitted at its default)
      OUTSIDE the untrusted `<memory>` block. `_DETECT_SYSTEM` marks it as trusted
@@ -829,10 +853,15 @@ and any new gating decision.
 | `tier0_passthrough` | n/a (skip-on-conflict) | incoming verbatim | incoming verbatim | incoming verbatim | `created`: keep if present; `updated`: today | incoming verbatim | passthrough |
 | `tier3_create` | n/a (no existing) | LLM | LLM | LLM | `created`/`updated`: today | LLM | not written |
 | `tier3_merge` | LLM-decided per the prompt's three-class taxonomy | LLM | LLM | LLM | `updated`: today | LLM | unchanged |
-| `tier3_write` | (delegates to merge/create) | (delegates) | (delegates) | (delegates) | `updated`: today | (delegates) | unchanged |
+| `tier3_write`\* | (delegates to merge/create) | (delegates) | (delegates) | (delegates) | `updated`: today | (delegates) | unchanged |
 | `merge.py` cluster merge | n/a | n/a | sources: `(session,turn)`-dedupe; origin_scopes: union | n/a | n/a | concat with paragraph-dedupe | n/a |
 | `contradictions.py` | DETECT-ONLY — never resolves (disjoint-validity pairs skip the LLM entirely, §9) | — | — | — | — | — | — |
 | `dedupe._perform_merge` | canonical wins if truthy | canonical wins | union (canonical first) | max | max (lex ISO) | canonical + appended absorbed | canonical wins per key; absorbed-only keys carried forward |
+
+\* `tier3_write`'s per-field behavior above is accurate for the function
+itself, but it has no production caller today — see §4 for the live path
+(`tiers.py:tier3_derive_actions` + `librarian.py:_apply_tier3_results`),
+which applies the same per-field rules.
 
 **Lock semantics:** every cell above MUST stay accurate. A future PR that
 changes any cell must update both this matrix AND the corresponding

@@ -440,11 +440,16 @@ as empty strings when missing.
 - **Precedence when both sides declare conflicting relationships:**
   - **Mutual `supersedes`** (A says supersedes B AND B says supersedes
     A) is itself a declared contradiction. Neither side wins
-    deterministically — `merge._declared_relationship` returns `None`
-    (the pair falls through to the detector/resolver), and
-    `resolutions._declared_winner` returns `None` (the pair falls
-    through to the LLM). Both sites emit a `WARNING` log so the
-    contradiction is auditable.
+    deterministically — the shared
+    `declared_relationships.declared_relationship` primitive returns
+    `None` at both of its live call sites: the comparator's Gate 1
+    (`comparator.py:compare_pages`, for a new pair — the pair falls
+    through to Gate 2's LLM judgement) and `resolutions._declared_winner`
+    (for a pair reaching the resolver via `athenaeum pending`'s
+    re-resolve path — the pair falls through to the LLM). `merge.py`'s own
+    `_declared_relationship`/`_filter_declared_pairs` now delegate to the
+    same primitive but have no caller left in the live pipeline. Both
+    live sites emit a `WARNING` log so the contradiction is auditable.
   - **Mixed `refines` + `supersedes`** (A `refines` B, B `supersedes`
     A) resolves to `keep_b` / `declared-supersession`. Supersession is
     the stronger statement and wins over the weaker refinement claim
