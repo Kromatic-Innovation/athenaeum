@@ -10,6 +10,8 @@ Athenaeum is maintained by Kromatic Innovation. Security reports go to **open-so
 
 Please report security vulnerabilities privately via email to **open-source@kromatic.com** with the subject prefix `[athenaeum security]`. Do **not** open a public GitHub issue for security problems.
 
+You may also use GitHub's private vulnerability reporting (Security Advisories) on the repository's Security tab.
+
 Include:
 
 - A description of the vulnerability and its impact

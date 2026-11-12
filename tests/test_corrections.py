@@ -4704,9 +4704,11 @@ def _tamper_witness_line(d: Path, position: int) -> None:
     line N breaks the chain AT N+1, never at N itself)."""
     from promptwitness import canon, ledger
 
+    from tests.fixtures.promptwitness_append_only_guard import unprotect_for_tamper
+
     names = ledger.list_partitions(d)
     assert len(names) == 1
-    partition = d / names[0]
+    partition = unprotect_for_tamper(d / names[0])
     lines = [ln for ln in partition.read_bytes().split(b"\n") if ln.strip()]
     objs = [json.loads(ln) for ln in lines]
     objs[position]["prompt_chars"] = 999999
