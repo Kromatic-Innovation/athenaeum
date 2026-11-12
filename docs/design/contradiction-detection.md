@@ -1,5 +1,17 @@
 # Contradiction Detection — Pipeline, Modes, Precedence, and Configuration
 
+> **Status: historical.** The C4 pipeline described below — the
+> Haiku-detect / Opus-resolve split over raw auto-memory clusters
+> (`contradictions.py:detect_contradictions`, `resolutions.propose_resolution`,
+> and the cross-scope toggle in §2) — was retired from the live
+> `athenaeum run` / `athenaeum ingest` pipeline by issue athenaeum#1256. It
+> is no longer part of an ordinary run; it survives only as the
+> `athenaeum measure shadow-parity` measurement path (one call site, see
+> `src/athenaeum/shadow_parity.py`). This document is kept as a historical
+> record of that design, not as live configuration — see "Status: both old
+> paths retired; one comparator domain still dark" below for the full
+> account of what replaced it.
+
 This document describes the full contradiction-detection-and-resolution pipeline
 that landed via PRs athenaeum#125 (cross-scope toggle), athenaeum#126 (Opus resolver and
 provenance precedence), and athenaeum#128 (pending-questions sidecar surface).
@@ -206,6 +218,12 @@ escalation format. The pipeline never blocks ingest on contradiction work.
 ---
 
 ## 2. Cross-scope detection modes
+
+**Removed.** `ATHENAEUM_CROSS_SCOPE_MODE` and `contradiction.cross_scope_mode`
+are not read anywhere in the current codebase, and `athenaeum.cross_scope`
+was deleted along with the rest of the C4 detector (athenaeum#1256). Nothing
+below is live configuration — it documents the retired toggle's behavior for
+historical reference only.
 
 `athenaeum.cross_scope.resolve_cross_scope_mode` reads
 `ATHENAEUM_CROSS_SCOPE_MODE` (env wins) then
