@@ -5784,7 +5784,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_THINKING` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS` | `src/athenaeum/tiers.py` |
-| `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_QUARANTINE_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_REASONING_T1_LLM_PROVIDER` | `src/athenaeum/provider.py` |
