@@ -2130,9 +2130,9 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-opus-5": (5.0, 25.0),
     "claude-sonnet-5": (3.0, 15.0),
     # claude-fable-5 / claude-mythos-5 (issue athenaeum#777): this table and the
-    # model-level sampling-capability table (removed as uncalled, athenaeum#2437;
-    # formerly _SAMPLING_PARAMS_REJECTED_PREFIXES) were not kept in sync while
-    # both existed — the latter had listed claude-fable-5 since athenaeum#577, but
+    # model-level sampling-capability table (a since-removed declaration-only
+    # primitive, uncalled, athenaeum#2437) were not kept in sync while both
+    # existed — the latter had listed claude-fable-5 since athenaeum#577, but
     # this one never did, so any run tagged claude-fable-5 or claude-mythos-5 fell
     # through to the blended fallback and under-reported spend 6.67x ($1.50/$7.50
     # blended vs. the real $10.00/$50.00). claude-mythos-5 is Project

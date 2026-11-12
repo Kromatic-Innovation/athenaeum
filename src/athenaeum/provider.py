@@ -384,11 +384,12 @@ class LLMResponse(Protocol):
     which is exactly the "must ACTUALLY satisfy" guarantee issue athenaeum#572 requires.
 
     ``content`` is a sequence of :class:`LLMContentBlock` — the real
-    ``anthropic`` union's shared ``.type`` discriminator, NOT ``LLMTextBlock``
-    (issue athenaeum#835 corrected this: most of the union's members, e.g.
-    ``ThinkingBlock``/``ToolUseBlock``, have no ``.text``). Callers read the
-    text answer via :func:`response_text`, which narrows to the first ``type
-    == "text"`` block before touching ``.text``, skipping any leading thinking
+    ``anthropic`` union's shared ``.type`` discriminator, NOT a narrower
+    text-only-block type (issue athenaeum#835 corrected this: most of the
+    union's members, e.g. ``ThinkingBlock``/``ToolUseBlock``, have no
+    ``.text``). Callers read the text answer via :func:`response_text`,
+    which narrows to the first ``type == "text"`` block before touching
+    ``.text``, skipping any leading thinking
     blocks (issue athenaeum#578); ``stop_reason`` is the terminal reason
     (``"max_tokens"``, ``"end_turn"``, ...) or ``None`` when a backend cannot
     report it; ``usage`` carries the four normalized token counters.
@@ -1683,9 +1684,10 @@ if TYPE_CHECKING:
     # ``anthropic.types.Message`` — a ``ThinkingBlock`` PRECEDING a
     # ``TextBlock``, and ``Usage`` with both cache_* fields ``None`` (no
     # cache breakpoints in the request) — to an ``LLMResponse``-annotated
-    # name is what makes mypy do the real work: pre-athenaeum#835, ``content:
-    # Sequence[LLMTextBlock]`` rejected the ``ThinkingBlock`` (no ``.text``
-    # attribute), and the two cache fields being plain ``int`` rejected
+    # name is what makes mypy do the real work: pre-athenaeum#835, the
+    # then-declared ``content`` type (a text-only-block sequence) rejected
+    # ``ThinkingBlock`` (no ``.text`` attribute), and the two cache fields
+    # being plain ``int`` rejected
     # ``Usage``'s ``Optional[int]`` fields — either mismatch alone fails this
     # assignment (verified against this exact object shape with the
     # pre-fix declarations restored). Never executed — a type-checker
