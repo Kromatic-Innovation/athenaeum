@@ -67,6 +67,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 #: docstring for how to regenerate, and the fixture's own ``_how_to_*`` keys.
 _FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "pre_2387_served_text.json"
 
+#: athenaeum#2438 deleted this dead-helper reference from the default
+#: ``instructions`` string (minimal: the sentence it sat in is otherwise
+#: unchanged) -- the ONE sanctioned byte-level delta from the
+#: athenaeum#2387 golden this module pins everything else against.
+#:
+#: The golden fixture is deliberately NOT re-captured for this (see its own
+#: ``_what``/``_how_to_regenerate``): doing so would quietly weaken what
+#: :class:`TestDefaultPathIsByteIdentical` proves, from "athenaeum#2387
+#: changed nothing a host reads" to "nothing changed since whatever we did
+#: most recently". Instead this constant names the one byte-exact,
+#: documented exception, and every assertion below strips it out of the
+#: golden before comparing -- so the class still fails on ANY OTHER drift
+#: in the default served text, sanctioned or not.
+_SANCTIONED_DELETION_2438 = " — the generalized primitive behind `athenaeum people`"
+
 #: Phrasings that would turn an instruction into a promise. Not an exhaustive
 #: content review — that is the reviewer criterion this backs up — but these
 #: are the words a well-meaning edit reaches for, and each would be false:
@@ -217,7 +232,8 @@ class TestDefaultPathIsByteIdentical:
     def test_served_instructions_match_the_pre_change_bytes(
         self, corpus: Path, golden: dict[str, str]
     ) -> None:
-        assert _server(corpus).instructions == golden["instructions"]
+        expected = golden["instructions"].replace(_SANCTIONED_DELETION_2438, "")
+        assert _server(corpus).instructions == expected
 
     def test_served_recall_description_matches_the_pre_change_bytes(
         self, corpus: Path, golden: dict[str, str]
@@ -231,7 +247,7 @@ class TestDefaultPathIsByteIdentical:
         """The capture path the golden was produced through, re-run here."""
         captured = _capture_served_text(corpus, corpus.parent / "cache")
         assert captured == {
-            "instructions": golden["instructions"],
+            "instructions": golden["instructions"].replace(_SANCTIONED_DELETION_2438, ""),
             "recall_description": golden["recall_description"],
         }
 
@@ -256,7 +272,8 @@ class TestDefaultPathIsByteIdentical:
         steering and must not get it.
         """
         server = _server(corpus, **policy_kwargs)
-        assert server.instructions == golden["instructions"]
+        expected = golden["instructions"].replace(_SANCTIONED_DELETION_2438, "")
+        assert server.instructions == expected
         assert _tool_descriptions(server)["recall"] == golden["recall_description"]
 
 
