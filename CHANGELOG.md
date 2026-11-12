@@ -132,6 +132,10 @@ semver compatibility promise; none of these are in it, so their flags, keys,
 formats and import paths may change in a minor release. `promptwitness` is a
 separate top-level import, not part of `athenaeum.__all__`.
 
+The README, `docs/guides/remote.md`, the `promptwitness` package docstring and
+`promptwitness --help` carry the same experimental label. `CONTRIBUTING.md` now
+says to run the test suite with an isolated `HOME` (`HOME=$(mktemp -d) pytest`).
+
 **Stability: the trust graph is experimental; its design is under
 reconsideration.** The v1 source trust graph shipped as built, but its rulings
 are being revisited in a v2 redesign, so it is not a finished feature in this
