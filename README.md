@@ -153,6 +153,20 @@ context on every turn, no tool call required. → [guides/sidecar](docs/guides/s
 nightly batch job is a barrier when you already pay for Claude Code. One provider seam, two
 transports, identical prompts either way. → [modules/provider](docs/modules/provider.md)
 
+**Can be served remotely (experimental).** A host that cannot launch a local process,
+such as ChatGPT or the Grok apps, can't reach a stdio memory server at all.
+`athenaeum serve --transport http` serves the store over HTTPS behind your reverse proxy,
+with OIDC bearer-token auth (`serve.auth.*`) and a `remote` serve profile that narrows
+what leaves your machine. Experimental, and not covered by the `athenaeum.__all__`
+compatibility promise: flags and keys may change in a minor release.
+→ [guides/remote](docs/guides/remote.md)
+
+**Transcript authorship can be attested (experimental).** `promptwitness` is a separate
+package and console script that keeps a hash-chained ledger recording that a human typed
+each prompt, with no prompt text stored, so a transcript can later be checked against it.
+Experimental, and not part of `athenaeum.__all__`: its CLI and formats may change in a
+minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
+
 ## Where to go next
 
 | | |
