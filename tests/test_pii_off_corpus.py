@@ -37,11 +37,9 @@ from athenaeum.pii import (
     find_inline_emails,
     find_inline_phones,
     fold_observations,
-    has_inline_contact_fields,
     is_bounced,
     is_pii_class_excluded,
     is_pii_flagged,
-    lint_inline_contact_fields,
     mark_bounced,
     read_bounce_record,
     read_observations,
@@ -268,27 +266,6 @@ class TestEntityPageLint:
         assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
         assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
         assert find_inline_phones("issue athenaeum#427 page 12") == []
-
-    def test_has_inline_contact_fields_frontmatter(self) -> None:
-        assert has_inline_contact_fields({"emails": ["a@example.com"]})
-        assert has_inline_contact_fields({"phones": ["+1-555-0100"]})
-        assert not has_inline_contact_fields({"name": "Alice", "linkedin_url": "https://x"})
-
-    def test_has_inline_contact_fields_body(self) -> None:
-        assert has_inline_contact_fields({}, "email me at alice@example.com")
-        assert has_inline_contact_fields({}, "call +1-555-0100")
-        assert not has_inline_contact_fields({}, "durable identifier only, no contact info")
-
-    def test_lint_message_names_file_and_reason(self, tmp_path: Path) -> None:
-        msg = lint_inline_contact_fields(
-            {"emails": ["a@example.com"]}, "", Path("/wiki/alice.md")
-        )
-        assert msg is not None
-        assert "/wiki/alice.md" in msg
-        assert "emails" in msg
-
-    def test_lint_silent_when_no_contact_data(self) -> None:
-        assert lint_inline_contact_fields({"name": "Alice", "linkedin_url": "https://x"}) is None
 
     def test_pydantic_warns_on_inline_emails(self) -> None:
         meta = {
