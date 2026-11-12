@@ -2,11 +2,13 @@
 
 # Vector search
 
-Athenaeum's default recall backend is FTS5 keyword search. A vector
-backend (chromadb + `all-MiniLM-L6-v2`) is available for semantic recall
-alongside it — the recall hook runs a **hybrid FTS5 + vector merge** once
-vector is configured, because each backend rescues a failure class the
-other has.
+Athenaeum's default recall backend is **vector** search (chromadb +
+`all-MiniLM-L6-v2`), hybridized with FTS5 keyword search via RRF fusion —
+the recall hook runs a **hybrid vector + FTS5 merge** by default, because
+each backend rescues a failure class the other has. FTS5-only is the
+opt-out (`search_backend: fts5`); a default install without the vector
+extra (no `chromadb`) degrades to FTS5 automatically at query time, with
+one logged warning.
 
 ## I want semantic recall in addition to keyword search
 
