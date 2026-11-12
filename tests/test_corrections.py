@@ -4703,7 +4703,6 @@ def _tamper_witness_line(d: Path, position: int) -> None:
     which surfaces as a chain break at `position + 1` (a content edit to
     line N breaks the chain AT N+1, never at N itself)."""
     from promptwitness import canon, ledger
-
     from tests.fixtures.promptwitness_append_only_guard import unprotect_for_tamper
 
     names = ledger.list_partitions(d)
