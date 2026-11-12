@@ -225,8 +225,6 @@ src/athenaeum/tiers.py::_reresolve_open_questions_impl
 # reasoning outcome. ---
 # parses the model identifier a call is routed to
 src/athenaeum/models.py::parse_model
-# decides which sampling params a model is sent
-src/athenaeum/models.py::_sampling_params_rejected
 # decides whether a prompt prefix is cached
 src/athenaeum/models.py::min_cacheable_prefix_tokens
 # decides whether the thinking knob is sent
