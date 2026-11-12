@@ -1,13 +1,14 @@
 # Trust graph for sources: architecture spec (athenaeum#2145)
 
-> **Unstable, under redesign.** The source trust graph (`librarian.source_trust_enabled`, `librarian.source_trust_edges`, `athenaeum corrections-trust-dryrun`) may change or be removed without a deprecation cycle, and is not covered by the `athenaeum.__all__` semver promise. Do not build on it.
-
-> **Status: under reconsideration (2026-11-12).** The v1 mechanism described
-> here (operator-declared override edges over the nine-tier ladder) shipped and
-> remains as built. Its rulings are being revisited in a v2 redesign, notably
-> rejected alternative 2 in section 5 (numeric per-(source, domain) trust) and
-> the no-thresholds stance. New work should not build to those rulings without
-> operator confirmation.
+> **Experimental; design under reconsideration (2026-11-12).** The source trust
+> graph (`librarian.source_trust_enabled`, `librarian.source_trust_edges`,
+> `athenaeum corrections-trust-dryrun`) may change or be removed without a
+> deprecation cycle, and is not covered by the `athenaeum.__all__` semver promise.
+> The v1 mechanism described here (operator-declared override edges over the
+> nine-tier ladder) shipped and remains as built. Its rulings are being revisited
+> in a v2 redesign, notably rejected alternative 2 in section 5 (numeric
+> per-(source, domain) trust) and the no-thresholds stance. Do not build on it,
+> and do not build to those rulings without operator confirmation.
 
 - **Status:** design of record, decided 2026-11-05. Open questions in the original draft are resolved in section 8.
 - **Authority:** operator ruling 2026-11-05 on athenaeum#2145.
