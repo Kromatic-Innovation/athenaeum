@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 
 from promptwitness import canon, ledger, signing, tpm
+from tests.fixtures.promptwitness_append_only_guard import unprotect_for_tamper
 
 
 def _append_turn(ledger_dir: Path, provider: ledger.KeyProviderLike) -> ledger.WitnessLine:
@@ -797,7 +798,7 @@ class TestLinuxGenerateSignVerifyRoundTrip:
         provider = tpm.generate_tpm_key(tpm.Tpm2ToolsBackend(handle="0x810100a0"))
         ledger_dir = tpm2_env.parent / "ledger"
         _append_turn(ledger_dir, provider)
-        path = next(ledger_dir.rglob("*.jsonl"))
+        path = unprotect_for_tamper(next(ledger_dir.rglob("*.jsonl")))
         raw = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
         raw["prompt_chars"] = raw["prompt_chars"] + 1
         path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")

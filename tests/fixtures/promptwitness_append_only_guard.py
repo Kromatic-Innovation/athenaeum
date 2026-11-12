@@ -65,6 +65,21 @@ _PROTECTION_FIELD = "protection"
 # "chattr:failed", ...) means a command WAS run against that path.
 _NO_ATTEMPT = "unsupported"
 
+def unprotect_for_tamper(path: Path) -> Path:
+    """Clear the append-only flag on *path* so a tamper test can rewrite it.
+
+    A test that edits a ledger partition in place to prove the verifier
+    notices must first lift the protection ``append_line`` applied, or on macOS
+    (``chflags uappnd``) the rewrite raises ``PermissionError`` (athenaeum#2429).
+    Uses the library's own clear path; production protection is untouched.
+    Returns *path* so it can be used inline.
+    """
+    from promptwitness import ledger
+
+    ledger.clear_append_only_protection(path)
+    return path
+
+
 @pytest.fixture(autouse=True)
 def _clear_promptwitness_append_only() -> Iterator[None]:
     """Clear the append-only flag off every ledger file this test protected.

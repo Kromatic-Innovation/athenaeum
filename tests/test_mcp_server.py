@@ -1631,6 +1631,8 @@ class TestRecallUncompiledClaudeSessionNotes:
         from athenaeum.config import resolve_extra_intake_roots
         from athenaeum.mcp_server import _refresh_extra_root_index
 
+        if search_backend == "vector":
+            pytest.importorskip("chromadb")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)

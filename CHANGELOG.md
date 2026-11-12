@@ -9,12 +9,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.23.5] - 2026-11-12
 
-First published release since 0.22.43 (2026-10-25). The versions `0.23.0`
-through `0.23.4` were build numbers on `develop` and were never tagged or
-published; the `[0.23.0]` section below was cut but never released, and its
-notes ship here. This section and `[0.23.0]` together are the release notes
-for everything since 0.22.43. Detailed entries are grouped by merge, so
-`### Added` / `### Changed` / `### Fixed` repeat.
+0.23.5 is a roll-up release: it publishes three workstreams that were built on
+`develop` since 0.22.43 and never tagged separately. This section is
+self-contained; you do not need to read `[0.23.0]` to upgrade.
+
+The three workstreams are:
+
+1. **Remote serving.** `athenaeum serve --transport http`, OIDC
+   resource-server auth (`serve.auth.*`) and a `remote` serve profile, so one
+   deployment can serve MCP clients over HTTP (see `docs/guides/remote.md`).
+2. **promptwitness.** A hash-chained ledger and receipts that record a human
+   typed each prompt, shipped as a second top-level package with its own
+   console script, plus `athenaeum receipts`.
+3. **Trust-graph and attribution calibration.** Contact-record attribution
+   checks, a calibration eval, attribution audits in the decision queue, and
+   an easier first run.
+
+First-run commands after upgrading:
+
+```bash
+athenaeum --version            # expect 0.23.5
+athenaeum doctor               # read-only health check; names a fix per FAIL
+athenaeum test-mcp             # smoke-test remember/recall, no API key needed
+```
+
+The versions `0.23.0` through `0.23.4` were build numbers on `develop` and
+were never tagged or published; the `[0.23.0]` section below was cut but never
+released, and its detailed entries ship here. Detailed entries are grouped by
+merge, so `### Added` / `### Changed` / `### Fixed` repeat.
+
+**Behaviour changes** (everything else is opt-in; a deployment that changes no
+configuration keeps its 0.22.43 behaviour except for these)
+
+- **Fresh keyless root defaults to `claude-cli`.** If a new knowledge
+  directory is scaffolded with no `ANTHROPIC_API_KEY` and a usable `claude`
+  binary is on `PATH`, `llm.provider` is set to `claude-cli`. An existing
+  config is never rewritten.
+- **`recall` returns uncompiled notes.** Raw notes saved via `remember` now
+  appear in `recall` before the first compile, labelled `[uncompiled]` and
+  ranked below compiled pages.
+- **No baked-in secret manager.** The default `op://` references are gone; use
+  `ATHENAEUM_ANTHROPIC_KEY_COMMAND`.
+- **Shipped hooks share one foreground budget**
+  (`ATHENAEUM_HOOK_BUDGET_SECONDS`, default 10s); slow work runs in the
+  background.
+- **Merges fold contact records.** `dedupe persons --apply` and an approved
+  `fold-into-existing` now also fold the absorbed person's contact record into
+  the surviving one and retire the absorbed copy (renamed and logged, never
+  deleted). If you merged person pages before upgrading, run
+  `athenaeum repair --contact-records` to see what earlier merges left behind,
+  then re-run it with `--apply`. Divergent or ambiguous records are reported
+  and left for you.
+- **Some contact values are no longer recorded.** Every contact-record writer
+  now runs an attribution check first. Most verdicts are only logged (observe
+  mode), but three narrow non-personal shapes are enforced: addresses with a
+  relay or no-reply local-part prefix, your own addresses on someone else's
+  page, and addresses at domains listed in
+  `librarian.attribution.operator_mailer_domains`. Tune the relay lists with
+  `librarian.attribution.relay_local_prefixes` and
+  `librarian.attribution.relay_domains`.
+- **Compiled pages drop mentioned contact tokens.** Email addresses and phone
+  numbers that a source note merely mentions are no longer written into a
+  compiled page's body. Existing page bodies are not rewritten.
+- **Quieter contact-surface logging.** Each load logs one summary line instead
+  of one WARNING per collided uid or address; the per-key lines moved to DEBUG.
+- **New frontmatter keys on `remember`.** A memory saved through the MCP
+  `remember` tool with the default `claude:inferred` source now also records
+  `model` and `originSessionId`. The `source` value itself is unchanged.
+- **Python 3.13+ is required**, and the `mcp` extra is needed for `serve` and
+  `test-mcp`.
+
+**Stability: experimental surface.** `athenaeum serve --transport http`, the
+`serve.auth.*` configuration keys, and the `promptwitness` package (including
+its console script) are experimental. Per the policy in
+`src/athenaeum/__init__.py`, only the names in `athenaeum.__all__` carry the
+semver compatibility promise; none of these are in it, so their flags, keys,
+formats and import paths may change in a minor release. `promptwitness` is a
+separate top-level import, not part of `athenaeum.__all__`.
+
+**New and changed surface**
+
+- **New network-facing surface, all opt-in.** `athenaeum serve --transport
+  http` (loopback-only without auth), `serve.auth.*` OIDC bearer-token
+  verification, and the `remote` profile. `stdio` stays the default. The `mcp`
+  extra's `fastmcp` floor rises to 2.11.1.
+- **New optional extras.** None is needed for a plain install: `signing`
+  (Ed25519 sealing of transcript receipts), `witness-sign` (Ed25519 signing
+  for the promptwitness ledger), `witness-anchor` (OpenTimestamps anchoring).
+- **New commands.** `athenaeum doctor`, `athenaeum schedule install | remove`,
+  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun`,
+  `athenaeum push-metrics sample-for-labelling | score-used`,
+  `athenaeum receipts seal | verify | anchor | attest-readout`,
+  `athenaeum attribution show | place`, `athenaeum repair --contact-records`
+  (dry-run by default), a `section_id` / `action: drop` record kind for
+  `athenaeum correct-notes`, and a `promptwitness` console script (`status`,
+  `keygen`, `hook`, `anchor`, `verify`, `demo`).
+- **New top-level import name.** `promptwitness` is installed next to
+  `athenaeum` (standard-library-only at import time; it never imports
+  `athenaeum`). An unrelated module of that name in your environment will
+  collide.
+- **New configuration keys, all off by default:**
+  `librarian.receipt_sealer` (and `librarian.receipt_signing.*`),
+  `librarian.witness_ledger_enabled`, `librarian.witness_attestation_enabled`,
+  and, for the Claude Code hook, `ATHENAEUM_WITNESS_LEDGER_ENABLED` and
+  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`. An unrecognised
+  `receipt_sealer` or `key_provider` value now raises instead of silently not
+  sealing.
+- **Attribution audits in the decision queue.** A sample
+  (`librarian.audit_sample_rate_attribution`, default 0.10) of attribution
+  placements that are actually filed shows up in `athenaeum decisions` as
+  `type: audit`. Model escalation stays off unless you set
+  `librarian.attribution.escalate: true`.
+- **New cache files.** `recall <email>` and the MCP entity reads keep
+  persisted, stat-validated index caches under the cache directory. The
+  contact-index cache stores only keyed digests of addresses and is removed by
+  the erasure cascade.
+- **Deprecation timeline.** `athenaeum merges` and `athenaeum questions` still
+  work, and their warnings name `0.24.0` as the removal release. Move to
+  `athenaeum decisions` before then.
+
+**Highlights**
+
+- **Run it remotely.** See workstream 1 above and `docs/guides/remote.md`.
+- **Easier first run.** `athenaeum doctor`, `athenaeum schedule install` and
+  `athenaeum import-memory`, and a keyless root that defaults to `claude-cli`.
+- **promptwitness and receipt sealing.** A harness-agnostic ledger with a
+  chain verifier, optional Ed25519 signing, optional external anchoring, a
+  Claude Code hook adapter, and `promptwitness verify` / `promptwitness demo`;
+  receipts can be signed with a key held outside the nightly process and
+  verified with only the public key. See the `[0.23.0]` detail entries.
+- **Contact-record fold, repair and attribution.** See the behaviour changes
+  above and the `[0.23.0]` detail entries.
+
+### Added` / `### Changed` / `### Fixed` repeat.
 
 **Highlights**
 
@@ -473,74 +600,7 @@ grouped by merge, so `### Added` / `### Changed` / `### Fixed` repeat; changes
 that only affect this project's own CI and contributor tooling are collected
 at the end under `### Internal`.
 
-**Upgrading from 0.22.43**
-
-Every new capability below is opt-in. A deployment that changes no
-configuration keeps its 0.22.43 behaviour, except for the points marked
-"behaviour change".
-
-- **New optional extras.** None is needed for a plain install.
-  - `signing`: Ed25519 sealing of athenaeum's own transcript receipts
-    (`pip install 'athenaeum[signing]'`).
-  - `witness-sign`: Ed25519 signing for the promptwitness ledger.
-  - `witness-anchor`: OpenTimestamps anchoring for the promptwitness ledger.
-- **New commands.**
-  - `athenaeum receipts seal | verify | anchor | attest-readout`.
-  - A new `promptwitness` console script (`status`, `keygen`, `hook`,
-    `anchor`, `verify`, `demo`).
-  - `athenaeum repair --contact-records`, dry-run by default.
-- **New top-level import name.** The wheel now installs a `promptwitness`
-  package next to `athenaeum`. It is standard-library-only at import time and
-  never imports `athenaeum`. If your environment already has an unrelated
-  module named `promptwitness`, the two will collide.
-- **New configuration keys, all off by default:**
-  `librarian.receipt_sealer` (and `librarian.receipt_signing.*`),
-  `librarian.witness_ledger_enabled`, `librarian.witness_attestation_enabled`,
-  and, for the Claude Code hook, `ATHENAEUM_WITNESS_LEDGER_ENABLED` and
-  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`. An unrecognised
-  `receipt_sealer` or `key_provider` value now raises instead of silently
-  not sealing.
-- **Behaviour change: merges fold contact records.** `dedupe persons --apply`
-  and an approved `fold-into-existing` now also fold the absorbed person's
-  contact record into the surviving one and retire the absorbed copy (it is
-  renamed and logged, never deleted). If you merged person pages before
-  upgrading, run `athenaeum repair --contact-records` to see what earlier
-  merges left behind, then re-run it with `--apply` to fold those records.
-  Divergent or ambiguous records are reported and left for you.
-- **Behaviour change: quieter contact-surface logging.** Each load now logs
-  one summary line instead of one WARNING per collided uid or address; the
-  per-key lines moved to DEBUG.
-- **Behaviour change: new frontmatter keys on `remember`.** A memory saved
-  through the MCP `remember` tool with the default `claude:inferred` source
-  now also records `model` and `originSessionId`. The `source` value itself
-  is unchanged.
-- **Deprecation timeline.** `athenaeum merges` and `athenaeum questions`
-  still work, and their warnings now name `0.24.0` as the removal release.
-  Move to `athenaeum decisions` before then.
-- **Behaviour change: some contact values are no longer recorded.** Every
-  contact-record writer now runs an attribution check first. Most verdicts
-  are only logged (observe mode), but three narrow non-personal shapes are
-  enforced: addresses with a relay or no-reply local-part prefix, your own
-  addresses on someone else's page, and addresses at domains listed in
-  `librarian.attribution.operator_mailer_domains`. These are no longer added
-  to a person's contact record. Tune the relay lists with
-  `librarian.attribution.relay_local_prefixes` and
-  `librarian.attribution.relay_domains`.
-- **Behaviour change: compiled pages drop mentioned contact tokens.** When
-  the librarian compiles a page, email addresses and phone numbers that a
-  source note merely mentions are no longer written into that page's body.
-  Existing page bodies are not rewritten.
-- **Attribution audits in the decision queue.** A sample
-  (`librarian.audit_sample_rate_attribution`, default 0.10) of attribution
-  placements that are actually filed shows up in `athenaeum decisions` as
-  `type: audit`. Model escalation itself stays off unless you set
-  `librarian.attribution.escalate: true`.
-- **New cache files.** `recall <email>` and the MCP entity reads keep
-  persisted, stat-validated index caches under the cache directory. The
-  contact-index cache stores only keyed digests of addresses and is removed
-  by the erasure cascade.
-- **New commands, continued:** `athenaeum attribution show | place`, and a
-  `section_id` / `action: drop` record kind for `athenaeum correct-notes`.
+**Upgrading from 0.22.43:** see the upgrade notes at the top of `[0.23.5]`.
 
 **Highlights**
 
@@ -11885,6 +11945,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.23.5...HEAD
+[0.23.5]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.22.43...v0.23.5
 [0.9.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.3...v0.8.0
