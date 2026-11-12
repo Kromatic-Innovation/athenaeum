@@ -372,15 +372,6 @@ class LLMContentBlock(Protocol):
 
 
 @runtime_checkable
-class LLMTextBlock(Protocol):
-    """One TEXT content block — the block :func:`response_text` returns after
-    narrowing a :class:`LLMContentBlock` sequence to the first ``type ==
-    "text"`` entry (issue athenaeum#578)."""
-
-    text: str
-
-
-@runtime_checkable
 class LLMResponse(Protocol):
     """The response surface the four ``messages.create`` call sites consume.
 
@@ -672,36 +663,6 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
     if provider == "claude-cli":
         return _CLI_CAPABILITIES
     return _API_CAPABILITIES
-
-
-def knob_provider_override_source(
-    config: dict[str, Any] | None, knob: str
-) -> str | None:
-    """Detect (without resolving) an explicit per-knob provider override.
-
-    Returns the source description (``"env ATHENAEUM_<KNOB>_LLM_PROVIDER"`` or
-    ``"yaml llm.providers.<knob>"``) if *knob* has an explicit override set,
-    else ``None``. Does not validate the value or apply precedence — it only
-    answers "did the operator set something for this knob". Originally added
-    (issue athenaeum#786) to power the librarian's now-removed
-    inert-override warning (every knob it names is genuinely routed as of
-    issue athenaeum#841); kept as a general-purpose diagnostic primitive —
-    "is this knob's provider operator-overridden, and from where" is useful
-    independent of that warning's removal.
-    """
-    env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
-    raw = os.environ.get(env_var)
-    if raw is not None and raw.strip():
-        return f"env {env_var}"
-    if isinstance(config, dict):
-        llm_cfg = config.get("llm")
-        if isinstance(llm_cfg, dict):
-            providers_cfg = llm_cfg.get("providers")
-            if isinstance(providers_cfg, dict):
-                candidate = providers_cfg.get(knob)
-                if isinstance(candidate, str) and candidate.strip():
-                    return f"yaml llm.providers.{knob}"
-    return None
 
 
 def capabilities_for_knob(
