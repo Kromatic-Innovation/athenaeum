@@ -54,13 +54,10 @@ Scope for this module (kept narrow on purpose — see issue athenaeum#197):
   is no minimum-cluster-size filter; the wiki read path wants a uniform
   surface.
 - Contradiction flag: ``contradictions_detected`` is written to
-  frontmatter but this module never sets it true. The cohesion proxy the
-  original athenaeum#197 scope described (flagging a cluster whose
-  ``centroid_score`` fell below :data:`CONTRADICTION_COHESION_THRESHOLD`)
-  was already inert before issue athenaeum#1256 — nothing gated on the
-  threshold — and the C4 lane that did set the flag has now been retired.
-  Real contradiction detection is the cluster-domain comparator lane's job
-  now (:mod:`athenaeum.cluster_comparator` and the verdict-effects lane it
+  frontmatter but this module never sets it true — the C4 lane that used
+  to set it was retired by issue athenaeum#1256. Real contradiction
+  detection is the cluster-domain comparator lane's job now
+  (:mod:`athenaeum.cluster_comparator` and the verdict-effects lane it
   feeds); the field and its frontmatter projection are retained so a
   comparator-sourced verdict can still populate them.
 
@@ -105,7 +102,6 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion_scopes,
     resolve_operational_markers,
 )
-from athenaeum.declared_relationships import DeclaredRelationshipFacts, declared_relationship
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.footnote_markers import attach_markers, marker_label
 from athenaeum.intake import RAW_FILE_RE, discover_auto_memory_files
@@ -148,128 +144,12 @@ class RunDeadlineExceeded(Exception):
         self.phase = phase
 
 
-# Legacy centroid-cohesion constant from C3. C4 replaces this with real
-# claim-level contradiction detection via
-# :func:`athenaeum.contradictions.detect_contradictions`, but the constant
-# stays exported (at its historical value) so any downstream consumer that
-# imports it does not break. New code should NOT read it.
-CONTRADICTION_COHESION_THRESHOLD = 0.75
-
 # Frontmatter marker written when the detector finds a contradiction. When
 # the detector returns ``detected=False`` the key is OMITTED entirely (not
 # rendered as ``status: clean``) -- absence is the clean signal. This
 # mirrors C3's treatment of the old ``contradictions_detected`` flag on
 # cohesive clusters and keeps ``wiki/auto-*.md`` frontmatter minimal.
 CONTRADICTION_STATUS_FLAGGED = "contradiction-flagged"
-
-
-def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | None:
-    """Return a rationale slug when ``a`` and ``b`` declare each other.
-
-    Lane 1 / athenaeum#167. Matches by ``AutoMemoryFile.name`` (the documented
-    frontmatter slug). A declaration on EITHER side suppresses the pair.
-
-    Returns:
-        ``"declared-supersession"`` when one side names the other in its
-        ``supersedes`` list (the resolution is in the text — no human
-        review needed). ``"declared-refinement"`` when one side names the
-        other in its ``refines`` list (general + exception; both stay
-        active and never count as a conflict). ``"declared-merge-rejection"``
-        (issue athenaeum#715) when one side names the other in its
-        ``merge_rejected_with`` list — a human REJECTED a merge proposal
-        for this pair, an honest non-directional fact that is distinct
-        from both of the above and must never be conflated with
-        ``"declared-refinement"``: a refinement is an adjudicated
-        specialization claim, a rejection is only "these are not the same
-        claim". ``None`` when no declaration applies.
-    """
-    # athenaeum#1682: the actual comparison logic now lives in
-    # :func:`athenaeum.declared_relationships.declared_relationship`, so
-    # `comparator.py`'s Gate 1 can reuse it without importing this L4
-    # module. This function is now purely an adapter -- unpack each side's
-    # four declared-relationship facts off its `AutoMemoryFile` and hand
-    # them to the shared primitive. Name, signature, and docstring are
-    # unchanged; only the body moved.
-    return declared_relationship(
-        DeclaredRelationshipFacts(
-            name=a.name,
-            refines=a.refines,
-            supersedes_names=a.supersedes_names(),
-            merge_rejected_with=a.merge_rejected_with,
-        ),
-        DeclaredRelationshipFacts(
-            name=b.name,
-            refines=b.refines,
-            supersedes_names=b.supersedes_names(),
-            merge_rejected_with=b.merge_rejected_with,
-        ),
-    )
-
-
-def _filter_declared_pairs(
-    members: list["AutoMemoryFile"],
-) -> tuple[list["AutoMemoryFile"], str | None]:
-    """Prune declared pairs from a chunk before the detector sees it.
-
-    Issue athenaeum#172: previously this was all-or-nothing — one undeclared pair
-    sent the WHOLE chunk (including already-declared pairs) to Haiku.
-    Now we prune: drop any member whose every partner in the chunk has
-    a declaration. The remaining members still form ≥1 undeclared pair
-    and are exactly what Haiku should see.
-
-    Returns ``(pruned_members, rationale)``:
-
-    * Fully declared chunk → ``([], rationale)``. Caller short-circuits.
-      Rationale records the strongest declaration class observed
-      (supersession beats refinement beats merge-rejection when more than
-      one appears — issue athenaeum#715 added the third class).
-    * Partially declared chunk → ``(pruned_members, None)``. Members
-      involved only in declared pairs are removed. Rationale is
-      ``None`` because the caller still runs the detector on the
-      remainder. If only one undeclared pair survives, ``pruned_members``
-      contains exactly those two members.
-    * No declarations → ``(members, None)`` unchanged.
-    * Singletons → ``(members, None)`` unchanged (no pairs to evaluate).
-    """
-    if len(members) < 2:
-        return members, None
-    n = len(members)
-    # Bookkeep per-member: does this member participate in ANY undeclared
-    # pair? If yes, keep it. If every one of its partners is declared,
-    # the member can be dropped from the Haiku batch.
-    has_undeclared_partner = [False] * n
-    saw_supersession = False
-    saw_refinement = False
-    saw_rejection = False
-    saw_undeclared = False
-    for i in range(n):
-        for j in range(i + 1, n):
-            verdict = _declared_relationship(members[i], members[j])
-            if verdict is None:
-                saw_undeclared = True
-                has_undeclared_partner[i] = True
-                has_undeclared_partner[j] = True
-            elif verdict == "declared-supersession":
-                saw_supersession = True
-            elif verdict == "declared-refinement":
-                saw_refinement = True
-            else:
-                # issue athenaeum#715: "declared-merge-rejection" — the only
-                # other slug _declared_relationship can return. Named
-                # explicitly (not folded into the refinement branch) so a
-                # future fourth slug cannot silently fall through here.
-                saw_rejection = True
-    if not saw_undeclared:
-        # Fully declared — short-circuit the detector entirely.
-        if saw_supersession:
-            return [], "declared-supersession"
-        if saw_refinement:
-            return [], "declared-refinement"
-        if saw_rejection:
-            return [], "declared-merge-rejection"
-        return [], None
-    pruned = [m for m, keep in zip(members, has_undeclared_partner) if keep]
-    return pruned, None
 
 
 # Filesystem prefix that distinguishes auto-memory wiki entries from
@@ -311,12 +191,15 @@ class MergedWikiEntry:
     athenaeum#1256 retired the C4 detector that used to set both this and
     ``contradiction`` from a real :class:`ContradictionResult`: the merge
     pass (:func:`merge_clusters_to_wiki`) no longer populates either field,
-    so they are ``False``/``None`` in practice from this lane. Both fields
-    are RETAINED (not removed) because ``contradiction``'s structured
-    output still feeds the frontmatter projection in
-    :func:`render_merged_entry` — a capability a comparator lane is meant
-    to populate going forward — and ``contradictions_detected`` is still
-    read by existing tests/callers of the C3 wire.
+    so they are ``False``/``None`` in practice from this lane.
+    ``contradictions_detected`` stays RETAINED and is still unconditionally
+    projected into frontmatter by :func:`render_merged_entry`, because
+    existing pages and ``mcp_server`` readers key on its presence.
+    ``contradiction`` is retained on the dataclass too, but issue
+    athenaeum#2435 removed the dead ``status``/``contradiction_type``
+    frontmatter branch that used to read it in :func:`render_merged_entry`
+    — real contradiction flagging is the cluster-domain comparator /
+    verdict-effects lane's job now (see :mod:`athenaeum.verdict_effects`).
     """
 
     topic_slug: str
@@ -1236,8 +1119,8 @@ def merge_cluster_row(
         cluster_id=cluster_id,
         cluster_centroid_score=centroid_score,
         min_pairwise_score=min_pairwise_score,
-        # Default False here; merge_clusters_to_wiki() overrides based on
-        # the C4 contradiction-detector result before rendering.
+        # Always False: issue athenaeum#1256 retired the C4 detector that used
+        # to set this; nothing in this module ever overrides it now.
         contradictions_detected=False,
         origin_scopes=origin_scopes_set,
         sources=deduped,
@@ -1344,10 +1227,14 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     Frontmatter shape:
     - Always present: ``name``, ``type``, ``cluster_id``,
       ``cluster_centroid_score``, ``contradictions_detected``,
-      ``origin_scopes``, ``sources``.
-    - When ``contradictions_detected`` is true: ``status`` is set to
-      :data:`CONTRADICTION_STATUS_FLAGGED`. When false, the ``status`` key
-      is OMITTED entirely (absence = clean) — see module-level comment.
+      ``origin_scopes``, ``sources``. ``contradictions_detected`` is always
+      ``False`` from this lane (issue athenaeum#1256 retired the C4 detector
+      that used to set it) and this function no longer derives a ``status``
+      key from it — issue athenaeum#2435 removed that dead branch, since
+      nothing reaches it through :class:`MergedWikiEntry` any more; a
+      contested page's ``status: contradiction-flagged`` key is written
+      directly by the comparator / verdict-effects lane instead (see
+      :mod:`athenaeum.verdict_effects`), never through this renderer.
     - ``aliases``: issue athenaeum#1596. A fused cluster's own ``name`` is a
       synthesized slug (:func:`derive_topic_slug`) that matches none of the
       individual members' written names — the addressability harm the issue
@@ -1372,10 +1259,6 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     aliases = [n for n in entry.member_names if n != entry.topic_slug]
     if aliases:
         meta["aliases"] = aliases
-    if entry.contradictions_detected:
-        meta["status"] = CONTRADICTION_STATUS_FLAGGED
-        if entry.contradiction is not None and entry.contradiction.conflict_type:
-            meta["contradiction_type"] = entry.contradiction.conflict_type
     # Issue athenaeum#261: mark the entry as a retired-on-move long-term memory.
     if entry.retired:
         meta["retired"] = True
