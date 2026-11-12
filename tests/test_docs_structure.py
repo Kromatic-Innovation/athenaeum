@@ -41,11 +41,18 @@ _OPERATOR_NAMES = re.compile(r"\bTristan\b|\btristankromer\b|\bAmanda\b", re.IGN
 #: Every other reader-facing page must link here instead of repeating one.
 INSTALL_CANONICAL_PAGE = DOCS / "guides" / "install.md"
 
-#: README plus every guide, minus the canonical page itself -- the set a
-#: stray install command is not allowed to appear in.
+#: The README is the front door and must show the install line before
+#: ``athenaeum init`` (the release-candidate review found a Quick start with no
+#: install command). It is exempt from the no-command rule below, but must not
+#: drift: every install command it shows has to appear verbatim in the
+#: canonical page (``TestReadmeInstallMatchesCanonicalPage``).
+README = REPO_ROOT / "README.md"
+
+#: Every guide, minus the canonical page itself -- the set a stray install
+#: command is not allowed to appear in.
 _INSTALL_COMMAND_SCAN_TARGETS = tuple(
     p
-    for p in [REPO_ROOT / "README.md", *sorted((DOCS / "guides").glob("*.md"))]
+    for p in sorted((DOCS / "guides").glob("*.md"))
     if p != INSTALL_CANONICAL_PAGE
 )
 
@@ -265,6 +272,28 @@ class TestGuidesAndModulesCrossLink:
         assert "**Reference:**" in head and "../modules/" in head, (
             f"{page.name} must open with a **Reference:** line naming its module page(s)"
         )
+
+
+class TestReadmeInstallMatchesCanonicalPage:
+    """README's Quick start shows an install line, and it matches install.md."""
+
+    def test_readme_install_lines_appear_in_the_canonical_page(self) -> None:
+        readme_lines = [
+            line.split(": ", 1)[1]
+            for line in _install_command_lines(README.read_text(encoding="utf-8"))
+        ]
+        assert readme_lines, "README's Quick start must show an install command"
+        canonical = INSTALL_CANONICAL_PAGE.read_text(encoding="utf-8")
+        missing = [line for line in readme_lines if line not in canonical]
+        assert not missing, (
+            "README shows an install command install.md does not:\n  "
+            + "\n  ".join(missing)
+        )
+
+    def test_install_precedes_init_in_quick_start(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        quick = text.partition("## Quick start")[2]
+        assert 0 <= quick.find("uv tool install") < quick.find("athenaeum init")
 
 
 class TestOneCanonicalInstallPage:

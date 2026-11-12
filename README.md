@@ -52,11 +52,15 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 ## Quick start
 
 **Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
-uv/pip commands, the `PATH` setup `uv tool install` needs, and the
-wrong-interpreter warning to check against if `athenaeum --version` ever
-looks stale.
+`PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
+check against if `athenaeum --version` ever looks stale.
 
 ```bash
+# Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
+uv tool install --python 3.13 'athenaeum[mcp]'
+# ...or, into an activated Python 3.13+ environment:
+pip install 'athenaeum[mcp]'
+
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
 

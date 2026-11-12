@@ -7,8 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.5] - 2026-11-12
+
+First published release since 0.22.43 (2026-10-25). The versions `0.23.0`
+through `0.23.4` were build numbers on `develop` and were never tagged or
+published; the `[0.23.0]` section below was cut but never released, and its
+notes ship here. This section and `[0.23.0]` together are the release notes
+for everything since 0.22.43. Detailed entries are grouped by merge, so
+`### Added` / `### Changed` / `### Fixed` repeat.
+
+**Highlights**
+
+- **Run it remotely.** `athenaeum serve --transport http`, OIDC
+  resource-server auth (`serve.auth.*`) and a `remote` serve profile let one
+  deployment serve MCP clients over HTTP; see `docs/guides/remote.md`.
+- **Easier first run.** A fresh keyless root defaults to the `claude-cli`
+  provider, plus new `athenaeum doctor`, `athenaeum schedule install` and
+  `athenaeum import-memory` commands. The promptwitness ledger and contact-record
+  attribution (see `[0.23.0]`) also ship here.
+
+**Upgrading from 0.22.43**
+
+Read the "Upgrading from 0.22.43" block under `[0.23.0]` as well; this digest
+lists what was added after it. A deployment that changes no configuration keeps
+its 0.22.43 behaviour except for the points marked "behaviour change".
+
+- **Behaviour change: fresh keyless root defaults to `claude-cli`.** If a new
+  knowledge directory is scaffolded with no `ANTHROPIC_API_KEY` and a usable
+  `claude` binary is on `PATH`, `llm.provider` is set to `claude-cli`. An
+  existing config is never rewritten.
+- **Behaviour change: `recall` returns uncompiled notes.** Raw notes saved via
+  `remember` now appear in `recall` before the first compile, labelled
+  `[uncompiled]` and ranked below compiled pages.
+- **Behaviour change: no baked-in secret manager.** The default `op://`
+  references are gone; use `ATHENAEUM_ANTHROPIC_KEY_COMMAND`.
+- **Behaviour change: shipped hooks share one foreground budget**
+  (`ATHENAEUM_HOOK_BUDGET_SECONDS`, default 10s); slow work runs in the
+  background.
+- **New network-facing surface, all opt-in.** `athenaeum serve --transport http`
+  (loopback-only without auth), `serve.auth.*` OIDC bearer-token verification,
+  and the `remote` profile. `stdio` stays the default. The `mcp` extra's
+  `fastmcp` floor rises to 2.11.1.
+- **New commands.** `athenaeum doctor`, `athenaeum schedule install | remove`,
+  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun`, and
+  `athenaeum push-metrics sample-for-labelling | score-used`; plus the
+  `receipts` group, `attribution`, and `promptwitness` console script from
+  `[0.23.0]`.
+- **New top-level import name.** `promptwitness` is installed next to
+  `athenaeum` (standard-library-only at import time). An unrelated module of
+  that name in your environment will collide.
+- **Python 3.13+ is required**, and the `mcp` extra is needed for `serve`
+  and `test-mcp`.
+
 ### Added
 
+- **`athenaeum import-memory` (issue athenaeum#2316).** Opt-in command that
+  compiles existing Claude Code memory files into the knowledge base. Nothing is
+  selected by default; it prints a size-based cost estimate first and caps a run
+  at 20 files / 100 calls, resumably. `athenaeum init` only mentions it.
+- **`athenaeum schedule install | remove`.** Writes a launchd plist (macOS) or a
+  systemd user timer / crontab entry (Linux) that runs `athenaeum run` with the
+  key source resolved into the unit. It refuses to install with no key source.
+- **`athenaeum doctor` (issue athenaeum#2298).** Read-only install health check
+  (version, interpreter, MCP registration, hooks, LLM key mode, index, last
+  compile, schedule); each failure names its fix and exits non-zero.
+- **MCP tool annotations (issue athenaeum#2381).** Every tool carries
+  `readOnlyHint` / `destructiveHint` / `openWorldHint` so remote hosts can decide
+  what to run unattended. `scan_retraction_cascade` is `readOnlyHint: false`.
+- **Trust-graph wiring, TG3 and TG6 (issue athenaeum#2331 for TG3).**
+  Tier-0 field corrections can compare sources through configured
+  `librarian.source_trust_edges`, and verified witness attestation can break an
+  equal-rank tie or demote a claim whose chain no longer verifies. Both sit
+  behind `librarian.source_trust_enabled` (default off); with it off, behaviour is
+  unchanged. New read-only `athenaeum corrections-trust-dryrun` lists verdicts
+  that would flip.
+- **OIDC resource-server auth for `serve --transport http`.** `serve.auth.*`
+  pins verify bearer tokens and serve RFC 9728 protected-resource metadata, and
+  a configured issuer lifts the non-loopback bind refusal.
+- **`librarian.attribution.mode` (issue athenaeum#2220).** `observe`, `enforce`
+  or `auto` (default); a fresh install still observes every class.
+- **`athenaeum push-metrics sample-for-labelling | score-used` (issue
+  athenaeum#2302).** Draw a sample to label by hand, then score the "used"
+  heuristic against those labels.
 - **Remote-mode deployment guide (issue athenaeum#2386).** New
   `docs/guides/remote.md` covers running `athenaeum serve --transport http`
   behind a TLS reverse proxy with an external OIDC authorization server and the
@@ -277,6 +357,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change: default to `claude-cli` on a fresh, keyless root (issue
+  athenaeum#2367).** See "Upgrading from 0.22.43" above; `athenaeum init` now
+  also says which provider was selected and names the missing credential when
+  neither a key nor `claude-cli` is usable.
 - **No secret manager is baked in; a generic credential command replaces the
   default `op://` paths (issue athenaeum#2205, operator ruling 2026-10-30).**
   `session-start-recall.sh` ships NO default 1Password references, and
@@ -378,9 +462,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.23.0] - 2026-10-31
 
-First release since 0.22.43 (2026-10-25). The intermediate `0.22.44`–`0.22.58`
-versions were per-merge build numbers on `develop` that were never tagged or
-published; this section covers the whole span. This is a MINOR release
+Cut 2026-10-31 but never tagged or published; it shipped as part of 0.23.5
+(see `[0.23.5]` above). Counted from 0.22.43 (2026-10-25), the intermediate
+`0.22.44`–`0.22.58` versions were per-merge build numbers on `develop` that
+were never tagged or published; this section covers the whole span. This is a MINOR release
 because it adds public surface: a second top-level package with its own
 console script, a new `athenaeum receipts` command group, and three new
 optional extras. Nothing was removed. Detailed entries follow the summary,
