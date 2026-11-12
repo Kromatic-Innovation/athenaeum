@@ -25,6 +25,31 @@ The three workstreams are:
    checks, a calibration eval, attribution audits in the decision queue, and
    an easier first run.
 
+**Upgrading a 0.22.43 deployment**
+
+Run `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+`athenaeum doctor`. No migration step is required: a deployment that changes no
+configuration keeps its 0.22.43 behaviour except for the points under
+"Behaviour changes" below. Athenaeum does not install Claude Code hooks for you,
+so what you do about hooks depends on how you wired them
+(see `docs/guides/sidecar.md`):
+
+- **Hooks wired to the `athenaeum-claude-hook` console script:** nothing to do;
+  the upgraded package is used on the next session.
+- **Hooks copied from the example kit** (`~/.claude/hooks/athenaeum/*.sh`):
+  those are copies and are not updated by the upgrade. The only shipped hook
+  script that changed since 0.22.43 is `session-start-recall.sh` (the shared
+  hook time budget and the backgrounded vector rebuild), and the example
+  `settings-snippet.json` raised the `SessionStart` timeout from 15 to 60
+  seconds and the `UserPromptSubmit` timeout from 5 to 15. To pick these up,
+  re-copy the scripts as in step 1 of that guide and adopt the new timeouts. Your
+  existing copies keep working if you do not.
+- **Your own hook wiring** in `~/.claude/settings.json` is never rewritten.
+  `athenaeum doctor` reports FAIL for `hooks` if no athenaeum hook is
+  registered or a registered target is missing on disk, and names the fix.
+
+The Python floor (3.13+) is unchanged from 0.22.43.
+
 First-run commands after upgrading:
 
 ```bash
@@ -37,6 +62,21 @@ The versions `0.23.0` through `0.23.4` were build numbers on `develop` and
 were never tagged or published; the `[0.23.0]` section below was cut but never
 released, and its detailed entries ship here. Detailed entries are grouped by
 merge, so `### Added` / `### Changed` / `### Fixed` repeat.
+
+**Highlights**
+
+- **Run it remotely.** See workstream 1 above and `docs/guides/remote.md`.
+- **Easier first run.** `athenaeum doctor`, `athenaeum schedule install` and
+  `athenaeum import-memory`, and a keyless root that defaults to `claude-cli`.
+- **promptwitness and receipt sealing.** A harness-agnostic ledger with a
+  chain verifier, optional Ed25519 signing, optional external anchoring, a
+  Claude Code hook adapter, and `promptwitness verify` / `promptwitness demo`;
+  receipts can be signed with a key held outside the nightly process and
+  verified with only the public key. See the `[0.23.0]` detail entries.
+- **Contact-record fold, repair and attribution.** See the behaviour changes
+  above and the `[0.23.0]` detail entries.
+
+**Upgrading from 0.22.43: what changes**
 
 **Behaviour changes** (everything else is opt-in; a deployment that changes no
 configuration keeps its 0.22.43 behaviour except for these)
@@ -76,8 +116,6 @@ configuration keeps its 0.22.43 behaviour except for these)
 - **New frontmatter keys on `remember`.** A memory saved through the MCP
   `remember` tool with the default `claude:inferred` source now also records
   `model` and `originSessionId`. The `source` value itself is unchanged.
-- **Python 3.13+ is required**, and the `mcp` extra is needed for `serve` and
-  `test-mcp`.
 
 **Stability: experimental surface.** `athenaeum serve --transport http`, the
 `serve.auth.*` configuration keys, and the `promptwitness` package (including
@@ -128,63 +166,6 @@ separate top-level import, not part of `athenaeum.__all__`.
   work, and their warnings name `0.24.0` as the removal release. Move to
   `athenaeum decisions` before then.
 
-**Highlights**
-
-- **Run it remotely.** See workstream 1 above and `docs/guides/remote.md`.
-- **Easier first run.** `athenaeum doctor`, `athenaeum schedule install` and
-  `athenaeum import-memory`, and a keyless root that defaults to `claude-cli`.
-- **promptwitness and receipt sealing.** A harness-agnostic ledger with a
-  chain verifier, optional Ed25519 signing, optional external anchoring, a
-  Claude Code hook adapter, and `promptwitness verify` / `promptwitness demo`;
-  receipts can be signed with a key held outside the nightly process and
-  verified with only the public key. See the `[0.23.0]` detail entries.
-- **Contact-record fold, repair and attribution.** See the behaviour changes
-  above and the `[0.23.0]` detail entries.
-
-### Added` / `### Changed` / `### Fixed` repeat.
-
-**Highlights**
-
-- **Run it remotely.** `athenaeum serve --transport http`, OIDC
-  resource-server auth (`serve.auth.*`) and a `remote` serve profile let one
-  deployment serve MCP clients over HTTP; see `docs/guides/remote.md`.
-- **Easier first run.** A fresh keyless root defaults to the `claude-cli`
-  provider, plus new `athenaeum doctor`, `athenaeum schedule install` and
-  `athenaeum import-memory` commands. The promptwitness ledger and contact-record
-  attribution (see `[0.23.0]`) also ship here.
-
-**Upgrading from 0.22.43**
-
-Read the "Upgrading from 0.22.43" block under `[0.23.0]` as well; this digest
-lists what was added after it. A deployment that changes no configuration keeps
-its 0.22.43 behaviour except for the points marked "behaviour change".
-
-- **Behaviour change: fresh keyless root defaults to `claude-cli`.** If a new
-  knowledge directory is scaffolded with no `ANTHROPIC_API_KEY` and a usable
-  `claude` binary is on `PATH`, `llm.provider` is set to `claude-cli`. An
-  existing config is never rewritten.
-- **Behaviour change: `recall` returns uncompiled notes.** Raw notes saved via
-  `remember` now appear in `recall` before the first compile, labelled
-  `[uncompiled]` and ranked below compiled pages.
-- **Behaviour change: no baked-in secret manager.** The default `op://`
-  references are gone; use `ATHENAEUM_ANTHROPIC_KEY_COMMAND`.
-- **Behaviour change: shipped hooks share one foreground budget**
-  (`ATHENAEUM_HOOK_BUDGET_SECONDS`, default 10s); slow work runs in the
-  background.
-- **New network-facing surface, all opt-in.** `athenaeum serve --transport http`
-  (loopback-only without auth), `serve.auth.*` OIDC bearer-token verification,
-  and the `remote` profile. `stdio` stays the default. The `mcp` extra's
-  `fastmcp` floor rises to 2.11.1.
-- **New commands.** `athenaeum doctor`, `athenaeum schedule install | remove`,
-  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun`, and
-  `athenaeum push-metrics sample-for-labelling | score-used`; plus the
-  `receipts` group, `attribution`, and `promptwitness` console script from
-  `[0.23.0]`.
-- **New top-level import name.** `promptwitness` is installed next to
-  `athenaeum` (standard-library-only at import time). An unrelated module of
-  that name in your environment will collide.
-- **Python 3.13+ is required**, and the `mcp` extra is needed for `serve`
-  and `test-mcp`.
 
 ### Added
 
