@@ -60,7 +60,6 @@ class TestModuleContract:
             "record_handle",
             "retire_handle",
             "leased_refs",
-            "release_lease",
         ):
             assert callable(getattr(batch_state, name)), name
 
@@ -587,18 +586,6 @@ class TestCleanExitPaths:
         batch_state.retire_handle(tmp_path, "never-recorded")
         batch_state.retire_handle(tmp_path, "")
         assert set(batch_state.load(tmp_path)) == {"msgbatch_1"}
-
-    def test_release_lease_frees_refs_but_keeps_the_handle(self, tmp_path: Path) -> None:
-        raw = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")
-        _record(tmp_path, {"c1": raw})
-        batch_state.release_lease(tmp_path, "msgbatch_1")
-        assert batch_state.leased_refs(tmp_path, now=NOW) == set()
-        assert batch_state.load(tmp_path)["msgbatch_1"].refs["c1"].ref == raw.ref
-
-    def test_release_lease_is_a_no_op_for_an_unknown_batch(self, tmp_path: Path) -> None:
-        batch_state.release_lease(tmp_path, "never-recorded")
-        batch_state.release_lease(tmp_path, "")
-        assert batch_state.load(tmp_path) == {}
 
 
 # ---------------------------------------------------------------------------
