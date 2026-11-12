@@ -2,6 +2,13 @@
 
 > **Unstable, under redesign.** The source trust graph (`librarian.source_trust_enabled`, `librarian.source_trust_edges`, `athenaeum corrections-trust-dryrun`) may change or be removed without a deprecation cycle, and is not covered by the `athenaeum.__all__` semver promise. Do not build on it.
 
+> **Status: under reconsideration (2026-11-12).** The v1 mechanism described
+> here (operator-declared override edges over the nine-tier ladder) shipped and
+> remains as built. Its rulings are being revisited in a v2 redesign, notably
+> rejected alternative 2 in section 5 (numeric per-(source, domain) trust) and
+> the no-thresholds stance. New work should not build to those rulings without
+> operator confirmation.
+
 - **Status:** design of record, decided 2026-11-05. Open questions in the original draft are resolved in section 8.
 - **Authority:** operator ruling 2026-11-05 on athenaeum#2145.
 - **Code baseline:** `origin/develop` at `7c6a1577`; every `path:line` citation in this document was re-verified against `origin/develop` at `40668992` (issue athenaeum#2329) and corrected where it had drifted — see that issue's lane report for the old→new list.
@@ -174,14 +181,14 @@ Most of athenaeum#2144's athenaeum-side data path **has already shipped**. athen
 
 ## 6. Child slices (as decided)
 
-Each slice is roughly one session. Epic athenaeum#2145 is `should`. "Edges" means native `blocked_by`. Slice scope and acceptance criteria are in each child issue.
+Each slice is roughly one session. All six slices (TG1-TG6) have merged as of 2026-11-12; the status on each line below is updated, the rest records the original plan. Epic athenaeum#2145 is `should`. "Edges" means native `blocked_by`. Slice scope and acceptance criteria are in each child issue.
 
-- **TG1. Design doc `docs/design/trust-graph.md`.** should, ready. Edges: none. Defines the evidence-kind vocabulary and its source.
-- **TG2. `trust_graph` module: edge config resolver and the pure four-outcome `compare_sources`, with evidence-kind support.** should, ready. blocked_by TG1.
-- **TG3. Wire trust edges into tier-0 field corrections behind a default-off flag, with a dry-run flip report.** Includes the shape-rule `api:<vendor>` guard (F5) and the stale-comment fix at `corrections.py:900-903`. should, ~operator. blocked_by TG2.
-- **TG4. LLM resolver: render matching trust edges into the per-pair message.** could, ~planning. blocked_by TG2. Its paid eval and pass bar are decided later by the operator.
-- **TG5. Witness attestation: verify signatures against operator-declared keys and record the anchor source.** Filed under epic athenaeum#2144, should, ready. Edges: none. No promptwitness change.
-- **TG6. Trust tie-break and demote-on-broken-chain on verified attestation.** could, ready. blocked_by TG3 and TG5. Enabling it on host additionally waits on athenaeum#2161 (operator step, not a native edge).
+- **TG1. Design doc `docs/design/trust-graph.md`.** Merged (PR athenaeum#2355). Edges: none. Defines the evidence-kind vocabulary and its source.
+- **TG2. `trust_graph` module: edge config resolver and the pure four-outcome `compare_sources`, with evidence-kind support.** Merged (PR athenaeum#2356). blocked_by TG1.
+- **TG3. Wire trust edges into tier-0 field corrections behind a default-off flag, with a dry-run flip report.** Includes the shape-rule `api:<vendor>` guard (F5) and the stale-comment fix at `corrections.py:900-903`. Merged (PR athenaeum#2405). blocked_by TG2.
+- **TG4. LLM resolver: render matching trust edges into the per-pair message.** Merged (PR athenaeum#2412). blocked_by TG2. Its paid eval is on hold pending the v2 redesign.
+- **TG5. Witness attestation: verify signatures against operator-declared keys and record the anchor source.** Filed under epic athenaeum#2144. Merged (PR athenaeum#2357). Edges: none. No promptwitness change.
+- **TG6. Trust tie-break and demote-on-broken-chain on verified attestation.** Merged (PR athenaeum#2410). blocked_by TG3 and TG5. Enabling it on host additionally waits on athenaeum#2161 (operator step, not a native edge).
 
 **Dropped:** TG7 (weight for hardware-nonexportable attestation), per OQ1 (attestation never overrides rank).
 
