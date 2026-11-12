@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. A handful of commands (`dedupe`, `auto-memory`, `questions`, `merges`, `decisions`, `authority`, `axiom`, `calibration`, `storage`, `push-metrics`, `measure`, `memory-class`, `description`, `verdicts`, `dimensions`, `subject`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `merges`, `push-metrics`, `questions`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -178,8 +178,8 @@ Acknowledge one contact-surface-lint --attribution observe report as clean, for 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -195,8 +195,8 @@ File a human answer for one parked suspect through the placement executor, with 
 |---|---|---|---|
 | `--as` | — | — | The answer to file: own \| other:<uid> \| alias:<relation> \| merge:<uid>. `own` confirms the value is the target's; `other:<uid>` re-attributes it to that uid; `alias:<relation>` files it as an alias with one of the four identifier relations; `merge:<uid>` proposes a same-entity merge and writes no contact value. |
 | `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -211,7 +211,7 @@ Print one parked suspect, including its raw contact value. This is the sanctione
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum audit`
@@ -220,17 +220,17 @@ Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, f
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write last_audited/audit_version and any determinable coordinate fills/undeterminable markers. Without this flag the command is a dry-run. |
-| `--batch` | `False` | — | Route audit calls through the Batch API transport (athenaeum.batch.execute_batch) instead of one synchronous call per page. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--apply` | off (flag absent) | — | Write last_audited/audit_version and any determinable coordinate fills/undeterminable markers. Without this flag the command is a dry-run. |
+| `--batch` | off (flag absent) | — | Route audit calls through the Batch API transport (athenaeum.batch.execute_batch) instead of one synchronous call per page. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Audit at most N pages this pass. |
-| `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely (every page reported no-llm-client). For CI/offline smoke checks only. |
+| `--mechanical-dry-run` | off (flag absent) | — | Skip building an LLM client entirely (every page reported no-llm-client). For CI/offline smoke checks only. |
 | `--model` | — | — | Override the model (default: the 'classify' knob's resolved model). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sample` | — | — | Audit a stratified (by type:) random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
 | `--seed` | `0` | — | Seed for --sample (default: 0). The same seed over the same corpus always selects the same pages. |
-| `--stale` | `False` | — | Report mode: list pages whose last_audited is missing/older than audit.stale_after_days, or whose audit_version is behind the current version, oldest/never-audited first. Read-only -- ignores --apply/--batch/--sample/--seed/--uids/--mechanical-dry-run; honors --path/--json/--limit. |
+| `--stale` | off (flag absent) | — | Report mode: list pages whose last_audited is missing/older than audit.stale_after_days, or whose audit_version is behind the current version, oldest/never-audited first. Read-only -- ignores --apply/--batch/--sample/--seed/--uids/--mechanical-dry-run; honors --path/--json/--limit. |
 | `--uids` | — | — | Path to a file listing one page uid per line; audit exactly those pages. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -249,7 +249,7 @@ Convert ONE page into a one-line pointer stub for a given manifest source. Defau
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the converted stub to --page. Without this flag, the command is a dry-run that prints the result to stdout. |
+| `--apply` | off (flag absent) | — | Write the converted stub to --page. Without this flag, the command is a dry-run that prints the result to stdout. |
 | `--page` | — | — | Path to the wiki page to convert. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge), used to resolve the authority manifest. |
 | `--source-slug` | — | — | The manifest source slug this page duplicates. |
@@ -261,7 +261,7 @@ List wiki pages that duplicate a manifest-listed authoritative source. READ-ONLY
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum auto-memory`
@@ -280,10 +280,10 @@ Prune operational/ephemeral wiki/auto-*.md pages. Default is dry-run (prints kil
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | git rm the kill-list in one labeled commit and rebuild the recall index. Without this flag the command is a dry-run. |
+| `--apply` | off (flag absent) | — | git rm the kill-list in one labeled commit and rebuild the recall index. Without this flag the command is a dry-run. |
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -293,8 +293,8 @@ Retire wiki entity pages minted from filenames/paths — a page whose entity nam
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | git rm the kill-list in one labeled commit. Without this flag the command is a dry-run. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | git rm the kill-list in one labeled commit. Without this flag the command is a dry-run. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -304,8 +304,8 @@ Prune dangling pointers from <scope>/MEMORY.md indexes. A pointer is dangling wh
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Rewrite the affected MEMORY.md indexes in one labeled commit. Without this flag the command is a dry-run. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Rewrite the affected MEMORY.md indexes in one labeled commit. Without this flag the command is a dry-run. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -326,7 +326,7 @@ Record a human-approved axiom demotion for a wiki page slug.
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--by` | — | — | Who is authorizing the demotion. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why this axiom is being demoted. |
 | `--slug` | — | — | The wiki page slug being demoted. |
@@ -337,7 +337,7 @@ Assignment audit: every slug's current status + full promote/demote history (whe
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum axiom promote`
@@ -347,7 +347,7 @@ Record a human-approved axiom promotion for a wiki page slug.
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--by` | — | — | Who is authorizing the promotion. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why this page is being promoted to axiom. |
 | `--scope` | — | — | Optional context scope (e.g. "applies to resume work"). Stored + surfaced; enforcement is a consumer's concern (out of scope for). |
@@ -360,7 +360,7 @@ Check whether a candidate raw-intake note would be recognized by the Tier-0 hard
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--file` | — | — | Path to a file holding the candidate note. Mutually exclusive with --text. |
-| `--json` | `False` | — | Emit a machine-readable JSON verdict instead of plain text. |
+| `--json` | off (flag absent) | — | Emit a machine-readable JSON verdict instead of plain text. |
 | `--text` | — | — | The candidate note (frontmatter + body), given inline. Mutually exclusive with --file; if neither is given, the note is read from stdin. |
 
 ## `athenaeum calibration`
@@ -379,9 +379,9 @@ Close pending default_acceptance audit items as not applicable (dry run unless -
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the closures to the ledger (default is a dry run). |
+| `--apply` | off (flag absent) | — | Write the closures to the ledger (default is a dry run). |
 | `--id` | — | — | Restrict to this audit item id (repeatable). Default: every pending default_acceptance item. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--note` | `not applicable: circular sample of the operator's own answer (athenaeum#2079)` | — | Ledger note recorded on each closure. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -392,7 +392,7 @@ Record a human confirm/overturn of a sampled audit item.
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--id` | — | — | The audit item id (from `decisions list`). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--note` | `` | — | Optional free-text note on the review. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--verdict` | — | — | The human's verdict. Equal to the tier's original verdict = confirm; different = overturn (a calibration signal only). |
@@ -403,7 +403,7 @@ Per-tier calibration counts (sampled / reviewed / overturned). The default_accep
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum claims`
@@ -412,7 +412,7 @@ Detect claims restated across distinct wiki entities (read-only). Default --find
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--find` | `False` | — | Discover recurring claims and print a YAML report. |
+| `--find` | off (flag absent) | — | Discover recurring claims and print a YAML report. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--threshold` | — | — | Cosine similarity cutoff (default: 0.85) |
 
@@ -446,10 +446,10 @@ Read-only contact-surface report: page-less records, shared values, and observed
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--attribution` | `False` | — | Run the attribution seam in report mode over every (value, uid) pair on the surface; writes attribution-log rows (writer=lint) and one observe-report record. |
+| `--attribution` | off (flag absent) | — | Run the attribution seam in report mode over every (value, uid) pair on the surface; writes attribution-log rows (writer=lint) and one observe-report record. |
 | `--contacts-root` | — | — | Override the resolved excluded contacts surface root. |
-| `--escalate` | `False` | — | With --attribution: also run the shadow escalation sweep over already-parked suspects. Opt-in; makes model calls. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--escalate` | off (flag absent) | — | With --attribution: also run the shadow escalation sweep over already-parked suspects. Opt-in; makes model calls. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--max-escalations` | — | — | Override the --escalate call cap (default: librarian_max_api_calls). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -468,9 +468,9 @@ Build one sidecar context envelope (ranked candidates + rendered text) for a pro
 | `--cache-dir` | — | — | Cache dir holding wiki-index.db (default: ~/.cache/athenaeum) |
 | `--llm-timeout` | `3.0` | — | LLM extraction timeout in seconds |
 | `--n` | `3` | — | Max candidates (default: 3) |
-| `--no-llm` | `False` | — | Skip LLM term extraction, use the regex fallback |
+| `--no-llm` | off (flag absent) | — | Skip LLM term extraction, use the regex fallback |
 | `--session-id` | — | — | Session id, for dedup bookkeeping by the caller |
-| `--stdin-json` | `False` | — | Read {"prompt":..., "session_id":...} from stdin (hook-input shape) |
+| `--stdin-json` | off (flag absent) | — | Read {"prompt":..., "session_id":...} from stdin (hook-input shape) |
 
 ## `athenaeum convergence`
 
@@ -478,7 +478,7 @@ Quarterly self-tuning-loop convergence report: supply (dimension-proposal approv
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum correct-notes`
@@ -492,8 +492,8 @@ Move or drop individual Notes lines on a person/company page, e.g. lines misfile
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--batch` | — | — | Host-path JSON batch file: {source_uid, batch_id, created_at, records: [{bullet_id, action: 'move'\|'drop', target_uid?, note?} \| {section_id, action: 'drop', note?}]}. A record carries exactly one of bullet_id (move/drop a Notes line) or section_id (drop a whole ## heading's span, -- action must be 'drop', there is no section move). Never read from raw/ -- see the module docstring for why that boundary matters here. A batch_id already present in the ledger makes the whole batch a no-op. |
-| `--dry-run` | `False` | — | Report counts only (records by action, refusals, body characters and file bytes against their respective thresholds) and write nothing. Without this flag the command applies. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--dry-run` | off (flag absent) | — | Report counts only (records by action, refusals, body characters and file bytes against their respective thresholds) and write nothing. Without this flag the command applies. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -503,7 +503,7 @@ Move or drop individual Notes lines on a person/company page, e.g. lines misfile
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | — | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decay-sweep`
@@ -512,11 +512,11 @@ Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + 
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Git-archive the kill-list (two-commit: provenance snapshot, then git rm) and rebuild the recall index. Without this flag the command is a dry-run. |
+| `--apply` | off (flag absent) | — | Git-archive the kill-list (two-commit: provenance snapshot, then git rm) and rebuild the recall index. Without this flag the command is a dry-run. |
 | `--as-of` | — | — | Rewind the expiry check to this date (YYYY-MM-DD) instead of today. Dry-run only in practice, but accepted by --apply too. |
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -544,7 +544,7 @@ Answer one queue item with a JSON object, validated against that item's publishe
 |---|---|---|---|
 | `--answer` | — | — | The answer as a JSON object, e.g. '{"verdict": "approve"}'. Must satisfy the item's response_schema. |
 | `--id` | — | — | The decision id being answered. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--type` | — | — | The item's decision type, as reported by `athenaeum decisions list` — it selects the response schema the answer is checked against. |
 
@@ -554,7 +554,7 @@ Report the five effort-budget figures (items/day, per-item context size distribu
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decisions challenge-coordinate`
@@ -567,8 +567,8 @@ Challenge/revoke a previously answered coordinate decision: stale-marks every ve
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -578,7 +578,7 @@ Print `N decisions pending (Q questions, M merges; oldest Xd)`.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decisions list`
@@ -587,10 +587,10 @@ List all pending decisions, oldest first.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | `False` | — | Include the (optional) `**Proposed resolution**` block on question items. |
+| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |
 
 ## `athenaeum decisions migrate`
 
@@ -598,7 +598,7 @@ Materialize every pending-merge and pending-question record (resolved and unreso
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decisions next`
@@ -607,9 +607,9 @@ Show the oldest pending decision (single block).
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | `False` | — | Include the (optional) `**Proposed resolution**` block on question items. |
+| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |
 
 ## `athenaeum decisions raise-confirmation`
 
@@ -622,7 +622,7 @@ File a NEW agent-raised 'implemented X without Y, confirm?' item into the pendin
 | `--entity` | `` | — | Optional short human-readable header label. Cosmetic only. |
 | `--implemented-behavior` | — | — | What was actually built instead. |
 | `--issue-ref` | — | — | The issue or PR the narrowing relates to. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--narrowed-scope` | — | — | What was narrowed — the scope NOT covered. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--question` | `` | — | Optional checkbox question text. Auto-phrased from the structured fields above when omitted. |
@@ -635,7 +635,7 @@ Flag any completed merge that relied on a now-retracted source for human review.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decompose-page`
@@ -648,14 +648,14 @@ Redistribute an aggregate page's per-entity facts onto the company/person pages 
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Attach the facts and rewrite the source page. Without this flag the command writes nothing but the report. |
+| `--apply` | off (flag absent) | — | Attach the facts and rewrite the source page. Without this flag the command writes nothing but the report. |
 | `--description` | — | — | New frontmatter description: for the source page. Required with --apply, and subject to the same no-subject-names check as the body (the current description is itself a list of companies). |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--report` | — | — | Write the JSON report here. The report names subjects and page filenames and is never printed to stdout. |
 | `--resolutions` | — | — | JSON object of bullet-id -> uid \| 'drop', ruling on the bullets the dry run could not place. A ruling whose id no longer matches its bullet's text is refused. --apply only. |
 | `--rewrite-body` | — | — | Markdown body the source page is rewritten to. Required with --apply. Refused if it exceeds 2 KB, links to a page that does not exist, or still names any decomposed subject. |
-| `--split-clauses` | `False` | — | Split a run-on list item into one candidate per footnote-cited clause before classification, instead of treating the whole item as one fact. A clause ends at a run of inline footnote markers, optionally followed by '.'/';'/',' and then whitespace or the end of the item; an item is only split when that yields 2+ clauses AND --subject-until matches it 2+ times, so a single fact with two mid-sentence citations is never cut. A clause --subject-until does not match exactly once is 'malformed' -- reported unresolved with an empty subject rather than re-cut by a second heuristic; only a 'drop' ruling can resolve it. Off by default: without this flag the report is the version 1 shape, byte-identical to today's. With it, the report is version 2, a strict superset (adds 'items', 'clause_split', and per-bullet 'item_ordinal'/'clause_index'/'clause_shape'). Makes no LLM call either way. |
+| `--split-clauses` | off (flag absent) | — | Split a run-on list item into one candidate per footnote-cited clause before classification, instead of treating the whole item as one fact. A clause ends at a run of inline footnote markers, optionally followed by '.'/';'/',' and then whitespace or the end of the item; an item is only split when that yields 2+ clauses AND --subject-until matches it 2+ times, so a single fact with two mid-sentence citations is never cut. A clause --subject-until does not match exactly once is 'malformed' -- reported unresolved with an empty subject rather than re-cut by a second heuristic; only a 'drop' ruling can resolve it. Off by default: without this flag the report is the version 1 shape, byte-identical to today's. With it, the report is version 2, a strict superset (adds 'items', 'clause_split', and per-bullet 'item_ordinal'/'clause_index'/'clause_shape'). Makes no LLM call either way. |
 | `--subject-until` | — | — | Regex marking the end of each bullet's subject. The subject is the bullet's leading span up to the first match; a bullet the regex does not match is reported unresolved rather than guessed at. Supplied at run time so a page's sentence template never has to be recorded in this repo. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -665,7 +665,7 @@ Collapse duplicate oversize-page-family escalations in _pending_questions.md to 
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -684,9 +684,9 @@ Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / exact-name match). De
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Read a report and perform the merge (idempotent). |
-| `--find` | `False` | — | Discover duplicate pairs and write a YAML report. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Read a report and perform the merge (idempotent). |
+| `--find` | off (flag absent) | — | Discover duplicate pairs and write a YAML report. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--from` | — | — | Path to the YAML report to apply (default: stdin). --apply only. |
 | `--out` | — | — | Path to write the YAML report (default: stdout). --find only. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
@@ -698,8 +698,8 @@ Cluster concept/reference/principle wiki pages and propose merges for near-dupli
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--dry-run` | `False` | — | Print what would be proposed without writing to wiki/_pending_merges.md. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--dry-run` | off (flag absent) | — | Print what would be proposed without writing to wiki/_pending_merges.md. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--threshold` | — | — | Cosine similarity cutoff (default: librarian.cluster_threshold / 0.55 — same threshold the raw auto-memory cluster pass uses). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
@@ -713,8 +713,8 @@ Open the recall viewer for the current Claude session — resolves the session i
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--editor` | — | — | Command used to open a clicked page (default: subl). |
 | `--limit` | `20` | — | With --list-sessions, the maximum number of sessions to print. Must be a positive integer -- 0 and negative values are rejected (a negative value would silently drop the N MOST RECENT sessions via list slicing, the opposite of a short list) (default: 20). Has no effect otherwise. |
-| `--list-sessions` | `False` | — | Print sessions with recall activity (newest last-activity first), including an items-pushed count and whether each has ended, then exit 0 without binding a port or starting a server. The count sums pushed_count across the session's push records, so an item pushed on N turns counts N times -- it is not distinct pages, which is what the viewer's header counts. Use this to find a session worth demoing, then pass its id via --session. |
-| `--no-browser` | `False` | — | Serve without opening a browser (headless/CI). |
+| `--list-sessions` | off (flag absent) | — | Print sessions with recall activity (newest last-activity first), including an items-pushed count and whether each has ended, then exit 0 without binding a port or starting a server. The count sums pushed_count across the session's push records, so an item pushed on N turns counts N times -- it is not distinct pages, which is what the viewer's header counts. Use this to find a session worth demoing, then pass its id via --session. |
+| `--no-browser` | off (flag absent) | — | Serve without opening a browser (headless/CI). |
 | `--path` | — | — | Knowledge directory (default: ~/knowledge) |
 | `--port` | `8756` | — | Preferred TCP port on localhost (default: 8756). Falls back to an OS-assigned free port if this one is busy. |
 | `--projects-root` | — | — | Claude Code transcript root (default: ~/.claude/projects) |
@@ -734,13 +734,13 @@ Write description: onto pages that lack it — batched LLM summaries through the
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the descriptions. Without this flag the command reports and writes nothing. |
+| `--apply` | off (flag absent) | — | Write the descriptions. Without this flag the command reports and writes nothing. |
 | `--batch-size` | `20` | — | Pages per LLM call (default: 20). |
-| `--dry-run` | `False` | — | Report without writing. Already the default; OVERRIDES --apply when both are given (safe mode wins). |
-| `--include-retired` | `False` | — | Do not skip pages carrying 'retired: true'. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--dry-run` | off (flag absent) | — | Report without writing. Already the default; OVERRIDES --apply when both are given (safe mode wins). |
+| `--include-retired` | off (flag absent) | — | Do not skip pages carrying 'retired: true'. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Decide at most N pages this pass (the rest are reported 'undecided'). Re-run to continue — already-described pages are skipped, so successive runs drain the backlog. |
-| `--mechanical` | `False` | — | Derive each description from the page's opening paragraph instead of an LLM call. Free and instant; lower quality on pages whose first paragraph is not a summary. |
+| `--mechanical` | off (flag absent) | — | Derive each description from the page's opening paragraph instead of an LLM call. Free and instant; lower quality on pages whose first paragraph is not a summary. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sample` | `0` | — | Print the first N decided descriptions (dry-run review aid). |
 
@@ -764,7 +764,7 @@ Compare two wiki pages' coordinates axis-by-axis, one relation per dimension.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON. |
 | `--path` | `~/knowledge` | — | Knowledge directory, for loading athenaeum.yaml (default: ~/knowledge). |
 
 ## `athenaeum dimensions show`
@@ -777,7 +777,7 @@ Show one wiki page's coordinates across every registered dimension.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON. |
 | `--path` | `~/knowledge` | — | Knowledge directory, for loading athenaeum.yaml (default: ~/knowledge). |
 
 ## `athenaeum disable`
@@ -787,7 +787,7 @@ Turn athenaeum's background work off (compile, detectors, recall, notifications)
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory for the state file (default: ~/.cache/athenaeum). |
-| `--compile` | `False` | — | Granular: stop only the expensive compile/detect pass (session-end contradiction detection); leave recall on. |
+| `--compile` | off (flag absent) | — | Granular: stop only the expensive compile/detect pass (session-end contradiction detection); leave recall on. |
 | `--reason` | — | — | Optional note recorded in the state file and shown by 'athenaeum status'. |
 
 ## `athenaeum doctor`
@@ -807,14 +807,14 @@ Supervised API+batch drain of the raw-intake backlog (cost-guarded)
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--knowledge-root`, `--path` | — | — | Knowledge directory (default: ~/knowledge). |
 | `--max-files` | — | — | Intake window size — files compiled per window (default: librarian.max_files / 50). The drain loops windows until the backlog empties or the cost ceiling trips. |
 | `--max-usd` | — | — | Mandatory cost ceiling in USD applied CUMULATIVELY across the whole drain (not per window). Maps onto the spend.max_usd_per_run ceiling for each window as the remaining budget. |
 | `--raw-root` | — | — | Raw intake directory (default: <knowledge-root>/raw). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki directory (default: <knowledge-root>/wiki). |
-| `--yes` | `False` | — | Proceed without the interactive cost confirmation (required to run non-interactively — the drain incurs real API spend). |
+| `--yes` | off (flag absent) | — | Proceed without the interactive cost confirmation (required to run non-interactively — the drain incurs real API spend). |
 
 ## `athenaeum enable`
 
@@ -831,7 +831,7 @@ One-call read of a SINGLE entity's page by uid, for any entity class, with an ex
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--class` | `person` | — | The page's `type:` (person, vendor, …). Selects which excluded SURFACE is read — a `person` page's record lives on the `pii` surface — while the page itself is resolved by uid whatever its type. Default: person. |
-| `--include-excluded` | `False` | — | Include the actual excluded values (default: off — withheld fields carry a redaction marker instead). |
+| `--include-excluded` | off (flag absent) | — | Include the actual excluded values (default: off — withheld fields carry a redaction marker instead). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--uid` | — | — | The entity's durable uid. |
 | `--usage-class` | `[]` | observed, provider, unclassified | Return only values of this usage class (repeatable; one of observed, provider, unclassified). Default: every value, each carrying its class. |
@@ -842,7 +842,7 @@ Enumerate every entity of a declared type matching field predicates — no query
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--ascending` | `False` | — | Sort ascending instead of the default descending. |
+| `--ascending` | off (flag absent) | — | Sort ascending instead of the default descending. |
 | `--audience` | — | — | Run under a restricted read scope, matching `recall --audience`. Unset = owner = full access. |
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
 | `--cursor` | — | — | Opaque continuation token from a prior call's `next_cursor`. |
@@ -852,7 +852,7 @@ Enumerate every entity of a declared type matching field predicates — no query
 | `--sort` | `name` | — | Frontmatter field to sort by (default: name). |
 | `--type` | — | — | Declared entity type (a page's `type:`). Call `athenaeum query entity-schema`-equivalent (the MCP `entity_schema` tool) to discover this deployment's classes. An unrecognized value does not error — the response's `known_classes` names what this deployment DOES have. |
 | `--where` | `[]` | — | Field predicate, AND-combined, repeatable. KIND is one of eq, ne, substring, regex (eq/substring/regex all compare case-insensitively). FIELD may be a comma-separated ORDERED fallback list, OR-combined (e.g. current_company,linkedin_company_at_connect:substring:Acme). |
-| `--with-pii` | `False` | — | Required to predicate or select `google_contact_*` fields (AC amendment 1). Same flag contract `recall --with-pii` already uses. NOT required for `do_not_email` (ungated by). |
+| `--with-pii` | off (flag absent) | — | Required to predicate or select `google_contact_*` fields (AC amendment 1). Same flag contract `recall --with-pii` already uses. NOT required for `do_not_email` (ungated by). |
 
 ## `athenaeum explain-routing`
 
@@ -860,7 +860,7 @@ Read-only preview: resolved provider/model/batch/price per model knob. Prints wh
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of a formatted table. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of a formatted table. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum fold-lint`
@@ -869,7 +869,7 @@ Read-only check of the two fold-graph invariants: the folded_into graph is acycl
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum import-memory`
@@ -879,14 +879,14 @@ Opt-in: discover existing Claude Code memory across projects and offer to compil
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the resumable import-memory state (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--max-calls` | `100` | — | Cap API calls this run (default 100, same ruling as --max-files). |
 | `--max-files` | `20` | — | Cap files compiled this run (default 20, ruling 3 — same cap as). Raise it for a larger batch; re-running with no flag change resumes where the cap stopped. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 | `--project` | — | — | Select a discovered project by its scope name (the directory name under the Claude Code projects root). Repeatable. Given at least once, this bypasses the interactive picker entirely — the scripts/tests path (ruling 4). Omitted: an interactive picker runs, with nothing selected by default. |
 | `--projects-root` | — | — | Override the Claude Code projects root to scan (default: ~/.claude/projects, honoring CLAUDE_CONFIG_DIR). For tests/scripts. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-| `--yes` | `False` | — | Skip the 'proceed?' confirmation after the cost/cap summary prints. Does NOT select any project by itself — selection still requires --project or an interactive pick. |
+| `--yes` | off (flag absent) | — | Skip the 'proceed?' confirmation after the cost/cap summary prints. Does NOT select any project by itself — selection still requires --project or an interactive pick. |
 
 ## `athenaeum ingest`
 
@@ -895,15 +895,15 @@ Compile new/changed raw intake into the wiki on demand. --incremental (default) 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the ingest stamp manifest (default: ~/.cache/athenaeum) |
-| `--dry-run` | `False` | — | Run the compile without writing files, committing, or updating the ingest stamp. |
-| `--evaluate-only` | `False` | — | Lock-free public trigger-evaluation mode: evaluate the configured reasoning-tier triggers against LIVE state and print the verdict, then exit — NEVER takes.athenaeum.lock and NEVER compiles, even when a trigger fired (unlike --if-triggered, which compiles on a fire). Reads the exact same reasoning-trigger stamp --if-triggered completion writes. Exit codes: 2 = a trigger fired, 0 = none fired, 1 = an error occurred evaluating (mirrors this repo's dry-run-found-something ternary, e.g. `athenaeum decay`/`athenaeum repair`). Cannot be combined with --if-triggered. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | `True` | — | Recompile all pending raw intake, ignoring the ingest stamp. |
-| `--if-triggered` | `False` | — | Additive control signal: before compiling, evaluate the configured reasoning-tier triggers (backlog file count / bytes, elapsed interval, nightly backstop — librarian.reasoning_triggers.*) against LIVE state. When none fired, does NOT compile — prints the same one-line JSON summary carrying trigger="none" and exits 0 (cheap, side-effect-free: no lock taken). When one fired, runs the normal incremental ingest exactly as without this flag, with the firing trigger's name in the summary, and — on a clean non-dry-run completion — advances the reasoning-trigger last-run stamp used by the elapsed-interval and nightly-backstop checks. This adds a control signal to the existing on-demand poke; it is not a second way for data to enter, and it never forces a full recompile (always --incremental's budgeted, resumable path). |
-| `--incremental` | — | — | Compile only raw files new/changed since the last successful ingest (tracked via a content-hash stamp). This is the DEFAULT. |
+| `--dry-run` | off (flag absent) | — | Run the compile without writing files, committing, or updating the ingest stamp. |
+| `--evaluate-only` | off (flag absent) | — | Lock-free public trigger-evaluation mode: evaluate the configured reasoning-tier triggers against LIVE state and print the verdict, then exit — NEVER takes.athenaeum.lock and NEVER compiles, even when a trigger fired (unlike --if-triggered, which compiles on a fire). Reads the exact same reasoning-trigger stamp --if-triggered completion writes. Exit codes: 2 = a trigger fired, 0 = none fired, 1 = an error occurred evaluating (mirrors this repo's dry-run-found-something ternary, e.g. `athenaeum decay-sweep`/`athenaeum repair`). Cannot be combined with --if-triggered. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--full` | off (flag absent) | — | Recompile all pending raw intake, ignoring the ingest stamp. |
+| `--if-triggered` | off (flag absent) | — | Additive control signal: before compiling, evaluate the configured reasoning-tier triggers (backlog file count / bytes, elapsed interval, nightly backstop — librarian.reasoning_triggers.*) against LIVE state. When none fired, does NOT compile — prints the same one-line JSON summary carrying trigger="none" and exits 0 (cheap, side-effect-free: no lock taken). When one fired, runs the normal incremental ingest exactly as without this flag, with the firing trigger's name in the summary, and — on a clean non-dry-run completion — advances the reasoning-trigger last-run stamp used by the elapsed-interval and nightly-backstop checks. This adds a control signal to the existing on-demand poke; it is not a second way for data to enter, and it never forces a full recompile (always --incremental's budgeted, resumable path). |
+| `--incremental` | off (flag absent) | — | Compile only raw files new/changed since the last successful ingest (tracked via a content-hash stamp). This is the DEFAULT. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). --knowledge-root is an alias, matching `run`. |
 | `--session` | — | — | Scope the new/changed detection to one originSessionId (the SessionEnd use-case). |
-| `--verbose`, `-v` | `False` | — | Enable debug logging |
+| `--verbose`, `-v` | off (flag absent) | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum ingest-answers`
@@ -912,10 +912,10 @@ Ingest answered pending questions from _pending_questions.md
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--quiet`, `-q` | `False` | — | Suppress per-block malformed-block warnings; print only the final summary line(s). |
-| `--verbose` | `False` | — | Print per-skip detail (proposal id, dimension, values) for fold_narrows_coordinate / fold_widen_impossible skips. |
+| `--quiet`, `-q` | off (flag absent) | — | Suppress per-block malformed-block warnings; print only the final summary line(s). |
+| `--verbose` | off (flag absent) | — | Print per-skip detail (proposal id, dimension, values) for fold_narrows_coordinate / fold_widen_impossible skips. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum ingest-merges`
@@ -924,7 +924,7 @@ Archive resolved pending merges from wiki/_pending_merges.md
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -934,12 +934,12 @@ Initialize a new knowledge directory
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Overwrite existing template files at the destination; no backup is created (only applies with --with-templates and/or --with-rules). |
+| `--force` | off (flag absent) | — | Overwrite existing template files at the destination; no backup is created (only applies with --with-templates and/or --with-rules). |
 | `--path` | `~/knowledge` | — | Target directory (default: ~/knowledge) |
 | `--rules-dest` | — | — | Override the shape-rules destination directory (default: <path>/rules). |
 | `--templates-dest` | — | — | Override the templates destination directory (default: <path>/templates). |
-| `--with-rules` | `False` | — | Also copy bundled EXAMPLE shape rules into <path>/rules/. Every example ships 'mode: observe' -- installing them changes nothing until you review wiki/_shape_rule_dispositions.jsonl and edit a copy to 'mode: live'. See docs/design/shape-rules.md. |
-| `--with-templates` | `False` | — | Also copy bundled entity-author templates (person/company/project/concept/source) into <path>/templates/. |
+| `--with-rules` | off (flag absent) | — | Also copy bundled EXAMPLE shape rules into <path>/rules/. Every example ships 'mode: observe' -- installing them changes nothing until you review wiki/_shape_rule_dispositions.jsonl and edit a copy to 'mode: live'. See docs/design/shape-rules.md. |
+| `--with-templates` | off (flag absent) | — | Also copy bundled entity-author templates (person/company/project/concept/source) into <path>/templates/. |
 
 ## `athenaeum measure`
 
@@ -963,9 +963,9 @@ Backlog price sheet with a decision-inflow sensitivity table.
 | `--cache-dir` | — | — | Cache directory holding the spend ledger (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--calls-per-file` | — | — | Operator-supplied override for calls/file (AC3(b)). Omit to re-derive it from the spend ledger (default). When supplied, the snapshot records calls_per_file_source=operator-supplied. |
 | `--docs-path` | `docs/measurements/memory-model-measurements.md` | — | Where the snapshot section is written/appended (default: docs/measurements/memory-model-measurements.md). |
-| `--dry-run` | `False` | — | Compute and display the measurement without writing to --docs-path. |
+| `--dry-run` | off (flag absent) | — | Compute and display the measurement without writing to --docs-path. |
 | `--human-daily-budget` | `20` | — | Human decisions/day the sensitivity table paces against (default: 20, per the issue's stated budget). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--prefilter-excluded-fraction` | — | — | Fraction of the backlog a write-refusal/retention-pack pre-filter would exclude (that classifier does not exist yet in this codebase — omit to report the 'with prefilter' column as n/a). |
 | `--six-month-days` | `182` | — | Day count marking the 6-month horizon a sensitivity row can breach (default: 182). |
@@ -979,7 +979,7 @@ Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--clusters` | `False` | — | Also report the Gate 1 subject relation distribution over one raw auto-memory clusters JSONL file's within-cluster member pairs. With no PATH, uses the newest raw/_librarian-clusters-*.jsonl under --path. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. Counts only -- no page names or uids in either format. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. Counts only -- no page names or uids in either format. |
 | `--pairs-from-report` | — | — | A subject-population JSONL report (see `athenaeum subject-population`). When given, also reports the Gate 1 subject relation distribution (EQUAL/UNKNOWN/DISJOINT) over the report's (candidate, top-k) pairs, against CURRENT page frontmatter. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
@@ -999,12 +999,12 @@ Ordinary-night steady-state table: measured load + amortized comparator-regime a
 | `--comparator-pairs-per-night` | — | — | — |
 | `--comparator-seconds-per-pair` | `0.0` | — | — |
 | `--docs-path` | `docs/measurements/memory-model-measurements.md` | — | Where the snapshot section is written/appended (default: docs/measurements/memory-model-measurements.md). |
-| `--dry-run` | `False` | — | Compute and display the measurement without writing to --docs-path. |
+| `--dry-run` | off (flag absent) | — | Compute and display the measurement without writing to --docs-path. |
 | `--files-per-day` | — | — | Operator-supplied override for files/day of ordinary intake (AC5). Omit to re-derive it from the trailing --intake-window-days scan of raw/ (default). When supplied, the snapshot records files_per_day_source=operator-supplied. |
 | `--intake-window-days` | `14` | — | Trailing window (days) files/day-of-intake is measured over (default: 14). |
 | `--invalidation-wave-calls-per-night` | `0.0` | — | — |
 | `--invalidation-wave-seconds-per-night` | `0.0` | — | — |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--nights-in-wave` | — | — | — |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--summary-log` | — | — | Path to a nightly log file containing 'librarian-run-summary' lines, used to derive wall-clock/file. Omit to report wall-clock figures as not-yet-measurable (no fabricated figure). |
@@ -1020,8 +1020,8 @@ Shadow-mode complete-linkage cluster population over the live wiki store: embedd
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--docs-path` | `docs/measurements/memory-model-measurements.md` | — | Where the snapshot section is written/appended (default: docs/measurements/memory-model-measurements.md). |
-| `--dry-run` | `False` | — | Compute and display the measurement without writing to --docs-path. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--dry-run` | off (flag absent) | — | Compute and display the measurement without writing to --docs-path. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum measure shadow-parity`
@@ -1031,8 +1031,8 @@ Run the C4 detector and the cluster comparator over the SAME corpus and report t
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cases` | — | — | A corpus YAML in the eval case shape (repeatable). Required — the live-corpus route (--path) is and is not wired here. |
-| `--dry-run` | `False` | — | Projection only: zero paid calls, nothing written. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--dry-run` | off (flag absent) | — | Projection only: zero paid calls, nothing written. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--max-usd` | — | — | Hard cost ceiling in USD — aborts before the run starts if the projected lower-bound cost already exceeds it, or mid-run as soon as observed spend crosses it (partial report is still written). |
 | `--out` | `measurements` | — | Output directory the dated shadow-parity report is written to (default: measurements). |
 | `--path` | `~/knowledge` | — | Reserved for the live-corpus run; unused until then. |
@@ -1051,12 +1051,12 @@ Assign memory_class: to pages that lack it — deterministic type-rule map, plus
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the assignments. Without this flag the command reports and writes nothing. |
+| `--apply` | off (flag absent) | — | Write the assignments. Without this flag the command reports and writes nothing. |
 | `--batch-size` | `20` | — | Pages per classifier call (default: 20). |
-| `--classifier` | `False` | — | Also class the residual (auto-memory/preference/feedback/incident/issue and untyped-but-frontmattered pages) with batched LLM calls routed through the 'classify' knob. Off by default: the deterministic rule map needs no model and covers ~97%% of pages. |
-| `--dry-run` | `False` | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
-| `--include-retired` | `False` | — | Do not skip pages carrying 'retired: true'. Off by default — a retired page is on its way out and does not merit a classifier call. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--classifier` | off (flag absent) | — | Also class the residual (auto-memory/preference/feedback/incident/issue and untyped-but-frontmattered pages) with batched LLM calls routed through the 'classify' knob. Off by default: the deterministic rule map needs no model and covers ~97%% of pages. |
+| `--dry-run` | off (flag absent) | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
+| `--include-retired` | off (flag absent) | — | Do not skip pages carrying 'retired: true'. Off by default — a retired page is on its way out and does not merit a classifier call. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum merges`
@@ -1080,7 +1080,7 @@ Print `N unresolved (oldest: <iso-date>)`.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum merges list`
@@ -1089,7 +1089,7 @@ List all unresolved merge proposals.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -1099,7 +1099,7 @@ Show the oldest unresolved merge (single block).
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum merges propose-fold`
@@ -1108,10 +1108,10 @@ Propose folding one or more source pages INTO a named canonical page. Derives me
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
+| `--apply` | off (flag absent) | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
 | `--draft-file` | — | — | Override the merged draft PAGE TEXT (frontmatter + body) with this file's contents, for a genuine content merge. A file that starts with a `---` frontmatter block is stored verbatim and must carry the canonical page's own `uid:`, or it is refused. A file with no frontmatter block is a body-only override and inherits the canonical page's current frontmatter verbatim. Default: the canonical page's current text VERBATIM. |
 | `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename identity-resolves to its `name:` slug: either `<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's own `uid:` frontmatter. When other live pages share that slug, a `<uid>-<slug>.md` canonical is keyed on its filename stem instead of being refused (as the nightly name-collision path does). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--rationale` | — | — | Optional human rationale recorded on the proposal. |
 | `--source` | `[]` | — | A source page to fold away (repeatable). Each must be an existing wiki page and must not equal --into. |
@@ -1123,7 +1123,7 @@ List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--canonical-slug` | — | — | Filter to records for this canonical target slug. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--merge-id` | — | — | Filter to the record for this merge id. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -1133,8 +1133,8 @@ Re-run the five-verdict comparator over every unresolved merge proposal and reco
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Append the computed verdicts to the verdict ledger. Default: dry-run — compare and report, write nothing. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--apply` | off (flag absent) | — | Append the computed verdicts to the verdict ledger. Default: dry-run — compare and report, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | `0` | — | Only re-run the first N unresolved proposals (default: 0 = all). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -1144,8 +1144,8 @@ Re-validate existing unresolved merge proposals against the CURRENT suppression 
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--apply` | off (flag absent) | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum merges scrub-pii`
@@ -1155,8 +1155,8 @@ Redact contact data out of merge-proposal bodies in place. The zero-LLM purge pa
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--allowlist` | — | — | Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`). A value with a reasoned entry there is not PII and is left untouched; an anchored regex `pattern` entry is honoured the same way. |
-| `--apply` | `False` | — | Redact the detected values in place. Default: dry-run — report only, write nothing. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--apply` | off (flag absent) | — | Redact the detected values in place. Default: dry-run — report only, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum outbound-lint`
@@ -1168,8 +1168,8 @@ Scan outbound-destined text for PII (emails/phones) before it ships; flag findin
 | `--allow` | — | — | An email or phone number already known to the recipient, which is dropped from the report. Repeatable. |
 | `--allowlist-file` | — | — | Path to a file with one allowlisted address per line. |
 | `--file` | — | — | Path to a file whose contents are scanned. Mutually exclusive with --text. |
-| `--json` | `False` | — | Emit machine-readable JSON findings instead of plain text (ignored in --redact mode). |
-| `--redact` | `False` | — | Strip mode: print the text with each finding replaced by a redaction placeholder (to stdout) instead of reporting findings. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON findings instead of plain text (ignored in --redact mode). |
+| `--redact` | off (flag absent) | — | Strip mode: print the text with each finding replaced by a redaction placeholder (to stdout) instead of reporting findings. |
 | `--text` | — | — | Text to scan, given inline. Mutually exclusive with --file; if neither is given, text is read from stdin. |
 
 ## `athenaeum paste-cleanup`
@@ -1178,15 +1178,15 @@ Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a chea
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--from-report` | — | — | Replay a prior --json report's verdicts instead of running a fresh proposer/verifier pass -- no LLM client is built. Mutually exclusive with --model/--verify-rule/--sample/--limit (--verify-model is allowed together with --resume-verification). --uids further restricts the replayed set. The report's version must match this build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay summary and writes nothing. Combine with --resume-verification to finish verifying bullets a spend ceiling left pending instead of just replaying as-is. A report entry's operator_claim, when present, is written verbatim by --apply in preference to the model's own claim AND verdict -- there is no separate flag for this; edit the report JSON directly. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Consider at most N pages this pass. |
-| `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
+| `--mechanical-dry-run` | off (flag absent) | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
 | `--model` | — | — | Override the proposer model (default: the 'classify' knob's resolved model). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--resume-verification` | `False` | — | Requires --from-report. Resumes the verifier pass over the loaded report's bullets that a spend ceiling left verify_attempted=False, WITHOUT re-running the proposer pass -- builds only the 'verify' LLM client. Runs before --apply, so --from-report --resume-verification --apply resumes then applies in one invocation. |
+| `--resume-verification` | off (flag absent) | — | Requires --from-report. Resumes the verifier pass over the loaded report's bullets that a spend ceiling left verify_attempted=False, WITHOUT re-running the proposer pass -- builds only the 'verify' LLM client. Runs before --apply, so --from-report --resume-verification --apply resumes then applies in one invocation. |
 | `--sample` | — | — | Consider a stratified random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
 | `--seed` | `0` | — | Seed for --sample (default: 0). |
 | `--uids` | — | — | Path to a file listing one page uid per line; consider exactly those pages. |
@@ -1200,12 +1200,12 @@ Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded sur
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write restorations. Without this flag the command is a dry-run. |
+| `--apply` | off (flag absent) | — | Write restorations. Without this flag the command is a dry-run. |
 | `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. Never scanned for markers and never written to. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--knowledge-root` | — | — | Knowledge root / git repo root (default: ~/knowledge). |
 | `--limit` | — | — | Cap the number of marker sites scanned (debugging/bounded runs). |
-| `--reindex` | `False` | — | After a successful --apply, rebuild the search index so restored text replaces corrupted text in the vector/fts5 index. Rewriting a page changes its content hash -- WITHOUT this, --apply leaves the corrupted prose live in the index. Ignored on a dry-run. |
+| `--reindex` | off (flag absent) | — | After a successful --apply, rebuild the search index so restored text replaces corrupted text in the vector/fts5 index. Rewriting a page changes its content hash -- WITHOUT this, --apply leaves the corrupted prose live in the index. Ignored on a dry-run. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki directory to scan for markers (default: <knowledge-root>/wiki). |
 
@@ -1232,9 +1232,9 @@ Compute precision + coverage over a window; write the dated snapshot to docs/mea
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--docs-path` | `docs/measurements/memory-model-measurements.md` | — | Where the snapshot section is written/appended (default: docs/measurements/memory-model-measurements.md). |
-| `--dry-run` | `False` | — | Compute and display the baseline without writing to --docs-path. This is the read-only way to check whether a baseline is computable — combine with --json for a read-only machine-readable inspection. Note: --json alone does NOT suppress the write; use --dry-run for that. |
+| `--dry-run` | off (flag absent) | — | Compute and display the baseline without writing to --docs-path. This is the read-only way to check whether a baseline is computable — combine with --json for a read-only machine-readable inspection. Note: --json alone does NOT suppress the write; use --dry-run for that. |
 | `--exclude-session` | — | — | Exclude a KNOWN-synthetic session id (e.g. one that ran the test suite and leaked fixture pushes into the ledger) from the precision/session counts. Repeatable. Excluded sessions and their record counts are always reported, never silently dropped. Accepts the full session id or an unambiguous prefix of exactly one known session id; a value matching zero or multiple known session ids is a hard error (exit 1), never a silent zero-effect success. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--since` | — | — | Window lower bound: relative (7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger (instrument-enabled to now). |
 
@@ -1246,7 +1246,7 @@ Sample N sessions' push records into a worksheet of the structural facts hash-on
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--exclude-session` | — | — | Exclude a KNOWN-synthetic session id (same semantics as `baseline --exclude-session`) from being sampled and from other sessions' candidate lists. Repeatable. Excluded sessions and their record counts are always reported, never silently dropped. Accepts the full session id or an unambiguous prefix of exactly one known session id; a value matching zero or multiple known session ids is a hard error (exit 1), never a silent zero-effect success. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--n` | `10` | — | Number of sessions to sample (default: 10). |
 | `--output` | `coverage-audit-worksheet.json` | — | Worksheet output file (default:./coverage-audit-worksheet.json). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
@@ -1259,7 +1259,7 @@ Per-pushed-page classification: joins the push ledger to the pushing sessions' o
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledger (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--projects-root` | — | — | Claude Code transcript root, holding <root>/<scope>/<session_id>.jsonl (default: CLAUDE_CONFIG_DIR env's `projects` dir, else ~/.claude/projects). |
 
 ## `athenaeum push-metrics liveness`
@@ -1269,7 +1269,7 @@ Read-only assertion: PASS if any of the most recent --window rows is sidecar-tag
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--window` | — | — | Row-count window to check (default: athenaeum.push_metrics.LIVENESS_WINDOW). |
 
@@ -1282,11 +1282,11 @@ Record one hook-path push: the fire-and-forget entry point the per-turn UserProm
 | `--backend` | — | — | Optional retrieval-backend label, recorded as-is. |
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--id` | — | — | One id actually injected into the turn. Repeatable. Replaced entirely (not merged) when --stdin-json supplies an `ids` array. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--query` | — | — | Optional raw query text for this push — only its hash is ever retained. |
 | `--session-id` | — | — | Consuming session id. Falls back to CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID (push_metrics.resolve_session_id) when omitted and --stdin-json was not passed, or its payload carried none. |
-| `--stdin-json` | `False` | — | Read {"session_id":..., "ids": [...], "query":..., "backend":...} from stdin (hook-input shape, mirrors `athenaeum context --stdin-json`). |
+| `--stdin-json` | off (flag absent) | — | Read {"session_id":..., "ids": [...], "query":..., "backend":...} from stdin (hook-input shape, mirrors `athenaeum context --stdin-json`). |
 
 ## `athenaeum push-metrics sample-for-labelling`
 
@@ -1296,7 +1296,7 @@ Stratified sample of pushed pages, by session-length bucket and population, writ
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--exclude-session` | — | — | Exclude a KNOWN-synthetic session id from the sampling pool (same semantics as `coverage-audit --exclude-session`). Repeatable. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--medium-max` | `10` | — | Push-record count at/below which a session is bucketed 'medium' (above 'short'); anything higher is 'long' (default: 10). |
 | `--n-per-stratum` | `10` | — | Max pushed pages to sample from EACH (length, population) stratum (default: 10). |
 | `--output` | — | — | Worksheet output file. Defaults under the cache dir (athenaeum.push_used_scoring.default_sample_output_path) — never inside this repo's working tree. |
@@ -1312,7 +1312,7 @@ Score the `used` heuristic (push_metrics.determine_references) against a human-l
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--confidence` | `0.95` | — | Confidence level for the Wilson score interval: one of 0.80, 0.90, 0.95, 0.98, 0.99 (default: 0.95). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--labels` | — | — | REQUIRED. Path to a fully-labelled JSONL file (one {session_id, push_id, relevant, changed_work} object per line). Label files live OUTSIDE this repo — there is no default. |
 | `--output` | — | — | Report output file. Defaults under the cache dir (athenaeum.push_used_scoring.default_score_output_path) — never inside this repo's working tree. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
@@ -1325,8 +1325,8 @@ Stream NDJSON — one object per push record and per reference-determination rec
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
-| `--follow` | `False` | — | After draining the ledgers, keep polling and emit records appended afterward, like `tail -f`. Without it, drain and exit. Runs until interrupted (e.g. Ctrl-C). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--follow` | off (flag absent) | — | After draining the ledgers, keep polling and emit records appended afterward, like `tail -f`. Without it, drain and exit. Runs until interrupted (e.g. Ctrl-C). |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--session` | — | — | Only emit records for this consuming session id (exact match). Without this, a viewer process that itself calls recall observes its own pushes mixed into the stream. |
 | `--since` | — | — | Only emit records timestamped at/after this bound: relative (7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger. |
@@ -1341,8 +1341,8 @@ Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (L
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write changes. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Write changes. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1375,7 +1375,7 @@ Print `N unresolved (oldest: <iso-date>)`.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum questions list`
@@ -1384,10 +1384,10 @@ List all unresolved questions.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | `False` | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
+| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
 
 ## `athenaeum questions next`
 
@@ -1395,9 +1395,9 @@ Show the oldest unresolved question (single block).
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | `False` | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
+| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
 
 ## `athenaeum quiesce`
 
@@ -1406,12 +1406,12 @@ Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--for` | — | — | How long to quiesce, as <number>[h\|m\|s] (default unit hours), e.g. 2h, 90m, 3600s. Capped at the configured maximum (librarian.quiesce.max_hours, default 6h) — a longer request is rejected with a clear error, never silently clamped. Required (together with --reason) unless --release or --status is given. |
-| `--force` | `False` | — | Override the holder check: with --release, remove a sentinel held by a DIFFERENT holder; with the default set mode, overwrite an ACTIVE sentinel held by a different holder. Without --force, both cases are refused (exit 1) rather than silently clobbering another party's quiesce. Rejected in combination with --status. |
+| `--force` | off (flag absent) | — | Override the holder check: with --release, remove a sentinel held by a DIFFERENT holder; with the default set mode, overwrite an ACTIVE sentinel held by a different holder. Without --force, both cases are refused (exit 1) rather than silently clobbering another party's quiesce. Rejected in combination with --status. |
 | `--holder` | — | — | Who/what is holding the quiesce, recorded in the sentinel. Default: '<user>@<hostname>' (see _default_holder) — pass this explicitly for a lane that wants a more specific self-identification (e.g. a hestia lane name) than the OS user. Also usable with --release, to identify the caller asking to release. |
 | `--path` | — | — | Knowledge directory the sentinel lives next to the run lock under (default: ~/knowledge). |
 | `--reason` | — | — | Free-text reason recorded in the sentinel, for `--status` and for the log line `ingest --if-triggered` emits when it finds an active quiesce. Required (together with --for) unless --release or --status is given. |
-| `--release` | `False` | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Refuses (exit 1) when an ACTIVE sentinel belongs to a different --holder, unless --force is given. Mutually exclusive with --status and with --for/--reason; --holder and --force ARE allowed alongside it. |
-| `--status` | `False` | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason/--holder/--force. |
+| `--release` | off (flag absent) | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Refuses (exit 1) when an ACTIVE sentinel belongs to a different --holder, unless --force is given. Mutually exclusive with --status and with --for/--reason; --holder and --force ARE allowed alongside it. |
+| `--status` | off (flag absent) | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason/--holder/--force. |
 
 ## `athenaeum rebuild-index`
 
@@ -1420,9 +1420,9 @@ Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets
 | `--as-of` | — | — | : build an as-of index reflecting the wiki as it stood on this date (pages outside their [valid_from, valid_until] window then are excluded). Always a full build; point --cache-dir at a scratch directory so the live index is not overwritten, then `recall --cache-dir <that>`. Unset = today (the normal live index). |
 | `--backend` | — | fts5, vector | Override configured backend (default: read from athenaeum.yaml) |
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | `False` | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
-| `--incremental` | `False` | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--full` | off (flag absent) | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
+| `--incremental` | off (flag absent) | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1444,7 +1444,7 @@ Search the wiki from the shell (one tab-separated hit per line)
 | `--top-k` | `5` | — | Maximum results to return (default: 5) |
 | `--type` | `[]` | — | : narrow to one or more entity classes (a page's `type:`), repeatable (OR semantics). Opaque, NOT validated against wiki/_schema/types.md — see the MCP `entity_schema` tool for the declared/observed registry. Unset = every class (default, unchanged behavior). An unrecognized value prints the deployment's known classes instead of a bare 'no results'. |
 | `--usage-class` | `[]` | observed, provider, unclassified | With --with-pii, return only excluded values of this usage class (repeatable; one of observed, provider, unclassified). Matches `entity --usage-class`. Default: every value. |
-| `--with-pii` | `False` | — | : also resolve each matching entity's EXCLUDED fields — contact data for a person, and whatever else the operator routes off-corpus for any other class. Appended to each hit line as tab-separated `field=value` pairs; a withheld field appears as `field=[redacted:N]` so withheld never looks like absent. Default off, and free when off: no excluded surface is scanned at all. The join runs strictly AFTER the audience and recallable filters, so it can never widen what this command returns. |
+| `--with-pii` | off (flag absent) | — | : also resolve each matching entity's EXCLUDED fields — contact data for a person, and whatever else the operator routes off-corpus for any other class. Appended to each hit line as tab-separated `field=value` pairs; a withheld field appears as `field=[redacted:N]` so withheld never looks like absent. Default off, and free when off: no excluded surface is scanned at all. The join runs strictly AFTER the audience and recallable filters, so it can never widen what this command returns. |
 
 ## `athenaeum receipts`
 
@@ -1463,8 +1463,8 @@ Anchor every receipt partition that changed since its own last anchor and the wi
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1474,7 +1474,7 @@ Report witnessed hits and every provenance miss as an incident, from the receipt
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--since` | — | — | Only count records from this YYYY-MM month onwards (receipt partition month / witness line month). Default: every month. |
 
@@ -1484,7 +1484,7 @@ Sign every unsealed range in every receipt partition. Requires a reachable signi
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum receipts verify`
@@ -1493,7 +1493,7 @@ Report unsealed ranges and seals that no longer verify, by partition and line ra
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum reconcile`
@@ -1502,8 +1502,8 @@ Retire pending raw-intake files whose content is already materialized in the wik
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Remove reconciled files via `git rm` + commit. Without this flag, the command is a dry-run: nothing is written. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Remove reconciled files via `git rm` + commit. Without this flag, the command is a dry-run: nothing is written. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--import-commit` | — | — | Git commit (in --knowledge-root) at which the source dual-wrote raw intake and wiki pages together. No default — pass the exact SHA for the dual-write event you are reconciling. |
 | `--knowledge-root` | — | — | Knowledge root (default: ~/knowledge). Must be a git repo containing --import-commit. |
 | `--source` | `drive` | — | raw/<source>/ tree to reconcile (default: drive). |
@@ -1519,8 +1519,8 @@ One-shot recovery of observations parked by refused oversize merges: 'restore' w
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write changes. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Write changes. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--manifest` | — | — | JSON list of {question_id, conflict_type, entity, raw_path, last_commit} rows. Host-side file; never commit it. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--state` | — | — | Recovery state file (default: recovery-state.json beside the manifest). |
@@ -1543,7 +1543,7 @@ Read-only readout of the auto-memory origin-recovery yield signal: recovered/unc
 |---|---|---|---|
 | `--out` | — | — | Where to write registry.json (default: <knowledge-root>/registry.json). |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
-| `--stdout` | `False` | — | Print the registry JSON to stdout instead of writing a file. |
+| `--stdout` | off (flag absent) | — | Print the registry JSON to stdout instead of writing a file. |
 
 ## `athenaeum reindex`
 
@@ -1554,9 +1554,9 @@ Rebuild the search index (FTS5 or vector, per config). --incremental (default) a
 | `--as-of` | — | — | : build an as-of index reflecting the wiki as it stood on this date (pages outside their [valid_from, valid_until] window then are excluded). Always a full build; point --cache-dir at a scratch directory so the live index is not overwritten, then `recall --cache-dir <that>`. Unset = today (the normal live index). |
 | `--backend` | — | fts5, vector | Override configured backend (default: read from athenaeum.yaml) |
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | `False` | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
-| `--incremental` | `False` | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--full` | off (flag absent) | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
+| `--incremental` | off (flag absent) | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1566,20 +1566,20 @@ Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --app
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--all` | `False` | — | Run all repair passes in sequence (tag-indent then value-quoting). |
-| `--apply` | `False` | — | Write fixes. Without this flag, the command is a dry-run. |
-| `--backfill-sources` | `False` | — | Re-classify memories whose source was DEFAULTED to `claude:inferred` against their origin transcript: user-stated / agent-observed upgrades, else confirm inferred. |
-| `--bounce-fold` | `False` | — | Fold slug-keyed bounce marks stranded by the pre- resolve path onto the person record that already lists the same address. Not included in --all — see module docstring. |
-| `--contact-records` | `False` | — | Fold contact records left behind by earlier merges onto the canonical uid's record, and retire slug-only duplicate copies of a uid's record. A copy holding values or facts the uid-named copy lacks is folded onto it first. Counts (and, for page-less uids, bare uids) only. Duplicates whose names or per-address validity differ are reported, never touched. Page-less uids with no merge record are reported, and retired only with --retire-pageless --apply. Not included in --all. |
+| `--all` | off (flag absent) | — | Run all repair passes in sequence (tag-indent then value-quoting). |
+| `--apply` | off (flag absent) | — | Write fixes. Without this flag, the command is a dry-run. |
+| `--backfill-sources` | off (flag absent) | — | Re-classify memories whose source was DEFAULTED to `claude:inferred` against their origin transcript: user-stated / agent-observed upgrades, else confirm inferred. |
+| `--bounce-fold` | off (flag absent) | — | Fold slug-keyed bounce marks stranded by the pre- resolve path onto the person record that already lists the same address. Not included in --all — see module docstring. |
+| `--contact-records` | off (flag absent) | — | Fold contact records left behind by earlier merges onto the canonical uid's record, and retire slug-only duplicate copies of a uid's record. A copy holding values or facts the uid-named copy lacks is folded onto it first. Counts (and, for page-less uids, bare uids) only. Duplicates whose names or per-address validity differ are reported, never touched. Page-less uids with no merge record are reported, and retired only with --retire-pageless --apply. Not included in --all. |
 | `--contacts-root` | — | — | --bounce-fold / --contact-records: override the contacts surface root (defaults to the configured `pii` entity-class surface under --knowledge-root). |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--knowledge-root` | — | — | Knowledge root for --backfill-sources / --bounce-fold (default: ~/knowledge); auto-memory is read from <root>/raw/auto-memory, and the contacts surface is resolved from it via the configured storage mapping unless --contacts-root overrides that. |
-| `--legacy-source-slugs` | `False` | — | Migrate legacy bare-slug `source:` values to typed `script:<slug>` form (/ design-lock §5). |
+| `--legacy-source-slugs` | off (flag absent) | — | Migrate legacy bare-slug `source:` values to typed `script:<slug>` form (/ design-lock §5). |
 | `--limit` | — | — | --backfill-sources: cap memories acted on per run (bounded resumable batch). Idempotency makes the resume implicit. |
 | `--projects-root` | — | — | Transcript root for --backfill-sources (default: ~/.claude/projects). |
-| `--retire-pageless` | `False` | — | --contact-records --apply only: retire every page-less uid (a live contact record whose uid has no live page and no merge record) through the same fold-or-retire helper a page removal uses, with no successor. Ignored without --contact-records --apply; dry-run still only reports them. |
-| `--tag-indent` | `False` | — | Normalize block-list indentation under top-level keys (tags:, emails:, aliases:,...). |
-| `--value-quoting` | `False` | — | Quote unquoted YAML values that break safe_load (values starting with '-' or '['). |
+| `--retire-pageless` | off (flag absent) | — | --contact-records --apply only: retire every page-less uid (a live contact record whose uid has no live page and no merge record) through the same fold-or-retire helper a page removal uses, with no successor. Ignored without --contact-records --apply; dry-run still only reports them. |
+| `--tag-indent` | off (flag absent) | — | Normalize block-list indentation under top-level keys (tags:, emails:, aliases:,...). |
+| `--value-quoting` | off (flag absent) | — | Quote unquoted YAML values that break safe_load (values starting with '-' or '['). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki directory (default: ~/knowledge/wiki) |
 
@@ -1589,7 +1589,7 @@ Re-resolve open proposal-less pending questions (self-heal transient cap/offline
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1599,10 +1599,10 @@ Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, aff
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Git-archive the kill-list (two-commit: provenance snapshot, then git rm + index rebuild + pending-merge withdrawal) and rebuild the recall index. Without this flag the command is a dry-run. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit. |
+| `--apply` | off (flag absent) | — | Git-archive the kill-list (two-commit: provenance snapshot, then git rm + index rebuild + pending-merge withdrawal) and rebuild the recall index. Without this flag the command is a dry-run. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit. |
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why these pages are being retired. Recorded verbatim in both commit messages (--apply only) and in every withdrawn pending-merge proposal's archive note. |
 | `--uids` | — | — | Either a single path to a file listing one uid per line (blank lines and lines starting with '#' are ignored), or one or more literal uids. Every uid must resolve to exactly one wiki page; an unknown or ambiguous uid aborts the whole run before any commit. |
@@ -1614,25 +1614,25 @@ Run the librarian pipeline
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--allow-degraded` | `False` | — | Exit 0 even when the run stopped early for a resource reason (budget / spend-ceiling / entity-share) AND committed ZERO files -- the DEGRADED REFUSAL, which otherwise exits EXIT_LIBRARIAN_REFUSAL (3) by default so a cron wrapper can tell 'compiled nothing' apart from success by exit code alone. The 'librarian-run-degraded reason=... files=0...' marker line is still logged at ERROR either way -- this flag controls only the exit code, not the log line. Opt-in escape hatch for a deliberate deterministic-phases-only / budget-starved run. --strict-budget takes precedence if both are set (see its help). Full exit-code contract: docs/reference/exit-codes.md. |
+| `--allow-degraded` | off (flag absent) | — | Exit 0 even when the run stopped early for a resource reason (budget / spend-ceiling / entity-share) AND committed ZERO files -- the DEGRADED REFUSAL, which otherwise exits EXIT_LIBRARIAN_REFUSAL (3) by default so a cron wrapper can tell 'compiled nothing' apart from success by exit code alone. The 'librarian-run-degraded reason=... files=0...' marker line is still logged at ERROR either way -- this flag controls only the exit code, not the log line. Opt-in escape hatch for a deliberate deterministic-phases-only / budget-starved run. --strict-budget takes precedence if both are set (see its help). Full exit-code contract: docs/reference/exit-codes.md. |
 | `--batch-mode`, `--no-batch-mode` | — | — | Submit tier-2/tier-3 LLM calls via the Anthropic Messages Batch API at a 50%% token discount. Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. --no-batch-mode forces the synchronous path even when the env/yaml default is on. Default: ATHENAEUM_BATCH_MODE env, then athenaeum.yaml librarian.batch_mode, then off. |
-| `--cluster-only` | `False` | — | Only run C2 auto-memory discovery + clustering — skip the entity tier pipeline. Writes the cluster JSONL report and exits. Useful for validating the cluster output before C3. |
-| `--dry-run` | `False` | — | Run pipeline without writing files or committing |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full-compile` | `False` | — | Force a whole-corpus auto-memory compile this run, bypassing both the delta gate and the librarian.full_compile_every_days cadence. Use for an immediate full reconciliation (e.g. after suspecting delta drift) without waiting for the periodic backstop. |
+| `--cluster-only` | off (flag absent) | — | Only run C2 auto-memory discovery + clustering — skip the entity tier pipeline. Writes the cluster JSONL report and exits. Useful for validating the cluster output before C3. |
+| `--dry-run` | off (flag absent) | — | Run pipeline without writing files or committing |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--full-compile` | off (flag absent) | — | Force a whole-corpus auto-memory compile this run, bypassing both the delta gate and the librarian.full_compile_every_days cadence. Use for an immediate full reconciliation (e.g. after suspecting delta drift) without waiting for the periodic backstop. |
 | `--knowledge-root`, `--path` | — | — | Knowledge git repo root (default: ~/knowledge). --path is an alias, matching init/status/serve. |
 | `--max-api-calls` | — | — | Maximum estimated API calls per run (default: ATHENAEUM_MAX_API_CALLS env, then athenaeum.yaml librarian.max_api_calls, then 800) |
 | `--max-files` | — | — | Stop after processing this many raw files (default: ATHENAEUM_MAX_FILES env, then athenaeum.yaml librarian.max_files, then 50) |
 | `--max-runtime` | — | — | Run-level wall-clock deadline in seconds. On trip the run commits partial progress, releases the lock, and exits 75 (EXIT_GRACEFUL_PARTIAL, resumable; — 124 is reserved for an external kill, e.g. coreutils timeout, and is never returned by this internal check) — bounding the WHOLE run incl. the post-compile phases, not just the per-file loop. Default: ATHENAEUM_MAX_RUNTIME env, then athenaeum.yaml librarian.max_runtime, then 3600. Pass 0 (or a negative value) to disable the deadline (unbounded run). Full exit-code contract: docs/reference/exit-codes.md. |
-| `--merge-only` | `False` | — | Only run C3 cluster merge — read the canonical cluster JSONL from the last C2 run and emit wiki/auto-*.md entries. Skips discovery, clustering, and the entity tier pipeline. |
-| `--no-live-session-guard` | — | — | Disable the move-then-retire live-session guard: a memory file whose scope's owning Claude Code session is not provably closed is normally held rather than retired. Overrides the athenaeum.yaml librarian.live_session_guard toggle (default on). Held files are always counted and named in the run summary and --dry-run report, never silently skipped. |
-| `--no-retire` | — | — | Skip the move-then-retire pass: raw auto-memory is neither moved into the wiki nor git-removed. Overrides the athenaeum.yaml librarian.retire toggle (default on). See the README 'Data lifecycle & upgrade impact' section. |
-| `--pull` | — | — | Before the run starts, invoke `git pull --ff-only --autostash` on the knowledge repo using the operator's ambient git credentials, so the run compiles against origin's latest. Overrides the athenaeum.yaml librarian.pull_before_run toggle (default off). No-op on --dry-run. A pull failure (e.g. diverged history that --ff-only rejects) is reported as a non-fatal warning; the run proceeds against the local tree. |
-| `--push` | — | — | After a successful run that produced at least one commit, invoke `git push` on the knowledge repo using the operator's ambient git credentials. Overrides the athenaeum.yaml librarian.push_after_run toggle (default off). No-op on --dry-run or when the run produced no commits. A push failure is reported as a non-fatal warning; commits remain local and the next run retries (`git push` is idempotent). |
+| `--merge-only` | off (flag absent) | — | Only run C3 cluster merge — read the canonical cluster JSONL from the last C2 run and emit wiki/auto-*.md entries. Skips discovery, clustering, and the entity tier pipeline. |
+| `--no-live-session-guard` | off (flag absent) | — | Disable the move-then-retire live-session guard: a memory file whose scope's owning Claude Code session is not provably closed is normally held rather than retired. Overrides the athenaeum.yaml librarian.live_session_guard toggle (default on). Held files are always counted and named in the run summary and --dry-run report, never silently skipped. |
+| `--no-retire` | off (flag absent) | — | Skip the move-then-retire pass: raw auto-memory is neither moved into the wiki nor git-removed. Overrides the athenaeum.yaml librarian.retire toggle (default on). See the README 'Data lifecycle & upgrade impact' section. |
+| `--pull` | off (flag absent) | — | Before the run starts, invoke `git pull --ff-only --autostash` on the knowledge repo using the operator's ambient git credentials, so the run compiles against origin's latest. Overrides the athenaeum.yaml librarian.pull_before_run toggle (default off). No-op on --dry-run. A pull failure (e.g. diverged history that --ff-only rejects) is reported as a non-fatal warning; the run proceeds against the local tree. |
+| `--push` | off (flag absent) | — | After a successful run that produced at least one commit, invoke `git push` on the knowledge repo using the operator's ambient git credentials. Overrides the athenaeum.yaml librarian.push_after_run toggle (default off). No-op on --dry-run or when the run produced no commits. A push failure is reported as a non-fatal warning; commits remain local and the next run retries (`git push` is idempotent). |
 | `--raw-root` | — | — | Raw intake directory (default: ~/knowledge/raw) |
 | `--run-type` | — | — | Declare which caller invoked this run, for spend-ledger attribution: `athenaeum spend --by-provider` groups ledger rows by this value, so an operator can tell a scheduled nightly compile's burn apart from an interactive session's. Default: ATHENAEUM_RUN_TYPE env, then 'librarian' (unchanged pre- behavior). The nightly wrapper — which lives in a different repo, not this one — is expected to set the env var rather than pass this flag, since an env var is easier for an external cron/launchd invocation to set; pass 'librarian-nightly' for that case. |
-| `--strict-budget` | `False` | — | Exit nonzero (1) when the run trips the API call budget (the DEGRADED path) instead of the default 0. Opt-in, for exit-code-based alerting; the warning summary and deferred-work manifest are written either way. Broader than a zero-progress refusal (fires on ANY deferral, not just a zero-files one) and wins if both this and --allow-degraded are set. |
-| `--verbose`, `-v` | `False` | — | Enable debug logging |
+| `--strict-budget` | off (flag absent) | — | Exit nonzero (1) when the run trips the API call budget (the DEGRADED path) instead of the default 0. Opt-in, for exit-code-based alerting; the warning summary and deferred-work manifest are written either way. Broader than a zero-progress refusal (fires on ANY deferral, not just a zero-files one) and wins if both this and --allow-degraded are set. |
+| `--verbose`, `-v` | off (flag absent) | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki output directory (default: ~/knowledge/wiki) |
 
@@ -1683,9 +1683,9 @@ Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MI
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the pending migrations. Without this flag the command reports and writes nothing. |
-| `--dry-run` | `False` | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--apply` | off (flag absent) | — | Write the pending migrations. Without this flag the command reports and writes nothing. |
+| `--dry-run` | off (flag absent) | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum serve`
@@ -1717,14 +1717,14 @@ Change-gated ingest + reindex for SessionEnd: compile this session's new raw int
 |---|---|---|---|
 | `--backend` | — | fts5, vector | Override configured search backend (default: read from athenaeum.yaml) |
 | `--cache-dir` | — | — | Cache directory holding the ingest + index manifests (default: ~/.cache/athenaeum) |
-| `--dry-run` | `False` | — | Run the compile without writing files, committing, updating the ingest stamp, or reindexing. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | `True` | — | Force a full recompile of all pending raw intake AND a full index rebuild (operator escape hatch). |
-| `--incremental` | — | — | Compile only raw new/changed since the last ingest and apply the index delta. This is the DEFAULT. |
+| `--dry-run` | off (flag absent) | — | Run the compile without writing files, committing, updating the ingest stamp, or reindexing. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--full` | off (flag absent) | — | Force a full recompile of all pending raw intake AND a full index rebuild (operator escape hatch). |
+| `--incremental` | off (flag absent) | — | Compile only raw new/changed since the last ingest and apply the index delta. This is the DEFAULT. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). --knowledge-root is an alias, matching `run`/`ingest`. |
 | `--references-only` | — | — | Run ONLY reference determination for SESSION (or --session) and exit: no ingest, no reindex, no corpus scan, no run lock. Cheap enough for a SessionEnd hook to call unconditionally. Prints a one-line JSON status and exits non-zero when determination was owed but could not be produced (never fatal to the hook's own work). |
 | `--session` | — | — | Scope the new/changed detection to one originSessionId (the SessionEnd use-case). |
-| `--verbose`, `-v` | `False` | — | Enable debug logging |
+| `--verbose`, `-v` | off (flag absent) | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum spend`
@@ -1733,10 +1733,10 @@ Report LLM spend from the durable ledger ($ for API, tokens for subscription —
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--by-knob` | `False` | — | Break down per model knob (classify/write/resolve/topic/reasoning_t1/reasoning_t2). |
-| `--by-model` | `False` | — | Break down per serving model. |
-| `--by-provider` | `False` | — | Break down per run type within each cost path. |
-| `--by-surface` | `False` | — | Break down per declared non-batched surface (C4 contradiction detector/resolver, same-page multi-merge, the truncation retry, the tier-3 full-echo fallback) plus an unattributed remainder. |
+| `--by-knob` | off (flag absent) | — | Break down per model knob (classify/write/resolve/topic/reasoning_t1/reasoning_t2). |
+| `--by-model` | off (flag absent) | — | Break down per serving model. |
+| `--by-provider` | off (flag absent) | — | Break down per run type within each cost path. |
+| `--by-surface` | off (flag absent) | — | Break down per declared non-batched surface (C4 contradiction detector/resolver, same-page multi-merge, the truncation retry, the tier-3 full-echo fallback) plus an unattributed remainder. |
 | `--cache-dir` | — | — | Cache dir holding spend.jsonl (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). |
 | `--candidate-max-pct-per-day` | — | — | Ceiling backtest: candidate spend.max_pct_per_day value to replay (only takes effect paired with --candidate-weekly-token-limit). |
 | `--candidate-max-tokens-per-day` | — | — | Ceiling backtest: candidate spend.max_tokens_per_day value to replay. |
@@ -1744,11 +1744,11 @@ Report LLM spend from the durable ledger ($ for API, tokens for subscription —
 | `--candidate-max-usd-per-day` | — | — | Ceiling backtest: candidate spend.max_usd_per_day value to replay. |
 | `--candidate-max-usd-per-run` | — | — | Ceiling backtest: candidate spend.max_usd_per_run value to replay. |
 | `--candidate-weekly-token-limit` | — | — | Ceiling backtest: candidate spend.weekly_token_limit value to replay (only takes effect paired with --candidate-max-pct-per-day). |
-| `--ceiling-backtest` | `False` | — | Replay candidate spend ceilings (--candidate-* below) against the ledger in the --since window and report per-run/per-day trip rates, using the SAME ceiling_tripped predicate a live run is gated on. Does not choose or arm any ceiling — that is an operator decision — this only reports what a candidate value would have done. READ-ONLY — the ledger file is never modified. |
-| `--json` | `False` | — | Emit machine-readable JSON (what /good-morning consumes). |
+| `--ceiling-backtest` | off (flag absent) | — | Replay candidate spend ceilings (--candidate-* below) against the ledger in the --since window and report per-run/per-day trip rates, using the SAME ceiling_tripped predicate a live run is gated on. Does not choose or arm any ceiling — that is an operator decision — this only reports what a candidate value would have done. READ-ONLY — the ledger file is never modified. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON (what /good-morning consumes). |
 | `--ledger` | — | — | Explicit ledger file path (overrides --cache-dir and config). |
 | `--path` | `~/knowledge` | — | Knowledge directory for config resolution (default: ~/knowledge). |
-| `--reprice` | `False` | — | Recompute historical rows from their per-model token attribution at the CURRENT rates and report the delta against the stored figures. READ-ONLY — the ledger file is never modified. |
+| `--reprice` | off (flag absent) | — | Recompute historical rows from their per-model token attribution at the CURRENT rates and report the delta against the stored figures. READ-ONLY — the ledger file is never modified. |
 | `--since` | `7d` | — | Lower bound: a window (7d / 24h / 30m / 2w) or an ISO date (2026-07-01). Default: 7d. |
 
 ## `athenaeum split-oversize`
@@ -1757,9 +1757,9 @@ Split oversized pages (flagged needs_split after a merge, or over the hard ceili
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Perform the splits. Without this flag nothing is written except --report. |
-| `--auto` | `False` | — | Also split every candidate over the hard ceiling without per-page approval. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Perform the splits. Without this flag nothing is written except --report. |
+| `--auto` | off (flag absent) | — | Also split every candidate over the hard ceiling without per-page approval. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--report` | — | — | Write per-page JSON detail here (never printed to stdout). |
 | `--uid` | `[]` | — | Operator-approved page to split (repeatable). |
@@ -1808,7 +1808,7 @@ storage.mapping completeness lint + the deferred (read_policy, adapter) pair che
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--corpus` | — | — | Corpus root to scan for sensitivity_class: frontmatter (default: the --path knowledge root). Always caller-supplied — this lint never falls back to a hardcoded or environment-derived path ('s own AC). |
-| `--json` | `False` | — | Emit machine-readable JSON findings instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON findings instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge); also the default corpus root. |
 
 ## `athenaeum storage lint-pii`
@@ -1818,7 +1818,7 @@ Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixe
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--allowlist` | — | — | Adjudicated allowlist of values that are NOT PII (service accounts, tagged test addresses, example-domain placeholders, identifier/timestamp digit runs the phone axis misreads). Each entry needs a non-empty reason, and is either an exact `value` or an anchored regex `pattern` matched via re.fullmatch -- e.g. a domain-level entry covering every localpart at that domain with one entry. Default: <knowledge-root>/wiki/_pii-allowlist.yml. A missing file means nothing is adjudicated. The allowlist is excluded from its own scan (unblocking). |
-| `--json` | `False` | — | Emit machine-readable JSON findings instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON findings instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 
 ## `athenaeum storage migrate-pii`
@@ -1827,15 +1827,15 @@ Move archival contact data (emails/phones) off entity pages to the excluded surf
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--all` | `False` | — | Bulk: migrate every entity page (top-level wiki/*.md, skipping _-prefixed queue/index/archive files) that carries contact data. Idempotent — re-running skips already-migrated pages, so a run that dies halfway resumes cleanly with no double-writes. |
-| `--apply` | `False` | — | Write the changes (rewrite the origin page + create the excluded contact record). Without this flag the command is a dry-run that prints what would change and writes nothing. In bulk mode the dry-run prints a summary (pages affected, records to create), not one diff per page. |
+| `--all` | off (flag absent) | — | Bulk: migrate every entity page (top-level wiki/*.md, skipping _-prefixed queue/index/archive files) that carries contact data. Idempotent — re-running skips already-migrated pages, so a run that dies halfway resumes cleanly with no double-writes. |
+| `--apply` | off (flag absent) | — | Write the changes (rewrite the origin page + create the excluded contact record). Without this flag the command is a dry-run that prints what would change and writes nothing. In bulk mode the dry-run prints a summary (pages affected, records to create), not one diff per page. |
 | `--glob` | — | — | Bulk: migrate every file under wiki/ matching PATTERN (supports recursive ** globs; not restricted to *.md), e.g. an archive to redact in place. Same idempotent/resumable semantics as --all. |
-| `--list-deferred` | `False` | — | List the pages the rename slice deferred (ambiguous local-part) with their reason, instead of only counting them. This is the operator's manual-naming worklist — deliberately never guesses a display name, so the deferred set is work a human has to do and needs to be enumerable. |
+| `--list-deferred` | off (flag absent) | — | List the pages the rename slice deferred (ambiguous local-part) with their reason, instead of only counting them. This is the operator's manual-naming worklist — deliberately never guesses a display name, so the deferred set is work a human has to do and needs to be enumerable. |
 | `--page` | — | — | Path to a single live entity wiki page to migrate. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
-| `--reindex` | `False` | — | After a successful --apply, rebuild the search index so the migrated contact data is no longer recallable. Rewriting a page changes its content hash, so an incremental reindex evicts the stale index entry and re-embeds the scrubbed text — WITHOUT this, --apply leaves the pre-migration text live in the index and every migrated address stays reachable via recall. Ignored on a dry-run (nothing changed to reindex). |
-| `--rename-name-email` | `False` | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
-| `--rename-only` | `False` | — | Run ONLY the name-is-an-email rename slice; skip the body-text contact-data migration entirely. Implies --rename-name-email. Use this when the body-migration pass would act on findings you do not want migrated — e.g. while the phone axis still carries detector false positives, where a full --all --apply would redact real prose (; the failure mode spent two restore passes repairing). |
+| `--reindex` | off (flag absent) | — | After a successful --apply, rebuild the search index so the migrated contact data is no longer recallable. Rewriting a page changes its content hash, so an incremental reindex evicts the stale index entry and re-embeds the scrubbed text — WITHOUT this, --apply leaves the pre-migration text live in the index and every migrated address stays reachable via recall. Ignored on a dry-run (nothing changed to reindex). |
+| `--rename-name-email` | off (flag absent) | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
+| `--rename-only` | off (flag absent) | — | Run ONLY the name-is-an-email rename slice; skip the body-text contact-data migration entirely. Implies --rename-name-email. Use this when the body-migration pass would act on findings you do not want migrated — e.g. while the phone axis still carries detector false positives, where a full --all --apply would redact real prose (; the failure mode spent two restore passes repairing). |
 | `--rename-to` | — | — | Operator-supplied display name for a --page rename. refuses to GUESS a name from an ambiguous local-part, but offered no way to supply one — so the deferred population had no route through the tool and could only be hand-edited, which skips the excluded record, the slug rename and the inbound-link rewrite. This is a human asserting the name, so it bypasses the confidence gate by design. Requires --page and --rename-name-email (or --rename-only). |
 
 ## `athenaeum storage prune-dispositions`
@@ -1844,8 +1844,8 @@ One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-dispositio
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Write the pruned ledger (atomic replace). Without this flag the command is a dry-run that prints the histogram and projected size and writes nothing. Refuses to write (exit 1, nothing written) if a re-parse of the constructed output does not carry exactly the positive-row count the scan pass promised. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--apply` | off (flag absent) | — | Write the pruned ledger (atomic replace). Without this flag the command is a dry-run that prints the histogram and projected size and writes nothing. Refuses to write (exit 1, nothing written) if a re-parse of the constructed output does not carry exactly the positive-row count the scan pass promised. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
@@ -1855,12 +1855,12 @@ Meaning-based subject: population over the comparator-eligible wiki pages (conce
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--apply` | `False` | — | Apply a report's decisions to the wiki. Requires --from-report; refused otherwise. Never used with a fresh collection run -- apply always replays a report, at zero LLM spend. |
+| `--apply` | off (flag absent) | — | Apply a report's decisions to the wiki. Requires --from-report; refused otherwise. Never used with a fresh collection run -- apply always replays a report, at zero LLM spend. |
 | `--cache-dir` | — | — | Cache directory holding the spend ledger consulted for the per-day ceiling (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum). Collection mode only. |
-| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--from-report` | — | — | Replay PATH's decisions (zero LLM spend, no LLM client constructed). Requires --apply; refused otherwise. Refuses unless --path is a git repository, the run lock can be acquired, and no target page has uncommitted changes. Warns (does not refuse) when no `athenaeum quiesce` sentinel is active. Never commits -- the operator commits. |
 | `--include-raw-members` | — | — | : additionally run meaning-based subject population over the raw auto-memory cluster members named in this clusters JSONL file (see `athenaeum measure coordinate-coverage --clusters`), additive to the wiki-page pass above -- same dry-run-by-default, --resume, spend-ceiling, fail-closed, and --from-report --apply contract. Collection mode only; a replayed --from-report --apply always applies every row a report carries, wiki or raw, with no separate flag needed. |
-| `--json` | `False` | — | Emit a machine-readable JSON summary instead of plain text. |
+| `--json` | off (flag absent) | — | Emit a machine-readable JSON summary instead of plain text. |
 | `--limit` | — | — | Stop after this many NEWLY-decided pages this run (a deliberate, zero-error pause -- never counts a replayed --resume row). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 | `--report` | — | — | Where to stream the JSONL decision report (default: ~/.cache/athenaeum/1944/subject-population-<UTC timestamp>.jsonl). Ignored when --resume is given (the resumed path IS the report path). |
@@ -1876,9 +1876,9 @@ Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. t
 |---|---|---|---|
 | `--contacts-root` | — | — | Override the contacts/excluded surface root (defaults to the configured `pii` entity-class surface). |
 | `--field` | — | bounced, do_not_email | Registered field to check. |
-| `--json` | `False` | — | Emit the report as JSON instead of plain text. Carries the same opaque handles — no addresses or names in either form. |
+| `--json` | off (flag absent) | — | Emit the report as JSON instead of plain text. Carries the same opaque handles — no addresses or names in either form. |
 | `--path` | `~/knowledge` | — | Knowledge-base root to report on. Both surfaces are resolved from it (the contacts/excluded surface through the configured storage mapping). |
-| `--report-only` | `False` | — | Preserve the pre- exit-0-unless-unreadable contract for interactive inspection: never fail on divergence, only on an unreadable surface. Do not pass this from an unattended caller — it is exactly the inert behavior generalizes past. |
+| `--report-only` | off (flag absent) | — | Preserve the pre- exit-0-unless-unreadable contract for interactive inspection: never fail on divergence, only on an unreadable surface. Do not pass this from an unattended caller — it is exactly the inert behavior generalizes past. |
 | `--wiki-root` | — | — | Override the wiki surface root (defaults to <path>/wiki). |
 
 ## `athenaeum test-mcp`
@@ -1887,7 +1887,7 @@ Smoke-test MCP remember/recall against a synthetic knowledge dir
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--keep` | `False` | — | Don't delete the temp knowledge dir on exit (for debugging) |
+| `--keep` | off (flag absent) | — | Don't delete the temp knowledge dir on exit (for debugging) |
 
 ## `athenaeum triage`
 
@@ -1904,7 +1904,7 @@ Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-r
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum triage run`
@@ -1913,8 +1913,8 @@ Walk the pending-decisions queue once: prepare authority items for the human, su
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--dry-run` | `False` | — | Report what would be absorbed without submitting or sampling anything. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--dry-run` | off (flag absent) | — | Report what would be absorbed without submitting or sampling anything. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum usage-report`
@@ -1925,7 +1925,7 @@ Per-claim usage report (pushed / referenced / last-referenced) computed from the
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--claim-id` | — | — | Report usage for a single claim id only. |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory whose wiki/ AC4-relocated push-records ledger this report reads (default: ~/knowledge).. |
 | `--since` | — | — | Window lower bound: relative (7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger. |
 
@@ -1946,7 +1946,7 @@ Print the live verdict count.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum verdicts list-by-verdict`
@@ -1955,7 +1955,7 @@ List all live verdicts, optionally filtered by --verdict.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--verdict` | — | duplicate, contradiction, specialization, distinct, underdetermined | Filter to only this verdict value. |
 
@@ -1965,7 +1965,7 @@ Show the current live verdict for one pair.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--pair` | — | — | Pair key, e.g. 'id-a+id-b' (order-independent). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -1975,7 +1975,7 @@ List every live verdict currently flagged stale.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum viewer`
@@ -2022,8 +2022,8 @@ Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
 | `--rfc3161-url` | — | — | RFC 3161 TSA URL for an optional, immediate second attestation source (else PROMPTWITNESS_RFC3161_URL; no default -- an unconfigured URL means this adapter is not offered at all). |
 | `--subject` | — | — | Subject to anchor (default: witness:<ledger_id>:<seq> of the current chain head). |
 | `--timeout` | `10.0` | — | Per-adapter network timeout in seconds (default: 10.0). |
-| `--upgrade` | `False` | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |
-| `--verify` | `False` | — | Run full Bitcoin verification of the OpenTimestamps attestation after anchoring. |
+| `--upgrade` | off (flag absent) | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |
+| `--verify` | off (flag absent) | — | Run full Bitcoin verification of the OpenTimestamps attestation after anchoring. |
 
 ## `promptwitness demo`
 
@@ -2033,7 +2033,7 @@ Render a static HTML side-by-side demo: a verified transcript next to a tampered
 |---|---|---|---|
 | `--ledger` | — | — | Ledger directory to verify --transcript against (ignored in synthetic mode). |
 | `--out` | `demo.html` | — | Output HTML file path (default: demo.html). |
-| `--synthetic` | `False` | — | Generate a synthetic five-turn session and two transcripts (default when --transcript is not given; contains no real prompt text, safe to publish). |
+| `--synthetic` | off (flag absent) | — | Generate a synthetic five-turn session and two transcripts (default when --transcript is not given; contains no real prompt text, safe to publish). |
 | `--transcript` | — | — | Render a REAL transcript JSON file instead of synthetic data (requires --ledger). The output file is written at mode 0600 and a warning is printed -- never publish it. |
 
 ## `promptwitness hook`
@@ -2058,7 +2058,7 @@ Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--force` | `False` | — | Overwrite an existing key instead of refusing. |
+| `--force` | off (flag absent) | — | Overwrite an existing key instead of refusing. |
 | `--harness` | `claude-code` | — | Harness name the default key path is namespaced under. |
 | `--key-path` | — | — | Override the key file path (else PROMPTWITNESS_KEY_PATH / PROMPTWITNESS_SE_KEY_PATH, else <ledger_dir>/keys/ed25519.pem or <ledger_dir>/keys/secure-enclave.key). |
 | `--keystore-backend` | — | macos-keychain, secret-service, windows-dpapi | Keystore to use with --provider os-keystore (else PROMPTWITNESS_KEYSTORE_BACKEND, else this platform's). |
@@ -2083,6 +2083,6 @@ Verify a transcript against a witness ledger; exit 0 iff every human turn is wit
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--json` | `False` | — | Print {ok, verdicts} as one JSON object instead of one line per turn. |
+| `--json` | off (flag absent) | — | Print {ok, verdicts} as one JSON object instead of one line per turn. |
 | `--ledger` | — | — | Ledger directory to verify the transcript against. |
 | `--transcript` | — | — | Path to a transcript JSON file: a top-level array of {role, text, session, prompt_id} objects (role 'human' or anything else for machine-authored; see promptwitness.verify). |
