@@ -8930,6 +8930,9 @@ def resolve_source_trust_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the trust-graph pairwise-override feature flag (issue
     athenaeum#2330). DEFAULT ``False``.
 
+    **Experimental:** subject to change or removal without a deprecation
+    cycle; the trust-graph design is under reconsideration.
+
     ``librarian.source_trust_enabled``. Yaml only, no env override -- an
     operator overriding source precedence for a domain is a deliberate,
     reviewed change to evidence ranking, not an emergency knob. Non-bool
@@ -8953,6 +8956,9 @@ def resolve_source_trust_edges(config: dict[str, Any] | None) -> tuple[Any, ...]
     """Resolve the operator-declared pairwise source-trust edges (issue
     athenaeum#2330) that `athenaeum.trust_graph.compare_sources` consults.
     DEFAULT ``()`` (empty tuple).
+
+    **Experimental:** subject to change or removal without a deprecation
+    cycle; the trust-graph design is under reconsideration.
 
     ``librarian.source_trust_edges`` -- a list of mappings, each shaped::
 

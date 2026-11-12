@@ -189,6 +189,10 @@ separate top-level import, not part of `athenaeum.__all__`.
   behind `librarian.source_trust_enabled` (default off); with it off, behaviour is
   unchanged. New read-only `athenaeum corrections-trust-dryrun` lists verdicts
   that would flip.
+  **Experimental:** `librarian.source_trust_edges`,
+  `librarian.source_trust_enabled` and `athenaeum corrections-trust-dryrun` may
+  change or be removed without a deprecation cycle, because the trust-graph
+  design is under reconsideration.
 - **OIDC resource-server auth for `serve --transport http`.** `serve.auth.*`
   pins verify bearer tokens and serve RFC 9728 protected-resource metadata, and
   a configured issuer lifts the non-loopback bind refusal.

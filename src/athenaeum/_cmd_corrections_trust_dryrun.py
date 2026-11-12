@@ -115,6 +115,8 @@ def add_corrections_trust_dryrun_subparser(subparsers: argparse._SubParsersActio
     parser = subparsers.add_parser(
         "corrections-trust-dryrun",
         help=(
+            "Experimental (may change or be removed without a deprecation "
+            "cycle; the trust-graph design is under reconsideration). "
             "Read-only: list every tier-0 field correction whose verdict would "
             "change if librarian.source_trust_edges were enabled (issue "
             "athenaeum#2331, TG3). Never mutates the store; works with the flag "

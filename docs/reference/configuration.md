@@ -3550,6 +3550,9 @@ this many days of "now".
 Resolve the operator-declared pairwise source-trust edges that `athenaeum.trust_graph.compare_sources` consults.
 DEFAULT ```` (empty tuple).
 
+**Experimental:** subject to change or removal without a deprecation
+cycle; the trust-graph design is under reconsideration.
+
 ``librarian.source_trust_edges`` -- a list of mappings, each shaped:
 ```
 domain: {entity_type: ..., field: ..., evidence_kind: ...}
@@ -3596,6 +3599,9 @@ operator who wrote the contradiction. No seed in ``_DEFAULTS``.
 - **Precedence:** `athenaeum.yaml` > code default
 
 Resolve the trust-graph pairwise-override feature flag. DEFAULT ``False``.
+
+**Experimental:** subject to change or removal without a deprecation
+cycle; the trust-graph design is under reconsideration.
 
 ``librarian.source_trust_enabled``. Yaml only, no env override -- an
 operator overriding source precedence for a domain is a deliberate,
