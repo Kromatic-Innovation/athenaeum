@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum corrections-trust-dryrun`` — the trust-graph flip report.
 
-Unstable, under redesign: the source trust graph may change or be removed
-without a deprecation cycle; do not build on it.
+Experimental: may change or be removed without a deprecation cycle; the
+trust-graph design is under reconsideration. Do not build on it.
 
 Issue athenaeum#2331 (TG3): a READ-ONLY command that lists every tier-0 field
 correction whose verdict would change if the trust edges already declared
@@ -118,8 +118,9 @@ def add_corrections_trust_dryrun_subparser(subparsers: argparse._SubParsersActio
     parser = subparsers.add_parser(
         "corrections-trust-dryrun",
         help=(
-            "[unstable, under redesign] Read-only: list every tier-0 field "
-            "correction whose verdict would "
+            "Experimental (may change or be removed without a deprecation "
+            "cycle; the trust-graph design is under reconsideration). "
+            "Read-only: list every tier-0 field correction whose verdict would "
             "change if librarian.source_trust_edges were enabled (issue "
             "athenaeum#2331, TG3). Never mutates the store; works with the flag "
             "off."
