@@ -14,7 +14,7 @@ command's `1` means something else.
 | `0` | — | Clean run — no failed files, no budget/deadline/spend-ceiling trip, no `EXIT_LIBRARIAN_REFUSAL`-eligible zero-progress trip; or `--strict-budget` is off and a non-zero-progress trip happened anyway; or `--allow-degraded` waived an otherwise-refusal-eligible zero-progress trip. | n/a |
 | `1` | — | A file failed processing (retried next run), or `--strict-budget` is set and the run deferred work under any resource budget/ceiling. | Yes — deferred/failed work is picked up by the next run. |
 | `3` | `EXIT_LIBRARIAN_REFUSAL` | **DEGRADED REFUSAL (issue athenaeum#1135): the run stopped early for a resource reason (`reason=budget` / `spend-ceiling` / `entity-share`) AND committed ZERO files.** Before this code existed, this case fell through to `0` — indistinguishable from a genuine success by exit code, the exact gap this issue closes (`athenaeum drain` already refused loudly on the analogous "made ZERO progress" condition; this brings `athenaeum run` up to the same standard). The `librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]` marker line (ERROR) is ALWAYS logged when the predicate holds, regardless of this code — see "Why 3 is its own code" below. Default-ON (no flag needed to opt in); `--allow-degraded` opts OUT (exits `0` instead, marker line still fires); `--strict-budget` takes precedence when both flags are set (its broader "any deferral" check runs first and returns `1`). | **Yes** — nothing was lost; the deferred intake is picked up exactly like any other budget/deadline trip. |
-| `75` | `EXIT_GRACEFUL_PARTIAL` **or** `EXIT_LOCK_HELD` | **Two unrelated constants both evaluate to `75` — see "`75` also collides with `EXIT_LOCK_HELD`" below (issue athenaeum#1379).** (1) `EXIT_GRACEFUL_PARTIAL` (`src/athenaeum/librarian.py`): athenaeum's own internal wall-clock deadline tripped. Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. (2) `EXIT_LOCK_HELD` (`src/athenaeum/_cli_shared.py`): any of the `_cmd_*` modules that call `_acquire_or_exit` (a count is deliberately not given here — it drifted twice; the enumeration below is the list `tests/test_exit_codes_doc_parity.py` checks) — `athenaeum run` (`_cmd_run.py`), `athenaeum attribution place` (`_cmd_attribution.py`), `athenaeum audit` (`_cmd_audit.py`), `athenaeum paste-cleanup` (`_cmd_paste_cleanup.py`), every `athenaeum curate` subcommand (`_cmd_curate.py`), `athenaeum decay-sweep` (`_cmd_decay.py`), `athenaeum decisions challenge-coordinate` (`_cmd_decisions.py`, issue athenaeum#1994), `athenaeum decompose-page` (`_cmd_decompose_page.py`), `athenaeum correct-notes` (`_cmd_correct_notes.py`), `athenaeum drain` (`_cmd_drain.py`), `athenaeum import-memory` (`_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum index`'s `rebuild-index`/`ingest`/`session-end` (`_cmd_index.py`), `athenaeum pending`'s `ingest-answers`/`ingest-merges`/`reresolve-questions` (`_cmd_pending.py`), `athenaeum pii-restore` (`_cmd_pii_restore.py`), `athenaeum quarantine requeue --apply` (`_cmd_quarantine.py`, issue athenaeum#2075), `athenaeum receipts anchor` (`_cmd_receipts.py`, issue athenaeum#2040), `athenaeum reconcile` (`_cmd_reconcile.py`), `athenaeum recover-parked` (`_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair` and its `backfill-sources`/`bounce-fold` subcommands (`_cmd_repair.py`), `athenaeum retire-pages` (`_cmd_retire.py`), `athenaeum split-oversize` (`_cmd_split_oversize.py`, issue athenaeum#2078), `athenaeum storage prune-dispositions` (`_cmd_storage.py`), or `athenaeum subject-population --from-report --apply` (`_cmd_subject_population.py`) — failed to acquire the run lock in `_acquire_or_exit` — **before any pipeline work started.** Nothing was committed and nothing was deferred to disk, so no clause of the `EXIT_GRACEFUL_PARTIAL` description above applies to it. | **Depends which producer.** `EXIT_GRACEFUL_PARTIAL`: **Yes** — nothing was killed, the next run continues from where this one stopped. `EXIT_LOCK_HELD`: **N/A** — no run happened, so there is nothing to resume; retry once the lock is free. |
+| `75` | `EXIT_GRACEFUL_PARTIAL` **or** `EXIT_LOCK_HELD` | **Two unrelated constants both evaluate to `75` — see "`75` also collides with `EXIT_LOCK_HELD`" below (issue athenaeum#1379).** (1) `EXIT_GRACEFUL_PARTIAL` (`src/athenaeum/librarian.py`): athenaeum's own internal wall-clock deadline tripped. Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. (2) `EXIT_LOCK_HELD` (`src/athenaeum/_cli_shared.py`): any of the `_cmd_*` modules that call `_acquire_or_exit` (a count is deliberately not given here — it drifted twice; the enumeration below is the list `tests/test_exit_codes_doc_parity.py` checks) — `athenaeum run` (`_cmd_run.py`), `athenaeum attribution place`/`athenaeum attribution ack-observe-report` (`_cmd_attribution.py`), `athenaeum audit` (`_cmd_audit.py`), `athenaeum paste-cleanup` (`_cmd_paste_cleanup.py`), `athenaeum dedupe`/`athenaeum auto-memory` (`_cmd_curate.py`; `athenaeum claims` is read-only and never takes the lock), `athenaeum decay-sweep` (`_cmd_decay.py`), `athenaeum decisions challenge-coordinate` (`_cmd_decisions.py`, issue athenaeum#1994), `athenaeum decompose-page` (`_cmd_decompose_page.py`), `athenaeum correct-notes` (`_cmd_correct_notes.py`), `athenaeum drain` (`_cmd_drain.py`), `athenaeum import-memory` (`_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum rebuild-index`/`athenaeum ingest`/`athenaeum session-end` (`_cmd_index.py`), `athenaeum ingest-answers`/`athenaeum ingest-merges`/`athenaeum reresolve-questions`/`athenaeum dedup-oversize-escalations` (`_cmd_pending.py`), `athenaeum pii-restore` (`_cmd_pii_restore.py`), `athenaeum quarantine requeue --apply` (`_cmd_quarantine.py`, issue athenaeum#2075), `athenaeum receipts anchor` (`_cmd_receipts.py`, issue athenaeum#2040), `athenaeum reconcile` (`_cmd_reconcile.py`), `athenaeum recover-parked` (`_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair` (`_cmd_repair.py`; the lock is acquired under every mode — `--tag-indent`/`--value-quoting`/`--legacy-source-slugs`/`--backfill-sources`/`--bounce-fold`/`--contact-records`/`--all`), `athenaeum retire-pages` (`_cmd_retire.py`), `athenaeum split-oversize` (`_cmd_split_oversize.py`, issue athenaeum#2078), `athenaeum storage prune-dispositions` (`_cmd_storage.py`), or `athenaeum subject-population --from-report --apply` (`_cmd_subject_population.py`) — failed to acquire the run lock in `_acquire_or_exit` — **before any pipeline work started.** Nothing was committed and nothing was deferred to disk, so no clause of the `EXIT_GRACEFUL_PARTIAL` description above applies to it. | **Depends which producer.** `EXIT_GRACEFUL_PARTIAL`: **Yes** — nothing was killed, the next run continues from where this one stopped. `EXIT_LOCK_HELD`: **N/A** — no run happened, so there is nothing to resume; retry once the lock is free. |
 | `124` | `EXIT_EXTERNAL_KILL` | **An external kill signal (SIGTERM/SIGINT) was delivered to the process** — matching coreutils `timeout`(1) semantics, which itself exits 124 when it SIGTERMs a child that overran its wall clock. athenaeum's opt-in signal handler (`install_signal_handlers=True`, the CLI default) makes a best-effort partial-progress commit before re-raising this code, but the STOP REQUEST originated outside athenaeum's own deadline logic. | Best-effort — whatever was committed before the signal is resumable, but the commit itself is not guaranteed (a SIGKILL after the `timeout` grace period gives the handler no chance to run at all). |
 
 ## Why 75 and 124 are two different codes (issue athenaeum#897)
@@ -52,28 +52,30 @@ evaluates to the same integer.
 `EXIT_LOCK_HELD = 75` (`src/athenaeum/_cli_shared.py`) is returned by the
 `_acquire_or_exit` helper (also in `_cli_shared.py`, issue athenaeum#309) when a
 mutating command — any of the `_cmd_*` modules that call it:
-`athenaeum run` (`src/athenaeum/_cmd_run.py`), `athenaeum attribution place`
+`athenaeum run` (`src/athenaeum/_cmd_run.py`), `athenaeum attribution place`/`athenaeum attribution ack-observe-report`
 (`src/athenaeum/_cmd_attribution.py`), `athenaeum audit`
 (`src/athenaeum/_cmd_audit.py`), `athenaeum paste-cleanup`
-(`src/athenaeum/_cmd_paste_cleanup.py`, issue athenaeum#1717), any `athenaeum curate`
-subcommand (`src/athenaeum/_cmd_curate.py`), `athenaeum decay-sweep`
-(`src/athenaeum/_cmd_decay.py`), `athenaeum decompose-page`
-(`src/athenaeum/_cmd_decompose_page.py`, issue athenaeum#1914), `athenaeum drain`
+(`src/athenaeum/_cmd_paste_cleanup.py`, issue athenaeum#1717), `athenaeum dedupe`/`athenaeum auto-memory`
+(`src/athenaeum/_cmd_curate.py`; `athenaeum claims` is read-only and never takes the lock), `athenaeum decay-sweep`
+(`src/athenaeum/_cmd_decay.py`), `athenaeum decisions challenge-coordinate`
+(`src/athenaeum/_cmd_decisions.py`, issue athenaeum#1994), `athenaeum decompose-page`
+(`src/athenaeum/_cmd_decompose_page.py`, issue athenaeum#1914), `athenaeum correct-notes`
+(`src/athenaeum/_cmd_correct_notes.py`), `athenaeum drain`
 (`src/athenaeum/_cmd_drain.py`), `athenaeum import-memory`
-(`src/athenaeum/_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum index`'s
-`rebuild-index`/`ingest`/`session-end` (`src/athenaeum/_cmd_index.py`),
-`athenaeum pending`'s `ingest-answers`/`ingest-merges`/`reresolve-questions`
-(`src/athenaeum/_cmd_pending.py`), `athenaeum pii-restore`
+(`src/athenaeum/_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum rebuild-index`/`athenaeum ingest`/`athenaeum session-end`
+(`src/athenaeum/_cmd_index.py`),
+`athenaeum ingest-answers`/`athenaeum ingest-merges`/`athenaeum reresolve-questions`/
+`athenaeum dedup-oversize-escalations` (`src/athenaeum/_cmd_pending.py`), `athenaeum pii-restore`
 (`src/athenaeum/_cmd_pii_restore.py`), `athenaeum quarantine requeue --apply`
 (`src/athenaeum/_cmd_quarantine.py`, issue athenaeum#2075), `athenaeum receipts anchor`
 (`src/athenaeum/_cmd_receipts.py`, issue athenaeum#2040), `athenaeum reconcile`
 (`src/athenaeum/_cmd_reconcile.py`), `athenaeum recover-parked`
-(`src/athenaeum/_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair` and its
-`backfill-sources`/`bounce-fold` subcommands
-(`src/athenaeum/_cmd_repair.py`), `athenaeum retire-pages`
+(`src/athenaeum/_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair`
+(`src/athenaeum/_cmd_repair.py`; the lock is acquired under every mode — `--tag-indent`/`--value-quoting`/`--legacy-source-slugs`/`--backfill-sources`/`--bounce-fold`/`--contact-records`/`--all`), `athenaeum retire-pages`
 (`src/athenaeum/_cmd_retire.py`), `athenaeum split-oversize`
-(`src/athenaeum/_cmd_split_oversize.py`, issue athenaeum#2078), or `athenaeum storage prune-dispositions`
-(`src/athenaeum/_cmd_storage.py`) — cannot acquire the run lock. This happens **before any pipeline work starts**: no
+(`src/athenaeum/_cmd_split_oversize.py`, issue athenaeum#2078), `athenaeum storage prune-dispositions`
+(`src/athenaeum/_cmd_storage.py`), or `athenaeum subject-population --from-report --apply`
+(`src/athenaeum/_cmd_subject_population.py`) — cannot acquire the run lock. This happens **before any pipeline work starts**: no
 file is compiled, no `git_snapshot` commit happens, and
 `wiki/_deferred_work.md` is never written. None of the "partial progress
 committed, remaining/deferred intake left on disk, resumable" language that
@@ -112,17 +114,33 @@ on the analogous "a window made ZERO progress" condition (`log.error(...
 "stopping loudly to avoid a spin")`, exit `1`); `EXIT_LIBRARIAN_REFUSAL`
 brings the plain `athenaeum run` entry path up to that same standard.
 
-`3` is not reused from anywhere else in this table (`0`/`1`/`75`/`124` are
-all already spoken for) and is not a `sysexits.h` reservation the way `75`
-is — it is simply the smallest unused small integer, matching this project's
-existing convention of picking a small distinct code (`1`) for a generic
-"something didn't fully succeed" condition and reserving specific codes
-(`75`, `124`) only where a consumer needs to distinguish causes. `3` is
-distinguishable from `75` (wall-clock deadline — already non-zero and
-already resumable regardless of files committed, so it does not need this
-code layered on top: the `EXIT_GRACEFUL_PARTIAL` branch in `run()`'s
-finalize cascade is checked and returns FIRST, before the athenaeum#1135
-check) and from `124` (nothing external intervened).
+`3` is not reused by anything else in `run()`'s OWN return-code cascade
+(`0`/`1`/`75`/`124` are all already spoken for there), and is not a
+`sysexits.h` reservation the way `75` is — it is simply the smallest unused
+small integer within that cascade, matching this project's existing
+convention of picking a small distinct code (`1`) for a generic "something
+didn't fully succeed" condition and reserving specific codes (`75`, `124`)
+only where a consumer needs to distinguish causes.
+
+**`3` is, however, independently reused by three other, unrelated command
+contracts** — the same shape of coincidental small-integer collision as the
+`75`/`EXIT_LOCK_HELD` collision documented above, not a design relationship:
+`athenaeum.surface_divergence.EXIT_DIVERGED` (`athenaeum surface-divergence`,
+see "`athenaeum surface-divergence`" below), `athenaeum subject-population`'s
+own stopped-at-ceiling code (`src/athenaeum/_cmd_subject_population.py`, see
+"`athenaeum subject-population`" below), and `VERIFY_PROBLEM_EXIT`
+(`src/athenaeum/_cmd_receipts.py`, see "`athenaeum receipts`" below) all
+return the literal value `3` for a meaning that has nothing to do with
+`EXIT_LIBRARIAN_REFUSAL` and shares no call path with `run()`. A caller
+keying off `rc == 3` alone, without also knowing which command it ran,
+cannot tell any of these four apart.
+
+Within `run()`'s own cascade, `3` is distinguishable from `75` (wall-clock
+deadline — already non-zero and already resumable regardless of files
+committed, so it does not need this code layered on top: the
+`EXIT_GRACEFUL_PARTIAL` branch in `run()`'s finalize cascade is checked and
+returns FIRST, before the athenaeum#1135 check) and from `124` (nothing
+external intervened).
 
 **The contract:** `run()` returns `EXIT_LIBRARIAN_REFUSAL` only when (a) the
 entity phase's `reason` (`RunContext.entity_exit_reason`) names an early
@@ -242,6 +260,145 @@ This table's `1` is unrelated to the `run()` table's `1` above (`run()`'s
 small-integer contract; nothing here is a claim that the two `1`s share
 meaning across commands.
 
+## Other command-specific exit codes
+
+The two tables above are `run()`'s cascade and `athenaeum entity`'s small
+contract — the two families big enough, and reused by enough other commands
+(`ingest`, `session-end`), to warrant a table of their own. Every other
+`_cmd_*.py` command also returns `0` on success, and most return a plain `1`
+for a generic, command-specific operational failure (a missing root
+directory, a caught exception, a validation error, an apply attempted
+without a git repository, ...) that this doc does not enumerate per command
+— that `1` carries no further distinguishable meaning the way `run()`'s or
+`athenaeum entity`'s `1` do, and a future reader should not infer one from
+its absence here. What follows is every DISTINCT, non-generic code a
+`_cmd_*.py` handler returns, grouped by shared convention where one is
+shared, so a wrapper branching on a non-`0`/`1` code (or on a command-
+specific `1`) has somewhere to look.
+
+### `2` as a usage error (dispatcher convention)
+
+A command whose own CLI surface has an optional (not `required=True`)
+further sub-action — `athenaeum axiom {promote,demote,list}`, for example —
+prints a `usage: ...` line to stderr and returns `2` itself when that
+sub-action is missing or unrecognized. This mirrors argparse's own exit
+code for a usage error (the code argparse itself would return if the
+sub-action were instead a required positional); it is not a distinct
+athenaeum-specific contract, so it is named here once rather than per
+command. The same code covers a small number of other usage/argument
+validation failures that are not a missing sub-action — an invalid `--since`
+value (`athenaeum spend`), a disabled feature flag a command refuses to run
+without (`athenaeum dedupe wiki-pages`, `athenaeum merges recompare`), or an
+unresolvable `--into`/`--merge` reference (`athenaeum merges propose-fold`)
+— all reported the same way: a message to stderr, then `2`, before any work
+starts.
+
+Commands following this convention: `athenaeum authority`, `athenaeum axiom`,
+`athenaeum schema`, `athenaeum description`, `athenaeum dimensions`,
+`athenaeum memory-class`, `athenaeum questions`, `athenaeum triage`,
+`athenaeum verdicts`, `athenaeum calibration`, `athenaeum schedule`,
+`athenaeum push-metrics`, `athenaeum attribution`, `athenaeum decisions`,
+`athenaeum merges`, `athenaeum dedupe`, `athenaeum claims`, `athenaeum spend`,
+`athenaeum session-end` (its own `--references-only`/`--session` usage
+check), and `athenaeum subject-population` (`--from-report`/`--apply`
+combined incorrectly).
+
+### `2` meaning "found something" (dry-run / lint convention)
+
+Two overlapping groups of commands use `2` the opposite way: not as an
+error, but as a **positive finding**, so a CI job or sign-off script can
+distinguish "ran clean" from "found something to act on" without parsing
+output.
+
+**Pure lint reports (no apply mode; `0`/`2` only):** `athenaeum fold-lint`
+(`EXIT_VIOLATIONS_FOUND`), `athenaeum outbound-lint` (`EXIT_PII_FOUND`),
+`athenaeum bounce-contract` (`EXIT_NONCONFORMING`), `athenaeum storage
+lint-pii` (`EXIT_PII_FOUND`), `athenaeum storage lint-mapping`
+(`EXIT_MAPPING_ISSUES`), and `athenaeum storage audit-h1-redaction` (also
+`EXIT_PII_FOUND` — a non-defect, marker-mid-heading finding alone does not
+trip it; see `_cmd_storage.py`'s own docstring).
+
+**Dry-run/apply commands (`0`/`1`/`2` ternary — "mirroring `repair`" is the
+literal phrase several of these modules' own docstrings use):** `0` is a
+clean run (nothing to do, or `--apply` succeeded with no errors); `1` is an
+error (apply attempted without git, an unreadable page, a lookup failure,
+...); `2` is a dry run that found something that WOULD be changed if
+`--apply` were passed — this is the CI/sign-off signal. Members:
+`athenaeum repair` (every mode), `athenaeum decay-sweep`, `athenaeum
+retire-pages`, `athenaeum reconcile`, `athenaeum pii-restore`, `athenaeum
+auto-memory prune`, `athenaeum auto-memory prune-index`, `athenaeum
+auto-memory prune-code-entities`, and `athenaeum ingest --evaluate-only`
+(the one member with no `--apply` of its own — `2` means "a trigger fired;
+run `ingest --if-triggered` next", per `_cmd_ingest_evaluate_only`'s own
+docstring, which names `decay-sweep` and `repair` as the pattern it mirrors).
+
+### `athenaeum contact-surface-lint`
+
+Its own small contract, deliberately inverted from the lint convention
+above (and never named in the `EXIT_LOCK_HELD` list above — it is read-only
+and never takes the run lock):
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean: nothing in any base report, and (with `--attribution`) no suspect verdict. |
+| `1` | Findings: the surface, or the attribution sweep, found something to report. |
+| `2` | Error: the `pii` class is not mapped to an excluded surface, the resolved contacts root IS the wiki root, or any other setup/read failure. |
+
+### `athenaeum surface-divergence`
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0` | — | The field is not diverged (or reads clean). |
+| `2` | `EXIT_SURFACE_UNREADABLE` | The excluded surface could not be read. |
+| `3` | `EXIT_DIVERGED` | The registered field has diverged beyond its declared allowance — **reuses the literal value `3`**; see "Why 3 is its own code" above. |
+
+(`EXIT_DIVERGED` and `EXIT_SURFACE_UNREADABLE` are defined in
+`src/athenaeum/surface_divergence.py`, not `_cli_shared.py`.)
+
+### `athenaeum subject-population`
+
+`2` follows the usage-error convention above (an invalid `--from-report`/
+`--apply` combination). Its own distinct code: stopping early because the
+run's confirmer-call ceiling was hit (`report.stopped_due_to_ceiling`)
+returns `3` — **also reusing the literal value `3`**; see "Why 3 is its own
+code" above. The run is resumable: `athenaeum subject-population --resume
+<report-path>`.
+
+### `athenaeum import-memory`
+
+`EXIT_INCOMPLETE = 1` (`src/athenaeum/_cmd_import_memory.py`) — a DISTINCT
+meaning from a generic command failure, even though it shares the literal
+value `1`: the import ran but did not finish importing everything it was
+given (as opposed to failing outright). `0` is a complete import; any other
+failure before that point is a generic, undifferentiated error (also `1` —
+this command does not distinguish the two by exit code, only by the error
+text it prints).
+
+### `athenaeum receipts`
+
+Its own small contract, spelled out in `_cmd_receipts.py`'s own module
+docstring; `anchor` is the only one of its four verbs that takes the run
+lock and can therefore return `EXIT_LOCK_HELD` (`75`) — see the
+`EXIT_LOCK_HELD` producer list above.
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0` | — | Clean: sealed/verified everything, or no incident. |
+| `2` | — | Usage: `seal`/`verify` run with no `signing` sealer configured. |
+| `3` | `VERIFY_PROBLEM_EXIT` | `verify`: at least one seal failed or one range is unsealed — **reuses the literal value `3`**; see "Why 3 is its own code" above. |
+| `4` | `KEY_UNAVAILABLE_EXIT` | `seal`: the configured key provider could not be reached. Not an error in the usual sense — reported distinctly from a crash. |
+| `5` | `INCIDENT_EXIT` | `attest-readout`: at least one incident exists (a provenance miss, a hook-error class, or a non-zero session-close deficit). No threshold — one incident is enough. |
+
+### `athenaeum ingest-answers` / `ingest-merges` / `reresolve-questions` / `dedup-oversize-escalations`
+
+All four (`_cmd_pending.py`) distinguish an EXPECTED validation failure
+(`1` — an unresolvable item, a malformed input file, ...) from an
+UNEXPECTED exception raised while applying, after the run lock was already
+acquired (`2`, always released via `finally` before returning). A caller
+that only checks "zero or not" does not need the distinction; one that logs
+differently for "this needs a human to fix the input" versus "this is a
+bug" does.
+
 ## Consumers
 
 - **`athenaeum drain`** (`src/athenaeum/drain.py`) forces `max_runtime=0` and
@@ -249,17 +406,13 @@ meaning across commands.
   observe either `75` or `124` from those calls today — its rc check still
   names `EXIT_GRACEFUL_PARTIAL` defensively for future callers that might
   thread deadline/signal handling through.
-- **The nightly cron wrapper and the Claude Code `SessionEnd` hook wrapper**
-  (`scripts/hooks/knowledge-rebuild-index.sh` in
-  `Kromatic-Innovation/code-workspace-config`, a different repo) wrap
-  `athenaeum run` / `athenaeum session-end` in an external coreutils
-  `timeout --signal=TERM`, and are exactly the callers this split is for.
-  **As of this writing the wrapper has not yet been updated** to recognise
-  `75` — that update is tracked separately at
-  [cwc#2556](https://github.com/Kromatic-Innovation/code-workspace-config/issues/2556).
-  Until it ships, a graceful `75` exit falls through the wrapper's generic
-  non-zero-rc handling rather than its dedicated `TIMEOUT` path: no data is
-  lost (partial progress is committed and the run is resumable exactly as
-  described above), but the wrapper's logs and `INGEST_DEGRADED` signal will
-  misreport a clean partial run as an unspecified failure until cwc#2556
-  lands.
+- **An external wrapper** that runs `athenaeum run` / `athenaeum session-end`
+  under a coreutils `timeout --signal=TERM` is exactly the caller the
+  `75`/`124` split above is for. If such a wrapper has not been updated to
+  recognise `75` as the graceful-partial case, a graceful `75` exit falls
+  through its generic non-zero-rc handling rather than any dedicated
+  timeout path it has. No data is lost either way — partial progress is
+  committed and the run is resumable exactly as described above — but an
+  un-updated wrapper's own logging may misreport a clean partial run as an
+  unspecified failure. This is a gap in the wrapper's own rc-handling, not
+  in athenaeum; this doc does not track deployment-specific wrapper state.
