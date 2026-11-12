@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 0.23.5 is a roll-up release: it publishes three workstreams that were built on
 `develop` since 0.22.43 and never tagged separately. This section is
-self-contained; you do not need to read `[0.23.0]` to upgrade.
+self-contained; you do not need to read the 0.23.0 build notes to upgrade.
 
 The three workstreams are:
 
@@ -59,8 +59,8 @@ athenaeum test-mcp             # smoke-test remember/recall, no API key needed
 ```
 
 The versions `0.23.0` through `0.23.4` were build numbers on `develop` and
-were never tagged or published; the `[0.23.0]` section below was cut but never
-released, and its detailed entries ship here. Detailed entries are grouped by
+were never tagged or published; the 0.23.0 build notes below were cut but never
+released, and their detailed entries ship here. Detailed entries are grouped by
 merge, so `### Added` / `### Changed` / `### Fixed` repeat.
 
 **Highlights**
@@ -72,9 +72,9 @@ merge, so `### Added` / `### Changed` / `### Fixed` repeat.
   chain verifier, optional Ed25519 signing, optional external anchoring, a
   Claude Code hook adapter, and `promptwitness verify` / `promptwitness demo`;
   receipts can be signed with a key held outside the nightly process and
-  verified with only the public key. See the `[0.23.0]` detail entries.
+  verified with only the public key. See the 0.23.0 build notes below.
 - **Contact-record fold, repair and attribution.** See the behaviour changes
-  above and the `[0.23.0]` detail entries.
+  above and the 0.23.0 build notes below.
 
 **Upgrading from 0.22.43: what changes**
 
@@ -568,18 +568,18 @@ separate top-level import, not part of `athenaeum.__all__`.
   dev-only `transformers` requirement to `<6.0` (athenaeum#2285,
   athenaeum#2286).**
 
-## [0.23.0] - 2026-10-31
+### Build notes: 0.23.0 (cut 2026-10-31, never published)
 
-Cut 2026-10-31 but never tagged or published; it shipped as part of 0.23.5
-(see `[0.23.5]` above). Counted from 0.22.43 (2026-10-25), the intermediate
+Not a release heading. Cut 2026-10-31 but never tagged or published; it ships in 0.23.5
+(these are the detailed entries for the `[0.23.5]` summary above). Counted from 0.22.43 (2026-10-25), the intermediate
 `0.22.44`–`0.22.58` versions were per-merge build numbers on `develop` that
 were never tagged or published; this section covers the whole span. This is a MINOR release
 because it adds public surface: a second top-level package with its own
 console script, a new `athenaeum receipts` command group, and three new
 optional extras. Nothing was removed. Detailed entries follow the summary,
-grouped by merge, so `### Added` / `### Changed` / `### Fixed` repeat; changes
+grouped by merge, so `#### Added` / `#### Changed` / `#### Fixed` repeat; changes
 that only affect this project's own CI and contributor tooling are collected
-at the end under `### Internal`.
+at the end under `#### Internal`.
 
 **Upgrading from 0.22.43:** see the upgrade notes at the top of `[0.23.5]`.
 
@@ -617,7 +617,7 @@ at the end under `### Internal`.
   `clean-venv` CI job installs the documented `pip install -e ".[dev]"` path
   without the lock file. None of this changes the installed package.
 
-### Changed
+#### Changed
 
 - **Faster lookups on large stores (issues athenaeum#2180, athenaeum#2181,
   athenaeum#2178, athenaeum#2243).** The librarian's email-named-candidate
@@ -645,7 +645,7 @@ at the end under `### Internal`.
   types produces a schema-amendment proposal for a human to adopt. Docs only;
   no behaviour changes in this release.
 
-### Added
+#### Added
 
 - **Contact-value attribution check, in observe mode, at every contact-record
   writer (issue athenaeum#2210).** A new seam,
@@ -1201,7 +1201,7 @@ at the end under `### Internal`.
     once), and points at the real recovery path — re-filing directly via
     `athenaeum attribution place <suspect-id> --as ...`.
 
-### Changed
+#### Changed
 
 - **Contact-surface collision logging is one summary line per load (issue
   athenaeum#2188).** `ExcludedRecordIndex` logged a WARNING for every uid
@@ -1278,7 +1278,7 @@ at the end under `### Internal`.
   Desktop, Cursor and other stdio MCP clients, and states plainly which
   clients and platforms are not supported today.
 
-### Fixed
+#### Fixed
 
 - **The eval-receipt check matches a receipt on content, not on the exact
   head commit.** A successful `Evals` run at commit X now satisfies PR head H
@@ -1536,7 +1536,7 @@ at the end under `### Internal`.
   in both its description and its title, so a raw address no longer lands in
   `_pending_questions.md`.
 
-### Internal
+#### Internal
 
 - **`docs/design/eval-trigger-surface.md` matches the current eval-gate
   rules (issue athenaeum#2237).** Docs only.
