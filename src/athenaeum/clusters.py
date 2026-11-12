@@ -146,7 +146,7 @@ class Cluster:
 
 
 def _indexed_id_for(am: AutoMemoryFile, extra_roots: Sequence[Path]) -> str | None:
-    """Compute the id used by :func:`search._iter_extra_root_entries` for *am*.
+    """Compute the id used by :func:`search._scan_indexed_records` for *am*.
 
     Recall's index registers extra-root files as
     ``{root_name}/{relpath_posix}``. We reconstruct that id from the
