@@ -136,7 +136,7 @@ does not answer.
 - [Eval trigger surface](design/eval-trigger-surface.md) — when a change must carry a paid
   eval receipt: the symbol-level reasoning surface, the structural fingerprint, and the
   structured exemption line.
-- [Trust graph](design/trust-graph.md) — domain-scoped source trust edges as an override
+- [Trust graph](design/trust-graph.md) (unstable, under redesign; do not build on it) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
 - [Cursor as a host](design/host-cursor.md) — what Cursor desktop, the CLI and cloud agents

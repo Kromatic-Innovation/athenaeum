@@ -21,9 +21,11 @@ The three workstreams are:
 2. **promptwitness.** A hash-chained ledger and receipts that record a human
    typed each prompt, shipped as a second top-level package with its own
    console script, plus `athenaeum receipts`.
-3. **Trust-graph and attribution calibration.** Contact-record attribution
-   checks, a calibration eval, attribution audits in the decision queue, and
-   an easier first run.
+3. **Attribution calibration and an easier first run.** Contact-record
+   attribution checks, a calibration eval, attribution audits in the decision
+   queue, and an easier first run. The source-trust-graph wiring that landed
+   in the same window is **unstable and under redesign**; see the stability
+   note below, and do not build on it.
 
 **Upgrading a 0.22.43 deployment**
 
@@ -125,6 +127,17 @@ semver compatibility promise; none of these are in it, so their flags, keys,
 formats and import paths may change in a minor release. `promptwitness` is a
 separate top-level import, not part of `athenaeum.__all__`.
 
+**Stability: the trust graph is unstable and under redesign.** The source trust
+graph is not a finished feature in this release, and you should not build on
+it. It covers `librarian.source_trust_enabled`, `librarian.source_trust_edges`,
+the read-only `athenaeum corrections-trust-dryrun` command, the `trust_graph`
+module, the tier-0 correction comparison that consults the configured edges
+(TG3), and the witness-attestation tie-break and demote-on-broken-chain rule
+(TG6). Its behaviour, config keys and on-disk format may change or be removed
+without a deprecation cycle, and it is not covered by the `athenaeum.__all__`
+semver promise. It ships off by default (`librarian.source_trust_enabled` is
+false); with it off, behaviour is unchanged.
+
 **New and changed surface**
 
 - **New network-facing surface, all opt-in.** `athenaeum serve --transport
@@ -135,7 +148,8 @@ separate top-level import, not part of `athenaeum.__all__`.
   (Ed25519 sealing of transcript receipts), `witness-sign` (Ed25519 signing
   for the promptwitness ledger), `witness-anchor` (OpenTimestamps anchoring).
 - **New commands.** `athenaeum doctor`, `athenaeum schedule install | remove`,
-  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun`,
+  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun` (unstable,
+  under redesign),
   `athenaeum push-metrics sample-for-labelling | score-used`,
   `athenaeum receipts seal | verify | anchor | attest-readout`,
   `athenaeum attribution show | place`, `athenaeum repair --contact-records`
@@ -182,7 +196,8 @@ separate top-level import, not part of `athenaeum.__all__`.
 - **MCP tool annotations (issue athenaeum#2381).** Every tool carries
   `readOnlyHint` / `destructiveHint` / `openWorldHint` so remote hosts can decide
   what to run unattended. `scan_retraction_cascade` is `readOnlyHint: false`.
-- **Trust-graph wiring, TG3 and TG6 (issue athenaeum#2331 for TG3).**
+- **Trust-graph wiring, TG3 and TG6 (issue athenaeum#2331 for TG3). Unstable,
+  under redesign: do not build on it.**
   Tier-0 field corrections can compare sources through configured
   `librarian.source_trust_edges`, and verified witness attestation can break an
   equal-rank tie or demote a claim whose chain no longer verifies. Both sit

@@ -1,5 +1,7 @@
 # Trust graph for sources: architecture spec (athenaeum#2145)
 
+> **Unstable, under redesign.** The source trust graph (`librarian.source_trust_enabled`, `librarian.source_trust_edges`, `athenaeum corrections-trust-dryrun`) may change or be removed without a deprecation cycle, and is not covered by the `athenaeum.__all__` semver promise. Do not build on it.
+
 - **Status:** design of record, decided 2026-11-05. Open questions in the original draft are resolved in section 8.
 - **Authority:** operator ruling 2026-11-05 on athenaeum#2145.
 - **Code baseline:** `origin/develop` at `7c6a1577`; every `path:line` citation in this document was re-verified against `origin/develop` at `40668992` (issue athenaeum#2329) and corrected where it had drifted — see that issue's lane report for the old→new list.

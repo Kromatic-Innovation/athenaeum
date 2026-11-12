@@ -3547,6 +3547,9 @@ this many days of "now".
 - **Default:** `()`
 - **Precedence:** `athenaeum.yaml` > code default
 
+Unstable, under redesign: the source trust graph may change or be removed
+without a deprecation cycle; do not build on it.
+
 Resolve the operator-declared pairwise source-trust edges that `athenaeum.trust_graph.compare_sources` consults.
 DEFAULT ```` (empty tuple).
 
@@ -3594,6 +3597,9 @@ operator who wrote the contradiction. No seed in ``_DEFAULTS``.
 - **CLI flag:** —
 - **Default:** `False`
 - **Precedence:** `athenaeum.yaml` > code default
+
+Unstable, under redesign: the source trust graph may change or be removed
+without a deprecation cycle; do not build on it.
 
 Resolve the trust-graph pairwise-override feature flag. DEFAULT ``False``.
 

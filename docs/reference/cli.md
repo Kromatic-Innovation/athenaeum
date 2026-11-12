@@ -38,7 +38,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
 - [`athenaeum convergence`](#athenaeum-convergence) (command) — Quarterly self-tuning-loop convergence report: supply (dimension-proposal approvals) vs. demand (unregistered-dimension signal), labelled convergence/abandonment/cyc_failure_mode/insufficient_data.
 - [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page, or drop a whole ## section by its section_id. Default is APPLY: every bullet/section id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
-- [`athenaeum corrections-trust-dryrun`](#athenaeum-corrections-trust-dryrun) (command) — Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
+- [`athenaeum corrections-trust-dryrun`](#athenaeum-corrections-trust-dryrun) (command) — [unstable, under redesign] Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
 - [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate.answer, budget, migrate.
 - [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
@@ -499,7 +499,7 @@ Move or drop individual Notes lines on a person/company page, e.g. lines misfile
 
 ## `athenaeum corrections-trust-dryrun`
 
-Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
+[unstable, under redesign] Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
