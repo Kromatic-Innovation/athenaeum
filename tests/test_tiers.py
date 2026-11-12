@@ -13,10 +13,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum import pii_attribution
+from athenaeum.librarian import _apply_tier3_results
 from athenaeum.models import (
     EntityAction,
     EntityIndex,
     EscalationItem,
+    ProcessingResult,
     RawFile,
     RawFileOverBudgetError,
     TokenUsage,
@@ -64,7 +66,6 @@ from athenaeum.tiers import (
     tier3_entity_from_response,
     tier3_merge,
     tier3_merge_full,
-    tier3_write,
     tier4_escalate,
 )
 
@@ -4540,7 +4541,9 @@ class TestTier3PrincipledEscalationIsAnswerable:
 
 
 class TestTier3Write:
-    """Integration test for tier3_write with mocked LLM calls."""
+    """Integration test for tier3_derive_actions + the librarian's flush
+    (``librarian._apply_tier3_results``, the flush path the librarian
+    actually uses) with mocked LLM calls."""
 
     def test_create_and_update_actions(self, wiki_dir: Path) -> None:
         raw = _make_raw("New info about Alice and Acme.")
@@ -4593,12 +4596,23 @@ class TestTier3Write:
         client = MagicMock()
         client.messages.create.side_effect = [create_response, merge_response]
 
-        new_entities, updated_uids, escalations = tier3_write(
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
             actions,
             index,
             wiki_dir,
             client,
+        )
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result,
+            new_entities=new_entities,
+            pending_updates=pending_updates,
+            updated_uids=updated_uids,
+            escalations=escalations,
+            wiki_root=wiki_dir,
+            index=index,
+            config=None,
         )
 
         assert len(new_entities) == 1
@@ -4610,7 +4624,7 @@ class TestTier3Write:
         assert "New partnership announced" in acme_content
 
     def test_create_api_error_propagates_through_write(self, wiki_dir: Path) -> None:
-        """APIError in tier3_create must bubble out of tier3_write."""
+        """APIError in tier3_create must bubble out of tier3_derive_actions."""
         import anthropic as anthropic_mod
 
         raw = _make_raw("Info about a new person.")
@@ -4635,10 +4649,13 @@ class TestTier3Write:
         )
 
         with pytest.raises(anthropic_mod.APIError):
-            tier3_write(raw, actions, index, wiki_dir, client)
+            tier3_derive_actions(raw, actions, index, wiki_dir, client)
 
     def test_no_disk_write_on_partial_failure(self, wiki_dir: Path) -> None:
-        """If the second action fails, the first action's update must not be written."""
+        """If the second action fails, the first action's update must not be
+        written -- ``tier3_derive_actions`` writes nothing itself, and a raise
+        here means its caller never even receives a ``pending_updates`` to
+        flush."""
         import anthropic as anthropic_mod
 
         raw = _make_raw("Info about Acme and a new person.")
@@ -4677,7 +4694,7 @@ class TestTier3Write:
         acme_before = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
 
         with pytest.raises(anthropic_mod.APIError):
-            tier3_write(raw, actions, index, wiki_dir, client)
+            tier3_derive_actions(raw, actions, index, wiki_dir, client)
 
         acme_after = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
         assert (
@@ -4685,7 +4702,7 @@ class TestTier3Write:
         ), "update was written despite subsequent failure"
 
     def test_uid_lookup_instead_of_glob(self, wiki_dir: Path) -> None:
-        """tier3_write uses EntityIndex UID lookup, not filesystem glob."""
+        """tier3_derive_actions uses EntityIndex UID lookup, not filesystem glob."""
         raw = _make_raw("Update info about Acme.")
         index = EntityIndex(wiki_dir)
 
@@ -4702,12 +4719,23 @@ class TestTier3Write:
         ]
 
         client = _mock_client("# Acme Corp\n\nUpdated content.")
-        new_entities, updated_uids, escalations = tier3_write(
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
             actions,
             index,
             wiki_dir,
             client,
+        )
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result,
+            new_entities=new_entities,
+            pending_updates=pending_updates,
+            updated_uids=updated_uids,
+            escalations=escalations,
+            wiki_root=wiki_dir,
+            index=index,
+            config=None,
         )
 
         assert updated_uids == ["a1b2c3d4"]
@@ -4916,8 +4944,9 @@ class TestTier3DeriveActionsBudget:
         self, wiki_dir: Path
     ) -> None:
         """The default (``max_api_calls_for_file=None``) is unbounded —
-        every other caller of tier3_derive_actions (tier3_write, and every
-        pre-athenaeum#994 test) must see byte-identical behaviour."""
+        every other caller of tier3_derive_actions (the librarian's own
+        flush, and every pre-athenaeum#994 test) must see byte-identical
+        behaviour."""
         raw = _make_raw("New info about Alice.")
         index = EntityIndex(wiki_dir)
         actions = [
@@ -5186,8 +5215,9 @@ class TestTier3Provenance:
         self,
         wiki_dir: Path,
     ) -> None:
-        """tier3_write merge attributes overwritten fields to the
-        merge source and preserves prior field_sources entries."""
+        """tier3_derive_actions + the librarian's flush attribute
+        overwritten fields to the merge source and preserve prior
+        field_sources entries."""
         import textwrap as _tw
 
         (wiki_dir / "a1b2c3d4-acme-corp.md").write_text(
@@ -5229,7 +5259,20 @@ class TestTier3Provenance:
             ),
         ]
         client = _mock_client("# Acme Corp\n\nFintech startup. Expanded ops.")
-        tier3_write(raw, actions, index, wiki_dir, client)
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw, actions, index, wiki_dir, client
+        )
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result,
+            new_entities=new_entities,
+            pending_updates=pending_updates,
+            updated_uids=updated_uids,
+            escalations=escalations,
+            wiki_root=wiki_dir,
+            index=index,
+            config=None,
+        )
 
         from athenaeum.models import parse_frontmatter
 
