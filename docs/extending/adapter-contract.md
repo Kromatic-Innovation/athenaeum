@@ -72,10 +72,12 @@ Write each intake file to:
   the first 8 chars of a `uuid4().hex`).
 
 The canonical filename is matched by
-`athenaeum.librarian.RAW_FILE_RE = ^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$`. Files
-that do not match this pattern are still discovered (with an empty
-timestamp/uuid), but the canonical `<timestamp>-<uuid8>.md` name is what tooling
-expects and what keeps files naturally time-ordered.
+`athenaeum.librarian.RAW_FILE_RE = ^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.(?:md|jsonl)$`,
+case-insensitive. Files that do not match this pattern are still discovered
+(with an empty timestamp/uuid), but the canonical `<timestamp>-<uuid8>.md`
+(or `.jsonl`, for the batch-correction shape — see
+[`docs/design/field-corrections.md`](../design/field-corrections.md) §3.1)
+name is what tooling expects and what keeps files naturally time-ordered.
 
 **Reserved names.** `raw/answers/` is skipped by discovery — it holds
 resolution *output*, not new intake — as is any `.gitkeep`. Do not write your

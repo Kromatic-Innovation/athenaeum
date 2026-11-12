@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -37,9 +38,15 @@ from pathlib import Path
 from athenaeum import generate_uid, render_frontmatter
 
 # The intake filename convention the librarian recognises:
-#   <YYYYMMDDTHHMMSSZ>-<8 hex chars>.md
-# (mirrors ``athenaeum.librarian.RAW_FILE_RE``). Files that do not match are
-# still discovered, but this canonical name is what tooling expects.
+#   <YYYYMMDDTHHMMSSZ>-<8 hex chars>.md or .jsonl, case-insensitive.
+# Kept byte-for-byte in sync with ``athenaeum.intake.RAW_FILE_RE`` (also
+# re-exported as ``athenaeum.librarian.RAW_FILE_RE``) -- a parity test in
+# ``tests/test_example_adapter.py`` asserts the two patterns agree, so this
+# example never drifts from the engine again. This adapter only ever WRITES
+# the ``.md`` form (see ``write_raw_intake`` below); ``.jsonl`` is the
+# batch-correction shape (``docs/design/field-corrections.md`` §3.1), a
+# different writer's job, but still a filename the librarian discovers.
+RAW_FILE_RE = re.compile(r"^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.(?:md|jsonl)$", re.IGNORECASE)
 _TIMESTAMP_FMT = "%Y%m%dT%H%M%SZ"
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum import parse_frontmatter
+from athenaeum.intake import RAW_FILE_RE as ENGINE_RAW_FILE_RE
 from athenaeum.librarian import RAW_FILE_RE, discover_raw_files
 
 _ADAPTER_PATH = (
@@ -113,6 +114,32 @@ def test_empty_source_name_is_rejected(tmp_path: Path) -> None:
             source_ref="https://example.com/a",
             body="x",
         )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "20260115T120000Z-deadbeef.md",  # canonical, documented shape
+        "20260115T120000Z-deadbeef.jsonl",  # batch-correction shape (athenaeum#797)
+        "20260115T120000-deadbeef.MD",  # no trailing Z; uppercase extension
+        "not-a-raw-filename.md",  # does not match either pattern
+        "20260115T120000Z-deadbeef.txt",  # right shape, wrong extension
+    ],
+)
+def test_example_raw_file_re_matches_the_engine(filename: str) -> None:
+    """``adapter-contract.md``/athenaeum#2442: the example's documented
+    filename pattern must never drift from ``athenaeum.intake.RAW_FILE_RE``
+    (re-exported as ``athenaeum.librarian.RAW_FILE_RE``) -- feed the SAME
+    filename, including the ``.jsonl`` raw shape, through both and assert
+    they agree, so a future engine change that the example misses fails
+    this test instead of silently documenting a stale contract.
+    """
+    adapter = _load_adapter()
+    example_match = adapter.RAW_FILE_RE.match(filename)
+    engine_match = ENGINE_RAW_FILE_RE.match(filename)
+    assert (example_match is None) == (engine_match is None), filename
+    if example_match is not None:
+        assert example_match.groups() == engine_match.groups()
 
 
 def test_main_writes_and_reports(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
