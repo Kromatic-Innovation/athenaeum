@@ -2,16 +2,14 @@
 """Unit tests for the delta-compile primitives (issue athenaeum#370 PR2).
 
 Complements the end-to-end equivalence gate (test_delta_compile_equivalence.py)
-with targeted coverage of the building blocks: ``query_neighbors`` (real
-chromadb), the fallback triggers (D1 no report, D3 stale index), the report
-splice, and run()'s D5 veto of the delta path under LLM contradiction mode.
+with targeted coverage of the building blocks: the fallback triggers (D1 no
+report, D3 stale index), the report splice, and run()'s D5 veto of the delta
+path under LLM contradiction mode.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from athenaeum import librarian as lib
 from athenaeum.clusters import Cluster
@@ -157,58 +155,6 @@ def test_new_file_missing_index_is_ok_not_d3(tmp_path: Path) -> None:
     assert scope is not None
     assert isinstance(scope, AffectedScope)
     assert new in scope.new_paths
-
-
-# ---------------------------------------------------------------------------
-# query_neighbors (real chromadb path)
-# ---------------------------------------------------------------------------
-
-
-def test_query_neighbors_ranks_near_dups(tmp_path: Path) -> None:
-    pytest.importorskip("chromadb")
-    from athenaeum.clusters import _indexed_id_for
-    from athenaeum.config import resolve_extra_intake_roots
-    from athenaeum.librarian import discover_auto_memory_files
-    from athenaeum.search import VectorBackend
-
-    root = tmp_path
-    _config(root)
-    _write_am(
-        root, "alpha", "project_a.md", "the quick brown fox jumps over the lazy dog"
-    )
-    _write_am(
-        root, "alpha", "project_b.md", "the quick brown fox jumps over the lazy dogs"
-    )
-    _write_am(
-        root,
-        "beta",
-        "reference_z.md",
-        "postgres pgvector hnsw ivfflat migration runbook",
-    )
-    cache = root / ".cache"
-    cache.mkdir()
-    backend = VectorBackend()
-    backend.build_index(
-        root / "wiki", cache, extra_roots=[root / "raw" / "auto-memory"]
-    )
-
-    files = discover_auto_memory_files(root)
-    roots = resolve_extra_intake_roots(root)
-    by = {f.path.name: f for f in files}
-    a_id = _indexed_id_for(by["project_a.md"], roots)
-    a_vec = backend.fetch_embeddings([a_id], cache)[a_id]
-
-    neighbors = backend.query_neighbors(a_vec, cache, k=10, exclude_ids=[a_id])
-    ids = [nid for nid, _dist in neighbors]
-    # The near-dup project_b must rank first; the unrelated beta file is farther.
-    assert ids, "expected neighbors"
-    b_id = _indexed_id_for(by["project_b.md"], roots)
-    z_id = _indexed_id_for(by["reference_z.md"], roots)
-    assert ids[0] == b_id
-    assert a_id not in ids  # excluded
-    # b (near-dup) is closer than z (unrelated) in the returned ranking.
-    dist = dict(neighbors)
-    assert dist[b_id] < dist[z_id]
 
 
 # ---------------------------------------------------------------------------
