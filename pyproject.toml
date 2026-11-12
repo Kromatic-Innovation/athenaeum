@@ -31,9 +31,11 @@ dependencies = [
     # wheel — bumps are explicit PRs.
     # Floor 0.39.0: first stable release shipping client.messages.batches
     # (the Batch API surface batch-mode depends on, athenaeum#236).
-    # Last tested against anthropic 0.109.2 (2026-06-18). The range stays
-    # open to <1.0; record the tested minor here so a CI run that resolves a
-    # newer-than-tested 0.x is visible at a glance against this baseline.
+    # Last tested against anthropic 0.120.2 (requirements-ci.lock). The pin
+    # allows any 0.x or 1.x/2.x release below 3.0 (the SDK is still 0.x, so
+    # `<3.0` is a wide ceiling, not a 1.0 gate); record the tested minor here
+    # so a CI run that resolves a newer-than-tested release is visible at a
+    # glance against this baseline.
     "anthropic>=0.39.0,<3.0",
     "pydantic>=2.0,<3.0",
 ]
@@ -76,14 +78,14 @@ mcp = [
     # decorator's built-in `validate_input` and offers no stdio equivalent.
     # `mcp` hard-declares `jsonschema>=4.20.0` so this is already present,
     # but the bridge imports it DIRECTLY, so it is declared like `mcp` is.
-    "jsonschema>=4.20",
+    "jsonschema>=4.20,<5",
 ]
 vector = [
     "chromadb>=0.5.0,<2.0",
     # Issue athenaeum#542: declared explicitly — recurring_claims.py's numpy fast-path
     # (`import numpy as np  # noqa: PLC0415`) was previously an undeclared
     # dependency, riding in only transitively via chromadb.
-    "numpy>=1.24",
+    "numpy>=1.24,<3",
 ]
 # Issue athenaeum#2049: the Maya PII-hazard eval (`scripts/eval_maya_pii_hazard.py`)
 # loads a local DeBERTa-v3-large-based cross-encoder; a host-side, opt-in eval
@@ -174,7 +176,7 @@ dev = [
     # transport both take httpx2 objects specifically.
     "httpx2>=2.0,<3.0",
     "joserfc>=1.0,<2.0",
-    "jsonschema>=4.20",
+    "jsonschema>=4.20,<5",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
     # check-run annotations — readable via `gh api

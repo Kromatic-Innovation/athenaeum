@@ -69,7 +69,8 @@ claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
 
 `athenaeum doctor` is a read-only health check. Run on a fresh install, it is
-expected to report FAILs for `mcp`, `hooks`, `key_mode` and `search_index`
+expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
+`key_mode` when neither an API key nor the `claude` CLI is available)
 until the steps below are complete; each FAIL names its fix.
 
 Want to confirm it works before wiring anything up or spending API budget?
