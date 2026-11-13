@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `athenaeum doctor` now ends its report with a short note when one or more
+  checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
+  install until setup is complete and pointing back at the per-FAIL `fix:`
+  lines above it. Not printed when every check is OK or SKIP; exit codes
+  are unchanged (athenaeum#2450).
+
+- `schema migrate` and `description backfill` now take the run lock and exit
+  75 while another run holds it (athenaeum#2453). User-visible: both
+  commands' `--apply` mode can now return exit code 75 (`EXIT_LOCK_HELD`)
+  instead of racing a concurrent `athenaeum run`'s wiki writes; dry-run mode
+  is unaffected.
+
 - `athenaeum run` now honours the compile kill switch: `athenaeum disable`
   (scope `all` or `--compile`) and `ATHENAEUM_DISABLED` all make `run` exit 0
   with a no-op, without taking the run lock or touching the librarian
@@ -27,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a distinct reason when the breach signal cannot be read at all
   (athenaeum#2449).
 
+- Retire now ignores resolved pending entries when deciding whether a
+  member is held: `retire.py`'s pending-queue crosscheck read
+  `_pending_merges.md` / `_pending_questions.md` by substring-matching the
+  raw file text, so a member named anywhere in either sidecar — including
+  inside a long-RESOLVED block — stayed held back from retirement forever.
+  It now reads both sidecars through the sanctioned parsers
+  (`parse_pending_merges()` / `parse_pending_questions()`) filtered to
+  UNRESOLVED entries only. **Behaviour change:** a member referenced only
+  by a resolved question or merge proposal is now retire-eligible instead
+  of held indefinitely — this changes which atoms retire on the next run
+  (athenaeum#2455).
+
 ### Removed
 
 - Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
@@ -35,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind in `merge.py`, `fingerprint.py`, `merge_type_gate.py` and
   `inference_blocks.py` after the detector's retirement
   (athenaeum#1256). No user-visible behaviour changes (athenaeum#2435).
+
+### Changed
+
+- Docs: security docs now state that erasure is not yet available
+  (athenaeum#2454).
 
 ## [0.23.5] - 2026-11-12
 

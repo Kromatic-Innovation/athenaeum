@@ -77,6 +77,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Callable
 
+from athenaeum.answers import parse_pending_questions
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     load_config,
@@ -93,6 +94,7 @@ from athenaeum.merge import (
     resolve_member_path,
 )
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
+from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.session_recovery import SessionRecoverer
 from athenaeum.store import FilesystemStore, Store
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
@@ -288,32 +290,59 @@ def _move_eligibility(
     return True, ""
 
 
-def _open_pending_text(wiki_root: Path) -> str:
-    """Concatenated text of the open pending-confirmation sidecars.
+def _unresolved_pending_text(wiki_root: Path) -> str:
+    """Concatenated raw-block text of UNRESOLVED pending-confirmation entries.
 
     Quine S1: the retire decision must also respect prior-run human
-    confirmations still in flight. We read ``_pending_questions.md`` and
-    ``_pending_merges.md`` and let the caller substring-check member refs;
-    a member referenced anywhere in them is held (conservative — "if in
-    doubt, keep it"). Missing files contribute the empty string.
+    confirmations still genuinely in flight. Issue athenaeum#2455: this used to
+    substring-match the ENTIRE raw text of both sidecars, so a member named
+    anywhere in a long-RESOLVED block (a question someone already answered,
+    a merge someone already approved/rejected) was held back from
+    retirement forever. It now reads both sidecars through the sanctioned
+    parsers — :func:`athenaeum.answers.parse_pending_questions` and
+    :func:`athenaeum.pending_merges.parse_pending_merges` (AGENTS.md names
+    these the only sanctioned readers of their respective files; this was
+    the last hand-rolled reader) — and keeps only each UNRESOLVED entry's
+    own ``raw_block`` text (``PendingQuestion.answered is False`` /
+    ``PendingMerge.resolved is False``). A member referenced ONLY by a
+    resolved block no longer appears in this text, so it no longer holds
+    the member back (still conservative for anything genuinely open — "if
+    in doubt, keep it").
+
+    Both parsers already return ``[]`` for a missing sidecar (their own
+    ``.exists()`` guard), so a missing file still contributes nothing here.
+    An unreadable-but-present file (``OSError`` from the parser's
+    ``read_text``) is caught per-file so one broken sidecar can't also
+    blank out the other's holds.
     """
     parts: list[str] = []
-    for name in ("_pending_questions.md", "_pending_merges.md"):
-        p = wiki_root / name
-        if p.is_file():
-            try:
-                parts.append(p.read_text(encoding="utf-8"))
-            except OSError:
-                continue
+    questions_path = wiki_root / "_pending_questions.md"
+    try:
+        parts.extend(
+            pq.raw_block
+            for pq in parse_pending_questions(questions_path)
+            if not pq.answered
+        )
+    except OSError:
+        pass
+    merges_path = wiki_root / "_pending_merges.md"
+    try:
+        parts.extend(
+            pm.raw_block for pm in parse_pending_merges(merges_path) if not pm.resolved
+        )
+    except OSError:
+        pass
     return "\n".join(parts)
 
 
-def _member_in_pending(member: Path, pending_text: str) -> bool:
-    """True when a member is referenced by an open pending entry (Quine S1).
+def _member_referenced_in_pending(member: Path, pending_text: str) -> bool:
+    """True when a member is referenced by an open (unresolved) pending entry.
 
     Matches both writer formats: the ``<scope>/<filename>`` ref used in
-    ``_pending_questions.md`` ("Members involved: …") and the absolute path
-    used in ``_pending_merges.md`` (sources list).
+    ``_pending_questions.md`` ("Members involved: …" / "**Member paths**:")
+    and the absolute path used in ``_pending_merges.md`` ("**Sources**:").
+    ``pending_text`` is expected to already be filtered to unresolved
+    entries only — see :func:`_unresolved_pending_text`.
     """
     if not pending_text:
         return False
@@ -608,7 +637,7 @@ def run_retire_pass(
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
     wiki_root = knowledge_root / "wiki"
     kr = knowledge_root.resolve()
-    pending_text = _open_pending_text(wiki_root)
+    pending_text = _unresolved_pending_text(wiki_root)
 
     # Issue athenaeum#1728: resolve the live-session guard (explicit arg > yaml
     # `librarian.live_session_guard` > default ON) once, up front, so every
@@ -665,7 +694,7 @@ def run_retire_pass(
             continue
 
         # Quine S1: never retire raw still referenced by an open pending entry.
-        if any(_member_in_pending(m, pending_text) for m in members):
+        if any(_member_referenced_in_pending(m, pending_text) for m in members):
             for m in members:
                 report.held.append(str(m))
                 report.dispositions.append(

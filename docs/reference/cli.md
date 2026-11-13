@@ -804,12 +804,14 @@ Write description: onto pages that lack it — batched LLM summaries through the
 | `--apply` | off (flag absent) | — | Write the descriptions. Without this flag the command reports and writes nothing. |
 | `--batch-size` | `20` | — | Pages per LLM call (default: 20). |
 | `--dry-run` | off (flag absent) | — | Report without writing. Already the default; OVERRIDES --apply when both are given (safe mode wins). |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--include-retired` | off (flag absent) | — | Do not skip pages carrying 'retired: true'. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Decide at most N pages this pass (the rest are reported 'undecided'). Re-run to continue — already-described pages are skipped, so successive runs drain the backlog. |
 | `--mechanical` | off (flag absent) | — | Derive each description from the page's opening paragraph instead of an LLM call. Free and instant; lower quality on pages whose first paragraph is not a summary. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sample` | `0` | — | Print the first N decided descriptions (dry-run review aid). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum dimensions`
 
@@ -1752,8 +1754,10 @@ Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MI
 |---|---|---|---|
 | `--apply` | off (flag absent) | — | Write the pending migrations. Without this flag the command reports and writes nothing. |
 | `--dry-run` | off (flag absent) | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum serve`
 

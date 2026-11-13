@@ -640,6 +640,34 @@ def test_format_report_prints_detail_and_fix_for_failures() -> None:
     assert "1 check(s) failed." in text
 
 
+def test_format_report_appends_fresh_install_note_when_any_check_fails() -> None:
+    """issue athenaeum#2450 AC: a report with at least one FAIL ends with a
+    note saying FAILs are expected on a fresh/not-yet-configured install
+    and points back at the fix: lines above it."""
+    results = [
+        doctor.CheckResult(name="mcp", status="fail", detail="broken", fix="do X"),
+        doctor.CheckResult(name="interpreter", status="ok", detail="fine"),
+    ]
+    text = doctor.format_report(results)
+    lines = text.splitlines()
+    assert "fresh or not-yet-configured install" in lines[-1]
+    assert "fix" in lines[-1]
+    # The note comes after the fix: line it refers to, and after the
+    # failure-count summary line.
+    assert lines.index("1 check(s) failed.") < len(lines) - 1
+
+
+def test_format_report_omits_fresh_install_note_when_all_ok_or_skip() -> None:
+    """issue athenaeum#2450 AC: no FAIL anywhere means no note at all."""
+    results = [
+        doctor.CheckResult(name="a", status="ok", detail="fine"),
+        doctor.CheckResult(name="b", status="skip", detail="offline"),
+    ]
+    text = doctor.format_report(results)
+    assert "fresh or not-yet-configured install" not in text
+    assert text.splitlines()[-1] == "All checks passed."
+
+
 def test_exit_code_zero_with_only_ok_and_skip() -> None:
     results = [
         doctor.CheckResult(name="a", status="ok", detail=""),
