@@ -483,7 +483,7 @@ class TestMergeGateIntegration:
 class TestByConstructionExclusion:
     def test_excluded_surface_not_scanned_by_index_builder(self, tmp_path: Path) -> None:
         from athenaeum.config import resolve_extra_intake_roots
-        from athenaeum.search import _scan_all_entries
+        from athenaeum.search import _scan_indexed_records
 
         knowledge_root = tmp_path / "knowledge"
         wiki_root = knowledge_root / "wiki"
@@ -498,7 +498,7 @@ class TestByConstructionExclusion:
         )
 
         extra_roots = resolve_extra_intake_roots(knowledge_root, config=config)
-        scanned = {name for name, _ in _scan_all_entries(wiki_root, extra_roots)}
+        scanned = {name for name, *_ in _scan_indexed_records(wiki_root, extra_roots)}
 
         assert "public.md" in scanned
         assert not any("alice-phone" in n for n in scanned)
