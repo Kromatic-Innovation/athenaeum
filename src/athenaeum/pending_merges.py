@@ -1781,7 +1781,7 @@ def _apply_fold_into_existing(
     5. TOMBSTONE the old source wiki files (issue athenaeum#716 — "a merge may
        destroy renderings, never observations"): stamp each with
        :func:`athenaeum.models.stamp_tombstone` (``status: folded``,
-       ``folded_into: <target_slug>``, ``embedded: false``) IN PLACE, via
+       ``folded_into: <target_path.stem>``, ``embedded: false``) IN PLACE, via
        ``git add`` (never ``git rm``, never ``Path.unlink()`` — the file
        stays on disk, body untouched, every other frontmatter key —
        including the source's own scope coordinate, "the narrow
@@ -1793,6 +1793,20 @@ def _apply_fold_into_existing(
        waiting for the next reindex to notice ``embedded: false``.
     7. Commit the fold itself as its own commit (Commit B), scoped to
        exactly the paths this fold touched.
+
+    Issue athenaeum#2545: step 5's ``folded_into`` is stamped from
+    ``target_path.stem`` — the canonical's own FILENAME identity, already
+    resolved by the caller (see ``resolve_merge``'s ``resolve_target_page``
+    call) — never from ``target_slug`` (``slugify(merge_target_name)``). For
+    the real corpus shape ``<uid>-<slug>.md`` the two differ: ``target_slug``
+    is the bare name-slug, which names no file, so a tombstone stamped with
+    it is a dead redirect the moment a second page could ever share that
+    name. ``target_path.stem`` always names the real file. For a bare-slug
+    canonical (``<slug>.md``) the two coincide, so this is a no-op there.
+    ``target_slug`` keeps its pre-existing meaning everywhere else in this
+    function (alias/source-identity comparisons, the wikilink rewrite
+    target, the pending-question entity key) — only the tombstone stamp
+    changes.
 
     Returns ``{"ok": True, "folded_sources", "aliases_added",
     "links_rewritten", "link_details", "canonical_content_hash",
@@ -2374,7 +2388,11 @@ def _apply_fold_into_existing(
                     repo_root,
                 )
                 continue
-            stamped_meta = stamp_tombstone(source_metas[src], target_slug)
+            # Issue athenaeum#2545: stamp the canonical's resolved FILE
+            # identity (``target_path.stem``), not ``target_slug`` (the
+            # bare name-slug) — see the function docstring. For a bare-slug
+            # canonical the two are identical, so this is a no-op there.
+            stamped_meta = stamp_tombstone(source_metas[src], target_path.stem)
             _, src_body = parse_frontmatter(source_texts[src])
             atomic_write_text(src_path, render_frontmatter(stamped_meta) + src_body)
             add_result = _git(repo_root, "add", "--", rel_src)
@@ -2866,7 +2884,12 @@ def resolve_merge(
                         root,
                         merge_id=target_pm.id,
                         write_kind=write_kind,
-                        canonical_slug=target_slug,
+                        # Issue athenaeum#2545: match the ledger's
+                        # ``canonical_slug`` to the value `folded_into` is
+                        # now stamped with (``target_path.stem``), so a
+                        # later `find_fold_record` lookup by identity still
+                        # finds this record.
+                        canonical_slug=target_path.stem,
                         source_paths=list(target_pm.sources),
                         auto_applied=False,
                         applied=False,
@@ -2954,7 +2977,12 @@ def resolve_merge(
             root,
             merge_id=target_pm.id,
             write_kind=write_kind,
-            canonical_slug=target_slug,
+            # Issue athenaeum#2545: ``target_path.stem`` — identical to
+            # ``target_slug`` for a bare-slug target (``create-merged``
+            # always writes one), and the canonical's real filename stem
+            # for ``fold-into-existing``, matching the tombstone's
+            # ``folded_into`` value so `find_fold_record` keeps resolving.
+            canonical_slug=target_path.stem,
             source_paths=list(target_pm.sources),
             auto_applied=auto_applied,
             **fold_ledger_extra,

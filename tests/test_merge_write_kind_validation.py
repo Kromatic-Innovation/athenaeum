@@ -504,10 +504,14 @@ class TestIdentityTargetResolution:
         assert dup.exists()  # tombstoned, not deleted (issue athenaeum#716)
         dup_meta, _ = parse_frontmatter(dup.read_text(encoding="utf-8"))
         assert is_tombstone(dup_meta)
-        # folded_into carries target_slug (slugify(merge_target_name)), the
-        # same identifier aliases:/wikilink-rewrite already use -- not the
-        # canonical file's own uid-prefixed stem.
-        assert tombstone_target(dup_meta) == "learn-s-i-m-p-l-e"
+        # Issue athenaeum#2545: folded_into carries the canonical's resolved
+        # FILENAME stem (target_path.stem) -- the bare target_slug
+        # (slugify(merge_target_name)) names no file for this uid-prefixed
+        # canonical, which is exactly the dangling-redirect bug that issue
+        # fixed. aliases:/the wikilink rewrite still key off target_slug
+        # (unchanged, out of that issue's scope) -- only the tombstone stamp
+        # changed.
+        assert tombstone_target(dup_meta) == "f351b6a1-learn-s-i-m-p-l-e"
         assert result["folded_sources"] == [str(dup)]
         assert not (wiki / "learn-s-i-m-p-l-e.md").exists()
 

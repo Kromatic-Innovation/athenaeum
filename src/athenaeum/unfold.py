@@ -184,16 +184,34 @@ def _wiki_relpath(wiki_root: Path, path: Path) -> str:
 def _path_for_slug(wiki_root: Path, slug: str) -> Path | None:
     """The live wiki page whose slug is *slug*, or ``None``.
 
-    Tries the direct filename first (``<slug>.md``, the common case), then
-    falls back to a scan comparing :func:`_page_slug` for every top-level
-    ``*.md`` file — mirrors how :mod:`athenaeum.pending_merges`'s own
-    inbound-link rewriter resolves a wikilink target to a file.
+    Tries the direct filename first (``<slug>.md``). Issue athenaeum#2545: a
+    tombstone's ``folded_into`` carries either the canonical's full filename
+    STEM (``<uid>-<slug>``, every fold stamped from issue athenaeum#2545 on)
+    or its bare name-slug (``<slug>``, every tombstone stamped before that
+    fix). The direct check above already resolves the stem form outright —
+    the canonical's own filename literally IS that stem. For the bare-slug
+    form, fall back to any live page whose filename is ``*-<slug>.md`` (the
+    corpus's other naming convention) before the final per-page scan
+    comparing :func:`_page_slug` for every top-level ``*.md`` file — which
+    mirrors how :mod:`athenaeum.pending_merges`'s own inbound-link rewriter
+    resolves a wikilink target to a file. A tie (more than one ``*-<slug>.md``
+    candidate) is broken by sorted filename, same arbitrary-but-deterministic
+    choice :func:`athenaeum.pending_merges.resolve_target_page` makes.
     """
     direct = wiki_root / f"{slug}.md"
     if direct.is_file():
         return direct
     if not wiki_root.exists():
         return None
+    try:
+        uid_prefixed = sorted(wiki_root.glob(f"*-{slug}.md"))
+    except OSError:
+        uid_prefixed = []
+    for candidate in uid_prefixed:
+        if candidate.name.startswith("_"):
+            continue
+        if candidate.is_file():
+            return candidate
     for candidate in sorted(wiki_root.glob("*.md")):
         if candidate.name.startswith("_"):
             continue

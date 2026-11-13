@@ -17,7 +17,7 @@ from athenaeum.fold_graph_lint import (
     _find_canonical_violations,
     scan_fold_graph,
 )
-from athenaeum.models import render_frontmatter, stamp_tombstone
+from athenaeum.models import render_frontmatter, slugify, stamp_tombstone
 
 
 def _write_live(path: Path, *, name: str, body: str = "body\n") -> None:
@@ -168,7 +168,32 @@ class TestExactlyOneLiveCanonicalInvariant:
         assert len(ambiguous) == 1
         assert set(ambiguous[0].members) == {"a", "bridge", "canonical"}
 
+    def test_long_uid_prefixed_stem_past_slugify_cap_still_matches(
+        self, tmp_path: Path
+    ) -> None:
+        """Review follow-up on issue athenaeum#2545: a fold now stamps
+        ``folded_into`` with the canonical's raw filename stem
+        (``<uid>-<slug>``), which can run past :func:`slugify`'s 60-char
+        cap even when the bare ``<slug>`` alone did not. This scan's own
+        node keys (``slugify(path.stem)``) truncate at 60 -- the edge
+        value must be normalized through the SAME function or a stem this
+        long never matches its own node, producing a false
+        ``missing_live_canonical``."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        long_name = "release checklist " + "x" * 60
+        slug = slugify(long_name)
+        uid = "1a2b3c4d"
+        stem = f"{uid}-{slug}"
+        assert len(stem) > 60  # the threshold this test exists to cross
+        canonical = wiki / f"{stem}.md"
+        _write_live(canonical, name=long_name)
+        tombstone = wiki / "old-checklist.md"
+        _write_tombstone(tombstone, name="Old Checklist", folded_into=stem)
 
+        report = scan_fold_graph(wiki)
+
+        assert report.ok, report.violations
 class TestReadOnly:
     def test_scan_never_writes_any_file(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
