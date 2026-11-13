@@ -693,9 +693,12 @@ def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> N
     for src in (src_b, src_c):
         src_meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
         assert is_tombstone(src_meta)
-        # folded_into carries target_slug (slugify(merge_target_name), here
-        # the canonical's human-readable name) -- not its uid-prefixed stem.
-        assert tombstone_target(src_meta) == "learn-s-i-m-p-l-e"
+        # Issue athenaeum#2545: folded_into carries the canonical's resolved
+        # FILENAME stem -- the bare target_slug (slugify of the canonical's
+        # human-readable name) names no file for this uid-prefixed
+        # canonical, which is exactly the dangling-redirect bug that issue
+        # fixed.
+        assert tombstone_target(src_meta) == "f351b6a1-learn-s-i-m-p-l-e"
     assert set(result["folded_sources"]) == {str(src_b), str(src_c)}
     # No 29th page beside it -- the bare-slug file must never be created.
     assert not (wiki / "learn-s-i-m-p-l-e.md").exists()

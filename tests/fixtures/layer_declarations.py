@@ -236,6 +236,10 @@ MODULE_LAYER: dict[str, int] = {
     "drain": 4,
     "entity_resolution": 4,
     "fold_graph_lint": 4,
+    # Issue athenaeum#2545: dangling-fold-target repair. Imports
+    # pending_merges (L4 sibling, for find_identity_pages' identity
+    # resolver), models (L1), atomic_io (L0).
+    "fold_target_repair": 4,
     "intake_audit": 4,
     "librarian": 4,
     "merge": 4,
