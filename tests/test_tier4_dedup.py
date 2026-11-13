@@ -288,9 +288,11 @@ class TestTier4Dedup:
         content = pending.read_text()
         assert content.count("## [") == 2
 
-    def test_disable_via_env(
+    def test_removed_env_var_no_longer_disables_dedup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """athenaeum#2461: ``ATHENAEUM_TIER4_DEDUP`` is removed; setting it
+        must have no effect — dedup still collapses the pair."""
         monkeypatch.setenv("ATHENAEUM_TIER4_DEDUP", "false")
         pending = tmp_path / "_pending_questions.md"
         items = [
@@ -299,9 +301,9 @@ class TestTier4Dedup:
         ]
         tier4_escalate(items, pending)
         content = pending.read_text()
-        # Disabled — two blocks, no Also affects line.
-        assert content.count("## [") == 2
-        assert "**Also affects**" not in content
+        # Still deduped — one block, Also affects line present.
+        assert content.count("## [") == 1
+        assert "**Also affects**: Beta" in content
 
     def test_deduped_block_round_trips_through_parser(self, tmp_path: Path) -> None:
         """The **Also affects**: line must NOT leak into answer_lines."""
