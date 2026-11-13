@@ -113,6 +113,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning, same as every other removed key. The live raw-retention
   reporting in `librarian.py` is unaffected.
 
+- Removed the deprecated `resolve.model` and
+  `contradiction.resolved_similarity_threshold` yaml keys (athenaeum#2463).
+  `resolve.model` was the pre-athenaeum#232 legacy spelling of the resolver
+  model knob; `_get_model` reads only `models.resolve` now. The
+  `resolved_similarity_threshold` knob (deprecated with a warning in
+  athenaeum#262) no longer has any effect on Tier-4 decision-log
+  suppression, which always uses the code default (0.83). A stale
+  `athenaeum.yaml` still setting either key loads fine and is ignored with
+  a warning, same as every other removed key.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available
