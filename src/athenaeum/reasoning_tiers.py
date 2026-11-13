@@ -156,7 +156,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from athenaeum._retry import with_retry
 from athenaeum.authority import (
@@ -653,8 +653,19 @@ Reject when you are confident the sources:
 If you are not confident it is safe to reject, pass_up. Never invent an
 "approve" — that option does not exist for you.
 
+When you reject, also set "reason_code" to whichever ONE of these best
+matches the reason you just gave:
+- "different_entities": the sources describe different, unrelated
+  entities/topics — the specific case the first reject bullet above names.
+- "other": any other basis for rejecting (for example: the sources look
+  like duplicates/the same entity as each other rather than two distinct
+  entities, an incompatible memory_class, or a live-source duplicate) —
+  pick this whenever "different_entities" would mischaracterize your own
+  stated reason. When pass_up, omit "reason_code" (or set it to null).
+
 Respond with ONLY a JSON object of the shape:
-{"verdict": "reject" | "pass_up", "reason": "<one sentence>"}"""
+{"verdict": "reject" | "pass_up", "reason": "<one sentence>",
+ "reason_code": "different_entities" | "other" | null}"""
 
 
 def _render_source_summary(view: BoundedSourceView) -> str:
@@ -705,7 +716,8 @@ def build_t1_request_params(
 
 class T1VerdictResponse(BaseModel):
     """M17 response model (athenaeum#570 convention, athenaeum#609 retrofit) for the T1
-    JSON contract — ``{"verdict": "reject" | "pass_up", "reason": "..."}``.
+    JSON contract — ``{"verdict": "reject" | "pass_up", "reason": "...",
+    "reason_code": "different_entities" | "other" | null}``.
 
     ``verdict`` is a two-member ``Literal`` — the SAME two-member vocabulary
     as :data:`ReasoningTierVerdict` — so "approve" (or any other string) is
@@ -718,6 +730,33 @@ class T1VerdictResponse(BaseModel):
     whitespace-only one, is itself treated as malformed input, not
     defaulted through.
 
+    ``reason_code`` (issue athenaeum#2521 fix): BEFORE this fix,
+    :func:`run_t1_tier` stamped ``REJECT_REASON_DIFFERENT_ENTITIES`` on
+    EVERY model-path reject, regardless of what ``reason`` actually said —
+    a hardcoded default, not a value derived from the model's own
+    judgment (confirmed live: 1893/1893 reason_code-bearing rows in
+    ``_reasoning_tier_decisions.jsonl`` carried that one value, including
+    1609 whose free-text ``reason`` said "duplicate"/"same entity"). The
+    fix asks the model for its own classification instead of defaulting
+    one in: ``reason_code`` is now REQUIRED (one of
+    ``"different_entities"``/``"other"``) whenever ``verdict == "reject"``,
+    and must be absent/``None`` on a ``"pass_up"`` (mirrors
+    :class:`ReasoningTierDecision`'s own "reason_code is reject-only"
+    contract one level up). Cross-memory_class and live-source-duplicate
+    are NOT offered to the model here — both are deterministic pre-checks
+    in :func:`run_t1_tier` that short-circuit before any model call, so the
+    model never needs to name them; ``"other"`` is the bin-less catch-all
+    (:data:`REJECT_REASON_OTHER`) for every model-judged reject that isn't
+    genuinely about two different entities, including the
+    duplicate-of-each-other case the live data shows the model actually
+    using "different_entities" prose for today.
+
+    A payload failing this (missing reason_code on reject, a
+    reason_code present on pass_up, or an out-of-vocabulary value) is
+    validation failure like any other — :func:`_parse_t1_response` routes
+    it to the existing ``pass_up`` degrade, never to a reject with a
+    guessed code.
+
     ``extra="forbid"`` (see the module docstring's M17-retrofit note): an
     unexpected key is validation failure here, not an observe-only signal —
     the decided posture for a contract with no measured mismatch window.
@@ -727,27 +766,44 @@ class T1VerdictResponse(BaseModel):
 
     verdict: Literal["reject", "pass_up"]
     reason: str
+    reason_code: Literal["different_entities", "other"] | None = None
 
     @field_validator("reason")
     @classmethod
     def _reason_not_blank(cls, value: str) -> str:
         return _require_nonblank_reason(value)
 
+    @model_validator(mode="after")
+    def _reason_code_matches_verdict(self) -> "T1VerdictResponse":
+        if self.verdict == "reject" and self.reason_code is None:
+            raise ValueError(
+                "reason_code is required when verdict is 'reject' "
+                "(must be 'different_entities' or 'other')"
+            )
+        if self.verdict == "pass_up" and self.reason_code is not None:
+            raise ValueError("reason_code must be absent/null when verdict is 'pass_up'")
+        return self
 
-def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str]:
-    """Parse the T1 model's JSON response into (verdict, reason).
+
+def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str, str | None]:
+    """Parse the T1 model's JSON response into (verdict, reason, reason_code).
 
     Defensive parsing (mirrors :func:`athenaeum.tiers.parse_tier2_entities`):
     malformed/missing JSON, a payload that fails :class:`T1VerdictResponse`
     validation (missing field, wrong type, out-of-vocabulary verdict, extra
-    key, empty payload, ...), degrades to a ``pass_up`` — T1 can only ever
-    reject when it is confidently able to say so; anything it cannot parse
-    AND validate is NOT treated as a rejection (that would be a
-    false-negative failure mode with much higher cost than an extra
-    pass-up). This is the retrofit's enforcement point (athenaeum#609): a
-    schema mismatch here drives the fallback directly, unlike
-    :mod:`athenaeum.llm_schemas`'s observe-only sites, where a mismatch is
-    only ever logged.
+    key, empty payload, a reject with no reason_code, a pass_up carrying one,
+    ...), degrades to a ``pass_up`` — T1 can only ever reject when it is
+    confidently able to say so; anything it cannot parse AND validate is NOT
+    treated as a rejection (that would be a false-negative failure mode with
+    much higher cost than an extra pass-up). This is the retrofit's
+    enforcement point (athenaeum#609): a schema mismatch here drives the
+    fallback directly, unlike :mod:`athenaeum.llm_schemas`'s observe-only
+    sites, where a mismatch is only ever logged.
+
+    ``reason_code`` is returned as the model's OWN classification (issue
+    athenaeum#2521) — never defaulted here or by the caller; see
+    :class:`T1VerdictResponse`'s docstring for why a hardcoded default was
+    the actual defect this replaces.
     """
     text = text.strip()
     try:
@@ -755,23 +811,24 @@ def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str]:
         end = text.rindex("}") + 1
         payload = json.loads(text[start:end])
     except (ValueError, json.JSONDecodeError):
-        return "pass_up", f"T1 response unparseable, passing up: {text[:200]!r}"
+        return "pass_up", f"T1 response unparseable, passing up: {text[:200]!r}", None
     try:
         validated = T1VerdictResponse.model_validate(payload)
     except ValidationError as exc:
         # Includes: missing "verdict", "verdict" outside {"reject",
         # "pass_up"} (which covers "approve" and any other hallucinated
         # string), wrong-typed "verdict"/"reason", a missing "reason", an
-        # unexpected extra key, and a non-dict/empty payload. T1's output
-        # type has no "approve" branch under any of these, so even if the
-        # model text says "approve" it is coerced to a pass-up, never
-        # surfaced as approval.
+        # unexpected extra key, a non-dict/empty payload, and a
+        # verdict/reason_code mismatch. T1's output type has no "approve"
+        # branch under any of these, so even if the model text says
+        # "approve" it is coerced to a pass-up, never surfaced as approval.
         return (
             "pass_up",
             f"T1 response failed schema validation, passing up: {exc.error_count()} "
             f"error(s): {'; '.join(_fmt_pydantic_error(e) for e in exc.errors())}",
+            None,
         )
-    return validated.verdict, validated.reason
+    return validated.verdict, validated.reason, validated.reason_code
 
 
 def _duplicate_check_reason(
@@ -913,10 +970,16 @@ def run_t1_tier(
     # Issue athenaeum#578: response_text skips any leading thinking block (T1 runs
     # disabled today; the helper is text-block-equivalent for a text-only
     # response and keeps the site robust if the posture changes).
-    verdict, reason = _parse_t1_response(response_text(response))
-    reason_code = (
-        REJECT_REASON_DIFFERENT_ENTITIES if verdict == "reject" else None
-    )
+    #
+    # Issue athenaeum#2521: reason_code comes STRAIGHT from the model's own
+    # validated classification (T1VerdictResponse.reason_code) — never a
+    # hardcoded default. The pre-fix line here read
+    # `REJECT_REASON_DIFFERENT_ENTITIES if verdict == "reject" else None`,
+    # which stamped "different_entities" on every model-path reject
+    # regardless of what `reason` said; live data showed 1893/1893
+    # reason_code-bearing T1 rows carrying that one value, 1609 of them
+    # with free text calling the pages a "duplicate"/"same entity".
+    verdict, reason, reason_code = _parse_t1_response(response_text(response))
     return ReasoningTierDecision(
         tier=T1_TIER_NAME,
         verdict=verdict,

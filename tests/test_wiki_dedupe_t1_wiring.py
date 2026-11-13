@@ -39,12 +39,23 @@ def _resp(text: str) -> MagicMock:
 
 
 def _client(t1_verdict: str = "pass_up") -> MagicMock:
-    """Call 1 is comparator Gate 2 (``equivalent``); later calls are T1."""
+    """Call 1 is comparator Gate 2 (``equivalent``); later calls are T1.
+
+    Issue athenaeum#2521: a well-formed T1 "reject" now requires a
+    "reason_code" (``T1VerdictResponse``'s model_validator) — a reject
+    payload without one fails validation and degrades to pass_up. This
+    fixture is a mocked T1 response, not T1 itself, so it must send the
+    well-formed shape for "reject" to exercise the reject path this file's
+    tests are actually about.
+    """
+    t1_payload: dict[str, str] = {"verdict": t1_verdict, "reason": "fixture"}
+    if t1_verdict == "reject":
+        t1_payload["reason_code"] = "different_entities"
     client = MagicMock()
     client.messages.create.side_effect = [
         _resp(_content_payload("equivalent")),
-        _resp(json.dumps({"verdict": t1_verdict, "reason": "fixture"})),
-    ] + [_resp(json.dumps({"verdict": t1_verdict, "reason": "fixture"}))] * 4
+        _resp(json.dumps(t1_payload)),
+    ] + [_resp(json.dumps(t1_payload))] * 4
     return client
 
 

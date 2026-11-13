@@ -263,6 +263,7 @@ def sample_tier_decision(
     ledger_path: Path | None = None,
     applied: bool = False,
     question_class: str | None = None,
+    cluster_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Sample one finalized tier decision for human audit, if selected.
 
@@ -299,8 +300,23 @@ def sample_tier_decision(
     onto the later review record by :func:`record_audit_review` so
     :func:`calibration_summary` can break the attribution tier out per
     class.
+
+    ``cluster_id`` (issue athenaeum#2521): the originating near-duplicate-page
+    cluster, when the caller has one (every T1/T2 merge-proposal screen —
+    :mod:`athenaeum.reasoning_screens` — does; the ATTRIBUTION tier does
+    not and passes ``None``). A flat per-item sample rate alone lets one
+    abnormally large cluster (every pairwise screen inside one
+    near-duplicate burst shares a single ``cluster_id``) fill the audit
+    sample purely by volume — live evidence: 140+ of 158 human-reviewed T1
+    samples came from one such burst. Once ``cluster_id`` has already
+    contributed :func:`athenaeum.config.resolve_audit_max_per_cluster`
+    audit records, further draws from it are skipped (``None`` returned)
+    even when ``should_sample`` says yes — the per-item draw stays exactly
+    as deterministic/reproducible as before, this only adds a ceiling on
+    top of it. Omitted from the stored record when ``None``.
     """
     from athenaeum.config import (
+        resolve_audit_max_per_cluster,
         resolve_audit_sample_rate_attribution,
         resolve_audit_sample_rate_t1_rejects,
         resolve_audit_sample_rate_t2_approvals,
@@ -318,13 +334,23 @@ def sample_tier_decision(
         return None
 
     item_id = audit_item_id(tier, proposal_id)
-    existing = {
-        str(r.get("id"))
+    existing_audit_records = [
+        r
         for r in read_calibration_ledger(wiki_root, ledger_path=ledger_path)
         if r.get("kind") == AUDIT_KIND
-    }
-    if item_id in existing:
+    ]
+    existing_ids = {str(r.get("id")) for r in existing_audit_records}
+    if item_id in existing_ids:
         return None  # already sampled on a prior run
+
+    if cluster_id is not None:
+        max_per_cluster = resolve_audit_max_per_cluster(config)
+        if max_per_cluster > 0:
+            cluster_count = sum(
+                1 for r in existing_audit_records if r.get("cluster_id") == cluster_id
+            )
+            if cluster_count >= max_per_cluster:
+                return None  # this cluster already filled its stratified share
 
     record = {
         "v": CALIBRATION_LEDGER_VERSION,
@@ -340,6 +366,8 @@ def sample_tier_decision(
     }
     if question_class is not None:
         record["question_class"] = question_class
+    if cluster_id is not None:
+        record["cluster_id"] = cluster_id
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
     )

@@ -37,6 +37,7 @@ from athenaeum.calibration import (
     should_sample,
 )
 from athenaeum.config import (
+    resolve_audit_max_per_cluster,
     resolve_audit_sample_rate_attribution,
     resolve_audit_sample_rate_t1_rejects,
     resolve_audit_sample_rate_t2_approvals,
@@ -163,6 +164,132 @@ class TestSampling:
         assert audit["confidence"] is None
 
 
+class TestClusterStratification:
+    """Issue athenaeum#2521 AC3: the audit sampler stratifies so one abnormally
+    large ``cluster_id`` (every pairwise T1/T2 screen generated from a
+    single near-duplicate-page burst shares one cluster_id) cannot fill the
+    sample on volume alone. Live evidence: 140+ of 158 human-reviewed T1
+    samples came from one such burst family.
+    """
+
+    def test_one_cluster_is_capped_even_at_rate_one(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = {
+            "librarian": {
+                "audit_sample_rate_t1_rejects": 1.0,
+                "audit_max_per_cluster": 3,
+            }
+        }
+        sampled = []
+        for i in range(20):
+            rec = sample_tier_decision(
+                wiki,
+                tier="T1",
+                verdict="reject",
+                proposal_id=f"burst-{i}",
+                reason="duplicate burst member",
+                config=config,
+                cluster_id="burst-cluster",
+            )
+            if rec is not None:
+                sampled.append(rec)
+        # Rate is 1.0 (every draw would otherwise be kept), but the cap
+        # stops this one cluster at exactly 3 audit records.
+        assert len(sampled) == 3
+        assert all(r["cluster_id"] == "burst-cluster" for r in sampled)
+        audit_records = [r for r in read_calibration_ledger(wiki) if r["kind"] == "audit"]
+        assert len(audit_records) == 3
+
+    def test_a_second_small_cluster_is_unaffected_by_the_first_clusters_cap(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = {
+            "librarian": {
+                "audit_sample_rate_t1_rejects": 1.0,
+                "audit_max_per_cluster": 2,
+            }
+        }
+        for i in range(10):
+            sample_tier_decision(
+                wiki,
+                tier="T1",
+                verdict="reject",
+                proposal_id=f"burst-{i}",
+                reason="duplicate burst member",
+                config=config,
+                cluster_id="burst-cluster",
+            )
+        rec = sample_tier_decision(
+            wiki,
+            tier="T1",
+            verdict="reject",
+            proposal_id="unrelated-pair",
+            reason="genuinely different entities",
+            config=config,
+            cluster_id="small-cluster",
+        )
+        assert rec is not None  # a different, small cluster is never capped out
+        audit_records = [r for r in read_calibration_ledger(wiki) if r["kind"] == "audit"]
+        by_cluster: dict[str, int] = {}
+        for r in audit_records:
+            by_cluster[r["cluster_id"]] = by_cluster.get(r["cluster_id"], 0) + 1
+        assert by_cluster == {"burst-cluster": 2, "small-cluster": 1}
+
+    def test_no_cluster_id_is_never_capped_backward_compatible(
+        self, tmp_path: Path
+    ) -> None:
+        # Every pre-athenaeum#2521 call site (and the ATTRIBUTION tier today)
+        # passes no cluster_id at all — the cap must stay fully inert there,
+        # matching test_sampler_selects_exactly_the_expected_items above.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = {
+            "librarian": {
+                "audit_sample_rate_t1_rejects": 1.0,
+                "audit_max_per_cluster": 1,
+            }
+        }
+        for i in range(5):
+            rec = sample_tier_decision(
+                wiki,
+                tier="T1",
+                verdict="reject",
+                proposal_id=f"no-cluster-{i}",
+                reason="r",
+                config=config,
+            )
+            assert rec is not None
+        audit_records = [r for r in read_calibration_ledger(wiki) if r["kind"] == "audit"]
+        assert len(audit_records) == 5
+        assert all("cluster_id" not in r for r in audit_records)
+
+    def test_cap_disabled_when_non_positive(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = {
+            "librarian": {
+                "audit_sample_rate_t1_rejects": 1.0,
+                "audit_max_per_cluster": 0,
+            }
+        }
+        for i in range(10):
+            rec = sample_tier_decision(
+                wiki,
+                tier="T1",
+                verdict="reject",
+                proposal_id=f"burst-{i}",
+                reason="r",
+                config=config,
+                cluster_id="burst-cluster",
+            )
+            assert rec is not None
+        audit_records = [r for r in read_calibration_ledger(wiki) if r["kind"] == "audit"]
+        assert len(audit_records) == 10
+
+
 # ---------------------------------------------------------------------------
 # AC 2 — overturn recorded + reflected in summary; confirm leaves untouched.
 # ---------------------------------------------------------------------------
@@ -264,6 +391,31 @@ class TestConfigResolution:
         assert resolve_audit_sample_rate_t1_rejects(
             {"librarian": {"audit_sample_rate_t1_rejects": True}}
         ) == 0.075
+
+
+class TestAuditMaxPerClusterConfig:
+    """Issue athenaeum#2521: config resolution for the per-cluster audit cap."""
+
+    def test_default(self) -> None:
+        assert resolve_audit_max_per_cluster(None) == 5
+
+    def test_yaml_overrides_default(self) -> None:
+        assert (
+            resolve_audit_max_per_cluster({"librarian": {"audit_max_per_cluster": 3}}) == 3
+        )
+
+    def test_env_overrides_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_MAX_PER_CLUSTER", "7")
+        cfg = {"librarian": {"audit_max_per_cluster": 3}}
+        assert resolve_audit_max_per_cluster(cfg) == 7
+
+    def test_bool_and_garbage_fall_through_to_default(self) -> None:
+        assert (
+            resolve_audit_max_per_cluster({"librarian": {"audit_max_per_cluster": True}}) == 5
+        )
+        assert (
+            resolve_audit_max_per_cluster({"librarian": {"audit_max_per_cluster": "x"}}) == 5
+        )
         assert resolve_audit_sample_rate_t2_approvals(
             {"librarian": {"audit_sample_rate_t2_approvals": "nan-nope"}}
         ) == 0.075
