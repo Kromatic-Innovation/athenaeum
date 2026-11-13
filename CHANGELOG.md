@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decision without folding. Neither outcome ever ends `**Write-back**: held`
   (athenaeum#2518).
 
+- The `resolve_merge` MCP tool's docstring and `docs/design/contradiction-detection.md`
+  said approving a `fold-into-existing` merge "deletes the old source wiki
+  files"; the code has tombstoned them (`status: folded`, `folded_into:`
+  set, file kept) since athenaeum#716. Both now describe tombstoning, and a
+  test guards the published tool description against the wording coming
+  back (athenaeum#2543).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
