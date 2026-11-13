@@ -4083,6 +4083,56 @@ def truncated_create_escalation(
     )
 
 
+#: Per-side cap on the conflicting-claims copy stored on a contradiction's
+#: EscalationItem/PendingQuestion record (issue athenaeum#2519). Mirrors
+#: MAX_PARKED_OBSERVATION_CHARS's bounding rationale — a predictable size on
+#: disk, never the whole raw file or the whole compiled page.
+MAX_CONFLICTING_CLAIMS_CHARS = 2000
+
+
+def attach_contradiction_writeback_copy(
+    escalation: EscalationItem,
+    *,
+    existing_path: Path,
+    wiki_root: Path,
+    observations: str,
+    existing_body: str,
+) -> None:
+    """Stamp *escalation* with a durable write-back copy (issue athenaeum#2519).
+
+    Mutates *escalation* in place: ``compiled_page`` becomes *existing_path*
+    relative to *wiki_root* — the compiled page this contradiction's raw
+    claim would have merged into — and ``conflicting_claims`` becomes a
+    bounded copy of both sides of the conflict (the new raw observation and
+    the page's current body). This lets the human answer be applied later
+    (:func:`athenaeum.answers._writeback_compiled_page`) even after the raw
+    source (``escalation.raw_ref``) is deleted by the librarian's normal
+    intake-consumption schedule — which this issue leaves completely
+    unchanged (its AC3): a raw file with an open question against it is
+    still deleted on schedule, same as always.
+
+    Called once, right after :func:`tier3_merge` returns a non-``None``
+    escalation for an ``action.kind == "update"`` action — the one call
+    site (``athenaeum.librarian``'s entity-tier loop) that has both the
+    resolved existing page path and its pre-merge body already in hand, no
+    second lookup needed. Every other escalation constructor in this module
+    (truncated create, oversize-page, field-correction, ...) leaves both
+    fields at their default ``""`` — there is either no existing compiled
+    page to point at (create) or the field doesn't apply.
+    """
+    try:
+        rel = str(existing_path.relative_to(wiki_root))
+    except ValueError:
+        rel = str(existing_path)
+    escalation.compiled_page = rel
+    escalation.conflicting_claims = (
+        f"New claim (raw source {escalation.raw_ref}):\n"
+        f"{observations.strip()[:MAX_CONFLICTING_CLAIMS_CHARS]}\n\n"
+        f"Existing compiled page body (before this merge attempt):\n"
+        f"{existing_body.strip()[:MAX_CONFLICTING_CLAIMS_CHARS]}"
+    )
+
+
 def _scrub_prose_compile_body(
     body: str | None,
     *,
@@ -7356,6 +7406,20 @@ def tier3_derive_actions(
                     target_type=resolve_page_type(meta) or None,
                 )
                 if esc:
+                    # Issue athenaeum#2519: stamp the durable write-back copy
+                    # (compiled page + conflicting claims) BEFORE this
+                    # escalation ever reaches tier4_escalate — existing_path
+                    # and existing_body (this page's pre-merge content) are
+                    # only in hand right here; by the time a human answers,
+                    # raw.ref may already be deleted on the normal intake
+                    # schedule.
+                    attach_contradiction_writeback_copy(
+                        esc,
+                        existing_path=existing_path,
+                        wiki_root=wiki_root,
+                        observations=action.observations,
+                        existing_body=existing_body,
+                    )
                     escalations.append(esc)
                 if updated_body:
                     stamp_merge_provenance(meta, config=config)
@@ -7810,7 +7874,11 @@ def tier4_escalate(
     # Build the open-pair index from the file's currently-open ([ ]) blocks.
     # Archived/[x] blocks are deliberately excluded — a previously-answered
     # pair that re-fires deserves a fresh block (resurrection case).
-    from athenaeum.answers import parse_pending_questions, render_observation_field
+    from athenaeum.answers import (
+        parse_pending_questions,
+        render_conflicting_claims_field,
+        render_observation_field,
+    )
 
     open_index: dict[tuple[str, ...], str] = {}
     # Issue athenaeum#1430: entities that already have an unanswered
@@ -8155,12 +8223,27 @@ def tier4_escalate(
         observation_field = (
             f"{render_observation_field(_desc_tail)}\n" if _desc_tail.strip() else ""
         )
+        # Issue athenaeum#2519: the durable write-back copy, when the raise
+        # site stamped one (today, only athenaeum.librarian's tier3-merge
+        # loop, via attach_contradiction_writeback_copy). Omitted entirely
+        # for every other item, so a pre-athenaeum#2519 block's rendering is
+        # byte-for-byte unchanged.
+        compiled_page_line = (
+            f"**Compiled page**: {item.compiled_page}\n" if item.compiled_page else ""
+        )
+        conflicting_claims_field = (
+            f"{render_conflicting_claims_field(item.conflicting_claims)}\n"
+            if item.conflicting_claims.strip()
+            else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {_desc_head}\n"
             f"{observation_field}"
+            f"{compiled_page_line}"
+            f"{conflicting_claims_field}"
             f"{fingerprint_line}"
             f"{decision_kind_line}"
         )
