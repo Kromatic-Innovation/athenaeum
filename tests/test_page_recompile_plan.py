@@ -27,6 +27,7 @@ from athenaeum.page_recompile_plan import (
     PLAN_KIND,
     SCOPE_CROSS_PAGE,
     SCOPE_STRUCTURE_ONLY,
+    VERIFY_UNUSABLE_CODE,
     PlanIssue,
     RecompilePlan,
     _get_page_recompile_model,
@@ -846,6 +847,112 @@ class TestAC9Verify:
         assert verify_summary(plan, segment, None).verified is None
 
 
+class TestAC9VerifyFailsClosedWhenAttempted:
+    """A verify that was MADE and produced nothing usable must not read as a
+    verify that was never asked for (Seer finding on PR athenaeum#2573).
+
+    The trap is :attr:`RecompilePlan.valid`: the applier slice -- an
+    explicitly named sibling under athenaeum#2525 -- will gate on it, and
+    before this fix every unusable-verify path left it ``True`` for a
+    summary nothing had confirmed. It was also internally inconsistent: a
+    sentence left unjudged INSIDE a received payload already failed, so
+    silence at the sentence level failed while silence at the call level
+    passed.
+
+    One test per path into ``verified is None``.
+    """
+
+    def _plan(self, segment: SegmentResult) -> RecompilePlan:
+        plan = _validate(_valid_payload(segment), segment)
+        assert plan.valid, "fixture plan must start out valid"
+        return plan
+
+    def test_no_client_is_a_genuine_not_requested_and_stays_valid(
+        self, segment: SegmentResult
+    ) -> None:
+        """The one path that must NOT fail closed: nobody asked for a check."""
+        verified = verify_summary(self._plan(segment), segment, None)
+        assert verified.verified is None
+        assert verified.verify_attempted is False
+        assert VERIFY_UNUSABLE_CODE not in _codes(verified)
+        assert verified.valid
+
+    def test_an_errored_verify_call_fails_closed(
+        self, segment: SegmentResult
+    ) -> None:
+        class _Exploding:
+            # Mirrors the SDK's attribute shape, lowercase on purpose.
+            class messages:
+                @staticmethod
+                def create(**kwargs: Any) -> Any:
+                    raise RuntimeError("provider down")
+
+        verified = verify_summary(self._plan(segment), segment, _Exploding())
+        assert verified.verify_attempted is True
+        assert verified.verified is None
+        assert VERIFY_UNUSABLE_CODE in _codes(verified)
+        assert not verified.valid
+
+    def test_a_response_with_no_sentences_array_fails_closed(
+        self, segment: SegmentResult
+    ) -> None:
+        client = _StubClient([{"verdict": "looks fine to me"}])
+        verified = verify_summary(self._plan(segment), segment, client)
+        assert client.call_count == 1
+        assert verified.verify_attempted is True
+        assert verified.verified is None
+        assert VERIFY_UNUSABLE_CODE in _codes(verified)
+        assert not verified.valid
+
+    def test_a_response_with_an_empty_sentences_array_fails_closed(
+        self, segment: SegmentResult
+    ) -> None:
+        client = _StubClient([{"sentences": []}])
+        verified = verify_summary(self._plan(segment), segment, client)
+        assert verified.verify_attempted is True
+        assert verified.verified is None
+        assert VERIFY_UNUSABLE_CODE in _codes(verified)
+        assert not verified.valid
+
+    def test_an_answered_verify_marks_the_attempt_either_way(
+        self, segment: SegmentResult
+    ) -> None:
+        """``verify_attempted`` is about the CALL, not about its verdict."""
+        passed = verify_summary(
+            self._plan(segment),
+            segment,
+            _StubClient([{"sentences": [{"index": 0, "verdict": "supported"},
+                                        {"index": 1, "verdict": "supported"}]}]),
+        )
+        failed = verify_summary(
+            self._plan(segment),
+            segment,
+            _StubClient([{"sentences": [{"index": 0, "verdict": "supported"},
+                                        {"index": 1, "verdict": "unsupported",
+                                         "reason": "r"}]}]),
+        )
+        assert passed.verify_attempted is True and passed.verified is True
+        assert failed.verify_attempted is True and failed.verified is False
+
+    def test_the_ledger_record_distinguishes_the_two_nulls(
+        self, wiki_root: Path, segment: SegmentResult
+    ) -> None:
+        """`verified: null` alone is ambiguous, so the record carries the
+        attempt flag beside it rather than leaving a reader to infer it."""
+        not_requested = verify_summary(self._plan(segment), segment, None)
+        unusable = verify_summary(
+            self._plan(segment), segment, _StubClient([{"sentences": []}])
+        )
+        append_plan_record(not_requested, wiki_root)
+        append_plan_record(unusable, wiki_root)
+        records = [
+            r for r in read_page_recompile_ledger(wiki_root) if r.get("kind") == PLAN_KIND
+        ]
+        assert [r["plan"]["verified"] for r in records] == [None, None]
+        assert [r["plan"]["verify_attempted"] for r in records] == [False, True]
+        assert [r["plan"]["valid"] for r in records] == [True, False]
+
+
 # ---------------------------------------------------------------------------
 # AC10: structure-only vs cross-page, classified in code.
 # ---------------------------------------------------------------------------
@@ -1180,6 +1287,76 @@ class TestShadowOnly:
         result = plan_page(wiki_root=wiki_root, uid="c-nope", client=_StubClient([]))
         assert result.plan is None
         assert "c-nope" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Eligibility: plan_page reuses S1's own per-page predicates (athenaeum#2536's
+# `classify_page_text`) rather than carrying a second copy of them.
+# ---------------------------------------------------------------------------
+
+
+class TestPlanPageEligibility:
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            pytest.param("status: folded\nfolded_into: c-beta\n", id="tombstone"),
+            pytest.param("retired: true\n", id="retired"),
+            pytest.param("superseded_by: c-beta\n", id="superseded"),
+        ],
+    )
+    def test_an_inactive_page_is_refused(
+        self, wiki_root: Path, frontmatter: str
+    ) -> None:
+        """EntityIndex indexes a tombstone like any other page, so without
+        the shared predicate this would plan one. All three states
+        `is_inactive_relation_target` names are covered, because the whole
+        point of routing through it is that this module does not get to
+        pick which of them count."""
+        path = wiki_root / "c-acme-acme.md"
+        path.write_text(
+            "---\nuid: c-acme\nname: Acme\ntype: company\n"
+            + frontmatter
+            + "---\n"
+            + _BODY,
+            encoding="utf-8",
+        )
+        client = _StubClient(_plan_responses(segment_page(_BODY)))
+        result = plan_page(wiki_root=wiki_root, uid="c-acme", client=client)
+        assert result.plan is None
+        assert "inactive" in result.error
+        assert client.call_count == 0, "a refused page must cost no model call"
+
+    def test_a_page_under_the_threshold_is_still_planned(
+        self, wiki_root: Path
+    ) -> None:
+        """`None` from classify_page_text means inactive OR merely small;
+        only the first is a refusal."""
+        _write_page(wiki_root, uid="c-acme", name="Acme", body=_BODY)
+        assert len(_BODY) < 10_000, "fixture is deliberately under the threshold"
+        result = plan_page(
+            wiki_root=wiki_root,
+            uid="c-acme",
+            client=_StubClient(_plan_responses(segment_page(_BODY))),
+        )
+        assert result.plan is not None
+
+    def test_a_blocked_page_is_refused_by_its_own_reason(
+        self, wiki_root: Path
+    ) -> None:
+        """A page whose frontmatter parses to a non-mapping is `blocked`,
+        not planned. Reached by poking the index directly, because such a
+        page has no uid for EntityIndex to key on."""
+        path = wiki_root / "weird.md"
+        path.write_text("---\n- a\n- b\n---\nBody.[^src-1]\n", encoding="utf-8")
+        index = EntityIndex(wiki_root)
+        index._by_uid["c-weird"] = path
+        client = _StubClient([])
+        result = plan_page(
+            wiki_root=wiki_root, uid="c-weird", client=client, index=index
+        )
+        assert result.plan is None
+        assert "invalid_frontmatter" in result.error
+        assert client.call_count == 0
 
 
 # ---------------------------------------------------------------------------

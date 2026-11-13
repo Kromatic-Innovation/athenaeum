@@ -14,13 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unit hash, so a re-plan over unchanged bytes makes no labelling call),
   groups and routes them by unit id on the new `page_recompile` knob, and
   writes a footnote-cited parent summary that a `verify`-knob call then
-  checks sentence by sentence. The plan is validated in code (unknown unit
-  id, missing target uid, a unit assigned twice, a model-asserted duplicate
-  whose text differs, a merge of fewer than two units, an uncited summary
-  sentence all reject it), classified structure-only or cross-page, and
-  appended to `wiki/_page_recompiles.jsonl` as a shadow record pinned to the
-  page's content hash. `athenaeum recompile show <plan id>` prints it.
-  Shadow only: no page is written (athenaeum#2537).
+  checks sentence by sentence — a verify that is attempted but comes back
+  with no usable verdicts invalidates the plan rather than passing it. The
+  plan is validated in code (unknown unit id, missing target uid, a unit
+  assigned twice, a model-asserted duplicate whose text differs, a merge of
+  fewer than two units, an uncited summary sentence all reject it);
+  tombstoned, retired and superseded pages are refused outright, reusing the
+  candidate scan's own predicate. A plan is classified structure-only or
+  cross-page, and appended to `wiki/_page_recompiles.jsonl` as a shadow
+  record pinned to the page's content hash. `athenaeum recompile show
+  <plan id>` prints it. Shadow only: no page is written (athenaeum#2537).
 
 - `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
   rename primitive: dry-run by default, `--apply` sets `name:`, appends the

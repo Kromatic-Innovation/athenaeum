@@ -52,10 +52,19 @@ model outright, because a model assertion is not evidence:
   :mod:`athenaeum.footnote_markers`; only whether a cited sentence is
   SUPPORTED is asked of a model.
 
+**Eligibility is S1's call, not a second copy.** :func:`plan_page` decides
+whether the page it was handed is one this pass may act on at all by calling
+:func:`athenaeum.page_recompile.classify_page_text` -- the predicates issue
+athenaeum#2536 extracted out of ``find_recompile_candidates``'s loop body for
+exactly this reason. Without it, reaching a page by uid through
+:class:`~athenaeum.models.EntityIndex` would plan tombstoned, retired and
+superseded pages, which the S1 scan exists to exclude.
+
 Layering: L4 domain/pipeline, the same layer as its S1 sibling
 :mod:`athenaeum.page_recompile` (same-layer imports are permitted by
 ``tests/test_layer_boundary.py``). Everything else it imports is below it:
-:mod:`athenaeum.provider` and :mod:`athenaeum.prompt_safety` (both L3),
+:mod:`athenaeum.provider`, :mod:`athenaeum.prompt_safety` and
+:mod:`athenaeum.page_relations` (all L3),
 :mod:`athenaeum.config` (L2), :mod:`athenaeum.models`,
 :mod:`athenaeum.footnote_markers` and :mod:`athenaeum.store` (L1),
 :mod:`athenaeum.json_utils` and :mod:`athenaeum._retry` (L0).
@@ -69,7 +78,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -79,6 +88,8 @@ from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     DEFAULT_VERIFY_MODEL,
     resolve_model,
+    resolve_oversize_hard_ceiling_chars,
+    resolve_page_size_threshold_chars,
 )
 from athenaeum.footnote_markers import INLINE_MARKER_RE, parse_footnote_definitions
 from athenaeum.json_utils import extract_json_object
@@ -221,6 +232,16 @@ STRUCTURE_ONLY_VERBS: frozenset[str] = frozenset(
 SCOPE_STRUCTURE_ONLY = "structure-only"
 SCOPE_CROSS_PAGE = "cross-page"
 
+#: :class:`PlanIssue` code for a verify that was MADE and came back with no
+#: usable verdicts (AC9). Distinct from ``unsupported-sentence`` (the model
+#: judged a sentence and rejected it) and from ``unverified-sentence`` (the
+#: model answered, but said nothing about one sentence): this one means the
+#: call itself yielded nothing to read. It is an issue, not merely a flag,
+#: so :attr:`RecompilePlan.valid` rejects the plan -- the same "silence
+#: reads as a failure, not a pass" rule the per-sentence check already
+#: applies, applied one level up at the call.
+VERIFY_UNUSABLE_CODE = "verify-unusable"
+
 
 @dataclass(frozen=True)
 class UnitLabel:
@@ -317,11 +338,38 @@ class RecompilePlan:
     summary: str
     scope: str
     issues: tuple[PlanIssue, ...]
-    verified: bool | None  # None = verify not run
+    #: ``True`` every summary sentence was confirmed, ``False`` at least one
+    #: was not, ``None`` no verdicts were obtained at all. ``None`` alone
+    #: does NOT say whether a verify was tried -- read
+    #: :attr:`verify_attempted` for that, and see its comment for why the
+    #: two are separate fields.
+    verified: bool | None
+    #: Whether a verify call was actually MADE (AC9). ``False`` means the
+    #: check was never requested: no client was supplied, or the caller
+    #: passed ``verify=False``, or there was no summary to check. ``True``
+    #: with ``verified is None`` means it was requested and came back
+    #: unusable -- a provider error, or an answer carrying no verdicts --
+    #: which :func:`verify_summary` also records as a
+    #: :data:`VERIFY_UNUSABLE_CODE` issue so :attr:`valid` fails closed.
+    #:
+    #: Two fields rather than one four-valued one because they answer two
+    #: different questions for two different readers: the ISSUE is what
+    #: makes ``valid`` fail closed (the applier slice's gate), while this
+    #: flag is what makes the ledger record self-describing without anyone
+    #: having to infer "was it tried?" from the presence of an issue code.
+    verify_attempted: bool = False
 
     @property
     def valid(self) -> bool:
-        """No structural issue AND, when a verify ran, a passing verify (AC9)."""
+        """No issue of any kind AND no sentence left unconfirmed (AC9).
+
+        Fails CLOSED on an attempted-but-unusable verify: that path adds a
+        :data:`VERIFY_UNUSABLE_CODE` issue, so the ``not self.issues`` term
+        below rejects it. Only a verify that was never REQUESTED
+        (:attr:`verify_attempted` ``False``) leaves a plan valid with
+        :attr:`verified` ``None`` -- the caller chose not to check, which is
+        a different thing from a check that failed to produce an answer.
+        """
         return not self.issues and self.verified is not False
 
     def plan_id(self) -> str:
@@ -357,6 +405,7 @@ class RecompilePlan:
             "scope": self.scope,
             "issues": [i.to_dict() for i in self.issues],
             "verified": self.verified,
+            "verify_attempted": self.verify_attempted,
             "valid": self.valid,
         }
 
@@ -1280,6 +1329,23 @@ def build_verify_user_message(plan: RecompilePlan, segment: SegmentResult) -> st
     )
 
 
+def _unusable_verify(plan: RecompilePlan, detail: str) -> RecompilePlan:
+    """A verify that was MADE and produced nothing usable (AC9).
+
+    Marks the attempt, leaves ``verified`` ``None`` (no verdict was
+    obtained -- the field says what the model concluded, and it concluded
+    nothing), and records the reason as a :data:`VERIFY_UNUSABLE_CODE`
+    issue, which is what makes :attr:`RecompilePlan.valid` fail closed.
+    """
+    log.warning("page_recompile_plan: verify unusable (%s)", detail)
+    return replace(
+        plan,
+        issues=plan.issues + (PlanIssue(VERIFY_UNUSABLE_CODE, detail),),
+        verified=None,
+        verify_attempted=True,
+    )
+
+
 def verify_summary(
     plan: RecompilePlan,
     segment: SegmentResult,
@@ -1290,11 +1356,25 @@ def verify_summary(
 ) -> RecompilePlan:
     """Check each summary sentence on the ``verify`` knob (AC9).
 
-    Returns a plan with :attr:`RecompilePlan.verified` set. A sentence the
-    model calls ``unsupported`` adds an ``unsupported-sentence`` issue and
-    marks the plan invalid; an unreachable or malformed verify leaves
-    ``verified`` ``None`` (not run) rather than silently passing. This never
-    rewrites the summary.
+    Three outcomes, kept deliberately distinct:
+
+    * **Not requested** -- *client* is ``None``. The plan is returned
+      untouched: ``verified`` ``None``, ``verify_attempted`` ``False``, no
+      issue. A caller that did not ask for a check does not get a failure
+      for not asking.
+    * **Attempted and answered** -- ``verified`` becomes ``True``/``False``.
+      A sentence the model calls ``unsupported``, or one it answers nothing
+      about, adds an issue and marks the plan invalid.
+    * **Attempted and unusable** -- the call errored, or came back with no
+      ``sentences`` array, or with an empty one. ``verify_attempted`` is
+      ``True``, ``verified`` stays ``None``, and a
+      :data:`VERIFY_UNUSABLE_CODE` issue is added so the plan is INVALID.
+      This path used to be indistinguishable from "not requested", which
+      left ``valid`` ``True`` for a summary nothing had confirmed -- a trap
+      for the applier slice, and inconsistent with the per-sentence rule a
+      few lines below, which already treats silence as failure.
+
+    This never rewrites the summary.
     """
     if client is None:
         return plan
@@ -1313,10 +1393,14 @@ def verify_summary(
         description="page_recompile_verify",
     )
     if payload is None:
-        return plan
+        return _unusable_verify(plan, "the verify call returned no usable response")
     raw = payload.get("sentences")
-    if not isinstance(raw, list) or not raw:
-        return plan
+    if not isinstance(raw, list):
+        return _unusable_verify(plan, "the verify response carried no sentences array")
+    if not raw:
+        return _unusable_verify(
+            plan, "the verify response carried an empty sentences array"
+        )
 
     sentences = split_summary_sentences(plan.summary)
     unsupported: list[PlanIssue] = []
@@ -1340,17 +1424,11 @@ def verify_summary(
         # confirm EVERY sentence, so silence reads as a failure, not a pass.
         unsupported.extend(PlanIssue("unverified-sentence", sentences[i]) for i in missing)
 
-    return RecompilePlan(
-        uid=plan.uid,
-        content_hash=plan.content_hash,
-        dispositions=plan.dispositions,
-        groups=plan.groups,
-        merges=plan.merges,
-        page_actions=plan.page_actions,
-        summary=plan.summary,
-        scope=plan.scope,
+    return replace(
+        plan,
         issues=plan.issues + tuple(unsupported),
         verified=not unsupported,
+        verify_attempted=True,
     )
 
 
@@ -1394,13 +1472,35 @@ def plan_page(
 ) -> PlanRunResult:
     """Plan one page end to end and append the shadow record (AC11).
 
-    Reads the page, segments it with
+    Reads the page, decides whether this pass may act on it at all
+    (:func:`athenaeum.page_recompile.classify_page_text`), segments it with
     :func:`athenaeum.page_recompile.segment_page` (never re-implemented
     here), labels, proposes, validates, verifies, and appends. **Writes no
     page** -- the only file this function can write is the ledger.
+
+    **Why the eligibility check reuses S1's own predicates.** Issue
+    athenaeum#2536 extracted ``find_recompile_candidates``'s loop body into
+    :func:`~athenaeum.page_recompile.classify_page_text` precisely so a
+    caller already holding a page's text need not grow a second copy of
+    them. This function is such a caller: it reaches its page by uid
+    through :class:`~athenaeum.models.EntityIndex`, which indexes
+    tombstoned, retired and superseded pages like any other -- so without
+    that call it would happily plan the recompilation of a page the S1 scan
+    exists to exclude (see that module's docstring on phantom candidates).
+    A ``BlockedPage`` outcome is refused by its own reason.
+
+    An eligible-but-under-threshold page is deliberately still planned: a
+    ``None`` outcome means EITHER inactive OR simply not large enough, and
+    only the first is a refusal -- an operator naming a uid explicitly has
+    asked about that page, and "not currently over the threshold" is not a
+    reason to decline. The two are told apart with
+    :func:`~athenaeum.page_relations.is_inactive_relation_target`, the same
+    single predicate ``classify_page_text`` itself uses, not a second
+    tombstone check.
     """
     from athenaeum.models import parse_frontmatter
-    from athenaeum.page_recompile import segment_page
+    from athenaeum.page_recompile import BlockedPage, classify_page_text, segment_page
+    from athenaeum.page_relations import is_inactive_relation_target
 
     usage = TokenUsage()
     page_index = index if index is not None else EntityIndex(wiki_root)
@@ -1414,6 +1514,24 @@ def plan_page(
 
     meta, body = parse_frontmatter(text)
     meta_dict = meta if isinstance(meta, dict) else {}
+
+    outcome = classify_page_text(
+        path,
+        text,
+        threshold=resolve_page_size_threshold_chars(config),
+        ceiling=resolve_oversize_hard_ceiling_chars(config),
+    )
+    if isinstance(outcome, BlockedPage):
+        return PlanRunResult(
+            plan=None, usage=usage, error=f"page is blocked ({outcome.reason})"
+        )
+    if outcome is None and is_inactive_relation_target(meta_dict):
+        return PlanRunResult(
+            plan=None,
+            usage=usage,
+            error="page is inactive (tombstoned, retired or superseded)",
+        )
+
     segment = segment_page(body)
     if not segment.units:
         return PlanRunResult(plan=None, usage=usage, error="page has no units to plan")
@@ -1483,6 +1601,7 @@ __all__ = [
     "SCOPE_STRUCTURE_ONLY",
     "STRUCTURE_ONLY_VERBS",
     "VERIFY_KNOB",
+    "VERIFY_UNUSABLE_CODE",
     "MergedSection",
     "PageCandidate",
     "PlanGroup",
