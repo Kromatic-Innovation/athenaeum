@@ -49,6 +49,58 @@ on by default. If you upgrade an existing install and run without reading
 this section, raw auto-memory files will start disappearing from the
 working tree — recoverable, but only from git history.
 
+## I want to know about the removed stranded-ledger warnings
+
+Earlier releases moved the spend ledger (`spend.jsonl`), the LLM-schema
+observation ledger (`_llm_schema_observations.jsonl`), and the push-records
+ledger (`_push_records.jsonl`) out of the knowledge root and into your
+cache directory, and for a while athenaeum logged a one-time warning per
+process if it found a leftover copy of one of these files still sitting at
+its old knowledge-root location.
+
+Those warnings are gone. If a leftover ledger from before that move is
+still sitting at the old location, athenaeum now simply ignores it — it is
+never read and never written. Nothing is deleted or migrated automatically;
+if you want those old rows, merge the leftover file into the corresponding
+file in your cache directory yourself, then remove the old copy.
+
+## I want to know which ledgers stopped being written, and where the old files are
+
+A cleanup audit found five internal ledgers written by live code but read
+by nothing outside their own tests. One is kept and newly exposed; the
+other four are no longer written at all. Nothing on disk from before this
+change is touched — each leftover file is simply ignored from now on, and
+you may delete it:
+
+- **Adapter provenance — kept, now readable.** `athenaeum provenance
+  adapter --uid <uid>` prints which adapter and source object produced a
+  compiled page, or says none was recorded. `--json` for machine output.
+  This is the one ledger of the five that is still written; nothing about
+  it changed except that you can now read it from the command line.
+- **Compile routes — stopped.** The per-file "which page did this raw file
+  write to" record is no longer kept. The one-way routing GUARD it rode
+  alongside (refusing or logging a write that lands on the wrong person's
+  page) is unaffected. Old file: `_compile_route_records.jsonl` under your
+  cache directory (`~/.cache/athenaeum` by default, or `ATHENAEUM_CACHE_DIR`
+  if you set it).
+- **LLM schema observations — stopped.** The per-parse "did the model's
+  response match the expected shape" record is no longer kept; a shape
+  mismatch is still logged to the process log as before, just no longer
+  durably recorded. The `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` environment
+  variable that used to gate this is gone — setting it now does nothing.
+  Old file: `_llm_schema_observations.jsonl` under your cache directory.
+- **Wiki-dedupe attribution report — stopped.** The per-run snapshot of
+  which candidate page pairs the dedupe pass examined, and why each one
+  did or didn't become a merge proposal, is no longer written. The dedupe
+  pass itself still proposes (or doesn't propose) merges exactly as before.
+  Old files: `_wiki_dedupe_attribution.jsonl` and its timestamped rotations
+  under `wiki/` in your knowledge directory.
+- **Never-ingest refusals — stopped.** The append-only record of which
+  files were refused for matching a configured never-ingest class is no
+  longer kept. The refusal itself is unchanged: a matching file is still
+  excluded from compilation this run and still left untouched on disk.
+  Old file: `_never_ingest_refusals.jsonl` under your cache directory.
+
 ## I want to know what gets moved vs. what's held back
 
 Only non-contradictory clusters are retired. A cluster is **held** in the
@@ -185,9 +237,9 @@ Two yaml keys that were deprecated-but-tolerated are now removed outright:
 | `resolve.model` | `models.resolve` |
 | `contradiction.resolved_similarity_threshold` | nothing — the knob is gone; the contradiction resolver always uses its built-in default now |
 
-`resolve.model` was the pre-0.? legacy spelling of the resolver's model
-knob; `models.resolve` has been the preferred key for a long time and is
-the only one read now. If your `athenaeum.yaml` still sets `resolve.model`,
+`resolve.model` was the original spelling of the resolver's model knob;
+`models.resolve` has been the preferred key for a long time and is the only
+one read now. If your `athenaeum.yaml` still sets `resolve.model`,
 move the same value to `models.resolve`.
 
 `contradiction.resolved_similarity_threshold` tuned the cosine-similarity
@@ -200,12 +252,56 @@ replacement to set — the resolver always uses its built-in default.
 A stale `athenaeum.yaml` still setting either key loads fine; each key is
 ignored and logged with the same warning every other removed key gets.
 
-## I want to know about the other destructive-by-design command
+The matching environment variable `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`
+is gone too; setting it now has no effect and produces no warning, the same
+as every other removed environment variable.
 
-`athenaeum auto-memory prune --apply` is a second opt-in command that
-`git rm`s pages (operational `wiki/auto-*.md`), with the same git-only
-recovery story as move-then-retire. It's dry-run by default — see [Daily
-operation](daily-operation.md).
+## I want to know about seven one-shot repair commands that are gone in 0.24.0
+
+Each of these commands existed to repair data left behind by one specific,
+now-fixed bug. Once the underlying defect was fixed, the command had nothing
+left to do for anyone running a current install — so it is removed outright
+in 0.24.0, with no deprecation period and no replacement:
+
+| Removed command |
+|---|
+| `athenaeum auto-memory prune` |
+| `athenaeum auto-memory prune-index` |
+| `athenaeum auto-memory prune-code-entities` |
+| `athenaeum dedup-oversize-escalations` |
+| `athenaeum storage prune-dispositions` |
+| `athenaeum storage audit-h1-redaction` |
+| `athenaeum paste-cleanup` |
+
+**If you are upgrading from an older release and still have the pre-fix data
+on disk** (for example, you skipped several releases, or your knowledge base
+predates the engine fix each command was written around), run the command you
+need on your *current, pre-upgrade* release before upgrading — each one is
+dry-run by default, so you can check first whether it finds anything to do.
+Once you upgrade, the command itself is gone; its one-time job cannot be run
+again from a newer release.
+
+## I want to know what changed in the MCP decision-queue tool responses
+
+The `resolve_question`, `resolve_merge`, `review_audit_item`, and
+`raise_decision` MCP tool responses (and the matching `athenaeum` Python
+helpers, `answers.resolve_by_id` and `answers.raise_pending_question`) no
+longer carry a handful of legacy keys that duplicated other fields:
+
+- **`error`** is gone everywhere it appeared. Read **`message`** instead —
+  `error` was always an exact copy of it (or `None` on success).
+- **`block`** is gone from `resolve_question` and `resolve_merge`. Read
+  **`resolved_block`** instead — on these two tools it was, and still is,
+  always `None`: both defer the actual question/merge rewrite to the next
+  `ingest-answers` tick, so neither ever rewrites anything synchronously.
+- **`block`** is gone from `raise_decision` (and the underlying
+  `answers.raise_pending_question`). Read **`raw_block`** instead — `block`
+  was always an exact copy of it (the newly rendered queue block on
+  success, `None` on failure).
+
+Nothing else changed: `ok`, `error_code`, `message`, `deferred`,
+`answer_file`, `decision_id`, `raw_block`, and `resolved_block` (where it
+already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
 
 ## See also
 

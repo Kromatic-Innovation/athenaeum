@@ -22,8 +22,11 @@ Two separable problems, and this module is both halves:
    consulted it. :func:`classify_route` consults it and reports divergence.
 2. **Nothing recorded the routing.** Runs logged counts (``created=2
    updated=1``), so a misroute was only reconstructible from the python log,
-   which rotates. :func:`record_compile_route` writes the per-file
-   ``raw ref -> written uid(s)`` join to a durable ledger instead.
+   which rotates. This module used to also write a durable per-file
+   ``raw ref -> written uid(s)`` ledger row for every compile; issue
+   athenaeum#2468 removed that ledger (nothing outside this module's own
+   tests ever read it) -- :func:`classify_route`'s routing GUARD from
+   problem 1 above is the surviving, unaffected mechanism.
 
 **Why a separate module rather than a helper inside the librarian.** The
 synchronous transport (``librarian._apply_tier3_results``) and the Batch API
@@ -58,29 +61,23 @@ guard rather than failing the compile. The guard never fires for a raw file
 that names no correspondent -- which is the overwhelming majority of the
 corpus -- so it cannot affect ordinary intake at all.
 
-Layering: L3 service. Imports :mod:`athenaeum.config` (cache dir
-resolution), :mod:`athenaeum.corrections` (L2, target resolution),
-:mod:`athenaeum.models` (``parse_frontmatter``) and :mod:`athenaeum.store`
-(``append_line_durable``/``now_iso``) -- all L2 or below. Mirrors
-:mod:`athenaeum.adapter_provenance`'s layering exactly. Must never import
-:mod:`athenaeum.librarian`, :mod:`athenaeum.batch` or
-:mod:`athenaeum.tiers` (that would close a cycle back to this module's own
+Layering: L3 service. Imports :mod:`athenaeum.corrections` (L2, target
+resolution) and :mod:`athenaeum.models` (``parse_frontmatter``) -- both L2
+or below. Must never import :mod:`athenaeum.librarian`, :mod:`athenaeum.batch`
+or :mod:`athenaeum.tiers` (that would close a cycle back to this module's own
 callers).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_frontmatter
-from athenaeum.store import append_line_durable, now_iso
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.models import EntityIndex, RawFile
@@ -113,15 +110,10 @@ CORRESPONDENT_NAME_KEY = "correspondent_name"
 #: different kind of write and is not what athenaeum#1949 observed.
 PERSON_ENTITY_TYPE = "person"
 
-#: Ledger filename, under the resolved cache dir -- outside the wiki/raw
-#: corpus by construction, mirroring
-#: :data:`athenaeum.adapter_provenance.PROVENANCE_LEDGER_FILENAME`.
-COMPILE_ROUTE_LEDGER_FILENAME = "_compile_route_records.jsonl"
-
-#: ``divergence`` values recorded on a ledger row and used in the escalation
-#: text. ``prevented`` -- the write was refused and never reached disk;
-#: ``logged`` -- the write was applied and the divergence recorded. Which one
-#: applies is decided by :func:`classify_route`; see its docstring for why the
+#: ``divergence`` values used in :func:`classify_route`'s escalation text.
+#: ``prevented`` -- the write was refused and never reached disk; ``logged``
+#: -- the write was applied and the divergence logged. Which one applies is
+#: decided by :func:`classify_route`; see its docstring for why the
 #: distinction is the correspondent's own page having been written or not.
 DIVERGENCE_PREVENTED = "prevented"
 DIVERGENCE_LOGGED = "logged"
@@ -436,108 +428,9 @@ def classify_route(
     )
 
 
-@dataclass(frozen=True)
-class CompileRouteRecord:
-    """One ledger row: which uid(s) a compile wrote for one raw file."""
-
-    raw_ref: str
-    source: str
-    written_uids: list[str] = field(default_factory=list)
-    created_uids: list[str] = field(default_factory=list)
-    updated_uids: list[str] = field(default_factory=list)
-    correspondent_uid: str = ""
-    prevented_uids: list[str] = field(default_factory=list)
-    logged_uids: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "recorded_at": now_iso(),
-            "raw_ref": self.raw_ref,
-            "source": self.source,
-            "written_uids": list(self.written_uids),
-            "created_uids": list(self.created_uids),
-            "updated_uids": list(self.updated_uids),
-            "correspondent_uid": self.correspondent_uid,
-            "prevented_uids": list(self.prevented_uids),
-            "logged_uids": list(self.logged_uids),
-        }
-
-
-def compile_route_ledger_path(cache_dir: Path | None = None) -> Path:
-    """Resolved path of the compile-route ledger.
-
-    Same cache-dir resolution every other ledger in this codebase uses
-    (:func:`athenaeum.config.resolve_cache_dir`: ``arg > env > default``).
-    """
-    return resolve_cache_dir(cache_dir) / COMPILE_ROUTE_LEDGER_FILENAME
-
-
-def record_compile_route(
-    record: CompileRouteRecord, *, cache_dir: Path | None = None
-) -> None:
-    """Append *record* to the durable compile-route ledger.
-
-    This is athenaeum#1949's AC2. Runs log counts (``created=2 updated=1``), so
-    a misroute was only ever reconstructible from the python log -- and the
-    observed one could not be reconstructed at all, because that log had
-    rotated. A durable, source-agnostic row per raw file is what makes it
-    reconstructible afterwards.
-
-    **Deliberately NOT folded into
-    :func:`athenaeum.adapter_provenance.record_adapter_provenance_for_pages`**,
-    which already runs at the same call site and already has the same join in
-    hand. That function records an EXTERNAL source-object id, so it is a no-op
-    unless the raw file's source declares an id key in
-    :data:`~athenaeum.adapter_provenance.SOURCE_OBJECT_ID_KEYS` -- one entry
-    today, ``mural-board-summary``. "Which uid did this file write" needs no
-    such convention and must be recorded for EVERY source, including the
-    conversation-intake source athenaeum#1949 is about, so widening that
-    function would have meant inventing a fake external id for sources that
-    have none.
-
-    Written for every raw file that reaches a Tier-3 write boundary, including
-    one that wrote nothing: an empty ``written_uids`` is exactly the observed
-    symptom ("afterwards, no page in the wiki cites the file") and is the row a
-    reconstruction most needs.
-
-    Fail-open (mirrors
-    :func:`athenaeum.adapter_provenance.write_adapter_provenance`): a write
-    failure is logged and swallowed -- this is an audit trail, not a gate, and
-    it must never break the compile it observes.
-    """
-    path = compile_route_ledger_path(cache_dir)
-    try:
-        line = json.dumps(record.to_dict(), separators=(",", ":")) + "\n"
-        append_line_durable(path, line.encode("utf-8"))
-    except OSError:
-        log.warning(
-            "compile-routing: failed to append the route record for %s to %s "
-            "(issue athenaeum#1949)",
-            record.raw_ref,
-            path,
-            exc_info=True,
-        )
-
-
-def read_compile_routes(cache_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Every ledger row, oldest first. ``[]`` when the ledger does not exist.
-
-    The read side a reconstruction uses, and what the regression tests assert
-    against. Malformed lines are skipped rather than raising -- a partially
-    written row must not make the whole audit trail unreadable.
-    """
-    path = compile_route_ledger_path(cache_dir)
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            log.warning("compile-routing: skipping a malformed ledger row in %s", path)
-            continue
-        if isinstance(parsed, dict):
-            rows.append(parsed)
-    return rows
+#: Issue athenaeum#2468 removed the durable compile-route ledger this module
+#: used to write (``CompileRouteRecord``/``record_compile_route``, formerly
+#: at ``_compile_route_records.jsonl`` in the cache dir) and its reader
+#: (``read_compile_routes``) -- nothing outside this module's own tests ever
+#: read it. :func:`classify_route`'s routing GUARD (preventing or logging a
+#: misroute) is unchanged; only the durable per-file row is gone.

@@ -25,9 +25,11 @@ the identical helper so neither arm's prompt leaks the answer key's own
 **No corpus mutation.** This script NEVER calls
 :func:`athenaeum.claim_kind.stamp_claim_kind` (the write path) -- only the
 read-only `classify_claim_kind`. It never writes into the sample directory.
-`wiki_root` is passed as ``None`` throughout, so the module's own
-observe-schema telemetry (``llm_schemas.record_observation``) lands in the
-local cache dir, never under the knowledge root.
+`wiki_root` is passed as ``None`` throughout; the module's own observe-schema
+telemetry logs a WARNING on a mismatch (issue athenaeum#2468 removed its
+durable ledger -- nothing outside `llm_schemas`'s own tests ever read it) and
+otherwise writes nothing, so there is no cache-dir or knowledge-root side
+effect from it either way.
 
 **No fixture content in the output.** The emitted markdown and the per-case
 log carry only aggregate counts, labels, predictions, token counts, and

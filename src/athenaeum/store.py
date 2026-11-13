@@ -931,32 +931,10 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         location="excluded surface root",
         source_ref="pii.py:1312 SUPERSESSION_LOG_FILENAME (design note §5.2 table row 7)",
     ),
-    ArtifactDeclaration(
-        name="llm-schema-observations-ledger",
-        persistence_class="operational",
-        operational_scope="store-durable",
-        location="cache dir",
-        source_ref=(
-            "llm_schemas.py OBSERVATIONS_FILENAME '_llm_schema_observations.jsonl' "
-            "(design note §5.2 table row 8 'observations.jsonl'). Issue athenaeum#980 "
-            "AC4 relocated this ledger to wiki root; issue athenaeum#1601 (operator "
-            "decision, 2026-09-15) WITHDREW that relocation and returned it to the "
-            "cache dir, the same fix issue athenaeum#1591 made for "
-            "push-records-ledger. R3's class/scope declaration is unchanged — "
-            "'store-durable' never implied 'wiki root'. "
-            "llm_schemas.durable_observations_path() now always resolves to the "
-            "cache dir and uses its wiki_root argument only to warn about a ledger "
-            "stranded at the withdrawn location; that same call also fixes issue "
-            "athenaeum#1512 defect 2 (a bare exists() check on the withdrawn path could "
-            "let a stray empty file flip resolution — closed by "
-            "_has_migrated_content()). observe()/observe_parse_failure() and all five "
-            "wrapper functions (observe_query_topics/observe_claim_kind/"
-            "observe_contradictions/observe_resolutions/observe_tier2_classify/"
-            "observe_tier3_merge_ops) still accept wiki_root=, threaded from every "
-            "call chain up to its available root, for that warning only — see "
-            "tests/test_llm_schemas.py::TestDurableObservationsPath"
-        ),
-    ),
+    # Issue athenaeum#2468 removed the "llm-schema-observations-ledger" entry
+    # that used to sit here (``_llm_schema_observations.jsonl``): nothing
+    # outside that module's own tests ever read the ledger, so the writer,
+    # its readers, and this registry row were all removed together.
     ArtifactDeclaration(
         name="spend-ledger",
         persistence_class="operational",
@@ -969,14 +947,15 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
             "relocation and returned it to the cache dir, the same fix issue "
             "athenaeum#1591 made for push-records-ledger. R3's class/scope declaration "
             "is unchanged — 'store-durable' never implied 'wiki root'. "
-            "spend.durable_ledger_path() now always resolves to the cache dir and uses "
-            "its wiki_root argument only to warn about a ledger stranded at the "
-            "withdrawn location. Every production write AND read call site still "
-            "passes wiki_root= (librarian.py x3, drain.py, _cmd_drain.py, "
-            "_cmd_lifecycle.py, status.py, backlog_price_sheet.py, "
-            "ordinary_night_table.py, answers.py, query_topics.py + _cmd_query.py, "
-            "memory_class_backfill.py) for that warning only — see "
-            "tests/test_spend.py::TestDurableLedgerPath::test_matrix_wiki_path_populated"
+            "spend.durable_ledger_path() now always resolves to the cache dir and "
+            "ignores its wiki_root argument entirely; issue athenaeum#2467 removed "
+            "the one-time stranded-ledger warning that argument used to feed. "
+            "Every production write AND read call site still passes wiki_root= "
+            "(librarian.py x3, drain.py, _cmd_drain.py, _cmd_lifecycle.py, "
+            "status.py, backlog_price_sheet.py, ordinary_night_table.py, "
+            "answers.py, query_topics.py + _cmd_query.py, "
+            "memory_class_backfill.py), purely for call-signature stability now — "
+            "see tests/test_spend.py::TestDurableLedgerPath::test_matrix_wiki_path_populated"
         ),
     ),
     ArtifactDeclaration(
@@ -998,8 +977,10 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
             "honoured the "
             "identical constraint for _decay_sweep_records.jsonl (athenaeum#969) and "
             "_push_references.jsonl. push_metrics.durable_push_records_path() now "
-            "always resolves to the cache dir and uses its wiki_root argument only to "
-            "warn about a ledger stranded at the withdrawn location — see "
+            "always resolves to the cache dir and ignores its wiki_root argument "
+            "entirely; issue athenaeum#2467 removed the one-time stranded-ledger "
+            "warning that argument used to feed (and, with it, this module's own "
+            "_has_migrated_content() copy, which had no other caller) — see "
             "tests/test_push_metrics.py::TestDurablePushRecordsPath"
         ),
     ),
@@ -1012,32 +993,23 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
             "push_metrics.py:82 REFERENCE_RECORDS_FILENAME '_push_references.jsonl' — "
             "sibling of push-records-ledger (same module, same durable/not-reconstructible "
             "shape) but not itself named in design note §5.2's table, so classified "
-            "without relocation, same reasoning as never-ingest-refusals-ledger below"
+            "without relocation"
         ),
     ),
-    ArtifactDeclaration(
-        name="never-ingest-refusals-ledger",
-        persistence_class="operational",
-        operational_scope="store-durable",
-        location="cache dir",
-        source_ref=(
-            "never_ingest.py:122 REFUSALS_FILENAME — same durable, not-reconstructible "
-            "shape as design note §5.2 table row 8 (and one of the duplicated §2.4 "
-            "appenders AC3 collapses), but NOT named in §5.2's table, so its physical "
-            "location is left as-is per 'do not invent a classification the note does "
-            "not state'; only classification is declared here, not relocated"
-        ),
-    ),
+    # Issue athenaeum#2468 removed the "never-ingest-refusals-ledger" entry
+    # that used to sit here (``_never_ingest_refusals.jsonl``): nothing
+    # outside that module's own tests ever read the ledger, so the writer,
+    # its reader, and this registry row were all removed together. The
+    # never-ingest refusal DECISION itself is unchanged.
     ArtifactDeclaration(
         name="decay-sweep-records-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
         location="cache dir",
         source_ref=(
-            "decay_sweep.py:100 SWEEP_LEDGER_FILENAME — same reasoning as "
-            "never-ingest-refusals-ledger above: durable and not reconstructible, one "
-            "of the §2.4 duplicated appenders, but outside §5.2's named table rows, so "
-            "classified without relocation"
+            "decay_sweep.py:100 SWEEP_LEDGER_FILENAME — durable and not "
+            "reconstructible, one of the §2.4 duplicated appenders, but outside "
+            "§5.2's named table rows, so classified without relocation"
         ),
     ),
     ArtifactDeclaration(

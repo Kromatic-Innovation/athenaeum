@@ -17,9 +17,9 @@ legal:
 1. **D1 call sites.** Every enclosing top-level function or method of a call
    whose function is an attribute chain ending in ``.messages.create`` or
    ``.messages.batches.create``. This is what the pre-athenaeum#2224 oracle
-   (the substring ``LLMBackend``) missed: `paste_cleanup.py` and
-   `memory_class_backfill.py` call `client.messages.create` without ever
-   naming `LLMBackend`, so neither was on the surface.
+   (the substring ``LLMBackend``) missed: `memory_class_backfill.py` calls
+   `client.messages.create` without ever naming `LLMBackend`, so it was not
+   on the surface.
 2. **D2 prompts.** Every `prompt_registry.PROMPT_META` row, as
    ``path::CONSTANT``. Replaces the old whole-module requirement.
 3. **D3 routing seam.** `config.py::resolve_model`, every module-level
@@ -353,20 +353,20 @@ def test_prompt_md_files_are_covered_by_the_surface() -> None:
     )
 
 
-def test_the_two_call_sites_the_old_oracle_missed_are_now_on_the_surface() -> None:
+def test_the_call_site_the_old_oracle_missed_is_now_on_the_surface() -> None:
     """athenaeum#2224's motivating gap, pinned so it cannot silently reopen.
 
-    Neither module mentions `LLMBackend`, so the pre-athenaeum#2224 oracle
-    never required them even though both call `client.messages.create`.
+    This module never mentions `LLMBackend`, so the pre-athenaeum#2224 oracle
+    never required it even though it calls `client.messages.create`. Its
+    sibling call site, `paste_cleanup.py::propose_page`/`verify_page`, was
+    removed along with the `paste-cleanup` command (athenaeum#2466, the
+    underlying defect fixed) -- so only this one remains to pin.
     """
     surface = _load_surface()
-    for entry in (
-        "src/athenaeum/paste_cleanup.py::propose_page",
-        "src/athenaeum/paste_cleanup.py::verify_page",
-        "src/athenaeum/memory_class_backfill.py::classify_residual",
-    ):
-        assert _covers(surface, entry), entry
-    assert "LLMBackend" not in (SRC_ATHENAEUM / "paste_cleanup.py").read_text(encoding="utf-8")
+    assert _covers(surface, "src/athenaeum/memory_class_backfill.py::classify_residual")
+    assert "LLMBackend" not in (
+        SRC_ATHENAEUM / "memory_class_backfill.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_librarian_orchestration_is_designated_not_covered_by_one_token_entry() -> None:

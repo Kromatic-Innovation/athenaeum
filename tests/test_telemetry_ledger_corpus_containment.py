@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Issue athenaeum#1601 AC4: a `FilesystemStore` run over a tmp git repo
-records spend and observations, then snapshots, and `git ls-files` shows
-neither ledger.
+records spend, then snapshots, and `git ls-files` shows no ledger.
 
 This is the corpus-containment assertion at the actual write-then-commit
 seam (`FilesystemStore.snapshot` is `git add -A` over `knowledge_root` —
 `src/athenaeum/store.py:1411`), not just at the resolver level: it is the
 test the observed harm this issue is filed about would have failed had the
-two ledgers actually migrated into `wiki_root` and a librarian run then
+ledger actually migrated into `wiki_root` and a librarian run then
 snapshotted the corpus. `tests/test_push_metrics.py`'s
 `test_record_push_with_wiki_root_never_writes_into_the_corpus` covers the
 analogous ground for `_push_records.jsonl` (issue athenaeum#1591) without
 exercising a real git commit; this test goes one step further and actually
 snapshots, then reads the commit's tree.
+
+Originally covered BOTH `spend.jsonl` and `llm_schemas`'
+`_llm_schema_observations.jsonl` side by side (the two artifacts issue
+athenaeum#1601 withdrew the same wiki-root relocation for). Issue
+athenaeum#2468 removed the `llm_schemas` observation ledger entirely
+(`record_observation`/`read_observations`/`aggregate_observations` and the
+`ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` switch) as something nothing
+outside that module's own tests ever read — this test now covers the
+spend ledger alone.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum import llm_schemas, spend
+from athenaeum import spend
 from athenaeum.models import TokenUsage
 from athenaeum.store import FilesystemStore
 
@@ -45,7 +53,7 @@ def _tracked_files(root: Path) -> list[str]:
 
 
 class TestSnapshotExcludesTelemetryLedgers:
-    def test_git_ls_files_shows_neither_ledger_after_snapshot(
+    def test_git_ls_files_shows_no_ledger_after_snapshot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The autouse cache-dir isolation fixture (tests/conftest.py) already
@@ -53,11 +61,6 @@ class TestSnapshotExcludesTelemetryLedgers:
         # hermeticity; clear it here so this test's own explicit cache_dir=
         # argument is what actually governs resolution.
         monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
-        # The same autouse fixture defaults schema-observation recording OFF
-        # under test (belt-and-braces against a stray write to the operator's
-        # real ledger); opt back in explicitly, as tests/test_llm_schemas.py
-        # does.
-        monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")
         knowledge_root = tmp_path / "knowledge_root"
         knowledge_root.mkdir()
         _init_git_repo(knowledge_root)
@@ -68,8 +71,8 @@ class TestSnapshotExcludesTelemetryLedgers:
 
         cache_dir = tmp_path / "cache"
 
-        # Record a spend row and an observation row, both passing
-        # wiki_root=knowledge_root the way every production caller does.
+        # Record a spend row, passing wiki_root=knowledge_root the way every
+        # production caller does.
         usage = TokenUsage()
         usage.add(10, 5, 0, 0, model="corpus-containment-probe")
         assert (
@@ -82,16 +85,9 @@ class TestSnapshotExcludesTelemetryLedgers:
             )
             is True
         )
-        llm_schemas.record_observation(
-            contract="corpus-containment-probe",
-            call_site="test",
-            outcome="ok",
-            cache_dir=cache_dir,
-            wiki_root=knowledge_root,
-        )
 
         # Also write an ordinary wiki page, so the commit has real content
-        # and `snapshot` has something to stage besides the (absent) ledgers.
+        # and `snapshot` has something to stage besides the (absent) ledger.
         (wiki_root / "page.md").write_text("# hello\n", encoding="utf-8")
 
         sha = store.snapshot("test: corpus containment probe")
@@ -99,17 +95,13 @@ class TestSnapshotExcludesTelemetryLedgers:
 
         tracked = _tracked_files(knowledge_root)
         assert spend.LEDGER_FILENAME not in tracked
-        assert llm_schemas.OBSERVATIONS_FILENAME not in tracked
         assert "wiki/page.md" in tracked
 
-        # Neither ledger should even be ON DISK under knowledge_root — they
-        # were never written there in the first place.
+        # The ledger should not even be ON DISK under knowledge_root — it
+        # was never written there in the first place.
         assert not (knowledge_root / spend.LEDGER_FILENAME).exists()
         assert not (wiki_root / spend.LEDGER_FILENAME).exists()
-        assert not (knowledge_root / llm_schemas.OBSERVATIONS_FILENAME).exists()
-        assert not (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).exists()
 
-        # And the rows genuinely landed in the cache dir, outside the store
+        # And the row genuinely landed in the cache dir, outside the store
         # entirely.
         assert (cache_dir / spend.LEDGER_FILENAME).exists()
-        assert (cache_dir / llm_schemas.OBSERVATIONS_FILENAME).exists()

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
+  ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
+  and source object produced a compiled page, or says plainly that none was
+  recorded; `--json` emits the same rows as JSON. Read-only: no run lock,
+  no writes. Of the five observability ledgers the cleanup audit reviewed
+  (athenaeum#2447), this is the one kept and, by this command, exposed for
+  the first time — see "Removed" below for the other four (athenaeum#2468).
+
 - Merge-queue maintenance commands (`revalidate`, `recompare`, `scrub-pii`,
   `propose-fold`, `provenance`) are now available under `athenaeum
   decisions`; `recompare --apply` exits 75 when the run lock is held
@@ -66,6 +74,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the one-time warnings about a spend ledger, LLM-schema
+  observations ledger, or push-records ledger left at its pre-move
+  wiki-root location (`spend.durable_ledger_path`,
+  `llm_schemas.durable_observations_path`,
+  `push_metrics.durable_push_records_path`), and their once-per-process
+  guards. Each function still returns the same cache-dir path as before; a
+  ledger left over at the old location is now simply ignored rather than
+  warned about. No deprecation period — operator ruling on cleanup epic
+  athenaeum#2447 (athenaeum#2467).
+
 - Removed the `rebuild-index` alias; use `athenaeum reindex` (athenaeum#2459).
   The alias printed no deprecation warning, so there was no transition
   period to preserve; see `docs/guides/upgrading.md` for anyone whose cron
@@ -90,6 +108,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/guides/upgrading.md` for the command-by-command mapping. A stale
   `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
   warning.
+
+- Added a read command for adapter provenance (see "Added" above); stopped
+  writing the compile-routes, schema-observation, wiki-dedupe attribution
+  and never-ingest refusal ledgers, which nothing outside their own tests
+  read: `compile_routing.record_compile_route`/`read_compile_routes`,
+  `llm_schemas.record_observation`/`read_observations`/
+  `aggregate_observations` and its `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED`
+  switch, `wiki_dedupe_attribution.write_attribution_report` and its module
+  (deleted outright), and `never_ingest.record_refusal`/`read_refusals`.
+  Each underlying BEHAVIOUR is unchanged — `classify_route`'s routing guard
+  still admits/prevents/logs writes, the wiki-dedupe pass still proposes
+  merges, and a never-ingest match is still refused — only the durable
+  per-observation record is gone. An existing on-disk ledger from before
+  this change (`_compile_route_records.jsonl` and
+  `_llm_schema_observations.jsonl` under the cache dir,
+  `_wiki_dedupe_attribution*.jsonl` under `wiki_root`, and
+  `_never_ingest_refusals.jsonl` under the cache dir) is left alone —
+  ignored, not read, not deleted; see `docs/guides/upgrading.md`
+  (athenaeum#2468).
+
+- MCP responses no longer include the legacy `block`, `error` and
+  `resolved_block` keys on `resolve_question`, `resolve_merge`,
+  `review_audit_item`, `raise_decision`, and the kill-switch/forbidden
+  refusals they share; read `message` (and `resolved_block` / `raw_block`
+  where those already carried real data) instead — see
+  `docs/guides/upgrading.md` (athenaeum#2460).
+
+- Removed seven one-shot repair commands whose defects are fixed:
+  `auto-memory prune`, `prune-index`, `prune-code-entities`,
+  `dedup-oversize-escalations`, `storage prune-dispositions`, `storage
+  audit-h1-redaction`, `paste-cleanup` (athenaeum#2466). No deprecation period —
+  each repaired data left behind by one specific, now-fixed bug, so it had
+  nothing left to do for a current install. See `docs/guides/upgrading.md`
+  if you still need one of these against an older, pre-fix knowledge base.
 
 - Tier-4 dedup, the relatedness writer, delta compile, the delta live
   client and the name-collision and qualified-name scans are now always on;

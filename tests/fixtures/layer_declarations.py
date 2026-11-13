@@ -192,7 +192,6 @@ MODULE_LAYER: dict[str, int] = {
     "metrics": 3,
     "spend": 3,
     "usage_report": 3,
-    "wiki_dedupe_attribution": 3,
     # witness_readout.py: "Layering: L3 service" (athenaeum#2160) -- imports
     # transcript_receipts/witness_attestation/config (all L2) and
     # promptwitness.ledger, nothing above, so the L5 CLI and the L4 nightly
@@ -220,7 +219,6 @@ MODULE_LAYER: dict[str, int] = {
     "decay_sweep": 4,
     "page_decompose": 4,
     "note_corrections": 4,
-    "paste_cleanup": 4,
     "decision_answers": 4,
     "decision_framing": 4,
     # Issue athenaeum#1990: the five athenaeum#717 budget figures + the answer-event
@@ -237,7 +235,6 @@ MODULE_LAYER: dict[str, int] = {
     "dedupe": 4,
     "drain": 4,
     "entity_resolution": 4,
-    "filename_entity_prune": 4,
     "fold_graph_lint": 4,
     "intake_audit": 4,
     "librarian": 4,
@@ -245,7 +242,6 @@ MODULE_LAYER: dict[str, int] = {
     "ordinary_night_table": 4,
     "pending_merges": 4,
     "pii_classification_decision": 4,
-    "pii_h1_audit": 4,
     # Issue athenaeum#2063: L4 glue wiring the yesno.py YesNoScorer seam into
     # storage lint-pii / merges recompare. Sibling of pii_verdicts.py.
     "pii_hazard_classifier": 4,
@@ -337,7 +333,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_decompose_page": 5,
     "_cmd_correct_notes": 5,
     "_cmd_corrections_trust_dryrun": 5,  # issue athenaeum#2331 (TG3)
-    "_cmd_paste_cleanup": 5,
+    "_cmd_provenance": 5,  # issue athenaeum#2468
     "_cmd_authority": 5,
     "_cmd_axiom": 5,
     "_cmd_bounce_contract": 5,

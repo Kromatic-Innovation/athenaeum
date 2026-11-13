@@ -2422,6 +2422,12 @@ class TestAllMcpToolWrappers:
         # Error-to-string: the ValueError for an unknown id becomes a structured
         # error dict, not a raised exception.
         assert res.get("ok") is False
+        # Tier auditing isn't enabled on this server, so this hits the
+        # "not enabled" refusal (``{"ok": False, "enabled": False, "error":
+        # ...}``) rather than the preflight id_not_found path -- a
+        # standalone, single-field shape unrelated to the legacy
+        # block/error/resolved_block aliases removed in athenaeum#2460 (those
+        # duplicated a `message` field this shape never had).
         assert res.get("error")
 
 

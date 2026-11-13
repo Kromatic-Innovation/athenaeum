@@ -84,9 +84,7 @@ from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest
 from athenaeum.compile_routing import (
-    CompileRouteRecord,
     classify_route,
-    record_compile_route,
     resolved_correspondent_uid,
 )
 from athenaeum.config import resolve_page_size_threshold_chars
@@ -2467,27 +2465,10 @@ def process_batch_run(
                 1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
             )
             result.skipped += len(st.skipped)
-            # Issue athenaeum#1949 (AC2): the same durable per-file
-            # `raw ref -> written uid(s)` row the synchronous transport writes.
-            record_compile_route(
-                CompileRouteRecord(
-                    raw_ref=st.raw.ref,
-                    source=st.raw.source,
-                    written_uids=[
-                        *_applied_updated_uids,
-                        *(e.uid for e in written_entities),
-                    ],
-                    created_uids=[e.uid for e in written_entities],
-                    updated_uids=list(_applied_updated_uids),
-                    correspondent_uid=_route.correspondent_uid,
-                    prevented_uids=[u for u in _prevented_uids if u],
-                    logged_uids=[
-                        str(updated_uids[i]).strip()
-                        for i in _route.logged
-                        if i < len(updated_uids)
-                    ],
-                )
-            )
+            # Issue athenaeum#2468 removed the durable per-file compile-route
+            # ledger row the synchronous transport used to write here too
+            # (issue athenaeum#1949's `compile_routing.record_compile_route`)
+            # -- nothing outside its own tests ever read it.
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
         except _BatchItemError as exc:
