@@ -203,8 +203,6 @@ src/athenaeum/tiers.py::parse_merge_ops_response
 src/athenaeum/tiers.py::tier1_programmatic_match
 # turns a tier-3 answer into actions
 src/athenaeum/tiers.py::tier3_derive_actions
-# the write path a tier-3 answer takes
-src/athenaeum/tiers.py::tier3_write
 # gates which create-name classifications reach a model
 src/athenaeum/tiers.py::gate_create_name_classifications
 # partitions classifications before they are acted on
@@ -225,8 +223,6 @@ src/athenaeum/tiers.py::_reresolve_open_questions_impl
 # reasoning outcome. ---
 # parses the model identifier a call is routed to
 src/athenaeum/models.py::parse_model
-# decides which sampling params a model is sent
-src/athenaeum/models.py::_sampling_params_rejected
 # decides whether a prompt prefix is cached
 src/athenaeum/models.py::min_cacheable_prefix_tokens
 # decides whether the thinking knob is sent
@@ -246,10 +242,6 @@ src/athenaeum/search.py::apply_relevance_cap
 src/athenaeum/search.py::reciprocal_rank_fusion
 # the RRF constant that ranking depends on
 src/athenaeum/search.py::_DEFAULT_RRF_K
-# the hybrid keyword/vector weighting
-src/athenaeum/search.py::_DEFAULT_HYBRID_FTS5_WEIGHT
-# the hybrid guard rank
-src/athenaeum/search.py::_DEFAULT_HYBRID_GUARD_RANK
 # the hybrid candidate count
 src/athenaeum/search.py::_DEFAULT_HYBRID_K
 # the HNSW search width — exactly the knob athenaeum#2036 changed under a free-text exemption
@@ -264,8 +256,6 @@ src/athenaeum/search.py::tokenize_keyword_query
 src/athenaeum/search.py::VectorBackend.build_index
 # what comes out of it
 src/athenaeum/search.py::VectorBackend.query
-# the neighbour query the detector layer uses
-src/athenaeum/search.py::VectorBackend.query_neighbors
 
 # --- hand-curated: R2/R5 — `config.py` resolvers that route a call or gate what reaches a
 # model. config.py has over a hundred `resolve_*` functions; the rest

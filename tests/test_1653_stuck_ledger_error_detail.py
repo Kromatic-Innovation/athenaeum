@@ -344,9 +344,9 @@ class TestRunHarnessCallSites:
         self, tmp_path: Path, monkeypatch, caplog
     ) -> None:
         """The non-transient branch (librarian.py's bare ``except Exception``),
-        pre-action path: process_one raises BEFORE any tier3_write action is
-        annotated, mirroring the two real ``last_action: null`` ledger
-        entries the issue's motivation cites."""
+        pre-action path: process_one raises BEFORE any tier3_derive_actions
+        action is annotated, mirroring the two real ``last_action: null``
+        ledger entries the issue's motivation cites."""
         root = _seed_knowledge_root(tmp_path, n_files=1)
         seeded_text = "Met with Alice Zhang about topic 0 at Acme Corp."
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")

@@ -12,26 +12,15 @@ itself contains no per-command branching. A missing subcommand prints help
 and returns 0; an unrecognized one is rejected by argparse itself before
 ``main()`` ever sees ``args.command``.
 
-Sixteen sibling ``_cmd_*.py`` modules each own one or a few related
-subcommands' argparse setup plus their handler(s):
-``_cmd_lifecycle`` (init/status/disable/enable/spend), ``_cmd_serve``
-(serve), ``_cmd_run`` (run), ``_cmd_index`` (reindex/rebuild-index/compile/
-registry/ingest/session-end), ``_cmd_query`` (recall/query-topics/
-stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
-reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
-``_cmd_decay`` (decay-sweep, issue athenaeum#904),
-``_cmd_decompose_page`` (decompose-page, issue athenaeum#1914),
-``_cmd_reconcile`` (reconcile, issue athenaeum#1143), ``_cmd_repair`` (repair),
-``_cmd_questions``, ``_cmd_merges``,
-``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
-``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
-(push-metrics baseline/coverage-audit, issue athenaeum#711;
-push-metrics liveness, issue athenaeum#1422),
-``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
-``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712),
-``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176),
-``_cmd_recovery_yield`` (recovery-yield, issue athenaeum#1453),
-``_cmd_attribution`` (attribution show|place, issue athenaeum#2212).
+Each top-level subcommand is owned by exactly one sibling ``_cmd_*.py``
+module (some modules own a small group of closely-related subcommands,
+e.g. ``_cmd_lifecycle`` owns init/status/disable/enable/spend). The
+authoritative, exhaustive roster of top-level command name -> owning
+module is ``_SUBCOMMAND_LOADERS`` below — read it (or
+``build_parser()``'s assembled tree) for the current module count and
+command set rather than this paragraph; enumerating them here too is
+exactly the kind of content that drifted stale (a hardcoded module count
+and an incomplete module list, issue athenaeum#2440).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -50,9 +39,9 @@ delegates to, or in the owning ``_cmd_*.py`` module.
 Non-obvious invariant: subcommand modules are imported LAZILY (inside
 ``main()``, not at module top) — this keeps `import athenaeum.cli` cheap (no
 transitive pull of the whole L1-L4 graph, e.g. ``anthropic``/embedding
-backends) for callers that only need argv-parsing helpers like
-``_iso_date`` (re-exported here from ``_cli_shared`` for backward
-compatibility).
+backends) for callers that only need ``EXIT_LOCK_HELD`` or the dispatch
+entry points (:func:`main`, :func:`build_parser`) without paying for every
+subcommand module's own imports.
 
 Second non-obvious invariant (issue athenaeum#1360 residual, see
 ``_SUBCOMMAND_LOADERS`` below): :func:`build_parser` itself stays fully
@@ -63,8 +52,8 @@ walks its ENTIRE tree, every leaf, to assert every subcommand binds
 argv for the subcommand token *before* building any parser and, when that
 token names a known subcommand, imports only that subcommand's owning
 ``_cmd_*`` module via ``_SUBCOMMAND_LOADERS`` and builds a parser containing
-just it. Every other ``_cmd_*`` module — 30 of the current 31 — is never
-imported. ``athenaeum --version`` needs no subcommand module at all and
+just it. Every other ``_cmd_*`` module named in ``_SUBCOMMAND_LOADERS`` is
+never imported. ``athenaeum --version`` needs no subcommand module at all and
 short-circuits before any lazy-loader lookup. Anything the peek can't
 resolve (bare ``athenaeum``, top-level ``-h``/``--help``, an unrecognized
 command) falls back to the fully eager :func:`build_parser`, so a wrong or
@@ -80,10 +69,6 @@ import sys
 
 from athenaeum._cli_shared import (
     EXIT_LOCK_HELD,  # noqa: F401 — re-exported for `from athenaeum.cli import EXIT_LOCK_HELD`
-    _acquire_or_exit,  # noqa: F401 — re-exported; some tests/tools import via cli
-    _add_lock_args,  # noqa: F401 — re-exported; some tests/tools import via cli
-    _iso_date,  # noqa: F401 — re-exported for `from athenaeum.cli import _iso_date`
-    _positive_int,  # noqa: F401 — re-exported; some tests/tools import via cli
 )
 
 # Subcommand name -> (owning module, its `add_*_subparser` loader function
@@ -305,7 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_corrections_trust_dryrun_subparser(subparsers)  # corrections-trust-dryrun (athenaeum#2331)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
-    add_receipts_subparser(subparsers)  # receipts seal|verify (issue athenaeum#2039)
+    # receipts seal|verify|anchor|attest-readout (issue athenaeum#2039)
+    add_receipts_subparser(subparsers)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
@@ -335,7 +321,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_viewer_subparser(subparsers)  # viewer (issue athenaeum#1480)
     add_demo_subparser(subparsers)  # demo (issue athenaeum#1525)
     add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
-    add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
+    # measure (shadow-linkage, backlog-price, ordinary-night, shadow-parity,
+    # coordinate-coverage)
+    add_measure_subparser(subparsers)
     add_memory_class_subparser(subparsers)  # memory-class backfill
     add_description_subparser(subparsers)  # description backfill (issue athenaeum#1324)
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
@@ -353,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
-    # attribution show|place (issue athenaeum#2212)
+    # attribution show|place|ack-observe-report (issue athenaeum#2212)
     add_attribution_subparser(subparsers)
     # contact-surface-lint (issue athenaeum#2218)
     add_contact_surface_lint_subparser(subparsers)
@@ -406,7 +394,8 @@ def _build_lazy_parser(command: str) -> argparse.ArgumentParser:
     module and calls its real ``add_*_subparser`` loader, so the resulting
     subparser (arguments, nested subcommands, ``func`` binding, help text)
     is identical to what :func:`build_parser` would have produced for that
-    same command — only the other ~30 modules are never imported.
+    same command — every other module in ``_SUBCOMMAND_LOADERS`` is never
+    imported.
     """
     module_path, loader_name = _SUBCOMMAND_LOADERS[command]
     module = importlib.import_module(module_path)
@@ -453,7 +442,8 @@ def main(argv: list[str] | None = None) -> int:
         # Bare `athenaeum`, top-level -h/--help, or an unrecognized command
         # -- all need the full subcommand listing (names + help text) to
         # answer correctly, which only the eager build provides. Pays the
-        # known ~31-module cost, same as before this change.
+        # cost of importing every module in `_SUBCOMMAND_LOADERS`, same as
+        # before this change.
         parser = build_parser()
 
     args = parser.parse_args(argv)

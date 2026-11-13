@@ -12,7 +12,9 @@ Coverage targets the seven in-tree resolvers listed in athenaeum#91:
 1. ``librarian.tier0_passthrough`` — skip-on-conflict eligibility gate.
 2. ``tiers.tier3_create`` — no-conflict-by-construction.
 3. ``tiers.tier3_merge`` — LLM-mediated three-class taxonomy + ESCALATE.
-4. ``tiers.tier3_write`` — atomic per-file apply, last-write-wins on disk.
+4. ``tiers.tier3_derive_actions`` + the librarian's own flush
+   (``librarian._apply_tier3_results``) — atomic per-file apply,
+   last-write-wins on disk.
 5. ``merge.merge_cluster_row`` — sources `(session,turn)` dedupe + body
    paragraph dedupe + origin_scopes union.
 6. ``contradictions.detect_contradictions`` — DETECT-ONLY, never resolves.
@@ -47,7 +49,7 @@ from athenaeum.dedupe import (
     _union_list,
     merge_duplicate_persons,
 )
-from athenaeum.librarian import tier0_passthrough
+from athenaeum.librarian import _apply_tier3_results, tier0_passthrough
 from athenaeum.merge import (
     dedupe_sources,
     merge_cluster_row,
@@ -57,6 +59,7 @@ from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
+    ProcessingResult,
     RawFile,
     parse_frontmatter,
     parse_valid_until,
@@ -68,7 +71,7 @@ from athenaeum.resolutions import (
     enact_resolution,
     propose_resolution,
 )
-from athenaeum.tiers import tier3_create, tier3_merge, tier3_write
+from athenaeum.tiers import tier3_create, tier3_derive_actions, tier3_merge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -278,18 +281,24 @@ class TestTier3MergeLLMMediated:
 
 
 # ---------------------------------------------------------------------------
-# 4. tier3_write — atomic per-file, last-write-wins across files
+# 4. tier3_derive_actions + the librarian's flush — atomic per-file,
+#    last-write-wins across files
 # ---------------------------------------------------------------------------
 
 
 class TestTier3WriteAtomicity:
-    def test_tier3_write_all_or_nothing_per_raw_file_atomic(
+    def test_tier3_derive_actions_all_or_nothing_per_raw_file_atomic(
         self,
         tmp_path: Path,
     ) -> None:
-        """All LLM calls run before any disk write. If we collect 2 update
-        actions for 2 different existing pages, both writes happen after the
-        last successful LLM call — never mid-loop."""
+        """All LLM calls run before any disk write. ``tier3_derive_actions``
+        (issue athenaeum#898) makes every call and writes NOTHING itself; the
+        caller — the librarian's own :func:`athenaeum.librarian._apply_tier3_results`,
+        the flush path it actually uses — only flushes ``pending_updates``
+        AFTER every action has landed. If we collect 2 update actions for 2
+        different existing pages, both writes happen after the last
+        successful LLM call — never mid-loop, and never before the flush
+        runs at all."""
         wiki = _wiki_root(tmp_path)
         _person_wiki(wiki, uid="uid1aaaa", name="Alice", body="# Alice\n\nOriginal A.")
         _person_wiki(wiki, uid="uid2bbbb", name="Bob", body="# Bob\n\nOriginal B.")
@@ -357,7 +366,7 @@ class TestTier3WriteAtomicity:
                 stop_reason="end_turn",
             ),
         ]
-        new_entities, updated_uids, escalations = tier3_write(
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
             actions,
             index,
@@ -367,7 +376,24 @@ class TestTier3WriteAtomicity:
         assert new_entities == []
         assert sorted(updated_uids) == ["uid1aaaa", "uid2bbbb"]
         assert escalations == []
-        # Both writes landed.
+        # Every LLM call landed, but nothing is written to disk until the
+        # caller flushes — this function's own all-or-nothing contract.
+        assert "Original A." in (wiki / "uid1aaaa-alice.md").read_text()
+        assert "Original B." in (wiki / "uid2bbbb-bob.md").read_text()
+
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result,
+            new_entities=new_entities,
+            pending_updates=pending_updates,
+            updated_uids=updated_uids,
+            escalations=escalations,
+            wiki_root=wiki,
+            index=index,
+            config=None,
+        )
+
+        # Both writes landed, through the SAME flush the librarian uses.
         assert "Updated A" in (wiki / "uid1aaaa-alice.md").read_text()
         assert "Updated B" in (wiki / "uid2bbbb-bob.md").read_text()
 

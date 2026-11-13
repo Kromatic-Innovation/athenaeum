@@ -27,7 +27,6 @@ from athenaeum.provider import (
     LLMContentBlock,
     LLMMessages,
     LLMResponse,
-    LLMTextBlock,
     LLMUsage,
     ProviderCapabilities,
     ProviderConfigError,
@@ -1006,7 +1005,6 @@ class TestLLMBackendContract:
             stop_reason="end_turn",
         )
         assert isinstance(resp, LLMResponse)
-        assert isinstance(resp.content[0], LLMTextBlock)
         assert isinstance(resp.usage, LLMUsage)
         # The surface the four call sites read is reachable through the contract.
         assert resp.content[0].text == '{"ok": 1}'
@@ -1101,12 +1099,14 @@ class TestRealSDKShapeConformance:
         # Every block satisfies the narrow LLMContentBlock (just ``.type``)...
         assert isinstance(msg.content[0], LLMContentBlock)
         assert isinstance(msg.content[1], LLMContentBlock)
-        # ...but only the TEXT block satisfies LLMTextBlock (``.text``) — the
-        # ThinkingBlock genuinely has no ``.text`` attribute, which is exactly
-        # the mismatch the pre-athenaeum#835 ``Sequence[LLMTextBlock]`` declaration
-        # papered over.
-        assert not isinstance(msg.content[0], LLMTextBlock)
-        assert isinstance(msg.content[1], LLMTextBlock)
+        # ...but only the TEXT block actually has ``.text`` — the ThinkingBlock
+        # genuinely has no ``.text`` attribute, which is exactly the mismatch
+        # the pre-athenaeum#835 ``Sequence[LLMTextBlock]`` declaration papered
+        # over (``LLMTextBlock`` itself was deleted as uncalled, athenaeum#2437:
+        # nothing narrows to it in production — call sites go through
+        # :func:`response_text` instead).
+        assert not hasattr(msg.content[0], "text")
+        assert hasattr(msg.content[1], "text")
 
 
 # ---------------------------------------------------------------------------

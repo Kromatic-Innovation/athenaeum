@@ -16,27 +16,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from athenaeum import fingerprint, resolutions
+from athenaeum import fingerprint
 from athenaeum.answers import ingest_answers
 from athenaeum.fingerprint import (
     claim_pair_fingerprint,
     fingerprint_from_description,
-    is_resolved,
-    load_resolved,
     load_resolved_records,
     record_resolution,
 )
 from athenaeum.models import EscalationItem
 from athenaeum.tiers import tier4_escalate
-
-
-def test_suppress_verdict_matches_resolutions_constant() -> None:
-    """``fingerprint._SUPPRESS_VERDICT`` is re-declared locally to keep the
-    module free of heavy imports; it must stay equal to the canonical
-    ``resolutions.SUPPRESS_ACTION``. Enforce mechanically so drift fails the
-    suite instead of relying on the in-code comment (issue athenaeum#251 cleanup)."""
-    assert fingerprint._SUPPRESS_VERDICT == resolutions.SUPPRESS_ACTION
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -135,13 +124,11 @@ class TestCacheRoundTrip:
             resolved_by="human",
             source_verdict_id="abc123",
         )
-        assert is_resolved(root, fp)
-        assert fp in load_resolved(root)
+        assert fp in load_resolved_records(root)
 
     def test_missing_file_is_empty(self, tmp_path: Path) -> None:
         root = _knowledge_root(tmp_path)
-        assert load_resolved(root) == set()
-        assert not is_resolved(root, "deadbeef")
+        assert load_resolved_records(root) == {}
 
     def test_record_writes_resolved_by(self, tmp_path: Path) -> None:
         root = _knowledge_root(tmp_path)
@@ -357,156 +344,6 @@ class TestResolvedByRecorded:
         assert all(r["resolved_by"] == "auto" for r in auto)
 
 
-# ---------------------------------------------------------------------------
-# Read-time decay of stale auto not_a_conflict suppressions (issue athenaeum#251)
-# ---------------------------------------------------------------------------
-
-from datetime import datetime, timezone  # noqa: E402
-
-from athenaeum.fingerprint import (  # noqa: E402
-    is_stale_auto_suppression,
-    resolve_not_a_conflict_ttl_days,
-)
-
-# Deterministic "now" used across the decay tests — no wall-clock anywhere.
-_NOW = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _stamp(days_ago: int) -> str:
-    """ISO ``%Y-%m-%dT%H:%M:%SZ`` timestamp ``days_ago`` before ``_NOW``."""
-    from datetime import timedelta
-
-    return (_NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _auto_suppress(resolved_at: str | None) -> dict:
-    rec = {
-        "fingerprint": "fp",
-        "action": "not_a_conflict",
-        "resolved_by": "auto",
-    }
-    if resolved_at is not None:
-        rec["resolved_at"] = resolved_at
-    return rec
-
-
-class TestIsStaleAutoSuppression:
-    def test_ttl_zero_never_stale(self) -> None:
-        # ttl_days=0 (disabled) → an old-looking auto suppress is NOT stale.
-        rec = _auto_suppress(_stamp(40))
-        assert is_stale_auto_suppression(rec, ttl_days=0, now=_NOW) is False
-
-    def test_old_auto_suppress_is_stale(self) -> None:
-        rec = _auto_suppress(_stamp(40))
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is True
-
-    def test_recent_auto_suppress_not_stale(self) -> None:
-        rec = _auto_suppress(_stamp(10))
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
-
-    def test_human_verdict_never_stale(self) -> None:
-        rec = {
-            "fingerprint": "fp",
-            "action": "not_a_conflict",
-            "resolved_by": "human",
-            "resolved_at": _stamp(400),
-        }
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
-
-    def test_enacting_auto_verdicts_never_stale(self) -> None:
-        for action in (
-            "keep_a",
-            "keep_b",
-            "correct_a",
-            "correct_b",
-            "forget_a",
-            "forget_b",
-            "deprecate_both",
-        ):
-            rec = {
-                "fingerprint": "fp",
-                "action": action,
-                "resolved_by": "auto",
-                "resolved_at": _stamp(400),
-            }
-            assert (
-                is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
-            ), action
-
-    def test_missing_resolved_at_not_stale(self) -> None:
-        rec = _auto_suppress(None)
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
-
-    def test_unparseable_resolved_at_not_stale(self) -> None:
-        rec = _auto_suppress("not-a-date")
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
-
-    def test_microsecond_resolved_at_not_stale_but_warns(self, caplog) -> None:
-        """Issue athenaeum#1348 AC4 counter-example: a ``resolved_at`` in the
-        microsecond form (the shape 12 of the package's 13 old ``_now_iso()``
-        copies rendered, before this issue collapsed them onto
-        :func:`athenaeum.store.now_iso`'s second-precision rendering) still
-        fails ``_RESOLVED_AT_FORMAT``'s ``strptime`` and keeps returning
-        ``False`` (fail-safe, unchanged) — but MUST now warn naming the
-        offending value, unlike the plain-garbage case above."""
-        rec = _auto_suppress("2026-09-03T19:12:33.123456Z")
-        with caplog.at_level(logging.WARNING, logger="athenaeum"):
-            result = is_stale_auto_suppression(rec, ttl_days=30, now=_NOW)
-        assert result is False
-        assert "2026-09-03T19:12:33.123456Z" in caplog.text
-
-    def test_verdict_key_fallback(self) -> None:
-        # Legacy rows may carry ``verdict`` instead of ``action``.
-        rec = {
-            "fingerprint": "fp",
-            "verdict": "not_a_conflict",
-            "resolved_by": "auto",
-            "resolved_at": _stamp(40),
-        }
-        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is True
-
-    def test_now_iso_round_trip_expires_when_old(self) -> None:
-        """Issue athenaeum#1348 AC5: a ``resolved_at`` stamped by the shared
-        :func:`athenaeum.store.now_iso` helper is parseable by
-        ``_RESOLVED_AT_FORMAT``'s ``strptime`` (unlike the AC4 microsecond
-        counter-example above) and expires exactly like a hand-built
-        ``_stamp(...)`` record does."""
-        from datetime import timedelta
-
-        from athenaeum.store import now_iso
-
-        old_rec = _auto_suppress(now_iso(_NOW - timedelta(days=40)))
-        assert is_stale_auto_suppression(old_rec, ttl_days=30, now=_NOW) is True
-
-        fresh_rec = _auto_suppress(now_iso(_NOW - timedelta(days=10)))
-        assert is_stale_auto_suppression(fresh_rec, ttl_days=30, now=_NOW) is False
-
-
-class TestResolveNotAConflictTtlDays:
-    def test_default_is_zero(self) -> None:
-        assert resolve_not_a_conflict_ttl_days(None) == 0
-        assert resolve_not_a_conflict_ttl_days({}) == 0
-
-    def test_yaml_value(self) -> None:
-        cfg = {"contradiction": {"not_a_conflict_ttl_days": 30}}
-        assert resolve_not_a_conflict_ttl_days(cfg) == 30
-
-    def test_env_overrides_yaml(self, monkeypatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "7")
-        cfg = {"contradiction": {"not_a_conflict_ttl_days": 30}}
-        assert resolve_not_a_conflict_ttl_days(cfg) == 7
-
-    def test_negative_falls_back_to_default(self, monkeypatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "-5")
-        assert resolve_not_a_conflict_ttl_days({}) == 0
-
-    def test_bool_yaml_rejected(self) -> None:
-        # bool is an int subclass — ``not_a_conflict_ttl_days: yes`` must not
-        # silently become a ttl of 1 (mirrors resolve_max_per_run).
-        cfg = {"contradiction": {"not_a_conflict_ttl_days": True}}
-        assert resolve_not_a_conflict_ttl_days(cfg) == 0
-
-
 import logging  # noqa: E402
 
 from athenaeum.fingerprint import (  # noqa: E402
@@ -535,24 +372,11 @@ class TestDeprecatedSuppressionKnobsWarn:
         assert "DEPRECATED" in caplog.text
         assert "resolved_similarity_threshold" in caplog.text
 
-    def test_not_a_conflict_ttl_days_env_tolerated_with_warning(
-        self, caplog, monkeypatch
-    ) -> None:
-        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "7")
-        fingerprint._DEPRECATED_CONFIG_WARNED.clear()
-        with caplog.at_level(logging.WARNING, logger="athenaeum"):
-            value = resolve_not_a_conflict_ttl_days({})
-        assert value == 7
-        assert "DEPRECATED" in caplog.text
-        assert "not_a_conflict_ttl_days" in caplog.text
-
     def test_default_path_does_not_warn(self, caplog, monkeypatch) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
-        monkeypatch.delenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", raising=False)
         fingerprint._DEPRECATED_CONFIG_WARNED.clear()
         with caplog.at_level(logging.WARNING, logger="athenaeum"):
             resolve_resolved_similarity_threshold(None)
-            resolve_not_a_conflict_ttl_days(None)
         assert "DEPRECATED" not in caplog.text
 
     def test_warns_exactly_once_across_repeated_calls(
