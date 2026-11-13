@@ -206,6 +206,11 @@ class DecisionAnswerOutcome:
     #: skip only. Empty for every other outcome.
     value_a: str = ""
     value_b: str = ""
+    #: Issue athenaeum#2514 (AC5): for an ``error_code == "superseded"``
+    #: outcome only, the FILENAME of the newer answer file that decided
+    #: this same ``decision_id`` and was applied in this file's place.
+    #: Empty for every other outcome.
+    superseded_by: str = ""
 
 
 @dataclass
@@ -1981,6 +1986,32 @@ def apply_decision_answers(
     happens to live in ``raw/answers/``) is silently left alone — not
     counted in either ``applied`` or ``skipped``.
 
+    Issue athenaeum#2514 (AC5): when SEVERAL files decide the same
+    ``decision_id``, only the NEWEST is dispatched; every older one is
+    skipped with ``error_code="superseded"`` and
+    :attr:`DecisionAnswerOutcome.superseded_by` naming the winner. Before
+    this, every file was dispatched in turn and the FIRST one to land won —
+    the rest bounced off the resolver's ``already_resolved`` guard — so an
+    older answer beat a newer one. Observed: a 2026-10-14 reject overrode a
+    2026-11-12 human approval of the same merge on every nightly tick until
+    the old file was moved out of the walk by hand.
+
+    "Newest" is the walk's own order: filename, whose ISO-timestamp prefix
+    :func:`write_decision_answer` mints from the clock (with a numeric
+    suffix for two answers written in the same second, which sorts after the
+    unsuffixed one). Deliberately NOT the ``resolved_at`` frontmatter, even
+    though it comes from that same clock — this function's chronology has
+    always been the filename, and having two sources of truth for "which is
+    newer" is how an answer file becomes un-orderable.
+
+    A superseded file is never deleted — like every other skip here, it
+    stays as its own audit trail. Note the fail-closed corner: if the newest
+    file is malformed or schema-invalid it is refused on its own merits AND
+    the older ones stay superseded, so nothing applies. That is deliberate.
+    Applying a stale ruling because the current one is unreadable is the
+    exact failure this AC exists to stop, and both files report their own
+    reason, so an operator sees what happened.
+
     An unknown id, an already-resolved id, an invalid verdict/decision, or a
     schema-malformed answer file is logged and skipped — the file is NEVER
     deleted (it stays as its own audit trail), and no other file in the
@@ -2018,18 +2049,34 @@ def apply_decision_answers(
     pending_questions_path = wiki_root / "_pending_questions.md"
     pending_merges_path = wiki_root / "_pending_merges.md"
 
+    # Issue athenaeum#2514 (AC5): load the whole batch BEFORE dispatching any
+    # of it, so "which file is the newest answer to this decision?" is known
+    # when the first (possibly stale) one comes up. Parsing is pure and
+    # already happened once per file either way, so this costs nothing but
+    # the batch held in memory — which the loop below already implied.
+    loaded: list[tuple[Path, DecisionAnswer | None, MalformedDecisionAnswer | None]] = []
+    newest_answer_for: dict[str, Path] = {}
     for path in sorted(answers_dir.glob("*.md")):
         try:
-            answer = _load_decision_answer(path)
+            parsed = _load_decision_answer(path)
         except MalformedDecisionAnswer as exc:
-            log.warning("decision_answers: %s", exc)
+            loaded.append((path, None, exc))
+            continue
+        loaded.append((path, parsed, None))
+        if parsed is not None:
+            # The walk is oldest-first, so the last writer wins.
+            newest_answer_for[parsed.decision_id] = path
+
+    for path, answer, load_error in loaded:
+        if load_error is not None:
+            log.warning("decision_answers: %s", load_error)
             outcome = DecisionAnswerOutcome(
                 path=path,
                 decision_id=None,
                 decision_type=None,
                 applied=False,
                 error_code="malformed",
-                message=str(exc),
+                message=str(load_error),
             )
             report.outcomes.append(outcome)
             report.skipped += 1
@@ -2037,6 +2084,28 @@ def apply_decision_answers(
 
         if answer is None:
             # No decision_id — legacy/non-decision file, not our concern.
+            continue
+
+        winner = newest_answer_for[answer.decision_id]
+        if winner != path:
+            # Issue athenaeum#2514 (AC5): a newer file decides this same id.
+            message = (
+                f"superseded by {winner.name}, a newer answer for decision "
+                f"{answer.decision_id}; not applied"
+            )
+            log.info("decision_answers: %s (%s)", message, path.name)
+            report.outcomes.append(
+                DecisionAnswerOutcome(
+                    path=path,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    applied=False,
+                    error_code="superseded",
+                    message=message,
+                    superseded_by=winner.name,
+                )
+            )
+            report.skipped += 1
             continue
 
         # Issue athenaeum#717: an answer must satisfy the response schema the
