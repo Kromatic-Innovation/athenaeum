@@ -9,55 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.23.5] - 2026-11-12
 
-0.23.5 is a deliberate roll-up and a MINOR bump from 0.22.43, not a patch: the ".5" counts untagged builds on `develop` (0.23.0 to 0.23.4), not patch releases, and it is not renumbered 0.24.0 because 0.24.0 is already announced as the removal release for `athenaeum merges` and `athenaeum questions`.
+**Summary.** 0.23.5 is a roll-up of three workstreams built on `develop` since
+0.22.43: remote serving, promptwitness, and attribution calibration with an easier
+first run. Nothing is removed. A deployment that changes no configuration keeps
+its 0.22.43 behaviour except for the points under "Behaviour changes".
 
-0.23.5 is a roll-up release: it publishes three workstreams that were built on
-`develop` since 0.22.43 and never tagged separately. This section is
-self-contained; you do not need to read the 0.23.0 build notes to upgrade.
+**Breaking and behaviour changes**
 
-The three workstreams are:
+- No removals. `athenaeum merges` and `athenaeum questions` still work and warn
+  that they are removed in `0.24.0`; use `athenaeum decisions`.
+- A fresh keyless root defaults `llm.provider` to `claude-cli` when a `claude`
+  binary is on `PATH`. An existing config is never rewritten.
+- `recall` returns raw `remember` notes before the first compile, labelled
+  `[uncompiled]` and ranked below compiled pages.
+- The default `op://` key references are gone; use `ATHENAEUM_ANTHROPIC_KEY_COMMAND`.
+- Shipped hooks share one foreground budget (`ATHENAEUM_HOOK_BUDGET_SECONDS`,
+  default 10s); slow work runs in the background.
+- Person merges (`dedupe persons --apply`, an approved `fold-into-existing`) now
+  fold the absorbed contact record into the survivor. Earlier merges: run
+  `athenaeum repair --contact-records`, then again with `--apply`.
+- Contact writers run an attribution check. Mostly observe-only, but relay or
+  no-reply addresses, your own addresses on someone else's page, and addresses
+  at `librarian.attribution.operator_mailer_domains` are no longer recorded.
+- Compiled pages no longer carry email addresses or phone numbers that a source
+  note merely mentions. Existing page bodies are not rewritten.
+- An unrecognised `receipt_sealer` or `key_provider` value now raises instead of
+  silently not sealing. The `mcp` extra's `fastmcp` floor rises to 2.11.1.
+- `remember` with the default `claude:inferred` source now also records `model`
+  and `originSessionId` frontmatter.
 
-1. **Remote serving.** `athenaeum serve --transport http`, OIDC
-   resource-server auth (`serve.auth.*`) and a `remote` serve profile, so one
-   deployment can serve MCP clients over HTTP (see `docs/guides/remote.md`).
-2. **promptwitness.** A hash-chained ledger and receipts that record a human
-   typed each prompt, shipped as a second top-level package with its own
-   console script, plus `athenaeum receipts`.
-3. **Attribution calibration and an easier first run.** Contact-record
-   attribution checks, a calibration eval, attribution audits in the decision
-   queue, and an easier first run. The source-trust-graph wiring that landed
-   in the same window is **experimental, with its design under reconsideration**; see the stability
-   note below, and do not build on it.
+**Experimental surface** (not in `athenaeum.__all__`; flags, keys, formats and
+import paths may change in any minor release without a deprecation cycle)
 
-**Upgrading a 0.22.43 deployment**
+- Remote serving: `athenaeum serve --transport http`, `serve.auth.*` OIDC
+  resource-server auth and the `remote` serve profile. See `docs/guides/remote.md`.
+- `promptwitness`, a separate top-level package and console script.
+- The source trust graph v1 knobs: `librarian.source_trust_enabled`,
+  `librarian.source_trust_edges`, `athenaeum corrections-trust-dryrun`, and the
+  `trust_graph` module. Off by default; its design is under reconsideration, so
+  do not build on it.
 
-Run `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
-`athenaeum doctor`. No migration step is required: a deployment that changes no
-configuration keeps its 0.22.43 behaviour except for the points under
-"Behaviour changes" below. Athenaeum does not install Claude Code hooks for you,
-so what you do about hooks depends on how you wired them
-(see `docs/guides/sidecar.md`):
+**Security-relevant changes** (all opt-in; unaffected unless you configure them)
 
-- **Hooks wired to the `athenaeum-claude-hook` console script:** nothing to do;
-  the upgraded package is used on the next session.
-- **Hooks copied from the example kit** (`~/.claude/hooks/athenaeum/*.sh`):
-  those are copies and are not updated by the upgrade. The only shipped hook
-  script that changed since 0.22.43 is `session-start-recall.sh` (the shared
-  hook time budget and the backgrounded vector rebuild), and the example
-  `settings-snippet.json` raised the `SessionStart` timeout from 15 to 60
-  seconds and the `UserPromptSubmit` timeout from 5 to 15. To pick these up,
-  re-copy the scripts as in step 1 of that guide and adopt the new timeouts. Your
-  existing copies keep working if you do not.
-- **`athenaeum doctor` FAILs on a fresh install are expected until setup.** On a
-  new knowledge directory a FAIL means setup is not finished yet, not that the
-  install is broken; each FAIL names its fix.
-- **Your own hook wiring** in `~/.claude/settings.json` is never rewritten.
-  `athenaeum doctor` reports FAIL for `hooks` if no athenaeum hook is
-  registered or a registered target is missing on disk, and names the fix.
+- HTTP transport refuses any non-loopback bind unless an auth issuer is
+  configured. `stdio` stays the default. TLS termination is yours.
+- OIDC auth verifies bearer tokens against one issuer and one pinned audience,
+  with an identity allowlist and a read/write scope split. It never issues tokens.
+- The `remote` profile pins a tool allowlist and excluded fields, but every
+  returned value leaves your machine; read `docs/guides/remote.md` first.
+- Receipts can be Ed25519-signed with a key held outside the nightly process and
+  verified with the public key alone; optional external anchoring.
+- New persisted caches (`recall <email>`, MCP entity reads) store only keyed
+  digests of addresses and are removed by the erasure cascade.
 
-The Python floor (3.13+) is unchanged from 0.22.43.
+**Upgrading from 0.22.43**
 
-First-run commands after upgrading:
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`. No migration step is required. The Python floor (3.13+) is
+   unchanged.
+2. A `doctor` FAIL on a fresh install is expected until setup is finished; each
+   FAIL names its fix.
+3. Hooks wired to the `athenaeum-claude-hook` console script need nothing.
+   Hooks copied from the example kit are not updated by the upgrade; re-copy them
+   (see `docs/guides/sidecar.md`) and adopt the new timeouts, or keep your copies.
+4. Move any use of `athenaeum merges` / `athenaeum questions` to
+   `athenaeum decisions` before 0.24.0.
 
 ```bash
 athenaeum --version            # expect 0.23.5
@@ -65,557 +81,15 @@ athenaeum doctor               # read-only health check; names a fix per FAIL
 athenaeum test-mcp             # smoke-test remember/recall, no API key needed
 ```
 
-The versions `0.23.0` through `0.23.4` were build numbers on `develop` and
-were never tagged or published; the 0.23.0 build notes (linked at the end of this section) were cut but never
-released, and their detailed entries ship here. Detailed entries are grouped by
-merge, so `### Added` / `### Changed` / `### Fixed` repeat.
+**Version numbering.** 0.23.5 is a MINOR bump from 0.22.43, not a patch: the
+".5" counts untagged builds on `develop` (0.23.0 to 0.23.4), which were never
+tagged or published. It is not renumbered 0.24.0 because 0.24.0 is already
+announced as the removal release for `athenaeum merges` and `athenaeum questions`.
 
-**Highlights**
-
-- **Run it remotely.** See workstream 1 above and `docs/guides/remote.md`.
-- **Easier first run.** `athenaeum doctor`, `athenaeum schedule install` and
-  `athenaeum import-memory`, and a keyless root that defaults to `claude-cli`.
-- **promptwitness and receipt sealing.** A harness-agnostic ledger with a
-  chain verifier, optional Ed25519 signing, optional external anchoring, a
-  Claude Code hook adapter, and `promptwitness verify` / `promptwitness demo`;
-  receipts can be signed with a key held outside the nightly process and
-  verified with only the public key. See the 0.23.0 build notes linked at the end of this section.
-- **Contact-record fold, repair and attribution.** See the behaviour changes
-  above and the 0.23.0 build notes linked at the end of this section.
-
-**Upgrading from 0.22.43: what changes**
-
-**Behaviour changes** (everything else is opt-in; a deployment that changes no
-configuration keeps its 0.22.43 behaviour except for these)
-
-- **Fresh keyless root defaults to `claude-cli`.** If a new knowledge
-  directory is scaffolded with no `ANTHROPIC_API_KEY` and a usable `claude`
-  binary is on `PATH`, `llm.provider` is set to `claude-cli`. An existing
-  config is never rewritten.
-- **`recall` returns uncompiled notes.** Raw notes saved via `remember` now
-  appear in `recall` before the first compile, labelled `[uncompiled]` and
-  ranked below compiled pages.
-- **No baked-in secret manager.** The default `op://` references are gone; use
-  `ATHENAEUM_ANTHROPIC_KEY_COMMAND`.
-- **Shipped hooks share one foreground budget**
-  (`ATHENAEUM_HOOK_BUDGET_SECONDS`, default 10s); slow work runs in the
-  background.
-- **Merges fold contact records.** `dedupe persons --apply` and an approved
-  `fold-into-existing` now also fold the absorbed person's contact record into
-  the surviving one and retire the absorbed copy (renamed and logged, never
-  deleted). If you merged person pages before upgrading, run
-  `athenaeum repair --contact-records` to see what earlier merges left behind,
-  then re-run it with `--apply`. Divergent or ambiguous records are reported
-  and left for you.
-- **Some contact values are no longer recorded.** Every contact-record writer
-  now runs an attribution check first. Most verdicts are only logged (observe
-  mode), but three narrow non-personal shapes are enforced: addresses with a
-  relay or no-reply local-part prefix, your own addresses on someone else's
-  page, and addresses at domains listed in
-  `librarian.attribution.operator_mailer_domains`. Tune the relay lists with
-  `librarian.attribution.relay_local_prefixes` and
-  `librarian.attribution.relay_domains`.
-- **Compiled pages drop mentioned contact tokens.** Email addresses and phone
-  numbers that a source note merely mentions are no longer written into a
-  compiled page's body. Existing page bodies are not rewritten.
-- **Quieter contact-surface logging.** Each load logs one summary line instead
-  of one WARNING per collided uid or address; the per-key lines moved to DEBUG.
-- **New frontmatter keys on `remember`.** A memory saved through the MCP
-  `remember` tool with the default `claude:inferred` source now also records
-  `model` and `originSessionId`. The `source` value itself is unchanged.
-
-**Stability: experimental surface.** `athenaeum serve --transport http`, the
-`serve.auth.*` configuration keys, and the `promptwitness` package (including
-its console script) are experimental. Per the policy in
-`src/athenaeum/__init__.py`, only the names in `athenaeum.__all__` carry the
-semver compatibility promise; none of these are in it, so their flags, keys,
-formats and import paths may change in a minor release. `promptwitness` is a
-separate top-level import, not part of `athenaeum.__all__`.
-
-The README, `docs/guides/remote.md`, the `promptwitness` package docstring and
-`promptwitness --help` carry the same experimental label. `CONTRIBUTING.md` now
-says to run the test suite with an isolated `HOME` (`HOME=$(mktemp -d) pytest`).
-
-**Stability: the trust graph is experimental; its design is under
-reconsideration.** The v1 source trust graph shipped as built, but its rulings
-are being revisited in a v2 redesign, so it is not a finished feature in this
-release and you should not build on it. It covers `librarian.source_trust_enabled`, `librarian.source_trust_edges`,
-the read-only `athenaeum corrections-trust-dryrun` command, the `trust_graph`
-module, the tier-0 correction comparison that consults the configured edges
-(TG3), and the witness-attestation tie-break and demote-on-broken-chain rule
-(TG6). Its behaviour, config keys and on-disk format may change or be removed
-without a deprecation cycle, and it is not covered by the `athenaeum.__all__`
-semver promise. It ships off by default (`librarian.source_trust_enabled` is
-false); with it off, behaviour is unchanged.
-
-**Security-relevant changes**
-
-New network-facing and trust-relevant surface. All of it is opt-in and off by
-default; a deployment that changes no configuration is unaffected.
-
-- **HTTP transport.** `athenaeum serve --transport http` is new. Without an auth
-  issuer configured it refuses any non-loopback bind. `stdio` stays the default.
-- **OIDC resource-server auth (`serve.auth.*`).** Bearer-token verification
-  against a configured issuer, one pinned audience, an identity allowlist and a
-  read/write scope split. Configuring an issuer is what lifts the non-loopback
-  bind refusal. Athenaeum verifies tokens; it never issues them, and TLS
-  termination is yours (a reverse proxy).
-- **The `remote` serve profile.** A serve-time tool allowlist and an
-  excluded-fields pin for hosts that cannot launch a local process. Every value
-  a tool returns leaves your machine, so read `docs/guides/remote.md` before
-  enabling it.
-- **Experimental status.** The HTTP transport and `serve.auth.*` are
-  experimental and are not covered by the `athenaeum.__all__` semver promise (see
-  the stability notes above).
-
-**New and changed surface**
-
-- **New network-facing surface, all opt-in.** `athenaeum serve --transport
-  http` (loopback-only without auth), `serve.auth.*` OIDC bearer-token
-  verification, and the `remote` profile. `stdio` stays the default. The `mcp`
-  extra's `fastmcp` floor rises to 2.11.1.
-- **New optional extras.** None is needed for a plain install: `signing`
-  (Ed25519 sealing of transcript receipts), `witness-sign` (Ed25519 signing
-  for the promptwitness ledger), `witness-anchor` (OpenTimestamps anchoring).
-- **New commands.** `athenaeum doctor`, `athenaeum schedule install | remove`,
-  `athenaeum import-memory`, `athenaeum corrections-trust-dryrun` (experimental;
-  design under reconsideration),
-  `athenaeum push-metrics sample-for-labelling | score-used`,
-  `athenaeum receipts seal | verify | anchor | attest-readout`,
-  `athenaeum attribution show | place`, `athenaeum repair --contact-records`
-  (dry-run by default), a `section_id` / `action: drop` record kind for
-  `athenaeum correct-notes`, and a `promptwitness` console script (`status`,
-  `keygen`, `hook`, `anchor`, `verify`, `demo`).
-- **New top-level import name.** `promptwitness` is installed next to
-  `athenaeum` (standard-library-only at import time; it never imports
-  `athenaeum`). An unrelated module of that name in your environment will
-  collide.
-- **New configuration keys, all off by default:**
-  `librarian.receipt_sealer` (and `librarian.receipt_signing.*`),
-  `librarian.witness_ledger_enabled`, `librarian.witness_attestation_enabled`,
-  and, for the Claude Code hook, `ATHENAEUM_WITNESS_LEDGER_ENABLED` and
-  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`. An unrecognised
-  `receipt_sealer` or `key_provider` value now raises instead of silently not
-  sealing.
-- **Attribution audits in the decision queue.** A sample
-  (`librarian.audit_sample_rate_attribution`, default 0.10) of attribution
-  placements that are actually filed shows up in `athenaeum decisions` as
-  `type: audit`. Model escalation stays off unless you set
-  `librarian.attribution.escalate: true`.
-- **New cache files.** `recall <email>` and the MCP entity reads keep
-  persisted, stat-validated index caches under the cache directory. The
-  contact-index cache stores only keyed digests of addresses and is removed by
-  the erasure cascade.
-- **Deprecation timeline.** `athenaeum merges` and `athenaeum questions` still
-  work, and their warnings name `0.24.0` as the removal release. Move to
-  `athenaeum decisions` before then.
-
-
-### Added
-
-- **`athenaeum import-memory` (issue athenaeum#2316).** Opt-in command that
-  compiles existing Claude Code memory files into the knowledge base. Nothing is
-  selected by default; it prints a size-based cost estimate first and caps a run
-  at 20 files / 100 calls, resumably. `athenaeum init` only mentions it.
-- **`athenaeum schedule install | remove`.** Writes a launchd plist (macOS) or a
-  systemd user timer / crontab entry (Linux) that runs `athenaeum run` with the
-  key source resolved into the unit. It refuses to install with no key source.
-- **`athenaeum doctor` (issue athenaeum#2298).** Read-only install health check
-  (version, interpreter, MCP registration, hooks, LLM key mode, index, last
-  compile, schedule); each failure names its fix and exits non-zero.
-- **MCP tool annotations (issue athenaeum#2381).** Every tool carries
-  `readOnlyHint` / `destructiveHint` / `openWorldHint` so remote hosts can decide
-  what to run unattended. `scan_retraction_cascade` is `readOnlyHint: false`.
-- **Trust-graph wiring, TG3 and TG6 (issue athenaeum#2331 for TG3). Experimental;
-  design under reconsideration: do not build on it.**
-  Tier-0 field corrections can compare sources through configured
-  `librarian.source_trust_edges`, and verified witness attestation can break an
-  equal-rank tie or demote a claim whose chain no longer verifies. Both sit
-  behind `librarian.source_trust_enabled` (default off); with it off, behaviour is
-  unchanged. New read-only `athenaeum corrections-trust-dryrun` lists verdicts
-  that would flip.
-- **OIDC resource-server auth for `serve --transport http`.** `serve.auth.*`
-  pins verify bearer tokens and serve RFC 9728 protected-resource metadata, and
-  a configured issuer lifts the non-loopback bind refusal.
-- **`librarian.attribution.mode` (issue athenaeum#2220).** `observe`, `enforce`
-  or `auto` (default); a fresh install still observes every class.
-- **`athenaeum push-metrics sample-for-labelling | score-used` (issue
-  athenaeum#2302).** Draw a sample to label by hand, then score the "used"
-  heuristic against those labels.
-- **Remote-mode deployment guide (issue athenaeum#2386).** New
-  `docs/guides/remote.md` covers running `athenaeum serve --transport http`
-  behind a TLS reverse proxy with an external OIDC authorization server and the
-  `remote` serve profile: prerequisites, the properties an authorization server
-  must have (PKCE `S256` advertised, CIMD or dynamic client registration, an
-  exact issuer match, the RFC 8707 `resource` parameter mapped to the token
-  audience, `openid`/`email` scopes, a JWKS at the plain OIDC default path and
-  `RS256`), every `serve.*` / `serve.auth.*` setting, a reverse-proxy example on
-  invented hosts, scheduling `athenaeum run` / `session-end` / `reindex` with no
-  `SessionStart` hook available on a server, logs, rotation and revocation, and a
-  "do not" section. It states plainly that every recall result is egress to the
-  remote host provider, and presents proxy-level mTLS client-certificate
-  validation as defense in depth rather than as authorization.
-  `docs/guides/clients.md`'s ChatGPT and Grok-app rows now point at it instead of
-  reading "Not supported" (the xAI API row is unchanged, and the "do not expose
-  through a no-auth tunnel" warning stays); `docs/index.md` and
-  `docs/modules/mcp.md` link it.
-  New `tests/test_docs_cli_commands.py` keeps the guide honest: it extracts every
-  `athenaeum ...` invocation from the fenced shell and unit-file blocks of
-  `README.md`, `docs/index.md`, `docs/guides/*` and `docs/modules/*` and binds
-  each long option against the live `athenaeum.cli.build_parser()` tree, read
-  through `scripts/gen_cli_reference.py`'s own walk so the check and the
-  generated CLI reference cannot disagree.
-- **Remote profile: serve-time tool allowlist and excluded-fields pin (issue
-  athenaeum#2383).** `athenaeum serve` gains `--profile` / `--tools` /
-  `--excluded-fields` (also `ATHENAEUM_SERVE_PROFILE` /
-  `ATHENAEUM_SERVE_TOOLS` / `ATHENAEUM_SERVE_EXCLUDED_FIELDS` and
-  `serve.profile` / `serve.tools` / `serve.excluded_fields`), resolved
-  CLI > env > yaml and pinned into `create_server` as arguments rather than
-  tool parameters. `serve.tools` is an allowlist: a tool outside it is never
-  registered, so it is absent from `tools/list` rather than refusing, and a
-  name that is not a tool of the deployment fails startup.
-  `serve.excluded_fields: off` withholds every excluded (off-corpus) value —
-  `recall(with_pii=True)` returns a count-free withheld notice (closing both
-  the per-hit join and the handle-shaped reverse lookup), `read_entity`
-  returns none, and `enumerate_entities` refuses a PII-scoped predicate or
-  output field. `serve.profile: remote` presets both: `remember` and
-  `raise_decision` stay on; `resolve_question`, `resolve_merge` and
-  `review_audit_item` are not served. With none of the keys set, the served
-  `tools/list` and every tool's output are unchanged.
-- **Opt-in streamable HTTP transport for `athenaeum serve` (issue
-  athenaeum#2382).** `athenaeum serve --transport http` serves MCP over
-  FastMCP's streamable HTTP transport on `--host` (default `127.0.0.1`),
-  `--port` (default `8000`) and `--path-prefix` (default `/mcp`); `stdio`
-  remains the default and calls `server.run()` exactly as before.
-  `--transport`, `--host` and `--port` resolve CLI > `ATHENAEUM_SERVE_*` env >
-  `serve.transport` / `serve.host` / `serve.port` in `athenaeum.yaml`. With no
-  auth issuer configured the server REFUSES any non-loopback bind, exiting
-  non-zero before a socket is opened and naming the missing
-  `serve.auth.issuer` setting; the guard is a positive allowlist of loopback
-  address literals (`127.0.0.0/8`, `::1` bracketed or bare, IPv4-mapped
-  loopback forms) and never resolves a hostname. The `mcp` extra's `fastmcp`
-  floor rises to 2.11.1, the lowest release carrying both the `http` transport
-  literal (2.9.0) and the `RemoteAuthProvider` resource-server export (2.11.1)
-  the auth child needs.
-- **Cursor instructed-recall example rule (issue athenaeum#2399).** Added
-  `examples/cursor/athenaeum.mdc`, an always-applied Cursor rule example that
-  tells the agent to call `recall` before answering when the request
-  concerns people, projects, or prior decisions, and to call `remember` for
-  durable facts, plus `examples/cursor/README.md` on installing it as a
-  project or user rule. `docs/guides/cursor.md` gains an "Instructed recall
-  (rule)" section explaining this is instructed recall, not auto-recall.
-- **Cursor setup guide and clients.md row (issue athenaeum#2396).** Added
-  `docs/guides/cursor.md` covering `mcpServers` setup (`"type": "stdio"`,
-  `${userHome}` interpolation, the `--audience` flag, and the Cursor CLI
-  sharing the same config), the explicit-tool-call model (no per-turn
-  auto-recall), the Claude Code hook no-op under Cursor's "Include
-  Third-Party Plugins, Skills, and Other Configs" passthrough, the
-  search-index rebuild step, and egress/platform limitations. `clients.md`
-  gets its own Cursor table row and a reworded Cursor-support-issue
-  sentence that no longer promises auto-recall.
-- **Claude Code hook adapter no-ops under Grok Build (issue athenaeum#2371).** `claude_code_adapter.main`, `witness_session_end`, and `witness_session_end_anchor` now refuse to run — printing nothing, exit 0, no witness line, no push telemetry, no seen-file write — when `GROK_HOOK_EVENT` is set or the stdin payload is Grok-shaped, before any other side effect.
-- **Claude Code hook adapter also no-ops under Cursor (issue athenaeum#2394).** The same `claude_code_adapter.main` / `witness_session_end` / `witness_session_end_anchor` guard now additionally refuses to run when `CURSOR_VERSION` is set in the environment, or the stdin payload carries `cursor_version` or `conversation_id` — the markers Cursor's "Include Third-Party Plugins, Skills, and Other Configs" setting (on by default) sends when it loads Claude Code's `.claude/settings.json` hooks and maps `UserPromptSubmit` to its own `beforeSubmitPrompt` event. The Grok and Cursor checks now share one guard function.
-- **Tier-0 structured upsert for configured entity types (issue
-  athenaeum#2360).** A pre-structured raw whose `type` is listed under
-  `librarian.structured_upsert` and whose `uid` already resolves to a page is
-  merged onto that page deterministically, with no LLM: named H2 sections are
-  replaced or appended to, list keys unioned, scalar keys set, and ordered keys
-  (for example a fetch status) ratcheted so they never move down. The page's
-  H1 and its `uid`/`type`/`created`/`access` never change, and a raw that adds
-  nothing is a no-op (no write, no `updated` bump). The step runs in
-  `process_one` after `tier0_passthrough` declines and before
-  `tier0_handle_upsert`, and in the batch transport's tier-0 loop. A raw of a
-  configured type that cannot be applied (type mismatch, unresolvable uid, a
-  section the config does not name) is logged at WARNING, recorded in
-  `skipped`, and left on disk; it never reaches the uid-bind path or the LLM
-  tiers. Unconfigured types are unaffected. See
-  `docs/reference/configuration.md` (`resolve_structured_upsert`). A raw is
-  also refused when it carries text between its H1 and first H2 or ends inside
-  an unclosed code fence, and a raw ranked below the page on an ordered key
-  never replaces `replace_sections`. A raw frontmatter key the config neither
-  merges (`union_keys`, `set_keys`, `ordered_keys`) nor deliberately ignores
-  (the new `keep_keys`, where the page's value wins) is refused instead of
-  silently dropped. Refused raws are counted in the existing stuck-file ledger,
-  so repeated refusals of unchanged content back off and then stop retrying;
-  the raw is never deleted.
-- **`validate_wiki_meta(declared_types=...)` (issue athenaeum#2362).** The
-  unknown-type warning now fires only outside `KNOWN_TYPES` plus the
-  deployment's declared types, so a type declared in `wiki/_schema/types.md`
-  no longer warns on every write. Tier-0 passthrough, handle upsert,
-  structured upsert, the batch create path and the corrections create path pass
-  their declared list; callers that pass none behave as before.
-- **`promptwitness` Secure Enclave key adapter, non-exportable, through a
-  signed Swift helper (issue athenaeum#2153, part of the
-  prompt-witness-ledger epic, athenaeum#2144).** A new SwiftPM package,
-  `tools/promptwitness-se/`, built on CryptoKit's
-  `SecureEnclave.P256.Signing.PrivateKey`, exposes `create`/`sign`/`pubkey`
-  subcommands; the key's opaque `dataRepresentation` blob lives in a plain
-  file (mode 0600), never the Keychain, so no entitlement is needed. A new
-  `promptwitness.secure_enclave.SecureEnclaveKeyProvider` (algorithm
-  `ecdsa-p256-sha256`, strength `hardware-nonexportable`) shells out to it
-  with the same subprocess discipline `signing._run_keystore_tool` already
-  uses for the OS-keystore tools: fixed argv, the payload on stdin only,
-  a detached session, a bounded timeout. Select it with
-  `PROMPTWITNESS_KEY_PROVIDER=secure-enclave` (helper path override
-  `PROMPTWITNESS_SE_HELPER`, key-blob path override
-  `PROMPTWITNESS_SE_KEY_PATH`); create the key with `promptwitness keygen
-  --provider secure-enclave`, which refuses to replace an existing key
-  without `--force`, same as every other tier.
-  - **Non-exportable, not presence-gated.** A signature proves the line
-    was signed on this physical device; `presence_required()` is `False`
-    (operator ruling 1) — any process running as this user's session can
-    still ask the enclave to sign.
-  - `signing.verify_signature` gains the `"ecdsa-p256-sha256"` algorithm
-    (raw X9.63 public key, DER signature), alongside the existing
-    `"ed25519"` one.
-  - A new, separate `.github/workflows/promptwitness-se-macos.yml` builds
-    the helper unsigned on `macos-latest` and smoke-tests it against that
-    runner's own enclave (measured: `macos-latest` has a usable one, so CI
-    verifies a real signature with `openssl` and nothing else), falling back
-    to asserting the clean-degrade contract on a runner without one. It is
-    deliberately excluded from the `ci-required` aggregate, same rationale
-    as `ci.yml`'s own `docs-uv-install-path` job.
-  - Codesigning, notarization, the real-device signature check, the
-    second-Mac uselessness check and latency measurement are **not** part
-    of this slice — they split off to athenaeum#2239 (operator ruling Q9).
-    A TPM-backed adapter for the same `hardware-nonexportable` tier is
-    separate, still-to-come work (athenaeum#2154).
-
-- **`promptwitness` TPM key adapter, non-exportable, on Linux and Windows
-  (issue athenaeum#2154, part of the prompt-witness-ledger epic,
-  athenaeum#2144).** A new `promptwitness.tpm.TpmKeyProvider` (algorithm
-  `ecdsa-p256-sha256`, strength `hardware-nonexportable`) covers the same
-  tier `promptwitness.secure_enclave` covers on macOS, over TWO backends
-  behind a `TpmBackend` protocol: `Tpm2ToolsBackend` on Linux (through
-  `tpm2-tools`'s `tpm2_createprimary`/`tpm2_create`/`tpm2_evictcontrol` to
-  persist a key at a fixed persistent handle, then `tpm2_readpublic`/
-  `tpm2_sign` to use it) and `WindowsPlatformCryptoBackend` on Windows (a
-  PowerShell child process, running a fixed script this module owns, over
-  CNG's "Microsoft Platform Crypto Provider"). Both normalize to the same
-  wire contract the Secure Enclave adapter already uses — the 65-byte
-  X9.63 uncompressed public point and a DER signature — including a new
-  shared `_normalize_signature_to_der`, since neither backend's native
-  signature output is reliably DER the way the Swift helper's already was.
-  That helper **accepts either** a 64-byte raw `r || s` pair or a DER
-  SEQUENCE and refuses anything else, because `tpm2_sign --format plain`'s
-  byte layout is undocumented: the two shapes are trivially
-  distinguishable, so the Linux path is correct whichever one real
-  hardware produces, and both are covered end to end rather than only the
-  assumed one.
-  Every subprocess call reuses `signing._run_keystore_tool`'s existing
-  discipline: fixed argv, a detached session, a bounded timeout, and the
-  payload never on argv (the TPM-sign path writes it to a private,
-  mode-0600 temp file instead of stdin — `tpm2_sign`'s message argument is
-  a file, not a stdin stream; only the file PATH, never the payload
-  bytes, reaches argv). Select it with `PROMPTWITNESS_KEY_PROVIDER=tpm`
-  (backend override `PROMPTWITNESS_TPM_BACKEND`, key-identifier override
-  `PROMPTWITNESS_TPM_KEY_ID`, PowerShell path override
-  `PROMPTWITNESS_TPM_POWERSHELL`); create the key with `promptwitness
-  keygen --provider tpm`, which refuses to replace an existing key without
-  `--force`, same as every other tier.
-  - **Non-exportable, not presence-gated.** A signature proves the line
-    was signed on this physical device; `presence_required()` is `False`
-    (operator ruling 1), exactly as `secure_enclave`'s adapter is.
-  - **`--force` rotation clears the old persistent handle LAST**, after
-    the replacement key already exists inside the TPM and immediately
-    before the persist. A TPM offers no atomic replace-at-handle, so some
-    window is irreducible; the obvious order (clear, then build) makes
-    every generation step a chance to leave the operator with the old key
-    destroyed and no new one, and nothing can restore a non-exportable
-    key. The ordering is pinned by a test on the real argv sequence.
-  - **Several real-TPM/CNG behaviours could not be verified without
-    hardware and are called out as explicit, numbered assumptions in
-    `promptwitness.tpm`'s own module docstring** rather than presented as
-    fact (the signature byte layout was on that list and is no longer —
-    the tolerant normalization above removed it as a correctness risk
-    rather than documenting it): which
-    `tpm2-tools` exit code (if any) reliably means "no object at this
-    handle yet" (its own docs give no code dedicated to that distinction,
-    unlike the os-keystore/secure-enclave adapters) — an inference scoped
-    to `tpm2_readpublic` ONLY, since `Tpm2ToolsBackend.sign` deliberately
-    classifies no exit code as absent: claiming it there would report
-    `key.error: "KeystoreItemAbsent"` ("you never created a key") for a
-    key that exists whose signing attempt failed for an unrelated reason,
-    and a confident wrong diagnosis in an audit trail is worse than a
-    vague true one; `tpm2_create -c`'s
-    direct-context-load capability ("TPM support varies" per its own
-    docs); and whether the managed `ECDsaCng` wrapper behaves cleanly
-    against the real "Microsoft Platform Crypto Provider" KSP specifically.
-    Real-hardware signature and non-exportability checks against these
-    split off to **athenaeum#2240** (operator ruling, mirroring how
-    athenaeum#2239 split off of athenaeum#2153).
-
-- **Witness-ledger signature verification against operator-declared keys,
-  and a real anchor source instead of a bare boolean (issue athenaeum#2333,
-  TG5).** A new `librarian.witness.keys` yaml map (`{<key_id>: {public_key,
-  strength}}`, introducing a `librarian.witness.*` nested family alongside
-  the existing flat `librarian.witness_attestation_enabled` /
-  `librarian.witness_ledger_enabled` keys) registers operator-trusted
-  public keys and their strength. `AttestationIndex.load` now passes this
-  registry to `promptwitness.ledger.verify_chain`, and `attest()` records
-  the result as a new, additive `witness_strength_verified` field: `"none"`
-  unless the line's signature verifies under a registered key whose own
-  registered strength is at least the line's claimed strength. A claim
-  that cannot be substantiated (unregistered key, invalid signature, or a
-  claim above the registered strength) does NOT turn a hit into a miss —
-  provenance and signing strength are orthogonal — but it does surface as
-  a new `witness-strength-mismatch:<claimed>` incident through the
-  existing athenaeum#2158 miss-reason vocabulary and one-WARNING-per-event
-  path. A new `witness_anchor_source` field records the best non-
-  `local-clock` source among the anchor lines covering a line's sequence
-  (`"local-clock"` when only the mandatory fallback covers it, `None` when
-  nothing anchors it) — consumers must treat `"local-clock"` as NOT
-  anchored. Both fields are additive on `ReceiptEntry` schema v2 (no
-  version bump); `witness_strength` and `witness_anchored` keep their
-  original, self-asserted/compatibility meanings unchanged, and v1
-  receipts still parse and read as unverified. No `src/promptwitness/`
-  edits and no new `promptwitness` imports.
-
-- **`recall` now returns raw notes saved via `remember` before the first
-  compile has run, with no LLM call (issue athenaeum#2313).**
-  `recall.extra_intake_roots`'s default gains `raw/claude-session` alongside
-  the existing `raw/auto-memory` — one more root on the existing extra-roots
-  read path, not a new scanner. Every hit from an extra-intake root is
-  labelled `[uncompiled]` and ranked below every compiled wiki page,
-  regardless of its raw relevance score, so it is never mistaken for a
-  compiled entity. `remember` also incrementally refreshes the configured
-  `fts5`/`vector` index after a successful write, so a note saved and then
-  recalled in the SAME session — on a brand-new install, before any compile —
-  is found. A restricted (non-owner) caller continues to receive zero raw
-  results, fail-closed, because raw notes carry no audience/sensitivity
-  tags. Setting `recall.extra_intake_roots: []` restores exactly today's
-  wiki-only behavior. The `keyword` backend is unaffected — it has never
-  scanned extra intake roots from its own query, a pre-existing, separate
-  gap this change does not take on.
-
-### Fixed
-
-- **Four Claude Code setup-doc errors, each of which pointed a reader at the
-  wrong value or a file that does not exist (issue athenaeum#2232).**
-  `SEARCH_BACKEND`'s default is no longer stated as a single `fts5`: the
-  hooks, the packaged adapter and `athenaeum.yaml`'s own resolver default to
-  `vector`, while `athenaeum context --backend` and `codex-context
-  --backend` default to `fts5`, and `docs/reference/environment.md` now
-  carries that per-entry-point table (the same single-default claim is
-  corrected in `docs/guides/vector-search.md`,
-  `docs/guides/troubleshooting.md` and `docs/modules/recall.md`).
-  `examples/claude-code/`'s "Option C: launchd plist on macOS" pointed at a
-  `docs/` template that never existed and now ships one,
-  `com.athenaeum.run.plist`, with the `EnvironmentVariables` an
-  `ANTHROPIC_API_KEY`-needing launchd job requires. MCP registration names
-  `~/.claude.json` (user scope) and `.mcp.json` (project scope) instead of
-  `~/.claude/settings.json`, which Claude Code does not read MCP servers
-  from; `claude mcp add` stays the primary path. `session-start-recall.sh`'s
-  header states the real `op` gate.
-
-### Changed
-
-- **Behaviour change: default to `claude-cli` on a fresh, keyless root (issue
-  athenaeum#2367).** See "Upgrading from 0.22.43" above; `athenaeum init` now
-  also says which provider was selected and names the missing credential when
-  neither a key nor `claude-cli` is usable.
-- **No secret manager is baked in; a generic credential command replaces the
-  default `op://` paths (issue athenaeum#2205, operator ruling 2026-10-30).**
-  `session-start-recall.sh` ships NO default 1Password references, and
-  `librarian.receipt_signing.op_reference` /
-  `librarian.receipt_signing.public_key_ref` no longer default to a specific
-  vault item. New `ATHENAEUM_ANTHROPIC_KEY_COMMAND` and
-  `ATHENAEUM_JEV_KEY_COMMAND` run any shell command — `security
-  find-generic-password`, `secret-tool lookup`, `pass show`, `bw get`,
-  `op read` — at most once while a value is cached in `config.env`, bounded
-  by `ATHENAEUM_CRED_COMMAND_TIMEOUT_SECONDS` (default 10s), inside the
-  detached background job. A failure, timeout, or empty result records a new
-  `credential_fetch_failed` degradation; the value is never an argument,
-  never logged, and never reported by `athenaeum status`.
-  `ATHENAEUM_CRED_REFRESH` is the generic name for `ATHENAEUM_OP_REFRESH`,
-  which still works.
-
-  **Upgrade note — defaults changed.** An install that relied on the shipped
-  `op://Agent Tools/...` paths now fetches nothing. Set
-  `ATHENAEUM_OP_KEY_PATH` (and `ATHENAEUM_OP_JEV_KEY_PATH`) to your own
-  references, or set `ATHENAEUM_ANTHROPIC_KEY_COMMAND` instead — an install
-  that already set either of those `OP_*` variables keeps working unchanged.
-  An operator using receipt signing must likewise set
-  `librarian.receipt_signing.op_reference` explicitly; with none set,
-  signing reports the key as unavailable (intake appends unsealed lines and
-  logs one warning) rather than failing.
-
-### Added
-
-- **`athenaeum contact-surface-lint` — read-only contact-surface report,
-  with an `--attribution` backfill report mode (child I of epic
-  athenaeum#2192, design `docs/design/attribution-verification.md` §10.4).**
-  New `src/athenaeum/contact_surface_lint.py` (L4) reports page-less
-  records (reusing athenaeum#2217's own detection), values shared by two or
-  more uids broken down by `field_sources` provenance type, and `observed`
-  values whose cited source still exists and no longer contains them —
-  counts and uids only, never a value. `--attribution` runs
-  `pii_attribution.check_contact_attribution` in report mode over every
-  (value, uid) pair on the surface (new `WRITER_LINT`), writing only
-  attribution-log rows and one persisted observe-report record per run
-  (new `pii_attribution.append_attribution_observe_report`) — per-class
-  shadow counts plus the model/prompt sha in effect, the contract
-  athenaeum#2220's `auto` preflight depends on. `--attribution --escalate`
-  additionally runs athenaeum#2212's shadow escalation over already-parked
-  suspects, capped by `librarian_max_api_calls`. `pii._log_collision_summary`'s
-  hint now names the real command. Does not take the run lock (never
-  writes a contact record; see the CLI module's own docstring for why).
-
-### Changed
-
-- **Hooks have one foreground time budget, and the slow work moves to the
-  background (issue athenaeum#2204).** Every shipped recall hook that does
-  variable-cost work, the `session-start-recall.sh` shell hook and the
-  packaged `athenaeum-claude-hook` adapter, now shares one budget,
-  `ATHENAEUM_HOOK_BUDGET_SECONDS` (default 10 seconds), so a hook finishes
-  inside the host's own timeout. Credential refresh and the vector-index
-  rebuild no longer run inline: they run as a detached background job behind
-  the same lock `rebuild-index.sh` uses, so two concurrent sessions never
-  start two builds and a turn never waits on one. When a step is skipped or
-  degraded (`no_api_key`, `index_not_ready`, `step_timeout`) the hook records
-  it to a durable `hook_degradation.jsonl` in the cache directory;
-  `athenaeum status` reports it, and a once-per-session notice is delivered on
-  the hook's own `additionalContext` channel rather than a discarded stderr.
-  The shipped `settings-snippet.json` timeouts now agree with the script's
-  recommendation (SessionStart was 15 seconds against a recommended 60), and
-  `examples/claude-code/README.md` documents the budget and the timeouts.
-
-### Internal
-
-- The attribution calibration sweep (`tests/evals/test_attribution_eval.py`)
-  no longer runs on every default eval dispatch. It spent 3,686,060 tokens
-  against the default suite's 250,000-token ceiling, which made every
-  default dispatch fail. It now carries its own `calibration` pytest marker
-  instead of `eval`, so neither `pytest -m eval` nor the default selection
-  picks it up. It runs only through the new `suite=calibration` input on
-  `evals.yml`, under its own `CALIBRATION_TOKEN_CEILING` (4,500,000);
-  `EVAL_TOKEN_CEILING` is unchanged. That job uploads the regenerated
-  calibration record as an artifact. A CI-wiring test keeps the marker out of
-  the default selections. The eval-receipt gate now also requires the run's
-  `Live-API eval suite` job to have succeeded, so a calibration-only dispatch
-  (which skips that job but still concludes `success`) is not accepted as a
-  receipt (athenaeum#2287).
-
-- **Live-eval aggregate gates no longer go red on tiny samples (issue
-  athenaeum#2231).** `AUDIT_RETIREMENT_FLOOR` sat at `n-1` with a
-  permanent miss already consuming the slack, a one-trial gate wearing a
-  six-case floor, so one stochastic miss failed the suite. It is re-floored
-  from 5 to 4. The classify and resolver suites each gain one golden case
-  (floors unchanged) and carry corrected sample counts. Three new offline
-  tests prove each changed floor still reds on a synthetic degraded model, and
-  `tests/evals/README.md` gains a "How a floor is derived" section with a
-  corrected floor table.
-- **Dependency bumps (dependabot): GitHub Actions `actions/upload-artifact`
-  7.0.2, `actions/download-artifact` 8.0.2, `actions/setup-python` 7.1.0,
-  `pypa/gh-action-pypi-publish` 1.14.3 and `ossf/scorecard-action` 2.5.0
-  (athenaeum#2279, athenaeum#2280, athenaeum#2281, athenaeum#2282,
-  athenaeum#2283); and the `anthropic` requirement widened to `<3.0` and the
-  dev-only `transformers` requirement to `<6.0` (athenaeum#2285,
-  athenaeum#2286).**
-
-### Build notes: 0.23.0
-
-The detailed per-merge entries for the never-published 0.23.0 build, which ships in this release, are in [docs/changelog/0.23.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.23.0-build-notes.md). They are reference material; the sections above are the release.
+The full release digest, the per-merge Added / Changed / Fixed / Internal entries
+and the never-published 0.23.0 build notes are in
+[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.23.5-build-notes.md).
+They are reference material; this section is the release.
 
 ## [0.22.43] - 2026-10-25
 

@@ -167,6 +167,24 @@ each prompt, with no prompt text stored, so a transcript can later be checked ag
 Experimental, and not part of `athenaeum.__all__`: its CLI and formats may change in a
 minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
 
+## Stability and versioning
+
+- **Pre-1.0.** Athenaeum follows semantic versioning, but until 1.0 a minor
+  version (0.x) may make breaking changes. Read the [CHANGELOG](CHANGELOG.md)
+  before upgrading across a minor.
+- **Public API.** Only the names in `athenaeum.__all__` are public API and carry the
+  compatibility promise. Everything else, including every other importable module
+  and each CLI flag, config key and file format not documented as stable, is
+  internal and may change.
+- **Experimental surfaces** are marked as such where they are documented (remote
+  serving with OIDC auth, `promptwitness`, and the source trust graph). They sit
+  outside `athenaeum.__all__` and may change in any minor release without a
+  deprecation cycle.
+- **Scheduled removal.** `athenaeum merges` and `athenaeum questions` are removed in
+  0.24.0. Use `athenaeum decisions` instead.
+- **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
+  for supported versions and how to report a vulnerability.
+
 ## Where to go next
 
 | | |
