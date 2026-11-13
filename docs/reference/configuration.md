@@ -4769,6 +4769,26 @@ no floor is applied regardless of config. A malformed env value WARNs
 and falls through to yaml/default (see `_env_number`); a
 non-numeric yaml value is ignored the same way.
 
+### `resolve_recall_sub_pages_cap`
+
+- **YAML path:** `recall.sub_pages_cap`
+- **Environment variable:** `ATHENAEUM_RECALL_SUB_PAGES_CAP`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve how many of a parent hit's sub-pages ``recall`` names on its
+``**Sub-pages:**`` line before folding the rest into a remainder count
+
+Precedence: ``ATHENAEUM_RECALL_SUB_PAGES_CAP`` env > ``recall.sub_pages_cap``
+yaml > ``5``. A malformed env value WARNs and falls through (see
+`_env_number`); a non-int / ``<= 0`` yaml value falls through to
+the default. No seed in ``_DEFAULTS``. The cap is
+applied AFTER the same audience/policy filter the hit itself passed
+through (`athenaeum.mcp_server._render_relation_lines`) — a
+sub-page the caller may not see is excluded before this cap, and
+therefore before the remainder count, ever sees it.
+
 ## `screening`
 
 ### `resolve_screening`

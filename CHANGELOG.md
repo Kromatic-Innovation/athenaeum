@@ -48,6 +48,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or removes it by hand (exits 75 under a held run lock); `athenaeum
   doctor` reports the count of one-sided pairs (athenaeum#2535).
 
+- Page recompile, slice S1 (`src/athenaeum/page_recompile.py`): a candidate
+  scan over active pages that are over `librarian.page_size_threshold_chars`
+  or flagged `needs_split: true`, ordered over-ceiling-first / most-recently-
+  updated / largest, with a `blocked` bucket (reason `no_uid` /
+  `invalid_frontmatter` / `unreadable`) instead of silently dropping a page;
+  and a segmenter cutting a page body into ordered, addressable units (one
+  per heading group, cut further at paragraph/list-item boundaries past a
+  size cap) plus pure conservation and marker-resolution checkers.
+  `athenaeum recompile candidates` reports counts only. No LLM call, no page
+  write (athenaeum#2534).
+
+- Recall and entity listings are now aware of the parent/child page
+  relation: a `recall` hit on a child renders a `**Parent:** <uid> —
+  <Name>` line, a hit on a parent renders a `**Sub-pages:** <uid> —
+  <Name>, ...` line (capped at `recall.sub_pages_cap` /
+  `ATHENAEUM_RECALL_SUB_PAGES_CAP`, default 5, with a count of the
+  remainder), and a uid named on either line is dropped from the same
+  hit's `**Links:**` line. Both lines pass through the hit's own
+  audience/policy filter, applied before the remainder count. Sub-pages
+  created by a split (`via: split`) are now hidden from
+  `enumerate_entities` and `entity_schema`'s page counts by default — a
+  page attached via `attach`/`fold`/`manual` stays listed; pass
+  `include_split=True` (`--include-split` on the CLI) to include them.
+  The per-turn hook bullet for a child whose own name doesn't already
+  contain its parent's reads `<Name> (under <Parent name>) —
+  <description>` (athenaeum#2538).
+
 - Merge decisions have a third verdict, `attach-as-subpage`, beside
   `approve`/`reject`: it attaches the proposal's other source page under
   the target as a sub-page (via `page_relations.set_relation`, stamped

@@ -889,6 +889,48 @@ class TestRecallCapCeilingPassthrough:
 
 
 # ---------------------------------------------------------------------------
+# issue athenaeum#2538 AC8 — the per-turn hook bullet names a child's
+# parent. The MECHANISM lives in athenaeum.context (Candidate.parent_name /
+# _resolve_parent_names); this class proves the adapter actually WIRES it
+# by passing `wiki_root` through to `build_context_for_turn` -- the
+# counter-example this defeats is a resolver that exists but is never
+# called from the real per-turn hook (mechanism without wiring).
+# ---------------------------------------------------------------------------
+
+
+class TestParentNameWiringPassthrough:
+    def test_wiki_root_is_forwarded_to_build_context_for_turn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["wiki_root"] = kwargs.get("wiki_root")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        forwarded = captured.get("wiki_root")
+        assert forwarded is not None
+        assert str(forwarded).endswith("wiki")
+
+
+# ---------------------------------------------------------------------------
 # athenaeum#1661 AC — prompts shorter than 8 characters produce no output
 # ---------------------------------------------------------------------------
 

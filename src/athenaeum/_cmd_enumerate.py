@@ -134,6 +134,14 @@ def add_enumerate_subparser(subparsers: argparse._SubParsersAction) -> None:
         "(ungated by athenaeum#1122).",
     )
     parser.add_argument(
+        "--include-split",
+        dest="include_split",
+        action="store_true",
+        help="Include split-created sub-pages (`via: split`) — excluded by "
+        "default (issue athenaeum#2538) since they inherit their parent's "
+        "type. Pages attached via attach/fold/manual are always listed.",
+    )
+    parser.add_argument(
         "--audience",
         type=str,
         default=None,
@@ -190,6 +198,7 @@ def cmd_enumerate(args: argparse.Namespace) -> int:
             caller_audience=caller_audience,
             extra_roots=extra_roots,
             config=cfg,
+            include_split=args.include_split,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

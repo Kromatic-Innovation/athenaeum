@@ -265,6 +265,11 @@ MODULE_LAYER: dict[str, int] = {
     "repair": 4,
     "retire": 4,
     "oversize_split": 4,  # athenaeum#2078 AC3: split pass over flagged pages
+    # Issue athenaeum#2534 (page-recompile slice S1): the candidate scan +
+    # unit segmenter, sibling to page_decompose.py/oversize_split.py (own
+    # docstring states "Layering: L4 domain/pipeline, same layer as
+    # athenaeum.oversize_split and athenaeum.page_decompose").
+    "page_recompile": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,
@@ -380,6 +385,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_repair": 5,
     "_cmd_retire": 5,
     "_cmd_receipts": 5,  # issue athenaeum#2039
+    "_cmd_recompile": 5,  # issue athenaeum#2534
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
     "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
