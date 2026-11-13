@@ -11,14 +11,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from athenaeum._cli_shared import _positive_int
 from athenaeum.config import resolve_cache_dir
-
-
-def _positive(value: str) -> int:
-    n = int(value)
-    if n <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return n
 
 
 def cmd_codex_context(args: argparse.Namespace) -> int:
@@ -51,17 +45,17 @@ def add_codex_context_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument(
         "--interval-seconds",
-        type=_positive,
+        type=_positive_int,
         default=900,
         help="Declared refresh cadence; must match the scheduler (default: 900)",
     )
     parser.add_argument(
         "--max-age-seconds",
-        type=_positive,
+        type=_positive_int,
         default=None,
         help="Seconds until the snapshot is stale (default: twice the interval)",
     )
-    parser.add_argument("--n", type=_positive, default=None, help="Max candidates (default: 7)")
+    parser.add_argument("--n", type=_positive_int, default=None, help="Max candidates (default: 7)")
     parser.add_argument(
         "--backend",
         choices=("fts5", "vector"),
