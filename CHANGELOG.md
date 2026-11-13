@@ -66,6 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the one-time warnings about a spend ledger, LLM-schema
+  observations ledger, or push-records ledger left at its pre-move
+  wiki-root location (`spend.durable_ledger_path`,
+  `llm_schemas.durable_observations_path`,
+  `push_metrics.durable_push_records_path`), and their once-per-process
+  guards. Each function still returns the same cache-dir path as before; a
+  ledger left over at the old location is now simply ignored rather than
+  warned about. No deprecation period — operator ruling on cleanup epic
+  athenaeum#2447 (athenaeum#2467).
+
 - Removed the `rebuild-index` alias; use `athenaeum reindex` (athenaeum#2459).
   The alias printed no deprecation warning, so there was no transition
   period to preserve; see `docs/guides/upgrading.md` for anyone whose cron

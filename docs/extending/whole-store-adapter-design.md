@@ -651,9 +651,13 @@ made concrete.
 > named as candidates for the same table-membership relocation —
 > `spend.jsonl` and `observations.jsonl` (`_llm_schema_observations.jsonl`)
 > now both resolve to the cache dir, never `wiki_root`, mirroring
-> `push_metrics.durable_push_records_path` exactly, including its one-time
-> stranded-file warning. Generalizing: nothing in this table's "where it
-> resolves" column is authoritative over an artifact's own resolver. It
+> `push_metrics.durable_push_records_path` exactly. (The one-time
+> stranded-ledger warning the three resolvers used to share is gone —
+> issue athenaeum#2467 removed it, with no deprecation period, per the
+> operator's cleanup-epic ruling; a ledger left at the withdrawn
+> `wiki_root` location is now simply ignored.) Generalizing: nothing in
+> this table's "where it resolves" column is authoritative over an
+> artifact's own resolver. It
 > records the R3 persistence *class* and *scope* (`operational` /
 > `store-durable`, in every row 8 case), which those three ledgers still
 > share — R3 requires a declaration, not a `wiki_root` write target, and
