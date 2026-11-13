@@ -121,6 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recall.hybrid` are unaffected and remain configurable — see
   `docs/reference/configuration.md`.
 
+- Removed the unwired `retention_policy` module and the
+  `librarian.retention` key, which had no effect (athenaeum#2462). The
+  module landed with no caller and never shipped a CLI, MCP or librarian
+  hook; a stale `librarian.retention` yaml key is now ignored with a
+  warning, same as every other removed key. The live raw-retention
+  reporting in `librarian.py` is unaffected.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available

@@ -8,7 +8,7 @@ python scripts/gen_config_reference.py
 
 Every `resolve_*` function in `athenaeum.config` appears below, grouped by the top-level `athenaeum.yaml` section it reads (or under **Other** when it reads no yaml key of its own). `athenaeum.yaml` lives at the knowledge root (`<knowledge_root>/athenaeum.yaml`, default `~/knowledge/athenaeum.yaml`). An em dash (—) means that layer does not exist for a given knob.
 
-Defaults were captured by actually invoking each resolver with no config and no `ATHENAEUM_*` environment variables set, except for a small, explicit set of resolvers whose signature takes a required non-config argument (a model knob, a retention family, a recall backend) or whose return value is a filesystem path relative to a knowledge root — those are hand-annotated because invoking them generically would either be meaningless (no single "the" default) or bake this generator's own machine into a committed file.
+Defaults were captured by actually invoking each resolver with no config and no `ATHENAEUM_*` environment variables set, except for a small, explicit set of resolvers whose signature takes a required non-config argument (a model knob, a decay bucket, a recall backend) or whose return value is a filesystem path relative to a knowledge root — those are hand-annotated because invoking them generically would either be meaningless (no single "the" default) or bake this generator's own machine into a committed file.
 
 ## Models
 
@@ -166,8 +166,7 @@ resolver can never turn a live page into an already-expired one by
 accident.
 
 ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
-two horizon families to resolve), not a value read out of *config* — the
-same shape `resolve_retention_policy` uses for its retention family.
+two horizon families to resolve), not a value read out of *config*.
 
 ## `dedupe`
 
@@ -2910,69 +2909,6 @@ never re-proposed regardless of this value.
 Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
 non-negative ``int``) > default ``0``. Negative, non-integer and
 boolean values fall through to the default. No seed in ``_DEFAULTS``
-
-### `resolve_retention_destination`
-
-- **YAML path:** `librarian.retention.families.<family>.destination` > `librarian.retention.defaults.destination`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `'in-repo'`
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s retention destination from
-``librarian.retention.families.<family>.destination`` >
-``librarian.retention.defaults.destination`` > the stated default
-``"in-repo"``.
-
-Returns ``"in-repo"``, ``"pii-vault"``, or ``"adapter:<name>"`` verbatim
-(the adapter name is validated by the caller that resolves it to an
-actual root -- `athenaeum.retention_policy` -- via
-`athenaeum.storage.available_adapters`, mirroring the `preserve`
-disposition's fail-loud-on-unknown-adapter contract; this resolver only
-reads the operator's string, same division of labor as
-`resolve_preserved_log_adapter`). A value matching neither
-``"in-repo"``, ``"pii-vault"`` nor the ``"adapter:"`` prefix -- at either
-level -- WARNs and falls through.
-
-### `resolve_retention_max_bytes`
-
-- **YAML path:** `librarian.retention.families.<family>.max_bytes` > `librarian.retention.defaults.max_bytes`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `1048576` (1 MiB)
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s truncation bound in bytes from
-``librarian.retention.families.<family>.max_bytes`` >
-``librarian.retention.defaults.max_bytes`` > the stated default
-``1048576`` (1 MiB, "sized for a git-tracked file" per the issue).
-
-Resolvable independent of `resolve_retention_policy` -- a caller
-enforcing ``truncate-top`` needs this regardless of how the policy
-itself resolved. ``bool`` (an ``int`` subclass) and non-int /
-non-positive values -- at either level -- fall through, same as every
-other numeric resolver here.
-
-### `resolve_retention_policy`
-
-- **YAML path:** `librarian.retention.families.<family>.policy` > `librarian.retention.defaults.policy`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `'truncate-top'`
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s retention policy from
-``librarian.retention.families.<family>.policy`` >
-``librarian.retention.defaults.policy`` > the stated default
-``"truncate-top"`` -- but ONLY once ``librarian.retention`` exists at
-all; absent that block entirely, returns ``None`` (AC1).
-
-Returns one of ``"truncate-top"``, ``"never-truncate"``,
-``"librarian-decides"``, or ``None``. A value outside that vocabulary --
-at either the family or defaults level -- WARNs and falls through to the
-next level, same malformed-value-falls-through idiom as every other
-resolver in this module; it is never allowed to silently disable
-enforcement by being mistaken for ``None``.
 
 ### `resolve_retire`
 

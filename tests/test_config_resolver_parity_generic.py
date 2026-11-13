@@ -109,8 +109,7 @@ resolver cannot silently join the exclusion set without this file changing):
 
 - ``resolve_decay_horizon_days`` (issue athenaeum#1840): its first parameter is
   a REQUIRED ``bucket`` SELECTOR (``daily`` / ``weekly`` / anything else),
-  which picks WHICH of two independent knob families to resolve — the same
-  shape ``resolve_retention_policy``'s ``family`` has, except bucket-first.
+  which picks WHICH of two independent knob families to resolve.
   The generic prober only ever calls ``fn(config)``, which would pass the
   candidate config dict as the bucket and land on the no-horizon ``0``
   branch for every candidate, reading identically to "never read the key".
@@ -178,15 +177,6 @@ _GENERIC_HELPER_SIGNATURE = frozenset(
         # generic prober only ever calls fn(config), so it cannot supply
         # either. Exercised directly in TestResolveRecallRelevanceFloorDirect.
         "resolve_recall_relevance_floor",
-        # Issue athenaeum#1418: family-parameterized retention resolvers, same
-        # shape problem as resolve_model — the generic prober only ever
-        # calls fn(config), and `family` is a required second positional
-        # arg with no single "correct" probe value the source can reveal.
-        # Exercised directly, with real family names, in
-        # TestRetentionResolversDirect below.
-        "resolve_retention_policy",
-        "resolve_retention_max_bytes",
-        "resolve_retention_destination",
         # Issue athenaeum#1840: bucket-selected horizon families. `bucket` is a
         # required FIRST positional the generic prober cannot supply, and
         # every value it could supply falls to the no-horizon `0` branch.
@@ -691,55 +681,6 @@ class TestResolveRecallRelevanceFloorDirect:
                 monkeypatch.delenv(key, raising=False)
         assert config_mod.resolve_recall_relevance_floor(None, "fts5") is None
         assert config_mod.resolve_recall_relevance_floor(None, "keyword", unprompted=True) is None
-
-
-# ---------------------------------------------------------------------------
-# resolve_retention_policy / resolve_retention_max_bytes /
-# resolve_retention_destination (issue athenaeum#1418): family-parameterized,
-# same generic-helper exclusion reason as resolve_model above — exercised
-# directly with real family names rather than a synthetic knob string.
-# ---------------------------------------------------------------------------
-
-
-class TestRetentionResolversDirect:
-    def test_policy_reads_family_yaml_key(self) -> None:
-        config = {
-            "librarian": {
-                "retention": {"families": {"probe-family": {"policy": "never-truncate"}}}
-            }
-        }
-        assert config_mod.resolve_retention_policy(config, "probe-family") == "never-truncate"
-
-    def test_policy_reads_defaults_yaml_key(self) -> None:
-        config = {"librarian": {"retention": {"defaults": {"policy": "librarian-decides"}}}}
-        assert (
-            config_mod.resolve_retention_policy(config, "unrelated-family")
-            == "librarian-decides"
-        )
-
-    def test_policy_none_when_retention_block_absent(self) -> None:
-        assert config_mod.resolve_retention_policy(None, "probe-family") is None
-        assert config_mod.resolve_retention_policy({}, "probe-family") is None
-
-    def test_max_bytes_reads_family_yaml_key(self) -> None:
-        config = {
-            "librarian": {"retention": {"families": {"probe-family": {"max_bytes": 4096}}}}
-        }
-        assert config_mod.resolve_retention_max_bytes(config, "probe-family") == 4096
-
-    def test_max_bytes_default_when_unset(self) -> None:
-        assert config_mod.resolve_retention_max_bytes(None, "probe-family") == 1_048_576
-
-    def test_destination_reads_family_yaml_key(self) -> None:
-        config = {
-            "librarian": {
-                "retention": {"families": {"probe-family": {"destination": "pii-vault"}}}
-            }
-        }
-        assert config_mod.resolve_retention_destination(config, "probe-family") == "pii-vault"
-
-    def test_destination_default_when_unset(self) -> None:
-        assert config_mod.resolve_retention_destination(None, "probe-family") == "in-repo"
 
 
 # ---------------------------------------------------------------------------

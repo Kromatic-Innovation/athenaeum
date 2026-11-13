@@ -339,8 +339,7 @@ _CURATED: dict[str, dict[str, str]] = {
         # Generic invocation is `fn(None)`, which passes None as the BUCKET
         # (the required first positional) and so reports the no-horizon
         # sentinel `0` as "the" default — meaningless for a resolver whose
-        # default is per-bucket, the same shape problem `resolve_model` and
-        # the retention-family resolvers have.
+        # default is per-bucket, the same shape problem `resolve_model` has.
     },
     "resolve_recall_relevance_floor": {
         "yaml_path": "`recall.relevance_floor.<backend>` (see docstring — the `unprompted` "
@@ -349,39 +348,6 @@ _CURATED: dict[str, dict[str, str]] = {
         "cli_flag": "—",
         "default": "`None` (no floor — today's behavior, unchanged, until an operator opts in)",
         "precedence": "environment variable > `athenaeum.yaml` > `None`",
-    },
-    "resolve_retention_policy": {
-        "yaml_path": "`librarian.retention.families.<family>.policy` > "
-        "`librarian.retention.defaults.policy`",
-        "env_var": "—",
-        "cli_flag": "—",
-        "default": "`'truncate-top'`",
-        "precedence": (
-            "per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > "
-            "code default"
-        ),
-    },
-    "resolve_retention_max_bytes": {
-        "yaml_path": "`librarian.retention.families.<family>.max_bytes` > "
-        "`librarian.retention.defaults.max_bytes`",
-        "env_var": "—",
-        "cli_flag": "—",
-        "default": "`1048576` (1 MiB)",
-        "precedence": (
-            "per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > "
-            "code default"
-        ),
-    },
-    "resolve_retention_destination": {
-        "yaml_path": "`librarian.retention.families.<family>.destination` > "
-        "`librarian.retention.defaults.destination`",
-        "env_var": "—",
-        "cli_flag": "—",
-        "default": "`'in-repo'`",
-        "precedence": (
-            "per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > "
-            "code default"
-        ),
     },
     "resolve_extra_intake_roots": {
         "yaml_path": "`recall.extra_intake_roots`",
@@ -883,7 +849,7 @@ def _render(
         "Defaults were captured by actually invoking each resolver with no config and "
         "no `ATHENAEUM_*` environment variables set, except for a small, explicit set "
         "of resolvers whose signature takes a required non-config argument (a model "
-        "knob, a retention family, a recall backend) or whose return value is a "
+        "knob, a decay bucket, a recall backend) or whose return value is a "
         "filesystem path relative to a knowledge root — those are hand-annotated "
         "because invoking them generically would either be meaningless (no single "
         "\"the\" default) or bake this generator's own machine into a committed file."

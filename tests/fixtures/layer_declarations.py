@@ -254,7 +254,6 @@ MODULE_LAYER: dict[str, int] = {
     "reasoning_screens": 4,
     "recurring_claims": 4,
     "repair": 4,
-    "retention_policy": 4,
     "retire": 4,
     "oversize_split": 4,  # athenaeum#2078 AC3: split pass over flagged pages
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
