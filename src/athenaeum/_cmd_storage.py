@@ -62,7 +62,12 @@ if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
 
 from athenaeum import pii_attribution
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
+from athenaeum._cli_shared import (
+    EXIT_PII_FOUND,
+    _acquire_or_exit,
+    _add_lock_args,
+    _resolve_knowledge_root,
+)
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
@@ -120,14 +125,6 @@ from athenaeum.storage_migrate import (
     iter_glob_pages,
     plan_pii_migration,
 )
-
-#: Exit code when ``lint-pii`` finds inline PII. Mirrors
-#: :data:`athenaeum._cmd_outbound.EXIT_PII_FOUND` (2) — a "found something to
-#: act on" signal distinct from the generic error code 1 — so a shell can gate
-#: on a clean scan (``athenaeum storage lint-pii && ...``). Defined locally
-#: rather than imported to keep the two lint CLIs decoupled (same rationale the
-#: detectors themselves are shared but the CLIs are not).
-EXIT_PII_FOUND = 2
 
 #: Exit code when ``lint-mapping`` finds a completeness gap (a sensitivity
 #: class the scanned corpus carries with no live ``storage.mapping`` entry,
