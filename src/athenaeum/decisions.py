@@ -1230,33 +1230,6 @@ def age_days(created_at: str, *, today: date | None = None) -> int | None:
     return days_since(created_at, today=today)
 
 
-def decision_time_minutes(raised_at: str, answered_at: str) -> int | None:
-    """Whole minutes between ``raised_at`` and ``answered_at``.
-
-    Sibling to :func:`age_days`: the queue's decision-time metric (issue
-    athenaeum#1990), consumed by :mod:`athenaeum.decision_budget`.
-    ``raised_at`` is an item's own raise timestamp —
-    ``PendingQuestion.raised_at`` when the item was agent-raised (issue
-    athenaeum#912), otherwise its ``created_at`` (every detector-raised
-    question, and every merge / audit / quarantine / proposed-rule record).
-    ``answered_at`` is the matching resolution timestamp each per-type
-    resolver stamps: ``PendingQuestion.answered_at``,
-    ``PendingMerge.answered_at``, or the ``answered_at`` key on the
-    audit-review, quarantine-release, and rule-proposal-disposition ledger
-    records.
-
-    Returns ``None`` — never a fabricated duration — when either timestamp
-    is missing or unparseable, or when the pair resolves to a negative
-    duration (clock skew or a malformed record, not a real decision time).
-    Delegates to :func:`athenaeum.metrics.minutes_between`; see
-    :func:`age_days` above for why the delegation (not a local
-    implementation importing this module from ``decision_budget``) matters.
-    """
-    from athenaeum.metrics import minutes_between
-
-    return minutes_between(raised_at, answered_at)
-
-
 #: Issue athenaeum#1992: filename of the persisted unified-schema mirror of
 #: every legacy merge + question record, written by
 #: :func:`migrate_legacy_queues`. Lives directly under ``wiki_root`` (the

@@ -21,6 +21,7 @@ from athenaeum.config import (
     resolve_owner,
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
+    resolve_person_registry_root,
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
@@ -1236,6 +1237,25 @@ class TestResolveExtraIntakeRoots:
         assert not [
             r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
         ]
+
+
+class TestResolvePersonRegistryRoot:
+    def test_empty_config_default_unchanged(self, tmp_path: Path) -> None:
+        """athenaeum#2446: the migration comment above this resolver was
+        rewritten (the closed athenaeum#1247 relocation it narrated is no
+        longer pending), but the default itself must not move — an empty
+        config still resolves the person-registry root to
+        ``<knowledge_root>/wiki``, the same directory
+        :class:`athenaeum.models.EntityIndex` scans.
+        """
+        resolved = resolve_person_registry_root(tmp_path, None)
+        assert resolved == tmp_path / "wiki"
+
+    def test_yaml_override_still_wins(self, tmp_path: Path) -> None:
+        override = tmp_path / "people"
+        config = {"person_registry": {"root": "people"}}
+        resolved = resolve_person_registry_root(tmp_path, config)
+        assert resolved == override
 
 
 class TestWriteDefaultConfig:

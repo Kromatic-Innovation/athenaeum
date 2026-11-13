@@ -25,8 +25,8 @@ list:
   (:func:`context_size_distribution`).
 - **decision time p50/p95** — over the ledger's ``(raised_at, answered_at)``
   pairs, via :func:`athenaeum.metrics.minutes_between` (the same shared
-  implementation :func:`athenaeum.decisions.decision_time_minutes`
-  delegates to — see the layering note below) (:func:`decision_time_percentiles`).
+  implementation this module calls directly — see the layering note
+  below) (:func:`decision_time_percentiles`).
 - **p95 item age** — over the LIVE queue's age, via
   :func:`athenaeum.metrics.days_since` (ditto, :func:`athenaeum.decisions.age_days`'s
   shared implementation) (:func:`item_age_p95_days`).
