@@ -2577,6 +2577,23 @@ class TestToolAnnotations:
         assert ann.destructive_hint is False
         assert ann.idempotent_hint is True
 
+    def test_resolve_merge_description_does_not_claim_source_deletion(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#2543: approving a `fold-into-existing` merge
+        TOMBSTONES the source wiki files (`status: folded`, `folded_into:`
+        set, file kept via `git add` -- see
+        `athenaeum.pending_merges.stamp_tombstone` callers) -- it never
+        deletes them. Guards the PUBLISHED tool description (what a caller
+        actually reads via `list_tools()`), not just the source docstring,
+        against this wording regressing."""
+        tools = self._tools_by_name(self._server(tmp_path))
+        description = tools["resolve_merge"].description
+        assert description is not None
+        lowered = description.lower()
+        assert "deletes the old source" not in lowered
+        assert "source deletes" not in lowered
+
 
 # ---------------------------------------------------------------------------
 # README <-> registered-tool parity (issue athenaeum#1380)

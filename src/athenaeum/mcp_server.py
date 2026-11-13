@@ -4771,9 +4771,9 @@ def create_server(
         decision as a decision-answer file under ``raw/answers/`` — the
         same conformant raw-intake record used for question answers and
         audit reviews. The actual merge apply — the write-kind dispatch,
-        checkbox flip, wikilink rewrite, source deletes, vector purge, and
-        provenance record described below — happens deterministically (no
-        LLM call) on the next ``athenaeum ingest-answers`` tick.
+        checkbox flip, wikilink rewrite, source tombstones, vector purge,
+        and provenance record described below — happens deterministically
+        (no LLM call) on the next ``athenaeum ingest-answers`` tick.
 
         Args:
             id: The id returned by ``list_pending_merges``.
@@ -4784,11 +4784,13 @@ def create_server(
                 draft body to the ALREADY-EXISTING canonical page, rewrites
                 every inbound ``[[old-slug]]`` wikilink to the canonical
                 slug, records the folded-away slugs as ``aliases:`` on the
-                canonical page, deletes the old source wiki files, and
-                purges their vectors from the search index (when a vector
-                backend is configured). Either way, flips the checkbox and
-                records a provenance entry naming the sources folded/merged
-                in. ``"reject"`` flips the checkbox and writes an honest,
+                canonical page, tombstones the old source wiki files
+                (``status: folded``, ``folded_into:`` set, file kept — issue
+                athenaeum#716, never deleted), and purges their vectors from
+                the search index (when a vector backend is configured).
+                Either way, flips the checkbox and records a provenance
+                entry naming the sources folded/merged in. ``"reject"``
+                flips the checkbox and writes an honest,
                 non-directional ``merge_rejected_with:`` declaration
                 (issue athenaeum#715 — never ``refines:``, which is reserved for
                 a genuine specialization verdict) into the first source
