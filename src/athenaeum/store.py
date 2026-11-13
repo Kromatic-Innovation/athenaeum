@@ -1007,10 +1007,9 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         operational_scope="store-durable",
         location="cache dir",
         source_ref=(
-            "decay_sweep.py:100 SWEEP_LEDGER_FILENAME — same reasoning as "
-            "never-ingest-refusals-ledger above: durable and not reconstructible, one "
-            "of the §2.4 duplicated appenders, but outside §5.2's named table rows, so "
-            "classified without relocation"
+            "decay_sweep.py:100 SWEEP_LEDGER_FILENAME — durable and not "
+            "reconstructible, one of the §2.4 duplicated appenders, but outside "
+            "§5.2's named table rows, so classified without relocation"
         ),
     ),
     ArtifactDeclaration(
