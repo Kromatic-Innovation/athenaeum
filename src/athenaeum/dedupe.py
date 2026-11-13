@@ -70,15 +70,30 @@ _SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md", "esq"}
 _MAX_KEYS_NUMERIC = {"warm_score", "meeting_count_24mo", "sent_count_24mo"}
 _MAX_KEYS_DATE = {"last_touch", "updated", "apollo_enriched_on"}
 
-# Apollo / LinkedIn / Google namespaces — coalesce (canonical wins).
-_APOLLO_KEYS = {
+# Person-dedupe strong-identifier + coalesced-namespace fields (issue
+# athenaeum#2472). Which enrichment vendor a deployment uses is deployment
+# policy, not engine behaviour -- these are supplied via config
+# (``dedupe.strong_identifier_keys``, see
+# :func:`athenaeum.config.resolve_strong_identifier_keys`), with the current
+# Apollo fields shipped as the DEFAULT so an unconfigured install reproduces
+# today's behaviour exactly. This tuple is the ONLY place a vendor-specific
+# frontmatter field name may appear in this module.
+#
+# The FIRST entry is the strong-IDENTIFIER field: two person pages sharing a
+# non-empty value there are a HIGH-confidence duplicate pair (mirrors the old
+# hardcoded ``apollo_id`` lookup in :func:`find_duplicate_persons`). EVERY
+# entry (including the first) is coalesced onto the canonical page on merge
+# (mirrors the old ``_APOLLO_KEYS`` namespace-coalesce set). An explicit
+# empty list (``dedupe.strong_identifier_keys: []``) disables both roles --
+# no identifier match, nothing coalesced -- with no error.
+_DEFAULT_STRONG_IDENTIFIER_KEYS: tuple[str, ...] = (
     "apollo_id",
     "apollo_headline",
     "apollo_location",
     "apollo_employment_history",
     "current_title",
     "current_company",
-}
+)
 _LINKEDIN_KEYS = {
     "linkedin_url",
     "linkedin_position_at_connect",
@@ -127,10 +142,12 @@ class DuplicatePair:
     Attributes:
         canonical_uid: uid of the wiki that wins the merge.
         absorbed_uid: uid of the wiki to be absorbed (deleted on apply).
-        match_signal: one of ``"apollo_id"``, ``"linkedin_url"``,
-            ``"google_contact"``, ``"name_exact"``, or an owner auto-bind
-            signal (``"owner_uid"`` / ``"owner_google_contact"`` /
-            ``"owner_name"`` / ``"owner_alias"`` / ``"owner_process"``).
+        match_signal: the configured strong-identifier field name
+            (``"apollo_id"`` by default; issue athenaeum#2472), or one of
+            ``"linkedin_url"``, ``"google_contact"``, ``"name_exact"``, or
+            an owner auto-bind signal (``"owner_uid"`` /
+            ``"owner_google_contact"`` / ``"owner_name"`` /
+            ``"owner_alias"`` / ``"owner_process"``).
         confidence: always ``"HIGH"`` for pairs returned by
             :func:`find_duplicate_persons` — kept on the dataclass for
             JSONL/YAML round-trip compatibility with the cwc worksheet.
@@ -304,7 +321,15 @@ def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | No
 # --- Wiki loading ---
 
 
-def _load_persons(wiki_root: Path) -> list[dict[str, Any]]:
+def _load_persons(wiki_root: Path, identifier_key: str | None) -> list[dict[str, Any]]:
+    """Load person pages under *wiki_root*.
+
+    ``identifier_key`` is the configured strong-identifier frontmatter field
+    (the first entry of ``dedupe.strong_identifier_keys``, or ``None`` when
+    the configured list is empty -- see
+    :data:`_DEFAULT_STRONG_IDENTIFIER_KEYS`). Its value lands on
+    ``"strong_id"`` for :func:`find_duplicate_persons` to group on.
+    """
     persons: list[dict[str, Any]] = []
     for path in sorted(wiki_root.glob("*.md")):
         if path.name.startswith("_"):
@@ -331,7 +356,7 @@ def _load_persons(wiki_root: Path) -> list[dict[str, Any]]:
                 "normalized": _normalize_name(name),
                 "emails": [str(e).lower() for e in emails],
                 "linkedin": _canonical_linkedin(str(meta.get("linkedin_url") or "")),
-                "apollo_id": str(meta.get("apollo_id") or ""),
+                "strong_id": str(meta.get(identifier_key) or "") if identifier_key else "",
                 "google_contact": str(meta.get("google_contact") or "").strip(),
                 "warm_score": meta.get("warm_score"),
                 "updated": str(meta.get("updated") or ""),
@@ -351,31 +376,45 @@ def _pair_key(uid_a: str, uid_b: str) -> tuple[str, str]:
 def _pick_canonical(
     a: dict[str, Any], b: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Apollo-enriched > higher warm_score > more emails > recently updated."""
+    """Carries the configured strong identifier > warm_score > emails > updated."""
 
     def score(p: dict[str, Any]) -> tuple[int, float, int, str]:
         try:
             ws = float(p["warm_score"] or 0)
         except (ValueError, TypeError):
             ws = 0.0
-        return (1 if p["apollo_id"] else 0, ws, len(p["emails"]), p["updated"])
+        return (1 if p["strong_id"] else 0, ws, len(p["emails"]), p["updated"])
 
     return (a, b) if score(a) >= score(b) else (b, a)
 
 
 def find_duplicate_persons(
-    wiki_root: Path, owner: dict[str, Any] | None = None
+    wiki_root: Path,
+    owner: dict[str, Any] | None = None,
+    strong_identifier_keys: Iterable[str] = _DEFAULT_STRONG_IDENTIFIER_KEYS,
 ) -> list[DuplicatePair]:
     """Surface HIGH-confidence duplicate-person pairs.
 
     HIGH-confidence signals (preserved from the cwc-side script):
 
-    - shared ``apollo_id``
+    - shared configured strong identifier (the FIRST entry of
+      *strong_identifier_keys* -- ``apollo_id`` by default; issue
+      athenaeum#2472)
     - shared canonicalized ``linkedin_url``
     - shared ``google_contact`` (issue athenaeum#263)
     - exact-match normalized ``name`` (group size 2 or 3 — name buckets
       with 4+ wikis are dropped here as common-name false-positives,
       matching the script's MEDIUM downgrade)
+
+    ``strong_identifier_keys`` (resolve it via
+    :func:`athenaeum.config.resolve_strong_identifier_keys`) lists the
+    frontmatter fields treated as strong identifiers for person dedupe; the
+    default reproduces today's shipped behaviour exactly via the current
+    Apollo fields (see :data:`_DEFAULT_STRONG_IDENTIFIER_KEYS`). Only the
+    FIRST entry drives matching here -- the full list additionally drives
+    merge-time coalescing in :func:`merge_duplicate_persons`. An empty list
+    disables the strong-identifier signal entirely (no error): pairs still
+    surface via ``linkedin_url`` / ``google_contact`` / name.
 
     When *owner* is supplied (see :func:`athenaeum.config.resolve_owner`)
     and the canonical owner page (``uid == owner["uid"]``) is present, any
@@ -383,14 +422,16 @@ def find_duplicate_persons(
     owner — the owner stays a singleton instead of fragmenting across
     process-context fragments and ``user_*`` aliases (issue athenaeum#263). The owner
     pass runs first and forces the configured owner as canonical, so a
-    coincidental apollo/name signal cannot make a fragment win the merge.
-    When *owner* is ``None`` this is fully inert.
+    coincidental strong-identifier/name signal cannot make a fragment win
+    the merge. When *owner* is ``None`` this is fully inert.
 
     The MEDIUM tier (fuzzy-name token Jaccard ≥ 0.8) is intentionally
     not surfaced through this API — that path requires human triage via
     the CSV worksheet workflow which lives in the cwc scripts.
     """
-    persons = _load_persons(wiki_root)
+    keys = tuple(strong_identifier_keys)
+    identifier_key = keys[0] if keys else None
+    persons = _load_persons(wiki_root, identifier_key)
     seen: dict[tuple[str, str], DuplicatePair] = {}
 
     def record(
@@ -403,7 +444,7 @@ def find_duplicate_persons(
             return
         key = _pair_key(a["uid"], b["uid"])
         if key in seen:
-            return  # first signal wins (owner > apollo > linkedin > gc > name)
+            return  # first signal wins (owner > strong-id > linkedin > gc > name)
         if forced_canonical is not None:
             canonical = forced_canonical
             absorbed = b if a["uid"] == forced_canonical["uid"] else a
@@ -430,14 +471,14 @@ def find_duplicate_persons(
                 if signal:
                     record(canonical_owner, p, signal, forced_canonical=canonical_owner)
 
-    by_apollo: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_strong_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in persons:
-        if p["apollo_id"]:
-            by_apollo[p["apollo_id"]].append(p)
-    for group in by_apollo.values():
+        if p["strong_id"]:
+            by_strong_id[p["strong_id"]].append(p)
+    for group in by_strong_id.values():
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                record(group[i], group[j], "apollo_id")
+                record(group[i], group[j], identifier_key or "")
 
     by_linkedin: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in persons:
@@ -628,10 +669,19 @@ def _merge_meta(
     absorbed: dict[str, Any],
     absorbed_uid: str,
     google_contact_keys: Iterable[str] = (),
+    strong_identifier_keys: Iterable[str] = _DEFAULT_STRONG_IDENTIFIER_KEYS,
     owner: dict[str, Any] | None = None,
     dropped: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Merge *absorbed*'s frontmatter into *canonical*'s.
+
+    ``strong_identifier_keys`` (resolve it via
+    :func:`athenaeum.config.resolve_strong_identifier_keys`; issue
+    athenaeum#2472) lists the frontmatter fields coalesced as the configured
+    vendor-enrichment namespace (canonical wins, absorbed-only carries
+    forward) -- the current Apollo fields by default (see
+    :data:`_DEFAULT_STRONG_IDENTIFIER_KEYS`), reproducing today's shipped
+    behaviour exactly. An empty list coalesces none of them.
 
     ``owner`` (see :func:`athenaeum.config.resolve_owner`) arms the
     owner-address guard (issue athenaeum#1739): when an owner is configured and
@@ -701,8 +751,9 @@ def _merge_meta(
             if absorbed.get(kspec) and not canonical.get(kspec):
                 out[kspec] = absorbed[kspec]
 
-    # Apollo + LinkedIn + social URL coalesce
-    for k in _APOLLO_KEYS | _LINKEDIN_KEYS | _SOCIAL_KEYS:
+    # Configured strong-identifier namespace (Apollo fields by default;
+    # issue athenaeum#2472) + LinkedIn + social URL coalesce
+    for k in set(strong_identifier_keys) | _LINKEDIN_KEYS | _SOCIAL_KEYS:
         merged_v = _coalesce(canonical.get(k), absorbed.get(k))
         if merged_v is not None:
             out[k] = merged_v
@@ -764,6 +815,7 @@ def _perform_merge(
     absorbed_path: Path,
     dry_run: bool,
     google_contact_keys: Iterable[str] = (),
+    strong_identifier_keys: Iterable[str] = _DEFAULT_STRONG_IDENTIFIER_KEYS,
     owner: dict[str, Any] | None = None,
     dropped: dict[str, int] | None = None,
 ) -> str:
@@ -783,6 +835,7 @@ def _perform_merge(
         ameta,
         absorbed_uid,
         google_contact_keys=google_contact_keys,
+        strong_identifier_keys=strong_identifier_keys,
         owner=owner,
         dropped=dropped,
     )
@@ -856,6 +909,7 @@ def merge_duplicate_persons(
     apply: bool = False,
     wiki_root: Path | None = None,
     google_contact_keys: Iterable[str] = (),
+    strong_identifier_keys: Iterable[str] = _DEFAULT_STRONG_IDENTIFIER_KEYS,
     owner: dict[str, Any] | None = None,
     contacts_root: Path | None = None,
 ) -> MergeReport:
@@ -874,6 +928,13 @@ def merge_duplicate_persons(
     :func:`athenaeum.config.resolve_google_contact_keys`. Empty (the default)
     merges on the generic key only.
 
+    ``strong_identifier_keys`` (issue athenaeum#2472; resolve it via
+    :func:`athenaeum.config.resolve_strong_identifier_keys`) lists the
+    person-dedupe vendor-enrichment namespace fields coalesced on merge --
+    the current Apollo fields by default (see
+    :data:`_DEFAULT_STRONG_IDENTIFIER_KEYS`), reproducing today's shipped
+    behaviour exactly. An empty list coalesces none of them, with no error.
+
     ``owner`` (resolve it via :func:`athenaeum.config.resolve_owner`) arms the
     owner-address guard (issue athenaeum#1739): an ``emails`` entry matching one of
     the owner's own addresses is never written onto a page that is not the
@@ -888,6 +949,7 @@ def merge_duplicate_persons(
     default) leaves the contacts surface untouched.
     """
     gc_keys = tuple(google_contact_keys)
+    si_keys = tuple(strong_identifier_keys)
     report = MergeReport(dry_run=not apply)
     contact_index = None
     if contacts_root is not None and Path(contacts_root).is_dir():
@@ -941,6 +1003,7 @@ def merge_duplicate_persons(
                 apath,
                 dry_run=not apply,
                 google_contact_keys=gc_keys,
+                strong_identifier_keys=si_keys,
                 owner=owner,
                 dropped=pair_dropped,
             )

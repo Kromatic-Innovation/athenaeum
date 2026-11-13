@@ -396,6 +396,23 @@ _CURATED: dict[str, dict[str, str]] = {
         # as two rows rather than shoehorned into one.
         "multi": "1",
     },
+    "resolve_strong_identifier_keys": {
+        "yaml_path": "`dedupe.strong_identifier_keys`",
+        "env_var": "—",
+        "cli_flag": "—",
+        "default": "the shipped Apollo fields -- `apollo_id`, `apollo_headline`, "
+        "`apollo_location`, `apollo_employment_history`, `current_title`, "
+        "`current_company` (see `athenaeum.dedupe._DEFAULT_STRONG_IDENTIFIER_KEYS`); "
+        "an explicit empty list (`[]`) disables vendor strong-identifier matching "
+        "and merge-time coalescing entirely",
+        "precedence": "`athenaeum.yaml` > code default",
+        # Generic invocation is `fn(None)`, which this resolver reports as
+        # `None` (unset -- the caller applies its own default; see the
+        # resolver's own docstring for why that differs from
+        # `resolve_google_contact_keys`'s always-empty default). `None`
+        # would read as "the default is nothing", which misdescribes the
+        # shipped behaviour -- curated instead.
+    },
 }
 
 # The two synthetic rows resolve_index_globs expands to.

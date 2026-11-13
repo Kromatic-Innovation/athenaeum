@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `deliverability_for_page`, `join_identifier` and `Deliverability` are now
   public API for reading address deliverability (athenaeum#2470).
+- Person dedupe's strong-identifier fields are now configurable
+  (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
+  fields (athenaeum#2472).
 
 ### Fixed
 
