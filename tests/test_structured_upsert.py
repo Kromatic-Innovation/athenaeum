@@ -849,12 +849,12 @@ FIELD_GROUP_CONFIG: dict = {
         "structured_upsert": {
             "person": {
                 "sections": [],
-                "set_keys": ["crm_deal_name", "crm_deal_amount"],
+                "set_keys": ["crm_deal_name", "crm_deal_amount", "crm_deal_stage"],
             }
         },
         "field_groups": {
             "person": {
-                "deal": ["crm_deal_name", "crm_deal_amount"],
+                "deal": ["crm_deal_name", "crm_deal_amount", "crm_deal_stage"],
             }
         },
     }
@@ -870,6 +870,7 @@ created: '2026-10-01'
 updated: '2026-10-01'
 crm_deal_name: Acme Renewal
 crm_deal_amount: '5000'
+crm_deal_stage: Negotiation
 ---
 
 # Dana Reyes
@@ -904,7 +905,11 @@ def test_declared_field_group_misfit_is_refused_and_keeps_both_values(
     tmp_path: Path, person_wiki: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """AC (a) Misfit detection: a second, different deal record for the same
-    person does not overwrite, interleave, or drop either value."""
+    person does not overwrite, interleave, or drop either value. This is the
+    "different source record" direction of the post-merge review of
+    athenaeum#2197 (defect 1): every comparable field (`crm_deal_name` AND
+    `crm_deal_amount`) disagrees -- nothing anchors this raw to the record
+    already on the page -- so it is still refused exactly as before."""
     raw = _raw(tmp_path, _second_deal_raw(), "deal2.md")
     with caplog.at_level(logging.WARNING):
         out = tier0_structured_upsert(
@@ -935,6 +940,46 @@ def test_matching_value_is_not_a_misfit(tmp_path: Path, person_wiki: Path) -> No
     )
     assert out is not None and out.status == "noop"
     assert out.field_group_misfits == ()
+
+
+def _stage_update_raw(stage: str = "Closed Won") -> str:
+    """Same deal as `PERSON_PAGE`, resending its unchanged `crm_deal_name`/
+    `crm_deal_amount` alongside an advanced `crm_deal_stage` -- the
+    "flattens each person's deal onto crm_deal_* fields" shape this
+    module's docstring describes, re-sent in full on every update."""
+    return f"""\
+---
+uid: person-dana-reyes
+type: person
+name: Dana Reyes
+access: public
+created: '2026-11-08'
+crm_deal_name: Acme Renewal
+crm_deal_amount: '5000'
+crm_deal_stage: {stage}
+---
+
+# Dana Reyes
+"""
+
+
+def test_same_record_update_applies_and_raises_no_misfit(tmp_path: Path, person_wiki: Path) -> None:
+    """Defect 1 (post-merge review of athenaeum#2197): an ordinary update to
+    the SAME deal -- its stage moving from one value to another while its
+    name/amount stay exactly as already held -- must apply normally, not be
+    misread as a second, conflicting record. `crm_deal_name` and
+    `crm_deal_amount` agreeing is the anchor that identifies this as the
+    record already on the page."""
+    raw = _raw(tmp_path, _stage_update_raw(), "stage_update.md")
+    out = tier0_structured_upsert(
+        raw, EntityIndex(person_wiki), person_wiki, PERSON_TYPES, config=FIELD_GROUP_CONFIG
+    )
+    assert out is not None and out.status == "applied"
+    assert out.field_group_misfits == ()
+    page_meta, _ = parse_frontmatter((person_wiki / f"{PERSON_UID}.md").read_text(encoding="utf-8"))
+    assert page_meta["crm_deal_stage"] == "Closed Won"
+    assert page_meta["crm_deal_name"] == "Acme Renewal"
+    assert page_meta["crm_deal_amount"] == "5000"
 
 
 def test_no_declared_groups_means_the_misfit_path_never_fires(
@@ -975,6 +1020,56 @@ def test_declared_group_for_a_different_page_type_does_not_apply_here(
     )
     assert out is not None and out.status == "applied"
     assert out.field_group_misfits == ()
+
+
+def test_dry_run_misfit_writes_no_proposal_ledger_entry(tmp_path: Path, person_wiki: Path) -> None:
+    """Defect 2 (post-merge review of athenaeum#2197): a `dry_run=True`
+    `process_one` call that hits a genuine field-group misfit must still
+    report the refusal (AC: a dry run observes, it doesn't adopt a
+    proposal silently either) but must NOT append to
+    `wiki/_schema_amendment_proposals.jsonl` or otherwise create a visible
+    pending decision -- a read-only preview must not mutate persistent
+    state."""
+    ledger_path = person_wiki / "_schema_amendment_proposals.jsonl"
+    raw = _raw(tmp_path, _second_deal_raw(), "deal2_dry_run.md")
+    result = process_one(
+        raw,
+        EntityIndex(person_wiki),
+        person_wiki,
+        MagicMock(name="llm"),
+        PERSON_TYPES,
+        [],
+        ["personal", "public"],
+        dry_run=True,
+        config=FIELD_GROUP_CONFIG,
+    )
+    assert result.skipped == ["structured-upsert-field-group-misfit"]
+    assert result.retain_raw is True
+    assert not ledger_path.exists()
+
+
+def test_live_run_misfit_does_write_a_proposal_ledger_entry(
+    tmp_path: Path, person_wiki: Path
+) -> None:
+    """Same raw as the dry-run test above, with `dry_run=False` (today's
+    default): the proposal ledger entry IS written -- confirms the dry-run
+    test above is actually exercising the guard, not a dead code path."""
+    ledger_path = person_wiki / "_schema_amendment_proposals.jsonl"
+    raw = _raw(tmp_path, _second_deal_raw(), "deal2_live_run.md")
+    result = process_one(
+        raw,
+        EntityIndex(person_wiki),
+        person_wiki,
+        MagicMock(name="llm"),
+        PERSON_TYPES,
+        [],
+        ["personal", "public"],
+        dry_run=False,
+        config=FIELD_GROUP_CONFIG,
+    )
+    assert result.skipped == ["structured-upsert-field-group-misfit"]
+    assert ledger_path.exists()
+    assert ledger_path.read_text(encoding="utf-8").strip()
 
 
 class TestResolvePageTypeFieldGroupsDirect:

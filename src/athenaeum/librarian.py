@@ -2638,13 +2638,17 @@ def process_one(
         if su_outcome.status == STRUCTURED_UPSERT_REFUSED:
             result.skipped.append(su_outcome.skipped_label)
             result.retain_raw = True
-            if su_outcome.field_group_misfits:
+            if su_outcome.field_group_misfits and not dry_run:
                 # Issue athenaeum#2197: a declared single-valued field-group
                 # misfit also raises, or grows, ONE schema-amendment
                 # proposal per (page type, field group) shape in the
                 # pending-decisions queue -- never a migration, never a
                 # config write (see athenaeum.schema_amendment_proposals's
-                # module docstring).
+                # module docstring). Gated on `dry_run` (post-merge review
+                # of athenaeum#2197): a read-only preview must not append to
+                # the on-disk proposal ledger or create a visible pending
+                # decision, mirroring every other side-effecting write this
+                # function already guards the same way.
                 record_field_group_misfits(
                     su_outcome.field_group_misfits,
                     wiki_root=wiki_root,

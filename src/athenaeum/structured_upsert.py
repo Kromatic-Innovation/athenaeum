@@ -36,10 +36,15 @@ Contract:
   flatten the structure this exists to preserve).
 - A raw whose value for a declared ``librarian.field_groups.<type>`` field
   collides with a different, already-held value is likewise REFUSED (issue
-  athenaeum#2197, ``REASON_FIELD_GROUP_MISFIT``): the whole raw, not merged
-  piecemeal, so neither value is lost. The outcome's ``field_group_misfits``
-  names what collided; :mod:`athenaeum.schema_amendment_proposals` is what
-  turns that into a growing pending-decisions proposal.
+  athenaeum#2197, ``REASON_FIELD_GROUP_MISFIT``) -- but only when NO other
+  field in the same group still agrees between the raw and the page; an
+  ordinary update to the record already on the page (e.g. the same deal's
+  stage moving forward while its name/amount stay put) applies normally
+  instead (post-merge review of athenaeum#2197). When a misfit does fire,
+  the whole raw is refused, not merged piecemeal, so neither value is
+  lost. The outcome's ``field_group_misfits`` names what collided;
+  :mod:`athenaeum.schema_amendment_proposals` is what turns that into a
+  growing pending-decisions proposal.
 """
 
 from __future__ import annotations
@@ -94,8 +99,10 @@ _BULLET_RE = re.compile(r"^[-*+][ \t]+")
 class FieldGroupMisfit:
     """One declared single-valued field-group slot a raw's value collided
     with (issue athenaeum#2197): the page already holds a DIFFERENT, non-empty
-    value for *field*, from what must be a different source record (the SAME
-    record would not emit two different values for the field it is about).
+    value for *field*, and -- per :func:`_detect_field_group_misfits`'s
+    group-level agreement check -- NO other field in the same group still
+    matches, so this is read as a different source record's data rather
+    than an ordinary update to the record already on the page.
 
     Pure data -- :func:`athenaeum.schema_amendment_proposals.record_field_group_misfits`
     is what turns a list of these into a growing pending-decisions proposal.
@@ -321,7 +328,8 @@ def _detect_field_group_misfits(
     raw: dict[str, Any],
 ) -> list[FieldGroupMisfit]:
     """Declared single-valued field-group conflicts between *raw* and *existing*
-    (issue athenaeum#2197).
+    (issue athenaeum#2197; record-identity narrowing from athenaeum#2197's
+    post-merge review).
 
     Only ``spec.set_keys`` are eligible: a field group names scalar,
     single-valued slots (the motivating case is a flat ``crm_*`` deal
@@ -330,11 +338,41 @@ def _detect_field_group_misfits(
     *page_type*) always returns ``[]`` regardless of field names or values --
     the "no implicit groups" guarantee lives here, not in the caller.
 
-    A misfit is: the field belongs to a declared group, the raw carries a
-    non-empty value for it, the page already holds a non-empty value for it,
-    and the two differ. Matching or absent-on-either-side values are not a
-    misfit -- they are the ordinary "no delta" / "first value" cases
-    ``_merge_frontmatter`` already handles correctly.
+    A field is a CANDIDATE misfit when: it belongs to a declared group, the
+    raw carries a non-empty value for it, the page already holds a non-empty
+    value for it, and the two differ. Matching or absent-on-either-side
+    values are never a candidate -- they are the ordinary "no delta" /
+    "first value" cases ``_merge_frontmatter`` already handles correctly.
+
+    A candidate only becomes a REPORTED misfit once per GROUP, not per
+    field, because this is where record identity is decided. Neither the
+    raw nor the page carries an explicit source-record id this deep in the
+    pipeline -- the raw's frontmatter is limited to the identity keys plus
+    whatever the spec's ``union_keys``/``set_keys``/``ordered_keys``/
+    ``keep_keys`` declare (an undeclared id field is refused upstream in
+    :func:`tier0_structured_upsert` as an unknown key), and
+    :mod:`athenaeum.registry`'s athenaeum#453 source-handle keys identify a
+    wiki ENTITY across adapters, not a sub-record within one page's field
+    group. Lacking that signal, this uses the group's OWN other declared
+    fields as the identity proxy the design doc already describes them as
+    ("a field group names a set of scalar fields that together hold ONE
+    record's worth of data"): if ANY other field in the same group has a
+    non-empty value on both sides that AGREES, the raw is treated as an
+    ordinary update to the record already on the page -- e.g. the same
+    deal's ``crm_deal_name``/``crm_deal_amount`` staying put while only
+    ``crm_deal_stage`` advances -- and no misfit is reported for ANY field
+    in that group, even the ones that differ; they apply normally. Only
+    when every comparable field in the group disagrees (no shared anchor)
+    is the group reported as a different source record's conflicting data,
+    exactly as before.
+
+    This is deliberately the conservative side of the tradeoff: a different
+    record that happens to coincidentally share one field's value with the
+    page's existing record (vanishingly unlikely for the motivating case --
+    two unrelated deals with an identical name AND amount) would wrongly be
+    let through rather than flagged. Closing that gap would need an
+    explicit per-record identity carried through the raw, which nothing in
+    this pipeline provides today.
     """
     if not type_groups:
         return []
@@ -343,7 +381,12 @@ def _detect_field_group_misfits(
         for group_name, fields in type_groups.items()
         for field_name in fields
     }
-    misfits: list[FieldGroupMisfit] = []
+    # Per group: candidate (key, existing, incoming) diffs, and whether any
+    # OTHER field in the same group agrees (non-empty on both sides, equal)
+    # -- the signal that this raw updates the record already on the page
+    # rather than naming a different one.
+    group_diffs: dict[str, list[tuple[str, Any, Any]]] = {}
+    group_has_agreement: dict[str, bool] = {}
     for key in spec.set_keys:
         group_name = field_to_group.get(key)
         if group_name is None:
@@ -354,7 +397,16 @@ def _detect_field_group_misfits(
         existing_value = existing.get(key)
         if existing_value in (None, "", [], {}):
             continue
-        if existing_value != incoming_value:
+        if existing_value == incoming_value:
+            group_has_agreement[group_name] = True
+        else:
+            group_diffs.setdefault(group_name, []).append((key, existing_value, incoming_value))
+
+    misfits: list[FieldGroupMisfit] = []
+    for group_name, diffs in group_diffs.items():
+        if group_has_agreement.get(group_name):
+            continue
+        for key, existing_value, incoming_value in diffs:
             misfits.append(
                 FieldGroupMisfit(
                     page_type=page_type,
@@ -503,7 +555,8 @@ def tier0_structured_upsert(
             REASON_FIELD_GROUP_MISFIT,
             "declared field group(s) "
             f"{sorted({m.field_group for m in misfits})} already hold a "
-            "different value from what must be a different source record",
+            "different value, with no other field in the group still "
+            "agreeing -- read as a different source record's data",
             misfits=tuple(misfits),
         )
 

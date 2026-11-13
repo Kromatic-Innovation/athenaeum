@@ -976,12 +976,17 @@ groups at all — the misfit path below never fires for it, however related its 
 names look.
 
 **Misfit detection** lives in `athenaeum.structured_upsert._detect_field_group_misfits`,
-called from `tier0_structured_upsert` before any merge is computed. When a raw's value
-for a declared group's field differs from a different, non-empty value the page already
-holds, the WHOLE raw is refused (`REASON_FIELD_GROUP_MISFIT`) rather than merged
-piecemeal — the page keeps its existing value untouched, and the raw itself (the only
-copy of the colliding record) stays on disk, so neither value is overwritten,
-interleaved, or lost.
+called from `tier0_structured_upsert` before any merge is computed. A raw's value for a
+declared group's field differing from a different, non-empty value the page already
+holds is only a MISFIT if no OTHER field in the same group still agrees between the raw
+and the page — an ordinary update to the record already on the page (the same deal's
+`crm_deal_stage` advancing while `crm_deal_name`/`crm_deal_amount` stay put) applies
+normally instead, because the raw and the page share no explicit record id this deep in
+the pipeline and the group's own other fields are the only identity signal available.
+When every comparable field in the group disagrees, the WHOLE raw is refused
+(`REASON_FIELD_GROUP_MISFIT`) rather than merged piecemeal — the page keeps its existing
+value untouched, and the raw itself (the only copy of the colliding record) stays on
+disk, so neither value is overwritten, interleaved, or lost.
 
 **The proposal** (`athenaeum.schema_amendment_proposals`) names the page type, the field
 group, a COUNT of affected pages (never the colliding values themselves), and a proposed
