@@ -2,6 +2,11 @@
 
 # Remote mode: serving athenaeum over HTTPS
 
+> **Experimental.** `athenaeum serve --transport http` and the `serve.auth.*`
+> configuration keys are experimental and are not covered by the
+> `athenaeum.__all__` semver promise, so their flags, keys and formats may change
+> in a minor release.
+
 Remote mode is `athenaeum serve --transport http` behind a TLS reverse proxy, with
 an external OIDC authorization server in front of it and the `remote` serve profile
 pinned on. It is how a host that cannot launch a local process — ChatGPT, the Grok
