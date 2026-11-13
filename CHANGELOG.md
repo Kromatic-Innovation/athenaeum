@@ -123,6 +123,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `athenaeum.yaml` still setting either key loads fine and is ignored with
   a warning, same as every other removed key.
 
+- Removed the page-split proposal decision type, which had no producer,
+  and its `librarian.page_split_proposals.heterogeneity_threshold` config
+  key (athenaeum#2465). `src/athenaeum/page_split_proposals.py` and its
+  entries in `decisions.py`, `decision_answers.py` and `decision_framing.py`
+  are deleted; nothing ever drafted one of these proposals, so the type
+  could never reach the decisions queue. A stale `librarian.page_split_
+  proposals.heterogeneity_threshold` yaml key is now ignored with a
+  warning, same as every other removed key; a pre-upgrade answer file
+  naming the removed type is skipped the same way any other unrecognized
+  decision type is. `split-oversize` and page decomposition are
+  unaffected.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available

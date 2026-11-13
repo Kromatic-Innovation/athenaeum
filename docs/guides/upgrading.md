@@ -200,6 +200,26 @@ replacement to set — the resolver always uses its built-in default.
 A stale `athenaeum.yaml` still setting either key loads fine; each key is
 ignored and logged with the same warning every other removed key gets.
 
+## I want to know what's gone: the page-split proposal decision type
+
+The page-split proposal decision type and its `librarian.page_split_
+proposals.heterogeneity_threshold` yaml key (and the matching
+`ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD` environment
+variable) are removed. Nothing ever drafted one of these proposals — the
+detector that would have raised them was never wired into the nightly
+run — so the type could never actually reach the decisions queue, and
+removing it changes no observed behavior.
+
+A stale `athenaeum.yaml` still setting the removed yaml key loads fine; the
+key is ignored and logged with the same warning every other removed key
+gets. If an existing `raw/answers/*.md` file answers a `page-split` item
+from before the upgrade, it is skipped with a logged warning rather than
+applied — the same fail-soft handling any other unrecognized decision type
+gets.
+
+This is unrelated to `split-oversize` and the deterministic heading-based
+page decomposition it drives, which are unaffected.
+
 ## I want to know about the other destructive-by-design command
 
 `athenaeum auto-memory prune --apply` is a second opt-in command that
