@@ -125,6 +125,7 @@ from athenaeum.models import (
     stamp_tombstone,
     tombstone_target,
 )
+from athenaeum.page_relations import RelationError, set_relation
 
 if TYPE_CHECKING:
     # Annotation-only (issue athenaeum#1627) — the real import stays local to
@@ -199,7 +200,7 @@ class PendingMerge:
     created_at: str
     resolved: bool
     raw_block: str
-    decision: Literal["approve", "reject", ""] = ""
+    decision: Literal["approve", "reject", "attach-as-subpage", ""] = ""
     note: str = ""
     also_affects: list[str] = field(default_factory=list)
     # Issue athenaeum#421: mechanical slug-collision classification recorded at proposal
@@ -832,7 +833,11 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         decision=(
             "approve"
             if decision == "approve"
-            else "reject" if decision == "reject" else ""
+            else (
+                "reject"
+                if decision == "reject"
+                else "attach-as-subpage" if decision == "attach-as-subpage" else ""
+            )
         ),
         note=note,
         write_kind=write_kind,
@@ -1141,7 +1146,7 @@ def list_pending_merges(
 
 def _rewrite_block_resolved(
     block_text: str,
-    decision: Literal["approve", "reject"],
+    decision: Literal["approve", "reject", "attach-as-subpage"],
     note: str,
     *,
     auto_applied: bool = False,
@@ -2555,7 +2560,7 @@ def _archive_stale_merge_block(
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
-    decision: Literal["approve", "reject"],
+    decision: Literal["approve", "reject", "attach-as-subpage"],
     note: str = "",
     *,
     wiki_root: Path | None = None,
@@ -2643,6 +2648,30 @@ def resolve_merge(
             the detector's declared-pair short-circuit suppresses the
             pair on future runs via the distinct
             ``"declared-merge-rejection"`` rationale.
+
+            ``"attach-as-subpage"`` (issue athenaeum#2539 — a fold decision's
+            third outcome besides merge/reject): folds nothing and writes
+            no tombstone. Sets the parent/child relation between the
+            proposal's target page (parent) and its other source page
+            (child) through :func:`athenaeum.page_relations.set_relation`,
+            with ``via="fold"`` — deliberately NOT ``via="attach"``, because
+            this attach arose from a fold decision read at a different page
+            size (issue athenaeum#1581's ruling that consolidate and
+            decompose are one decision), and athenaeum#2538 keeps a
+            ``via: fold`` child visible in entity listings by default where
+            a ``via: split`` child is hidden. Refused — with a reason, the
+            checkbox left unflipped, the item still pending — when: the
+            proposal's target name does not resolve to an existing page
+            (``attach_target_missing``); the proposal does not carry
+            exactly one OTHER source besides the target
+            (``attach_source_ambiguous``); either page is unreadable or
+            carries no ``uid:`` (``attach_source_unreadable`` /
+            ``attach_target_unreadable`` / ``attach_uid_missing``); or
+            :func:`set_relation` itself refuses the relation
+            (``attach_relation_refused`` — a second, different parent; a
+            cycle; a third nesting level; or an inactive target). On
+            success, a provenance record is appended naming
+            ``write_kind="attach-as-subpage"``.
         note: Optional human note attached to the decision block.
         wiki_root: Optional wiki root override (defaults to
             ``merges_path.parent``).
@@ -2672,11 +2701,14 @@ def resolve_merge(
         and ``"links_rewritten"`` (the count of sibling wiki files whose
         inbound wikilinks were repointed).
     """
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return {
             "ok": False,
             "error_code": "invalid_decision",
-            "message": f"decision must be 'approve' or 'reject', got {decision!r}",
+            "message": (
+                "decision must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {decision!r}"
+            ),
             "resolved_block": None,
         }
     if not merges_path.exists():
@@ -3001,6 +3033,89 @@ def resolve_merge(
             )
             if contact_fold.records_folded:
                 extra_response["contact_records_folded"] = contact_fold.records_folded
+    elif decision == "attach-as-subpage":
+        # Issue athenaeum#2539: attach the proposal's other source page as a
+        # sub-page of its target, instead of merging or rejecting. Folds
+        # nothing and writes no tombstone — the two pages stay exactly as
+        # they are, linked by the first-class parent/child relation
+        # (athenaeum#2535) rather than one of them being absorbed.
+        root = wiki_root or merges_path.parent
+        resolved_target = resolve_target_page(target_pm.merge_target_name, root)
+        if resolved_target is None:
+            return {
+                "ok": False,
+                "error_code": "attach_target_missing",
+                "message": (
+                    f"no existing page resolves to {target_pm.merge_target_name!r}; "
+                    "attach-as-subpage requires an existing target page to "
+                    "attach the other source under"
+                ),
+                "resolved_block": None,
+            }
+        other_sources = [
+            s for s in target_pm.sources if Path(s).resolve() != resolved_target.resolve()
+        ]
+        if len(other_sources) != 1:
+            return {
+                "ok": False,
+                "error_code": "attach_source_ambiguous",
+                "message": (
+                    "attach-as-subpage needs exactly one source distinct from "
+                    f"the target; got {len(other_sources)} (sources: "
+                    f"{target_pm.sources!r})"
+                ),
+                "resolved_block": None,
+            }
+        child_path = Path(other_sources[0])
+        try:
+            child_meta, _ = parse_frontmatter(child_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_source_unreadable",
+                "message": f"could not read source page {child_path}: {exc}",
+                "resolved_block": None,
+            }
+        try:
+            target_meta, _ = parse_frontmatter(resolved_target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_target_unreadable",
+                "message": f"could not read target page {resolved_target}: {exc}",
+                "resolved_block": None,
+            }
+        child_uid = str((child_meta or {}).get("uid", "") or "").strip()
+        target_uid = str((target_meta or {}).get("uid", "") or "").strip()
+        if not child_uid or not target_uid:
+            return {
+                "ok": False,
+                "error_code": "attach_uid_missing",
+                "message": (
+                    f"{'source' if not child_uid else 'target'} page has no "
+                    "uid: frontmatter; cannot set a relation"
+                ),
+                "resolved_block": None,
+            }
+        try:
+            # Deliberately via="fold", not via="attach" — see this function's
+            # own docstring and athenaeum#2538 for why the distinction matters.
+            set_relation(root, child_uid=child_uid, parent_uid=target_uid, via="fold")
+        except RelationError as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_relation_refused",
+                "message": str(exc),
+                "resolved_block": None,
+            }
+        record_merge_provenance(
+            root,
+            merge_id=target_pm.id,
+            write_kind="attach-as-subpage",
+            canonical_slug=resolved_target.stem,
+            source_paths=list(target_pm.sources),
+            auto_applied=auto_applied,
+        )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Issue athenaeum#715 (restating athenaeum#658's D3): a rejection means "these
         # two are NOT the same claim" — a completely different assertion
