@@ -55,14 +55,17 @@ What the suite assumes:
   different thing and does not satisfy those). Each is probed by
   `tests/test_shell_hooks.py`'s `_require`, which skips naming the missing
   tool.
-- **Run the suite with an isolated `HOME`**, e.g. `HOME=$(mktemp -d) pytest`.
-  The suite redirects `ATHENAEUM_CACHE_DIR` and `ATHENAEUM_SPEND_LEDGER` to a
-  throwaway directory (`tests/conftest.py`'s `pytest_configure` hook, narrowed
-  per test by the `_isolate_cache_dir` fixture), but some tests still read
-  `~/knowledge` or `~/.cache/athenaeum` directly. On a machine with a real
-  athenaeum install, about 26 tests fail without isolation (mostly
-  `tests/test_spend.py`, plus `tests/test_llm_schemas.py`). On a clean machine
-  the suite passes either way.
+- **You do NOT need to isolate `HOME`.** The suite redirects
+  `ATHENAEUM_CACHE_DIR` and `ATHENAEUM_SPEND_LEDGER` to a throwaway directory
+  (`tests/conftest.py`'s `pytest_configure` hook, narrowed per test by the
+  `_isolate_cache_dir` fixture), and every test that resolves a path from
+  `HOME` directly — the real default knowledge root or cache dir — is either
+  isolated the same way or, for the handful whose documented job is reading
+  the real tree, opted in via the `reads_live_knowledge_tree` marker.
+  `tests/fixtures/default_root_guard.py` enforces this: any OTHER open under
+  either real default root fails loudly instead of silently reading (or
+  writing) your actual knowledge base. The suite passes whether your machine
+  has a real athenaeum install or not (athenaeum#2452).
 - **Do NOT, however, carry ambient athenaeum or knowledge configuration in
   your environment.** `KNOWLEDGE_ROOT`, `KNOWLEDGE_WIKI_PATH`,
   `KNOWLEDGE_RAW_PATH` and the `ATHENAEUM_*` knobs are honoured by config

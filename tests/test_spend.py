@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from athenaeum import spend
+from athenaeum import _cmd_lifecycle, spend
 from athenaeum.cli import main
 from athenaeum.config import (
     resolve_spend_ledger_enabled,
@@ -55,6 +55,42 @@ def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ):
         monkeypatch.delenv(var, raising=False)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#2452: most ``main(["spend", ...])`` calls in this file
+    omit ``--path``, so ``cmd_spend`` falls through to argparse's
+    ``default=DEFAULT_KNOWLEDGE_ROOT`` (``athenaeum.config.DEFAULT_KNOWLEDGE_ROOT``,
+    ``~/knowledge``) and then does ``load_config(target) if target.exists()
+    else None``. On a machine with a real, populated ``~/knowledge`` (a real
+    ``athenaeum.yaml`` included), that default resolves to a real directory
+    and ``load_config`` really opens it — tripping the athenaeum#2183
+    default-root-open guard, and, were the guard not there, silently
+    absorbing the operator's actual spend config into tests that assume
+    "no config" (``test_human_output_omits_budget_window_when_unconfigured``
+    already carries a per-test fix for exactly this; this fixture covers
+    every OTHER call site in the file the same way, once, instead of
+    repeating that per-test patch).
+
+    ``_cmd_lifecycle.add_lifecycle_subparsers`` reads the module-global
+    ``DEFAULT_KNOWLEDGE_ROOT`` name at ``add_argument(default=...)`` call
+    time — which is every time ``main()`` builds a fresh parser — so
+    redirecting the name bound in ``_cmd_lifecycle`` here is enough; it does
+    not require patching ``athenaeum.config`` itself (and does not affect
+    ``--path``, which always overrides the default when a test supplies it
+    explicitly).
+
+    ``tmp_path`` guarantees the fake default does not exist, so
+    ``target.exists()`` is ``False`` and ``config`` stays ``None`` — the same
+    "unconfigured" state every test in this file already assumes,
+    independent of whatever the host's real ``~/knowledge`` contains.
+    """
+    monkeypatch.setattr(
+        _cmd_lifecycle, "DEFAULT_KNOWLEDGE_ROOT", tmp_path / "unused-default-knowledge-root"
+    )
 
 
 def _sub_usage(model: str = "claude-sonnet-4-6") -> TokenUsage:

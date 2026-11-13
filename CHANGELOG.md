@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of racing a concurrent `athenaeum run`'s wiki writes; dry-run mode
   is unaffected.
 
+- The test suite now passes on a machine with a real, populated athenaeum
+  install (a real `~/knowledge` and `~/.cache/athenaeum`), with no `HOME`
+  isolation wrapper. Several `tests/test_spend.py` CLI tests omitted
+  `--path`, so `cmd_spend` fell through to the real default knowledge root
+  and (when a real `athenaeum.yaml` lives there) actually opened it —
+  tripping the athenaeum#2183 default-root-open guard; a module-level
+  autouse fixture now redirects the default for the whole file.
+  `tests/test_llm_schemas.py::TestObservationsPathIsolation`'s nested-pytest
+  pollution check reads the real cache dir by design, so it now carries the
+  declared `reads_live_knowledge_tree` opt-in instead of tripping the same
+  guard. `CONTRIBUTING.md` no longer tells contributors to isolate `HOME`
+  (athenaeum#2452).
+
 - `athenaeum run` now honours the compile kill switch: `athenaeum disable`
   (scope `all` or `--compile`) and `ATHENAEUM_DISABLED` all make `run` exit 0
   with a no-op, without taking the run lock or touching the librarian
