@@ -8084,6 +8084,15 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
             ctx.wiki_root,
             auto_merge=auto_merge,
             dry_run=ctx.dry_run,
+            # Issue athenaeum#2514 AC1: the scan needs the run's config to
+            # resolve `librarian.rejected_merge_cooldown_days` — without it
+            # this proposer would honour prior rulings on a DIFFERENT decay
+            # schedule (the hard default) from the other two. Harmless for
+            # the only other thing this parameter gates, the athenaeum#2364
+            # content-comparator auto-apply: that path needs a comparator
+            # verdict of `duplicate`, which Gate 2 can only reach with an
+            # LLM client, and this call site passes none.
+            config=ctx.config,
             # Issue athenaeum#1627: audit each page in a collision group
             # before its merge proposal is written. Dry-run never
             # reaches write_pending_merge (see resolve_name_collisions'

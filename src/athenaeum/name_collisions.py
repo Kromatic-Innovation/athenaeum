@@ -36,7 +36,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from athenaeum.comparator import VERDICT_DUPLICATE, compare_pages, page_from_path
-from athenaeum.config import resolve_reversible_verdict_auto_apply_enabled
+from athenaeum.config import (
+    resolve_rejected_merge_cooldown_days,
+    resolve_reversible_verdict_auto_apply_enabled,
+)
 from athenaeum.models import is_tombstone, parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import (
     NAME_COLLISION_RATIONALE_PREFIX,
@@ -44,6 +47,7 @@ from athenaeum.pending_merges import (
     resolve_merge,
     write_pending_merge,
 )
+from athenaeum.prior_rulings import load_prior_rulings, match_rulings
 from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
 
 if TYPE_CHECKING:
@@ -609,10 +613,35 @@ def resolve_name_collisions(
     unambiguous = 0
     ambiguous = 0
     merged = 0
+    ruled_out = 0
+
+    # Issue athenaeum#2514 AC1: the third proposer now consults the same
+    # prior-ruling record the qualified-name scan
+    # (:func:`athenaeum.name_structure.propose_qualified_name_merges`) and
+    # the wiki-dedupe pair loop (:func:`athenaeum.wiki_dedupe.dedupe_wiki_pages`)
+    # already do. Before this, a pair a human rejected through this scan's
+    # own proposal was re-proposed by it the very next night -- one pair had
+    # been re-minted nightly for 19 consecutive nights. Loaded ONCE per run
+    # (the sidecar + its archive are parsed once, not once per collision)
+    # and consulted BEFORE any write, so a ruled-on group costs no
+    # ``write_pending_merge`` call, no audit-on-touch re-audit of its pages
+    # and no comparator confidence computation.
+    rulings = load_prior_rulings(wiki_root)
+    cooldown_days = resolve_rejected_merge_cooldown_days(config)
 
     if dry_run:
         for collision in collisions:
             canonical = canonical_page(collision)
+            if (
+                match_rulings(
+                    rulings,
+                    [str(page.path) for page in collision.pages],
+                    cooldown_days=cooldown_days,
+                ).in_force
+                is not None
+            ):
+                ruled_out += 1
+                continue
             verdict = classify_collision(collision)
             if verdict == "unambiguous" and not _fold_target_matches_canonical(
                 wiki_root, canonical
@@ -627,7 +656,8 @@ def resolve_name_collisions(
             "unambiguous": unambiguous,
             "ambiguous": ambiguous,
             "merged": 0,
-            "queued": len(collisions),
+            "ruled_out": ruled_out,
+            "queued": len(collisions) - ruled_out,
         }
 
     merges_path = wiki_root / "_pending_merges.md"
@@ -649,6 +679,20 @@ def resolve_name_collisions(
             continue
         canonical = canonical_page(collision)
         sources = [str(page.path) for page in collision.pages]
+        # Issue athenaeum#2514 AC1: a group a human already ruled on (or one
+        # a `merges revalidate --apply` sweep archived, AC2) is not
+        # re-proposed. Placed before `classify_collision` and before the
+        # comparator confidence below so a settled group costs nothing.
+        matched = match_rulings(rulings, sources, cooldown_days=cooldown_days)
+        if matched.in_force is not None:
+            ruled_out += 1
+            log.info(
+                "name-collision-scan-skip-ruled-out name=%r canonical=%s — %s",
+                collision.name,
+                canonical.path.name,
+                matched.in_force.describe(),
+            )
+            continue
         verdict = classify_collision(collision)
         if verdict == "unambiguous" and not _fold_target_matches_canonical(
             wiki_root, canonical
@@ -669,6 +713,15 @@ def resolve_name_collisions(
             f"share the name {collision.name!r}{type_note}; classified {verdict} "
             f"(canonical: {canonical.path.name})."
         )
+        if matched.expired is not None:
+            # Issue athenaeum#2514 AC1: the cooldown lapsed (or a source page
+            # changed since the archive), so this is a fresh question -- but
+            # the reviewer should see the earlier answer, same as the other
+            # two proposers already show it.
+            rationale += (
+                f" Earlier ruling on this group ({matched.expired.merge_id}): "
+                f"{matched.expired.describe()}; it no longer binds this scan."
+            )
         # Pass the canonical page's FULL raw text (frontmatter included),
         # not just its body. _apply_fold_into_existing's step 1 overwrites
         # target_path verbatim with draft_merged_body, and step 3 only
@@ -835,5 +888,6 @@ def resolve_name_collisions(
         "ambiguous": ambiguous,
         "merged": merged,
         "vanished": vanished,
-        "queued": len(collisions) - merged - vanished,
+        "ruled_out": ruled_out,
+        "queued": len(collisions) - merged - vanished - ruled_out,
     }

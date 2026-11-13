@@ -80,7 +80,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -244,6 +244,21 @@ class PendingMerge:
     # derivation — those still use ``merge_target_name`` — this is a pure
     # display override.
     display_name: str = ""
+    # Issue athenaeum#2514 AC2: the ``**Retired**:`` / ``**Archived**:``
+    # disposition a queue-hygiene sweep stamps on a block it moves to
+    # ``_pending_merges_archive.md`` without any human decision, split into
+    # its timestamp and its reason. ``""``/``""`` for every live block and
+    # for any block a human actually resolved (that disposition is carried
+    # by ``decision``/``answered_at`` instead).
+    archived_at: str = ""
+    archive_reason: str = ""
+    # Issue athenaeum#2514 AC2: the
+    # :func:`athenaeum.prior_rulings.source_content_digest` of this
+    # proposal's source pages AS THEY WERE when the sweep archived it —
+    # what makes "has a source page changed since the archive?" answerable
+    # without a clock. ``""`` for a live block and for anything archived
+    # before this field existed.
+    source_digest: str = ""
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
@@ -697,6 +712,68 @@ def _split_blocks(text: str) -> list[str]:
     )
 
 
+#: Issue athenaeum#2514 AC2: the block line a queue-hygiene sweep stamps an
+#: archived proposal with, so :func:`athenaeum.prior_rulings.load_prior_rulings`
+#: can later ask "have the source pages changed since this was archived?"
+#: without consulting a clock. Named here because this module owns the
+#: block format; the value it carries is computed by
+#: :func:`source_content_digest` just below.
+SOURCE_DIGEST_LINE_PREFIX = "**Source digest**:"
+
+
+def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
+    """The live file *source* names, or ``None`` when it names none.
+
+    A stored source is normally an absolute path captured when the proposal
+    was written, so a moved checkout invalidates it; the page's FILENAME
+    under *wiki_root* is therefore tried as well -- the same basename-keyed
+    fallback :func:`athenaeum.prior_rulings.source_key` relies on, and for
+    the same reason (the wiki is flat, so the basename is the stable
+    identity). A relative source is resolved against *wiki_root* too, which
+    :func:`_classify_source` already documents as a real stored shape.
+    """
+    direct = Path(source).expanduser()
+    if not direct.is_absolute():
+        direct = Path(wiki_root).expanduser() / direct
+    if direct.is_file():
+        return direct
+    candidate = Path(wiki_root).expanduser() / Path(source).name
+    return candidate if candidate.is_file() else None
+
+
+def source_content_digest(sources: Iterable[str], *, wiki_root: Path) -> str:
+    """A stable fingerprint of what every page in *sources* CONTAINS.
+
+    Order-independent (sources fold in basename order) and
+    location-independent (only the basename, never the stored absolute
+    path, enters the hash), so it survives a moved checkout exactly as
+    :func:`athenaeum.prior_rulings.source_key` does. A source naming no live
+    file contributes the digest of empty bytes, so a page that disappears --
+    or one that later reappears -- is itself a change.
+
+    Deliberately content-based rather than clock-based (issue athenaeum#2514):
+    a modification time is rewritten by a fresh clone and by any tool that
+    rewrites a file byte-identically, so it answers "was this file touched",
+    not "did this page change". The second question is the one the archived
+    ruling asks.
+    """
+    parts: list[bytes] = []
+    for source in sorted(set(sources), key=lambda s: Path(s).name):
+        path = resolve_source_path(source, wiki_root=wiki_root)
+        data = b""
+        if path is not None:
+            try:
+                data = path.read_bytes()
+            except OSError:  # pragma: no cover - raced deletion
+                data = b""
+        parts.append(
+            Path(source).name.encode("utf-8")
+            + b"\x00"
+            + hashlib.sha256(data).hexdigest().encode("ascii")
+        )
+    return hashlib.sha256(b"\x00".join(parts)).hexdigest()
+
+
 def _parse_block(block_text: str) -> PendingMerge | None:
     lines = block_text.splitlines()
     if not lines:
@@ -734,6 +811,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     auto_applied = False
     embedder = ""
     display_name = ""
+    archived_at = ""
+    archive_reason = ""
+    source_digest = ""
 
     in_sources = False
     in_draft = False
@@ -810,6 +890,24 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             answered_at = s.removeprefix("**Answered at**:").strip()
             continue
+        if s.startswith(SOURCE_DIGEST_LINE_PREFIX):
+            in_sources = False
+            source_digest = s.removeprefix(SOURCE_DIGEST_LINE_PREFIX).strip()
+            continue
+        if s.startswith("**Retired**:") or s.startswith("**Archived**:"):
+            # Issue athenaeum#2514 AC2: a queue-hygiene disposition, not a
+            # human decision. Both spellings are the same fact to a reader
+            # (the block is in the archive and nobody answered it); only
+            # the reason text after the em dash differs, and a bare
+            # ``**Archived**: <ts>`` (the shape ingest_resolved_merges
+            # writes) simply carries no reason.
+            in_sources = False
+            prefix = "**Retired**:" if s.startswith("**Retired**:") else "**Archived**:"
+            raw_disposition = s.removeprefix(prefix).strip()
+            archived_at, _, archive_reason = raw_disposition.partition(" — ")
+            archived_at = archived_at.strip()
+            archive_reason = archive_reason.strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -845,6 +943,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         embedder=embedder,
         display_name=display_name,
         answered_at=answered_at,
+        archived_at=archived_at,
+        archive_reason=archive_reason,
+        source_digest=source_digest,
     )
 
 
@@ -3619,7 +3720,10 @@ def revalidate_pending_merges(
                             )
                         )
                         satisfied_blocks.append(
-                            f"{block_text}\n\n**Archived**: {ts} — satisfied: "
+                            f"{block_text}\n\n"
+                            f"{SOURCE_DIGEST_LINE_PREFIX} "
+                            f"{source_content_digest(pm.sources, wiki_root=wiki_root)}\n"
+                            f"**Archived**: {ts} — satisfied: "
                             f"all sources already folded into "
                             f"{own_target_path.stem!r}\n"
                         )
@@ -3641,8 +3745,16 @@ def revalidate_pending_merges(
                 reason=reason,
             )
         )
+        # Issue athenaeum#2514 AC2: record WHAT the sources contained at the
+        # moment of the archive. Without it the archive is a ruling nobody
+        # can tell has gone stale, so the proposers could only ever ignore
+        # it -- which is exactly why a sweep that archived 17 proposals was
+        # followed by a night that re-proposed every one of them.
         retired_blocks.append(
-            f"{block_text}\n\n**Retired**: {ts} — gate: {reason}\n"
+            f"{block_text}\n\n"
+            f"{SOURCE_DIGEST_LINE_PREFIX} "
+            f"{source_content_digest(pm.sources, wiki_root=wiki_root)}\n"
+            f"**Retired**: {ts} — gate: {reason}\n"
         )
 
     result.kept = len(remaining)

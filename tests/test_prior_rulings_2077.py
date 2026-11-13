@@ -332,7 +332,11 @@ class TestBasePageVariant:
 
 
 class TestProvenance:
-    def test_retired_blocks_are_not_rulings(self, wiki: Path) -> None:
+    def test_retired_blocks_are_archive_rulings_not_human_ones(self, wiki: Path) -> None:
+        """Issue athenaeum#2514 AC2 supersedes this case's original
+        assertion (``load_prior_rulings(wiki) == []``). A retired block IS a
+        ruling now -- the queue-hygiene sweep's, not a human's -- so what
+        this guards is that it is never MISREAD as a human decision."""
         archive = wiki / "_pending_merges_archive.md"
         write_pending_merge(
             wiki / "_pending_merges.md",
@@ -349,7 +353,11 @@ class TestProvenance:
             encoding="utf-8",
         )
         (wiki / "_pending_merges.md").unlink()
-        assert load_prior_rulings(wiki) == []
+        (ruling,) = load_prior_rulings(wiki)
+        assert ruling.decision == "archived"
+        assert ruling.note == "stale"
+        assert "archived as stale on 2026-10-15" in ruling.describe()
+        assert "by a human" not in ruling.describe()
 
     def test_open_proposal_is_not_a_ruling(self, wiki: Path) -> None:
         propose_qualified_name_merges(wiki)
