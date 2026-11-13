@@ -400,7 +400,7 @@ def enumerate_entities(
     Args:
         wiki_root: Compiled wiki directory.
         cache_dir: Search index cache directory (the FTS5 index is built/
-            refreshed here — same directory ``recall``/``rebuild-index`` use).
+            refreshed here — same directory ``recall``/``reindex`` use).
         entity_type: The declared entity class to enumerate (a page's
             ``type:``). Required — there is no "enumerate everything" mode;
             see the issue's "no proliferating typed interfaces" motivation
@@ -461,7 +461,7 @@ def enumerate_entities(
 
     # Issue athenaeum#965 (AC amendment 3): read the converged filterable-metadata
     # store athenaeum#964 built. Ensure it is current (cheap incremental build —
-    # the same manifest-diff machinery `recall`/`rebuild-index` already use),
+    # the same manifest-diff machinery `recall`/`reindex` already use),
     # then narrow to this type's candidates with a plain indexed WHERE — never
     # FTS5 MATCH/ranking.
     backend = FTS5Backend()

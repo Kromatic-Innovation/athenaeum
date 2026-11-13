@@ -73,8 +73,7 @@ from athenaeum._cli_shared import (
 
 # Subcommand name -> (owning module, its `add_*_subparser` loader function
 # name). Keys are every name `build_parser()` registers on the top-level
-# subparsers action, aliases included (`reindex`'s `rebuild-index` alias is
-# both a key here, same target). This is intentionally a literal table, not
+# subparsers action. This is intentionally a literal table, not
 # something extracted from each module at runtime — extracting it without
 # importing the module is exactly the thing we're avoiding. Kept honest by
 # `TestSubcommandLoaderRegistryStaysInSync` in `tests/test_cli.py`, which
@@ -103,10 +102,8 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "ingest-answers": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "ingest-merges": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "reresolve-questions": ("athenaeum._cmd_pending", "add_pending_subparsers"),
-    "dedup-oversize-escalations": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "dedupe": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "claims": ("athenaeum._cmd_curate", "add_curate_subparsers"),
-    "auto-memory": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "decay-sweep": ("athenaeum._cmd_decay", "add_decay_subparser"),
     "decompose-page": (
         "athenaeum._cmd_decompose_page",
@@ -168,14 +165,12 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "context": ("athenaeum._cmd_context", "add_context_subparser"),
     "convergence": ("athenaeum._cmd_convergence", "add_convergence_subparser"),
     "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
-    "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
     "compile": ("athenaeum._cmd_index", "add_index_subparsers"),
     "registry": ("athenaeum._cmd_index", "add_index_subparsers"),
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
     "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
     "attribution": ("athenaeum._cmd_attribution", "add_attribution_subparser"),
-    "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
     "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
     "subject-population": (
@@ -232,7 +227,6 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
-    from athenaeum._cmd_paste_cleanup import add_paste_cleanup_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
     from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
@@ -274,9 +268,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_doctor_subparser(subparsers)  # doctor (issue athenaeum#2298)
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_explain_routing_subparser(subparsers)  # explain-routing (issue athenaeum#1176)
-    # ingest-answers, ingest-merges, reresolve-questions, dedup-oversize-escalations
-    add_pending_subparsers(subparsers)
-    add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
+    add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
+    add_curate_subparsers(subparsers)  # dedupe, claims
     add_decay_subparser(subparsers)  # decay-sweep
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
     add_split_oversize_subparser(subparsers)  # split-oversize (issue athenaeum#2078)
@@ -299,7 +292,6 @@ def build_parser() -> argparse.ArgumentParser:
     # by athenaeum#2456. See docs/guides/upgrading.md for the mapping.
     add_decisions_subparser(subparsers)  # decisions
     add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
-    add_paste_cleanup_subparser(subparsers)  # paste-cleanup (issue athenaeum#1717)
     add_schema_subparser(subparsers)  # schema migrate (issue athenaeum#1628)
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom
@@ -337,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_subject_population_subparser(subparsers)  # subject-population (issue athenaeum#1944)
     add_index_subparsers(
         subparsers
-    )  # reindex/rebuild-index, compile, registry, ingest, session-end
+    )  # reindex, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
     # attribution show|place|ack-observe-report (issue athenaeum#2212)

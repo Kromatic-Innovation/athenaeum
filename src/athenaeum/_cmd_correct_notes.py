@@ -3,8 +3,8 @@
 person/company page (issue athenaeum#1976), or drop a whole ``##`` section
 by its ``section_id`` (issue athenaeum#2236).
 
-Apply-by-default, UNLIKE ``decompose-page``/``paste-cleanup``/
-``retire-pages``: the bare command resolves every record in ``--batch``
+Apply-by-default, UNLIKE ``decompose-page``/``retire-pages``: the bare
+command resolves every record in ``--batch``
 against one snapshot of the named page and, when every id and target
 resolve, writes the moves/drops and records one ledger line.
 ``--dry-run`` reports counts only and changes nothing. The domain logic —

@@ -36,7 +36,7 @@ def knowledge_with_wiki(tmp_path: Path) -> Path:
     return knowledge
 
 
-class TestRebuildIndex:
+class TestReindex:
     def test_builds_fts5_index(
         self,
         knowledge_with_wiki: Path,
@@ -46,7 +46,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -72,7 +72,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -91,7 +91,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -118,7 +118,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -134,7 +134,7 @@ class TestRebuildIndex:
         nonexistent = tmp_path / "does-not-exist"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(nonexistent),
                 "--cache-dir",
@@ -158,7 +158,7 @@ class TestRebuildIndex:
         )
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -167,6 +167,29 @@ class TestRebuildIndex:
         )
         assert rc == 1
         assert "Unknown search backend" in capsys.readouterr().err
+
+    def test_rebuild_index_alias_is_not_registered(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#2459: the `rebuild-index` back-compat alias for
+        `reindex` is removed with no deprecation period. argparse must treat
+        it exactly like any other unknown command — exit 2, "invalid
+        choice" on stderr — not dispatch to the `reindex` handler."""
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        assert "rebuild-index" not in top.choices
+        assert "reindex" in top.choices
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["rebuild-index", "--path", "/nonexistent"])
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid choice" in err
+        assert "rebuild-index" in err  # argparse echoes the bad token
 
 
 class TestServe:
@@ -362,7 +385,7 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("fts5", tmp_path)
         err = capsys.readouterr().err
         assert "search_backend=fts5" in err
-        assert "rebuild-index" in err
+        assert "reindex" in err
 
     def test_fts5_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -381,7 +404,7 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("vector", tmp_path)
         err = capsys.readouterr().err
         assert "search_backend=vector" in err
-        assert "rebuild-index" in err
+        assert "reindex" in err
 
     def test_vector_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -659,14 +682,14 @@ class TestRecall:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Recall with fts5 must use the on-disk cache the user built with
-        ``athenaeum rebuild-index``. Regression guard: if the handler
+        ``athenaeum reindex``. Regression guard: if the handler
         silently falls back to keyword when the fts5 index is missing,
         validation harnesses reading `athenaeum.yaml: vector` would see
         wrong results."""
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -676,7 +699,7 @@ class TestRecall:
             ]
         )
         assert rc == 0
-        capsys.readouterr()  # drain rebuild-index output
+        capsys.readouterr()  # drain reindex output
 
         rc = main(
             [
@@ -1458,7 +1481,7 @@ class TestAsOfView:
             )
         assert "invalid ISO date" in capsys.readouterr().err
 
-    def test_rebuild_index_as_of_note(
+    def test_reindex_as_of_note(
         self,
         temporal_knowledge: Path,
         tmp_path: Path,
@@ -1467,7 +1490,7 @@ class TestAsOfView:
         cache = tmp_path / "asof-cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(temporal_knowledge),
                 "--cache-dir",
@@ -1962,3 +1985,135 @@ class TestRemovedSurfaces:
             "DEPRECATED_CLI_SURFACE_REMOVAL_VERSION",
         ):
             assert not hasattr(config, name), name
+
+
+class TestSevenOneShotRepairCommandsRemoved:
+    """Seven one-shot repair commands, each written around one now-fixed
+    engine defect, are removed outright (issue athenaeum#2466): no deprecation
+    period, no replacement — argparse's normal unknown-command/unknown-choice
+    error is what a caller gets.
+
+    ``storage`` and ``auto-memory`` are command GROUPS, not single verbs:
+    ``auto-memory`` had no subcommand left once ``prune``/``prune-index``/
+    ``prune-code-entities`` were all removed, so the whole noun is gone;
+    ``storage`` keeps ``migrate-pii``/``lint-pii``/``lint-mapping`` and only
+    loses its ``audit-h1-redaction``/``prune-dispositions`` sub-choices.
+    """
+
+    #: (top-level argv, expected invalid-choice token). A top-level verb
+    #: argparse rejects before ever reaching a sub-subparser.
+    REMOVED_TOP_LEVEL_INVOCATIONS = [
+        (["paste-cleanup"], "paste-cleanup"),
+        (["dedup-oversize-escalations"], "dedup-oversize-escalations"),
+        (["auto-memory", "prune"], "auto-memory"),
+        (["auto-memory", "prune-index"], "auto-memory"),
+        (["auto-memory", "prune-code-entities"], "auto-memory"),
+    ]
+
+    #: (``storage`` sub-argv, expected invalid-choice token) — ``storage``
+    #: itself stays registered, so these are rejected one level down.
+    REMOVED_STORAGE_SUB_INVOCATIONS = [
+        (["storage", "audit-h1-redaction"], "audit-h1-redaction"),
+        (["storage", "prune-dispositions"], "prune-dispositions"),
+    ]
+
+    def _top_level_choices(self) -> set[str]:
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        return set(top.choices)
+
+    def test_none_of_the_seven_is_a_top_level_choice(self) -> None:
+        choices = self._top_level_choices()
+        assert "paste-cleanup" not in choices
+        assert "dedup-oversize-escalations" not in choices
+        assert "auto-memory" not in choices
+        # Positive control: a sibling command registered by the SAME
+        # grouping module (_cmd_curate) still is, so this cannot pass on an
+        # empty/broken parser.
+        assert "dedupe" in choices
+        assert "claims" in choices
+
+    def test_storage_keeps_its_live_subcommands_only(self) -> None:
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        storage = top.choices["storage"]
+        sub = next(
+            action
+            for action in storage._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        assert "audit-h1-redaction" not in sub.choices
+        assert "prune-dispositions" not in sub.choices
+        # Positive control: storage's other subcommands are untouched.
+        assert "migrate-pii" in sub.choices
+        assert "lint-pii" in sub.choices
+        assert "lint-mapping" in sub.choices
+
+    def test_not_in_the_lazy_dispatch_registry(self) -> None:
+        from athenaeum.cli import _SUBCOMMAND_LOADERS
+
+        assert "paste-cleanup" not in _SUBCOMMAND_LOADERS
+        assert "dedup-oversize-escalations" not in _SUBCOMMAND_LOADERS
+        assert "auto-memory" not in _SUBCOMMAND_LOADERS
+        assert "dedupe" in _SUBCOMMAND_LOADERS
+        assert "storage" in _SUBCOMMAND_LOADERS
+
+    @pytest.mark.parametrize(
+        "argv,token",
+        REMOVED_TOP_LEVEL_INVOCATIONS,
+        ids=lambda v: v if isinstance(v, str) else " ".join(v),
+    )
+    def test_invoking_a_removed_top_level_command_is_an_unknown_choice_error(
+        self, argv: list[str], token: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert f"invalid choice: '{token}'" in err
+
+    @pytest.mark.parametrize(
+        "argv,token",
+        REMOVED_STORAGE_SUB_INVOCATIONS,
+        ids=lambda v: v if isinstance(v, str) else " ".join(v),
+    )
+    def test_invoking_a_removed_storage_subcommand_is_an_unknown_choice_error(
+        self, argv: list[str], token: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert f"invalid choice: '{token}'" in err
+
+    def test_the_handler_modules_are_deleted(self) -> None:
+        import importlib.util
+
+        assert importlib.util.find_spec("athenaeum._cmd_paste_cleanup") is None
+        assert importlib.util.find_spec("athenaeum.paste_cleanup") is None
+        assert importlib.util.find_spec("athenaeum.filename_entity_prune") is None
+
+    def test_the_kept_sibling_commands_still_work(self) -> None:
+        """``recover-parked``, ``quarantine requeue``, ``repair
+        --contact-records``, ``pii-restore``, ``decisions migrate`` and
+        ``recovery-yield`` are explicitly in scope to stay unchanged — assert
+        each still parses (``--help`` never mutates anything and exits 0)."""
+        for argv in (
+            ["recover-parked", "--help"],
+            ["quarantine", "requeue", "--help"],
+            ["repair", "--help"],
+            ["pii-restore", "--help"],
+            ["decisions", "--help"],
+            ["recovery-yield", "--help"],
+        ):
+            with pytest.raises(SystemExit) as excinfo:
+                main(argv)
+            assert excinfo.value.code == 0, " ".join(argv)

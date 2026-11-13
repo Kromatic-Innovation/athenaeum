@@ -523,7 +523,6 @@ class AmbiguousYamlKeyError(ValueError):
 #: a new entry is a decision to document a name/key divergence, not a way to
 #: silence the leaf-match check.
 _YAML_KEY_OVERRIDES: dict[str, str] = {
-    "resolve_live_delta_enabled": "librarian.delta.live_client",
     "resolve_push_token_budget": "push_budget.tokens_per_turn",
     "resolve_screening": "screening.medical.action",
 }
@@ -539,8 +538,9 @@ def _leaf_match_len(leaf_tokens: list[str], key: str) -> int:
     ``resolve_<leaf>`` is named for its key's last segment, but the resolver
     name often spells more of the path (``resolve_spend_max_tokens_per_run``
     -> ``spend.max_tokens_per_run``; ``resolve_off_corpus_adapter_name`` ->
-    ``off_corpus.adapter``) or carries a suffix (``resolve_delta_enabled`` ->
-    ``librarian.delta``). The key's last segment must appear as a contiguous
+    ``off_corpus.adapter``) or carries a suffix
+    (``resolve_delta_max_affected_clusters`` ->
+    ``librarian.delta.max_affected_clusters``). The key's last segment must appear as a contiguous
     run of ``_``-separated tokens in the leaf; each further trailing segment
     that still extends the contiguous run adds its tokens, so the key that
     explains MORE of the resolver name outranks one that shares only the final
@@ -636,7 +636,6 @@ _YAML_PATH_DECLARED: dict[str, str | None] = {
     "resolve_model_rates": "pricing",
     "resolve_dimensions": "dimensions",
     "resolve_embedding_model": "vector.embedding_model",
-    "resolve_qualified_name_scan_enabled": "librarian.qualified_name_scan",
     "resolve_retention_pack_overrides": "erasure.retention_packs",
     "resolve_authority_grant_implications": "librarian.authority_grant_implications",
 }

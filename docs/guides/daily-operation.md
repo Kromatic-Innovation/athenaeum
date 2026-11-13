@@ -27,8 +27,7 @@ athenaeum reindex             # --incremental hash-diff delta
 `ingest --incremental` tracks a content-hash stamp
 (`~/.cache/athenaeum/ingest-manifest.json`), so it's a fast no-op when
 nothing has changed. Pre-structured intake compiles with no LLM cost.
-`reindex` is the canonical name; `rebuild-index` is a back-compat alias for
-the exact same command. Both also take `--full` (recompile/rebuild from
+Both also take `--full` (recompile/rebuild from
 scratch) and `--session <id>` (scope to one session) — see the
 [CLI reference](../reference/cli.md#athenaeum-ingest) for every flag.
 
@@ -120,23 +119,6 @@ for the full loop. Both are idempotent and should be scheduled
 periodically — this is exactly the archival step that, left unrun, let a
 live sidecar file grow into the millions of lines in production before
 these commands existed.
-
-## I want to retire operational scratch pages
-
-`auto-memory prune` retires operational/ephemeral `wiki/auto-*.md` pages
-(throwaway scratch scopes, install-token boilerplate, anything flagged
-`ephemeral: true`), using the same classifier the intake gate applies:
-
-```bash
-athenaeum auto-memory prune              # dry-run: prints kill-list + retained-list
-athenaeum auto-memory prune --apply      # git rm the kill-list, rebuild the recall index
-```
-
-Dry-run is the default and exits `2` when candidates exist (a usable CI /
-sign-off signal), `0` when there's nothing to prune. `--apply` scopes its
-commit to exactly the kill-list, so unrelated staged work is never swept
-in. Recovery is git-only — the command refuses to run outside a git repo
-and never hard-deletes.
 
 ## I want to archive expired daily-bucket pages
 

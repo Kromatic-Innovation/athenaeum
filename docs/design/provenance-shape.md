@@ -580,7 +580,7 @@ It is **read-only**: no resolver decision, no wiki mutation. Two surfaces:
   and honors `as_of` directly. A final temporal backstop re-checks each hit's
   fresh on-disk frontmatter against `as_of`, so the printed view is exact
   regardless of backend build state.
-- **`athenaeum rebuild-index --as-of YYYY-MM-DD --cache-dir <scratch>`.** Builds a
+- **`athenaeum reindex --as-of YYYY-MM-DD --cache-dir <scratch>`.** Builds a
   persistent as-of index in a scratch dir (`search.build_index(..., as_of=...)` on
   all backends; the `build_fts5_index` / `build_vector_index` convenience wrappers
   accept an ISO string). Point `--cache-dir` at a scratch path so the live index
@@ -824,7 +824,7 @@ decay-sweep` CLI) periodically archives EXPIRED `bucket: daily` pages —
 `weekly` / `durable` / unbucketed pages are never touched. Makes ZERO LLM
 calls (no `client`/model parameter exists anywhere in the module). Mirrors
 the existing git-retire precedent exactly
-(`auto_memory_prune.apply_prune`'s refuse-without-`.git` gate,
+(`retire.py`'s refuse-without-`.git` gate,
 `pending_merges._apply_fold_into_existing`'s two-commit
 snapshot-then-`git rm` shape, issue athenaeum#947) — archival is git-rm removal
 (never an in-tree tombstone marker, which would need its own new filtering

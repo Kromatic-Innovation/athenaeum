@@ -963,6 +963,105 @@ class TestLoadConfig:
             for r in caplog.records
         ), caplog.text
 
+    def test_removed_relatedness_writer_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2461: ``librarian.relatedness_writer`` is removed; a
+        stale ``athenaeum.yaml`` carrying it loads fine and gets the same
+        loud, specific WARNING every other removed librarian key gets."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  relatedness_writer: false\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["relatedness_writer"] is False
+        assert any(
+            "relatedness_writer" in r.message and "athenaeum#2461" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_removed_name_collision_scan_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2461: ``librarian.name_collision_scan`` is removed."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  name_collision_scan: false\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["name_collision_scan"] is False
+        assert any(
+            "name_collision_scan" in r.message and "athenaeum#2461" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_removed_qualified_name_scan_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2461: ``librarian.qualified_name_scan`` is removed."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  qualified_name_scan: false\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["qualified_name_scan"] is False
+        assert any(
+            "qualified_name_scan" in r.message and "athenaeum#2461" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_removed_nested_delta_enabled_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2461: ``librarian.delta.enabled`` is a NESTED removed
+        key (under ``librarian.delta``, which still carries live siblings
+        like ``max_affected_clusters``) — the warning must still fire, and
+        the warning message must name the full dotted path."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  delta:\n    enabled: false\n    max_affected_clusters: 3\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["delta"]["enabled"] is False
+        assert cfg["librarian"]["delta"]["max_affected_clusters"] == 3
+        assert any(
+            "delta.enabled" in r.message and "athenaeum#2461" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_removed_nested_delta_live_client_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2461: ``librarian.delta.live_client`` is a NESTED
+        removed key, same shape as ``librarian.delta.enabled`` above."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  delta:\n    live_client: false\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["delta"]["live_client"] is False
+        assert any(
+            "delta.live_client" in r.message and "athenaeum#2461" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_no_warning_for_live_delta_sibling_key(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A ``librarian.delta`` sibling key that was never removed (for
+        example ``max_affected_clusters``) must not trip the nested-key
+        warning just because it shares the ``delta`` section."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  delta:\n    max_affected_clusters: 3\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            load_config(tmp_path)
+        assert not [
+            r
+            for r in caplog.records
+            if "delta.enabled" in r.message or "delta.live_client" in r.message
+        ]
+
     def test_no_warning_when_removed_key_absent(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -25,9 +25,9 @@ writer stamped.** Since issue athenaeum#1576 a compile-time writer
 (``athenaeum.relatedness.stamp_related_edges``, called from
 ``librarian.py:1694``) stamps ``related:`` rows with
 ``role: term-overlap`` onto every NEWLY CREATED entity, by mutual k-NN over
-corpus-weighted distinctive-term overlap, gated by
-``resolve_relatedness_writer_enabled`` (DEFAULT ON) above a 50-page index
-floor. The eval corpus's ``core`` scale is ~96 pages, so the writer FIRES on
+corpus-weighted distinctive-term overlap, always on (athenaeum#2461), gated
+only by a 50-page index floor. The eval corpus's ``core`` scale is ~96
+pages, so the writer FIRES on
 every run of this layer.
 
 That is exactly the confound this layer must not fall into. A librarian that
