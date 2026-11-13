@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum outbound-lint`` — outbound-draft PII lint CLI (issue athenaeum#455).
 
-Mirrors ``athenaeum authority`` / ``athenaeum merges`` in shape: a thin CLI
+Mirrors ``athenaeum authority`` / ``athenaeum decisions`` in shape: a thin CLI
 dispatcher over the library functions in :mod:`athenaeum.outbound_pii`, with no
 detection logic of its own.
 

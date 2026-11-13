@@ -11450,7 +11450,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # entries queued BEFORE the athenaeum#400/#421 gate tightened that the pipeline
     # would never propose today. Runs in DRY-RUN here (never mutates the queue
     # unprompted) so a withdrawn-and-regrown queue's junk is visible from the
-    # first night, and names the one-command ``athenaeum merges revalidate
+    # first night, and names the one-command ``athenaeum decisions revalidate
     # --apply`` remedy. Best-effort: never breaks a run.
     if not ctx.dry_run:
         try:
@@ -11464,7 +11464,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                 log.warning(
                     "pending-merge queue: %d unresolved proposal(s) the current "
                     "suppression gate would retire (queued before the gate "
-                    "tightened) — run `athenaeum merges revalidate --apply` to "
+                    "tightened) — run `athenaeum decisions revalidate --apply` to "
                     "archive them",
                     len(_reval.retired),
                 )

@@ -558,7 +558,7 @@ def _scrub_merge_sidecar(
         print(
             f"warning: could not scrub {merges_path} ({exc}); the migrated "
             "contact data may still be embedded in a pending merge proposal. "
-            "Run `athenaeum merges scrub-pii --apply` once resolved.",
+            "Run `athenaeum decisions scrub-pii --apply` once resolved.",
             file=sys.stderr,
         )
         return

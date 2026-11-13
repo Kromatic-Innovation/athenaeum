@@ -11,7 +11,7 @@ Factoring rule: adding a name to ``__all__`` is a public-API commitment: do it
 only for something a library consumer (not the CLI) genuinely needs, and keep
 the list in sync with the imports above it. Most functionality is exercised
 through the CLI subcommands (``athenaeum enumerate``, ``athenaeum recall``,
-``athenaeum repair``, ``athenaeum dedupe``, ``athenaeum questions``,
+``athenaeum repair``, ``athenaeum dedupe``, ``athenaeum decisions``,
 ``athenaeum ingest-answers``, ``athenaeum ingest-merges``, etc.) — see
 ``README.md`` and ``athenaeum --help``. Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``delta``, ``dedupe``, ``repair``, ``answers``,

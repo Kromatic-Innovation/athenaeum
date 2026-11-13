@@ -4,7 +4,7 @@
 Athenaeum accumulates two separate queues that need a human:
 
 - **questions** — contradiction-detector escalations in
-  ``wiki/_pending_questions.md`` (surfaced by ``athenaeum questions``).
+  ``wiki/_pending_questions.md`` (surfaced by ``athenaeum decisions``).
 - **merges** — resolver merge proposals in ``wiki/_pending_merges.md``
   (previously reachable ONLY through the ``list_pending_merges`` MCP tool —
   no CLI, no briefing, so a real backlog could sit unseen for weeks).
@@ -58,9 +58,9 @@ resolving/writing back to a given queue stays the owning module's job (e.g.
 
 Issue athenaeum#1992 narrows that factoring rule for exactly the three types
 its own AC3 names. ``merge`` and ``question``/``confirmation`` are the two
-legacy surfaces with a REAL CLI (``_cmd_merges.py``, ``_cmd_questions.py``,
-now both flagged deprecated — :data:`athenaeum.config.
-DEPRECATED_CLI_SURFACE_MESSAGES`); ``audit`` has no legacy CLI of its own
+types that once had a REAL legacy CLI of their own (``athenaeum merges`` and
+``athenaeum questions``, deprecated by athenaeum#1992 and removed in 0.24.0
+by athenaeum#2457); ``audit`` has no legacy CLI of its own
 (it was always only reachable through this module's union — see
 :func:`audit_to_decision`'s own docstring and the PII-hazard note in
 :func:`migrate_legacy_queues`), but AC3 names it explicitly alongside the
@@ -127,8 +127,9 @@ from athenaeum.tier_movement_proposals import list_pending_tier_movement_proposa
 log = logging.getLogger(__name__)
 
 # Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
-# re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
-# with :mod:`athenaeum._cmd_questions`.
+# re-extracted verbatim when ``--with-proposal`` is requested. Inherited from
+# the removed ``athenaeum questions`` surface (issue athenaeum#2457), which is
+# where this tuple used to be duplicated.
 _PROPOSAL_KEYS = (
     "**Proposed resolution**:",
     "**Confidence**:",
@@ -183,9 +184,10 @@ def _one_line(text: str, *, limit: int = _GIST_LIMIT) -> str:
 def _extract_proposal_block(raw_block: str) -> str:
     """Pull the trailing 4-key proposal block out of a question ``raw_block``.
 
-    Mirrors :func:`athenaeum._cmd_questions._extract_proposal_block` so the
-    ``decisions`` view renders the same proposal text the ``questions`` view
-    does. Returns ``""`` when the block carries no proposal.
+    Inherited verbatim from the removed ``athenaeum questions`` surface
+    (issue athenaeum#2457), so the ``decisions`` view renders exactly the
+    proposal text that view did. Returns ``""`` when the block carries no
+    proposal.
     """
     proposal_lines: list[str] = []
     for line in raw_block.splitlines():
@@ -955,15 +957,6 @@ def policy_pack_edit_proposal_to_decision(rec: dict) -> dict:
             "rationale": rec.get("rationale"),
         },
     }
-
-
-def list_pending_merges_rich(merges_path: Path) -> list[dict]:
-    """Unresolved merges as decidable dicts (title + gist + question)."""
-    return [
-        merge_to_rich(pm)
-        for pm in parse_pending_merges(merges_path)
-        if not pm.resolved
-    ]
 
 
 def list_pending_decisions(

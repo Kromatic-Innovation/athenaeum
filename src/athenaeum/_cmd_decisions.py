@@ -367,10 +367,10 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     print nothing (or ``null`` JSON for ``next``) and exit 0.
 
     Issue athenaeum#2456: ``revalidate``/``recompare``/``scrub-pii``/
-    ``propose-fold``/``provenance`` delegate to the SAME handler functions
-    ``athenaeum merges`` dispatches to (:mod:`athenaeum._cmd_merges`) — same
-    flags, output and exit codes, just reached through this surface too,
-    with no deprecation warning (this is the sanctioned spelling).
+    ``propose-fold``/``provenance`` delegate to the handler functions in
+    :mod:`athenaeum._cmd_merges`, which the removed ``athenaeum merges``
+    surface dispatched to before issue athenaeum#2457 — same flags, output
+    and exit codes, now reached only through this surface.
     """
     sub = getattr(args, "decisions_target", None)
     if sub not in (
@@ -890,12 +890,12 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
     _add_common(migrate_p, with_proposal=False)
 
     # Issue athenaeum#2456: revalidate/recompare/scrub-pii/propose-fold/
-    # provenance moved here from `athenaeum merges` — no replacement exists
-    # for these five under `decisions` until now, so the move is a straight
-    # re-registration of the SAME subparser-building functions
-    # `add_merges_subparser` uses, onto THIS surface's `d_sub` instead of
-    # `merges`' `m_sub`. Same flags, same dispatch target functions (see
-    # `cmd_decisions` above) — only the parent command name differs.
+    # provenance moved here from `athenaeum merges`, which had no replacement
+    # for these five under `decisions` until then — a straight re-registration
+    # of the same subparser-building functions in `_cmd_merges`, onto THIS
+    # surface's `d_sub`. Issue athenaeum#2457 then removed the `merges` noun
+    # outright, so `d_sub` is now their only registrar. Same flags, same
+    # dispatch target functions (see `cmd_decisions` above).
     _add_revalidate_subparser(d_sub)
     _add_recompare_subparser(d_sub)
     _add_scrub_pii_subparser(d_sub)

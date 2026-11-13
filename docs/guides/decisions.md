@@ -22,14 +22,12 @@ are named by their frontmatter `name:` (not the uuid-slug) with a
 one-line gist each, because cosine topic-similarity alone doesn't tell you
 whether two pages *should* merge.
 
-**`athenaeum merges` and `athenaeum questions` (below) are deprecated** in
-favor of this unified surface — each prints a reminder to stderr on every
-call, pointing back here. Nothing about either surface's own behavior
-changes. The merge queue's maintenance-only modes (`revalidate`,
-`recompare`, `scrub-pii`, `propose-fold`, `provenance`) are available here
-too, as `athenaeum decisions revalidate` / `recompare` / `scrub-pii` /
-`propose-fold` / `provenance` — same flags, output and exit codes as the
-`merges` spelling, just reached through this surface. `athenaeum decisions
+**`athenaeum merges` and `athenaeum questions` were removed in 0.24.0** in
+favor of this unified surface; see [Upgrading](upgrading.md) for the
+command-by-command mapping. The merge queue's maintenance-only modes
+(`revalidate`, `recompare`, `scrub-pii`, `propose-fold`, `provenance`) live
+here too, as `athenaeum decisions revalidate` / `recompare` / `scrub-pii` /
+`propose-fold` / `provenance`. `athenaeum decisions
 migrate` additionally materializes every
 pending-merge and pending-question record (resolved and unresolved) into a
 persisted unified-schema file (`wiki/_decisions_queue.jsonl`) alongside the
@@ -79,9 +77,8 @@ filesystem:
 
 ## I want to work through the merge-proposal queue
 
-`athenaeum decisions` mirrors the old `athenaeum merges` one-for-one, plus
-five merge-only modes — this is the sanctioned spelling; `athenaeum merges
-<verb>` still works (deprecated) but reaches the exact same code:
+`athenaeum decisions` carries every mode the removed `athenaeum merges`
+offered, plus five merge-only modes — it is the only spelling:
 
 ```bash
 athenaeum decisions list  [--limit N] [--json]        # all unresolved proposals

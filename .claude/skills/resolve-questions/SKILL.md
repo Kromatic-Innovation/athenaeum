@@ -12,23 +12,31 @@ don't. The user is the final authority — never resolve without confirmation.
 
 ## Surface
 
-- CLI: `athenaeum questions count|next|list [--with-proposal] [--json]`
+- CLI: `athenaeum decisions count|next|list [--with-proposal] [--json]` — the
+  unified decision queue. (`athenaeum questions` was removed in 0.24.0.)
 - MCP tools: `list_pending_questions`, `resolve_question(id, answer)`
 - Snooze file: `~/.cache/athenaeum/pending-questions-snoozed-until` (ISO-8601 UTC)
 
 ## Flow (six steps)
 
-1. Run `athenaeum questions count --json`. If `count` is 0, tell the user
+1. Run `athenaeum decisions count --json`. If `questions` is 0, tell the user
    "no pending questions" and stop.
 
 2. Loop. On each iteration call
-   `athenaeum questions next --with-proposal --json`. The result has the
-   shape `{id, entity, source, question, conflict_type, description,
-   created_at, proposal}`. Render it to the user as a short block:
+   `athenaeum decisions next --with-proposal --json`. The result has the
+   shape `{type, id, created_at, summary, confidence, payload}`; a question
+   item carries `type: "question"` and
+   `payload: {entity, source, question, conflict_type, description,
+   raised_by, proposal}`. The queue is unified, so the oldest item may be a
+   `merge`, `confirmation`, `retraction` or `audit` instead — this skill only
+   handles `type: "question"`; for anything else, tell the user the oldest
+   decision is that other kind and point them at
+   `athenaeum decisions list --json`. Render a question to the user as a
+   short block:
 
-   - entity, question, conflict_type
-   - description (verbatim)
-   - the proposal block when non-empty
+   - `payload.entity`, `payload.question`, `payload.conflict_type`
+   - `payload.description` (verbatim)
+   - `payload.proposal` when non-empty
 
 3. Ask the user one of four choices:
 
@@ -39,7 +47,7 @@ don't. The user is the final authority — never resolve without confirmation.
 
 4. **accept**: call the `resolve_question` MCP tool with `id` and the
    proposed action (extract the action from the `**Proposed resolution**:`
-   line in the proposal block, e.g. `keep_a`, `merge`,
+   line in `payload.proposal`, e.g. `keep_a`, `merge`,
    `retain_both_with_context`). Then loop back to step 2.
 
 5. **override**: ask the user for the answer text they want recorded. Call

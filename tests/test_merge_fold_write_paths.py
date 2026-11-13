@@ -914,7 +914,7 @@ class TestProvenanceRecording:
         with redirect_stdout(buf):
             rc = cli_main(
                 [
-                    "merges",
+                    "decisions",
                     "provenance",
                     "--path",
                     str(tmp_path),
@@ -934,7 +934,7 @@ class TestProvenanceRecording:
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cli_main(["merges", "provenance", "--path", str(tmp_path)])
+            rc = cli_main(["decisions", "provenance", "--path", str(tmp_path)])
         assert rc == 0
         assert "0 recorded" in buf.getvalue()
 

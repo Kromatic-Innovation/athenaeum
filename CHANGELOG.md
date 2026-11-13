@@ -77,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#2471). The write-boundary guard that still refuses a
   violating Tier-3 write is unaffected.
 
+- Removed `athenaeum merges` and `athenaeum questions` (use `athenaeum
+  decisions`) and the `deprecated_cli_surfaces_enabled` switch that only
+  existed to announce them, along with its
+  `ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED` override (athenaeum#2457). The
+  0.24.0 removal the deprecation warnings promised; see
+  `docs/guides/upgrading.md` for the command-by-command mapping. A stale
+  `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
+  warning.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available

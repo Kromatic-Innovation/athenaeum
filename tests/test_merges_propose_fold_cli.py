@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``athenaeum merges propose-fold`` (issue athenaeum#747).
+"""Tests for ``athenaeum decisions propose-fold`` (issue athenaeum#747).
 
 Before this command, consolidating duplicate entities required hand-building a
 ``_pending_merges.md`` block through the Python API — exactly how the athenaeum#748
@@ -7,6 +7,11 @@ Before this command, consolidating duplicate entities required hand-building a
 operator-decided fold expressible from the CLI, deriving every field the fold
 mechanics depend on (target name from the canonical page's ``name:``, write_kind
 from the corpus) so no hand construction is needed.
+
+The command shipped as ``athenaeum merges propose-fold``; issue
+athenaeum#2456 moved it under ``athenaeum decisions`` and issue
+athenaeum#2457 removed the ``merges`` noun, so ``decisions`` is now the
+only spelling.
 """
 
 from __future__ import annotations
@@ -60,7 +65,7 @@ def test_apply_queues_one_proposal_with_expected_sources_and_target(
     wiki, canonical, src_b, src_c = _seed(tmp_path)
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -94,7 +99,7 @@ def test_no_write_kind_argument_exists(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         cli_main(
             [
-                "merges",
+                "decisions",
                 "propose-fold",
                 "--path",
                 str(tmp_path),
@@ -121,7 +126,7 @@ def test_default_draft_is_canonical_current_text(tmp_path: Path) -> None:
     # The canonical body differs from every source (per the AC's fixture).
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -151,7 +156,7 @@ def test_draft_file_overrides(tmp_path: Path) -> None:
     draft.write_text("genuinely content-merged body\n", encoding="utf-8")
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -317,7 +322,7 @@ def test_dry_run_reports_draft_source_shape_in_text_and_json(tmp_path: Path) -> 
 
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -331,7 +336,7 @@ def test_dry_run_reports_draft_source_shape_in_text_and_json(tmp_path: Path) -> 
 
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -373,7 +378,7 @@ def test_dry_run_writes_nothing_and_prints_plan(tmp_path: Path) -> None:
     wiki, _canonical, _src_b, _src_c = _seed(tmp_path)
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -399,7 +404,7 @@ def test_dry_run_json_plan(tmp_path: Path) -> None:
     wiki, canonical, src_b, _src_c = _seed(tmp_path)
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -430,7 +435,7 @@ def test_refuses_nonexistent_into(tmp_path: Path) -> None:
     _seed(tmp_path)
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -447,7 +452,7 @@ def test_refuses_source_equals_into(tmp_path: Path) -> None:
     _seed(tmp_path)
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -476,7 +481,7 @@ def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> Non
     _wiki_page(src, name="Dup", body="d\n")
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -524,7 +529,7 @@ def test_uid_prefixed_canonical_page_succeeds_in_dry_run(tmp_path: Path) -> None
     _wiki_page(src, name="Dup", body="d\n")
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -558,7 +563,7 @@ def test_refuses_ambiguous_target_naming_both_colliding_pages(tmp_path: Path) ->
     _wiki_page(src, name="Dup", body="d\n")
     rc, out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -593,7 +598,7 @@ def test_queued_proposal_folds_correctly_via_resolve_merge(tmp_path: Path) -> No
     init_git_repo(wiki)
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -658,7 +663,7 @@ def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> N
 
     rc, _out = _run(
         [
-            "merges",
+            "decisions",
             "propose-fold",
             "--path",
             str(tmp_path),
@@ -719,7 +724,7 @@ def _tombstone_page(path: Path, *, uid: str, name: str, into: str) -> None:
 
 
 def _propose(tmp_path: Path, *argv: str) -> tuple[int, dict]:
-    rc, out = _run(["merges", "propose-fold", "--path", str(tmp_path), "--json", *argv])
+    rc, out = _run(["decisions", "propose-fold", "--path", str(tmp_path), "--json", *argv])
     return rc, json.loads(out)
 
 
