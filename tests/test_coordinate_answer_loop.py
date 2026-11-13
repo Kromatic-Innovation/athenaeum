@@ -33,7 +33,12 @@ from athenaeum.comparator import (
     page_from_path,
     record_comparison,
 )
-from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+from athenaeum.decision_answers import (
+    CoordinateAnswerRefused,
+    apply_decision_answers,
+    render_decision_answer,
+    write_decision_answer,
+)
 from athenaeum.decision_framing import (
     answerable_as,
     response_schema_for,
@@ -258,59 +263,71 @@ class TestCoordinateQueueing:
 
 
 class TestCoordinateAnswerApplierRefusals:
+    """Issue athenaeum#2544: every one of these payloads used to be WRITTEN
+    successfully and only refused hours later, when `ingest-answers`
+    applied it. They are now refused at `write_decision_answer` time
+    instead, via the SAME `validate_coordinate_answer` function
+    `_apply_coordinate_answer` calls — "nothing half-lands" now means
+    nothing is even written, not just nothing changed on disk."""
+
     def test_malformed_verdict_json_is_refused(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             _, _, _, _, _, pq = _seed_underdetermined_coordinate_item(tmp_path, lock)
-            raw_root = tmp_path / "raw"
+        raw_root = tmp_path / "raw"
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
-                raw_root, decision_id=pq.id, decision_type="coordinate", verdict="not json"
+                raw_root,
+                wiki_root=tmp_path,
+                decision_id=pq.id,
+                decision_type="coordinate",
+                verdict="not json",
             )
-            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
-
-        assert report.applied == 0
-        assert report.outcomes[0].error_code == "malformed_verdict_json"
+        assert exc_info.value.error_code == "malformed_verdict_json"
+        assert not (raw_root / "answers").exists()
 
     def test_schema_invalid_payload_is_refused(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             _, _, _, _, _, pq = _seed_underdetermined_coordinate_item(tmp_path, lock)
-            raw_root = tmp_path / "raw"
+        raw_root = tmp_path / "raw"
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps({"no_answers_key": True}),
             )
-            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
-
-        assert report.applied == 0
-        assert report.outcomes[0].error_code == "schema_invalid"
+        assert exc_info.value.error_code == "schema_invalid"
+        assert not (raw_root / "answers").exists()
 
     def test_unknown_decision_id_is_refused(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             _seed_underdetermined_coordinate_item(tmp_path, lock)
-            raw_root = tmp_path / "raw"
+        raw_root = tmp_path / "raw"
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id="not-a-real-batch-ref",
                 decision_type="coordinate",
                 verdict=json.dumps(
                     {"answers": [{"pair": "a+b", "dimensions": {"subject": {"a": "x"}}}]}
                 ),
             )
-            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
-
-        assert report.applied == 0
-        assert report.outcomes[0].error_code == "id_not_found"
+        assert exc_info.value.error_code == "id_not_found"
+        assert not (raw_root / "answers").exists()
 
     def test_pair_not_in_batch_is_refused_before_writing(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             path_a, path_b, id_a, id_b, pair_key, pq = _seed_underdetermined_coordinate_item(
                 tmp_path, lock
             )
-            raw_root = tmp_path / "raw"
-            before_a = path_a.read_text(encoding="utf-8")
+        raw_root = tmp_path / "raw"
+        before_a = path_a.read_text(encoding="utf-8")
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -324,22 +341,24 @@ class TestCoordinateAnswerApplierRefusals:
                     }
                 ),
             )
-            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
-            # Nothing half-lands: the page is untouched on a refusal.
-            assert path_a.read_text(encoding="utf-8") == before_a
-
-        assert report.applied == 0
-        assert report.outcomes[0].error_code == "invalid_coordinate_answer"
-        assert "not a member of batch" in report.outcomes[0].message
+        # Nothing half-lands: the page is untouched, and no answer file
+        # was even written — a stronger guarantee than this test used to
+        # check (issue athenaeum#2544 AC1: "nothing is written").
+        assert path_a.read_text(encoding="utf-8") == before_a
+        assert not (raw_root / "answers").exists()
+        assert exc_info.value.error_code == "invalid_coordinate_answer"
+        assert "not a member of batch" in exc_info.value.message
 
     def test_unknown_dimension_is_refused(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             _, _, id_a, id_b, pair_key, pq = _seed_underdetermined_coordinate_item(
                 tmp_path, lock
             )
-            raw_root = tmp_path / "raw"
+        raw_root = tmp_path / "raw"
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -350,20 +369,20 @@ class TestCoordinateAnswerApplierRefusals:
                     }
                 ),
             )
-            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
-
-        assert report.applied == 0
-        assert report.outcomes[0].error_code == "invalid_coordinate_answer"
-        assert "unknown dimension" in report.outcomes[0].message
+        assert exc_info.value.error_code == "invalid_coordinate_answer"
+        assert "unknown dimension" in exc_info.value.message
+        assert not (raw_root / "answers").exists()
 
     def test_page_id_not_a_member_of_its_own_pair_is_refused(self, tmp_path: Path) -> None:
         with RunLock(tmp_path) as lock:
             _, _, id_a, id_b, pair_key, pq = _seed_underdetermined_coordinate_item(
                 tmp_path, lock
             )
-            raw_root = tmp_path / "raw"
+        raw_root = tmp_path / "raw"
+        with pytest.raises(CoordinateAnswerRefused) as exc_info:
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -377,11 +396,47 @@ class TestCoordinateAnswerApplierRefusals:
                     }
                 ),
             )
+        assert exc_info.value.error_code == "invalid_coordinate_answer"
+        assert "not members of this pair" in exc_info.value.message
+        assert not (raw_root / "answers").exists()
+
+    def test_apply_time_defense_in_depth_catches_a_hand_placed_bad_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A file placed directly under `raw/answers/` — a hand edit, or
+        one written before issue athenaeum#2544 shipped — never ran
+        `validate_coordinate_answer` at write time. `_apply_coordinate_answer`
+        still independently re-runs it (the SAME function, not a second
+        implementation), so a bad pair key is caught here too."""
+        with RunLock(tmp_path) as lock:
+            _, _, _, _, _, pq = _seed_underdetermined_coordinate_item(tmp_path, lock)
+            raw_root = tmp_path / "raw"
+            answers_dir = raw_root / "answers"
+            answers_dir.mkdir(parents=True, exist_ok=True)
+            bad_verdict = json.dumps(
+                {
+                    "answers": [
+                        {
+                            "pair": "some-other-page+another-page",
+                            "dimensions": {"subject": {"some-other-page": "x"}},
+                        }
+                    ]
+                }
+            )
+            text = render_decision_answer(
+                decision_id=pq.id,
+                decision_type="coordinate",
+                verdict=bad_verdict,
+                resolved_at="2026-11-13T00:00:00+00:00",
+            )
+            (answers_dir / "20261113T000000Z-coordinate-handplaced.md").write_text(
+                text, encoding="utf-8"
+            )
             report = apply_decision_answers(tmp_path, raw_root, lock=lock)
 
         assert report.applied == 0
         assert report.outcomes[0].error_code == "invalid_coordinate_answer"
-        assert "not members of this pair" in report.outcomes[0].message
+        assert "not a member of batch" in report.outcomes[0].message
 
     def test_no_lock_is_refused_without_calling_the_comparator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -400,6 +455,7 @@ class TestCoordinateAnswerApplierRefusals:
         raw_root = tmp_path / "raw"
         write_decision_answer(
             raw_root,
+            wiki_root=tmp_path,
             decision_id=pq.id,
             decision_type="coordinate",
             verdict=json.dumps(
@@ -423,25 +479,30 @@ class TestCoordinateAnswerApplierRefusals:
                 {"answers": [{"pair": pair_key, "dimensions": {"subject": {id_a: "x"}}}]}
             )
             write_decision_answer(
-                raw_root, decision_id=pq.id, decision_type="coordinate", verdict=verdict
+                raw_root,
+                wiki_root=tmp_path,
+                decision_id=pq.id,
+                decision_type="coordinate",
+                verdict=verdict,
             )
             first = apply_decision_answers(tmp_path, raw_root, lock=lock)
             assert first.applied == 1
 
-            write_decision_answer(
-                raw_root, decision_id=pq.id, decision_type="coordinate", verdict=verdict
-            )
-            second = apply_decision_answers(tmp_path, raw_root, lock=lock)
+            # Issue athenaeum#2544: the item is now answered, so a SECOND
+            # write for the same id is refused immediately — it never
+            # reaches `apply_decision_answers` at all, let alone half-lands
+            # a second answer file next to the first.
+            with pytest.raises(CoordinateAnswerRefused) as exc_info:
+                write_decision_answer(
+                    raw_root,
+                    wiki_root=tmp_path,
+                    decision_id=pq.id,
+                    decision_type="coordinate",
+                    verdict=verdict,
+                )
 
-        # Every outcome on this SECOND pass is now "already_resolved" --
-        # both the just-reprocessed first file and the fresh second file
-        # for the now-answered id, since `apply_decision_answers` walks
-        # every file in `raw_root/answers/` on each call, not just new
-        # ones (same posture as every other applier: never deletes an
-        # answer file, so it is its own audit trail and gets re-seen).
-        assert second.applied == 0
-        assert all(o.error_code == "already_resolved" for o in second.outcomes)
-        assert len(second.outcomes) == 2
+        assert exc_info.value.error_code == "already_resolved"
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +540,7 @@ class TestCoordinateAnswerEndToEnd:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -552,6 +614,7 @@ class TestCoordinateAnswerEndToEnd:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -639,6 +702,7 @@ class TestCoordinateChallengeBlastRadius:
             # Answer the TWO-pair batch with one decision-answer file.
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=batch_pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -661,6 +725,7 @@ class TestCoordinateChallengeBlastRadius:
             # radius entirely.
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=solo_pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(

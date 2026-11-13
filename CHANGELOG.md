@@ -67,6 +67,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A question raised before this change (no stored copy) keeps the prior
   behaviour (athenaeum#2519).
 
+- `decisions answer --type coordinate` (and every writer that calls
+  `write_decision_answer`, e.g. the triage lane) now runs the applier's own
+  deep checks — JSON decoding, payload schema, pair/page/dimension
+  membership — BEFORE writing anything, naming the failing pair on
+  refusal, instead of deferring them to the next `ingest-answers` tick and
+  refusing the whole batch hours later. The write path also now reports
+  (warns by default; `--refuse-on-pending-conflict` refuses) any unapplied
+  answer file already on disk for the same decision id, and for a merge,
+  for another proposal whose sources overlap; a new read-only
+  `decisions pending-answers --id/--page` lists them. `decisions answer
+  --json` now emits a single-line JSON object, matching `propose-fold
+  --json` (athenaeum#2544).
+
 - `_detect_field_group_misfits` no longer refuses an ordinary same-record
   update (e.g. a deal's stage advancing while its name/amount stay put) as
   a field-group misfit: a misfit now requires that NO other field in the
