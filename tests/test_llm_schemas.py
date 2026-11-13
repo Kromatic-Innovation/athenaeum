@@ -957,27 +957,22 @@ class TestDurableObservationsPath:
 
         assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
 
-    def test_populated_wiki_path_warns_once_naming_both_paths(
+    def test_populated_wiki_path_no_longer_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC3: a deployment already carrying the misrouted file is left in a
-        DELIBERATE state — nothing is auto-migrated or auto-deleted, and the
-        operator is told the rows are stranded. Warned once per path per
-        process, mirroring push_metrics.durable_push_records_path exactly."""
+        """Issue athenaeum#2467: a deployment already carrying the misrouted
+        file is left alone — nothing is auto-migrated or auto-deleted, and
+        (unlike before athenaeum#2467) the operator is no longer warned
+        either. The old-location file is simply ignored."""
         wiki_root, cache_dir = self._roots(tmp_path)
         misrouted = wiki_root / llm_schemas.OBSERVATIONS_FILENAME
         misrouted.write_text('{"v":1}\n', encoding="utf-8")
-        llm_schemas._MISROUTED_WARNED.discard(str(misrouted))
 
         with caplog.at_level(logging.WARNING, logger=llm_schemas.log.name):
             llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
             llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1, "must warn once per path, not once per observation"
-        message = warnings[0].getMessage()
-        assert str(misrouted) in message
-        assert str(cache_dir / llm_schemas.OBSERVATIONS_FILENAME) in message
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
     def test_absent_wiki_path_is_silent(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

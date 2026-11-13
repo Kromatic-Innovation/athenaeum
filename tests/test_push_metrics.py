@@ -2156,28 +2156,22 @@ class TestDurablePushRecordsPath:
         )
         assert push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy
 
-    def test_populated_wiki_path_warns_once_naming_both_paths(
+    def test_populated_wiki_path_no_longer_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC3: a deployment already carrying the misrouted file is left in a
-        DELIBERATE state — nothing is auto-migrated or auto-deleted, and the
-        operator is told the rows are stranded rather than silently losing
-        them from precision. Warned once per path per process, because
-        ``record_push`` calls this on every recall push."""
+        """Issue athenaeum#2467: a deployment already carrying the misrouted
+        file is left alone — nothing is auto-migrated or auto-deleted, and
+        (unlike before athenaeum#2467) the operator is no longer warned
+        either. The old-location file is simply ignored."""
         wiki_root, cache_dir = self._roots(tmp_path)
         misrouted = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
         misrouted.write_text('{"session_id":"misrouted"}\n', encoding="utf-8")
-        push_metrics._MISROUTED_WARNED.discard(str(misrouted))
 
         with caplog.at_level(logging.WARNING, logger=push_metrics.log.name):
             push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
             push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1, "must warn once per path, not once per push"
-        message = warnings[0].getMessage()
-        assert str(misrouted) in message
-        assert str(cache_dir / push_metrics.PUSH_RECORDS_FILENAME) in message
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
     def test_artifact_registry_declares_the_cache_dir(self) -> None:
         """Issue athenaeum#1591 AC1: the file must say ONE thing. The R3
