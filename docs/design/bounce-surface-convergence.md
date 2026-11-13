@@ -54,6 +54,14 @@ missing link and report how far they got (`BounceJoin.reached`) rather than
 raising — a broken chain is the ordinary case on a real store, not an error.
 A person record with no `uid`, or a `uid` with no wiki page, is expected.
 
+**Public API (athenaeum#2470).** `join_identifier` and `deliverability_for_page`
+are exported from the package root — `from athenaeum import join_identifier,
+deliverability_for_page` — and documented, with their stability promise, in
+[`docs/extending/authorized-reader-contract.md`](../extending/authorized-reader-contract.md)
+§6. `BounceJoin` (the type `join_identifier` returns) stays internal,
+builder's choice stated in that issue's PR: reachable via
+`bounce_join.BounceJoin` directly, just not re-exported.
+
 ## The evidence-class asymmetry
 
 **The two surfaces do not hold the same kind of evidence, and convergence
@@ -76,7 +84,8 @@ Three consequences, all of them load-bearing:
    diagnostic into the corpus as free-text memories. This is a join on a
    shared key, never a re-recognition pass.
 3. **Nothing may promote the broader class to a hard bounce.**
-   `bounce_join.Deliverability` therefore reports the two halves **separately**
+   `bounce_join.Deliverability` (public API, athenaeum#2470 — `from athenaeum
+   import Deliverability`) therefore reports the two halves **separately**
    and never collapses them into one boolean:
 
    - `hard_bounced` — the pii mark. `5.x.x` only.
@@ -95,7 +104,8 @@ Three consequences, all of them load-bearing:
 P6 makes wiki frontmatter consumer truth, so the question this design answers
 is *"what does a consumer holding a wiki page know about deliverability?"* —
 and the pii mark reaches that answer through the chain above, at read time,
-via `deliverability_for_page`.
+via `deliverability_for_page` — now the public, exported consumer entry
+point for that question (athenaeum#2470), not merely an internal function.
 
 **athenaeum does not write `bounced:` onto wiki pages.** That is a deliberate
 choice between the two directions athenaeum#852 allowed ("feeds **or**
@@ -116,7 +126,8 @@ reconciles with"), and the alternative is worth stating:
   relates them.
 
 The cost of this choice is explicit: a consumer must call
-`deliverability_for_page` rather than read one field. That is the price of not
+`deliverability_for_page` (`from athenaeum import deliverability_for_page`,
+athenaeum#2470) rather than read one field. That is the price of not
 collapsing two evidence classes into one, and of not adding a second writer to
 a contested field.
 

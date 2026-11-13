@@ -340,3 +340,124 @@ section is about — a caller still has to combine it with
 itself, which is precisely the composition §3 documents. It is scoped
 narrowly enough to be a fact, not a verdict, and that is what keeps it inside
 the boundary this section draws rather than outside it.
+
+## 6. Deliverability for a held wiki page (athenaeum#2470)
+
+**Status: published extension point.** `deliverability_for_page`,
+`join_identifier` and `Deliverability` — all three defined in
+`src/athenaeum/bounce_join.py` — are on the stable `__all__` surface as of
+this section's publication: `from athenaeum import deliverability_for_page,
+join_identifier, Deliverability` is the supported import path, same contract
+as every other name in `src/athenaeum/__init__.py`'s `__all__`. The module
+itself predates this promotion (issue athenaeum#852); it was a finished reader
+API with only its own test (`tests/test_bounce_join.py`) exercising it until
+this issue made it a supported consumer surface.
+
+This is a companion entry point to §3's `read_identifier_facts`, not a
+replacement for it: `read_identifier_facts` answers "what do we know about
+this address" from a batch of addresses; the functions below answer the same
+family of question starting from the other end — a wiki page a consumer
+already holds — and fold in the wiki `bounced:` field's own, separately-owned
+evidence (see
+[`docs/design/bounce-surface-convergence.md`](../design/bounce-surface-convergence.md),
+which is the canonical design document for the join and the evidence-class
+split; this section only states the public contract).
+
+### `deliverability_for_page`
+
+```python
+def deliverability_for_page(
+    page: Path,
+    contacts_root: Path,
+    *,
+    as_of: date | None = None,
+) -> list[Deliverability]: ...
+```
+
+- **Inputs:** `page` — the wiki entity page the caller holds. `contacts_root`
+  — the excluded contacts surface root. `as_of` — optional valid-time cutoff
+  for the pii-mark check (defaults to the current date).
+- **Output:** one `Deliverability` per address the page's `uid` resolves to
+  on the contacts surface, in record order. An empty list means "nothing is
+  recorded about this page's addresses" — covering both a page with no `uid`
+  and a `uid` no contacts-surface record carries — which a caller must not
+  read as "deliverable": it is the "not found" case, not a clean bill of
+  health.
+- **Stability promise:** signature and return shape are covered by this
+  project's semver guard (`tests/test_public_surface_guard.py`); a behaviour
+  change to what counts as a match, or to the per-address evidence computed,
+  is a minor-or-greater release, same as removing the name itself.
+
+### `join_identifier`
+
+```python
+def join_identifier(
+    contacts_root: Path,
+    wiki_root: Path,
+    identifier: str,
+    *,
+    as_of: date | None = None,
+) -> BounceJoin: ...
+```
+
+- **Inputs:** `contacts_root`, `wiki_root` — the two store roots. `identifier`
+  — an email address. `as_of` — same valid-time cutoff as above.
+- **Output:** a `BounceJoin` describing how far the chain
+  `identifier -> person record -> uid -> wiki page` reached before the first
+  missing link, never raising on a broken chain. Read `.reached` and
+  `.joined` rather than assuming every attribute is populated.
+- **Stability promise:** same as `deliverability_for_page`. The returned
+  *type*, `BounceJoin`, is NOT itself promoted — see "Builder's choice",
+  below — so a caller that needs to annotate it imports
+  `athenaeum.bounce_join.BounceJoin` directly; only reading the attributes
+  `join_identifier` is documented to set is covered by the stability promise.
+
+### `Deliverability`
+
+A frozen dataclass: `identifier: str`, `hard_bounced: bool`,
+`wiki_verdict: str | None`, `person_record: Path | None`,
+`wiki_page: Path | None`, plus the `any_evidence` property. `hard_bounced`
+and `wiki_verdict` are reported separately and never collapsed into one
+boolean — see `docs/design/bounce-surface-convergence.md`'s "evidence-class
+asymmetry" section for why that split is load-bearing. **Stability promise:**
+the five fields and the `any_evidence` property above are covered; a new
+field may be added in a minor release, and none of the existing ones is
+removed or repurposed without a minor-or-greater bump.
+
+### Three contract cases (`tests/test_bounce_join_public_api.py`)
+
+Exercised against a fixture knowledge root through the public import path
+(`from athenaeum import deliverability_for_page`), with invented people only:
+
+1. **A page whose address bounced** — the contacts-surface record carries a
+   `mark_bounced` close for that address — reports not deliverable
+   (`hard_bounced=True`).
+2. **A page with no bounce** — the contacts-surface record exists and is
+   clean — reports deliverable (`hard_bounced=False`, `wiki_verdict=None`).
+3. **An unknown `uid`** — no contacts-surface record carries it — reports the
+   documented "not found" result: `deliverability_for_page` returns `[]`,
+   which the caller must read as "nothing recorded," not as "deliverable."
+
+### Builder's choice: `BounceJoin` and `_uid_of` stay private
+
+athenaeum#2470 named exactly three symbols as the public surface. `BounceJoin`
+(the dataclass `join_identifier` returns) and `_uid_of` (a private helper,
+already leading-underscore) are deliberately **not** added to `__all__`:
+
+- The issue's own acceptance criterion asks only for `deliverability_for_page`,
+  `join_identifier` and `Deliverability` to be exported and documented; it
+  does not ask for `BounceJoin`.
+- A narrower public surface is a smaller stability promise. `BounceJoin` is
+  an intermediate chain-walk result with five optional-by-design attributes;
+  promoting it commits every one of those attributes, and their "`None` from
+  the first break onward" semantics, to semver — a cost worth paying only if
+  a consumer is shown to need the type by name, not preemptively.
+- `BounceJoin` is still fully usable: `join_identifier` returns a real
+  instance, and a caller that wants to annotate it can
+  `import athenaeum.bounce_join` directly — the same pattern this repo
+  already uses for every importable-but-not-promoted internal module (see
+  `src/athenaeum/__init__.py`'s own docstring, "Internal modules ... are
+  importable but not part of the stable public surface").
+
+A future issue that names a concrete consumer need for `BounceJoin` by name
+is the right trigger to promote it; this one did not ask for that.
