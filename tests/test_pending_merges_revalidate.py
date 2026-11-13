@@ -497,3 +497,105 @@ def test_low_cohesion_proposal_suppression_set_unchanged_by_dead_arm_removal(
     assert result.retired == []
     remaining_names = {pm.merge_target_name for pm in parse_pending_merges(merges_path)}
     assert remaining_names == {"weak-bridge-cluster", "acme-corp"}
+
+
+# ---------------------------------------------------------------------------
+# Seer finding on PR #2565, verified against the live corpus (24 of 367 real
+# `status: folded` tombstones carry a bare-slug `folded_into` with no uid
+# prefix): a pre-athenaeum#2545 fold stamped a tombstone's `folded_into` with
+# the bare slug even when its target was ALREADY uid-prefixed. Comparing
+# that legacy bare slug against a uid-prefixed target's current filename
+# STEM (`<uid>-<slug>`) by raw equality never matches, so an
+# already-satisfied proposal was misrouted into the stale/retired bucket.
+# `_folded_into_matches` normalises both sides to the bare slug (stripping
+# ONLY the target's own known `uid:` prefix) before comparing.
+# ---------------------------------------------------------------------------
+
+
+def _write_uid_prefixed_target(wiki: Path, *, uid: str, slug: str, name: str) -> Path:
+    path = wiki / f"{uid}-{slug}.md"
+    path.write_text(
+        f"---\nuid: {uid}\nname: {name}\ntype: concept\n---\nmerged body\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_legacy_bare_slug_fold_into_uid_prefixed_own_target_is_satisfied(
+    tmp_path: Path,
+) -> None:
+    """Reproduces the Seer-flagged defect directly: BEFORE
+    `_folded_into_matches`'s normalisation, comparing a legacy bare-slug
+    `folded_into` against a uid-prefixed target's raw filename stem
+    (`fa2aeafa-sublime-default-rule` != `sublime-default-rule`) fails, and
+    this proposal lands in `result.retired` instead of `result.satisfied`.
+    With the fix, both sides normalise to the bare slug
+    `sublime-default-rule` and match."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    _write_uid_prefixed_target(
+        wiki, uid="fa2aeafa", slug="sublime-default-rule", name="Sublime Default Rule"
+    )
+    src_a = wiki / "src-a.md"
+    src_b = wiki / "src-b.md"
+    # Legacy (pre-athenaeum#2545) shape: the BARE slug, not the target's
+    # real uid-prefixed stem.
+    _write_tombstone(src_a, name="Src A", folded_into="sublime-default-rule")
+    _write_tombstone(src_b, name="Src B", folded_into="sublime-default-rule")
+
+    block = render_block(
+        merge_target_name="sublime-default-rule",
+        sources=[str(src_a), str(src_b)],
+        rationale="queued before an unrelated, pre-2545-shaped fold landed",
+        draft_merged_body="draft",
+        confidence=0.95,
+        created_at="2026-07-01",
+    )
+    merges_path = _write_sidecar(wiki, block)
+
+    result = revalidate_pending_merges(merges_path, apply=True, now=_FIXED_NOW)
+
+    assert result.retired == []
+    assert len(result.satisfied) == 1
+    assert result.satisfied[0].merge_target_name == "sublime-default-rule"
+    assert result.satisfied[0].folded_into == "fa2aeafa-sublime-default-rule"
+    assert parse_pending_merges(merges_path) == []
+    archive_text = (wiki / "_pending_merges_archive.md").read_text(encoding="utf-8")
+    assert "**Archived**:" in archive_text
+    assert "**Retired**:" not in archive_text
+
+
+def test_lookalike_longer_slug_is_not_falsely_satisfied(tmp_path: Path) -> None:
+    """Guards the exact failure mode the coordinator flagged as WORSE than
+    the bug being fixed: normalising must never degrade into a
+    substring/`endswith` match. A `folded_into` of
+    `other-sublime-default-rule` (a longer, unrelated name that happens to
+    END with the real target's slug, and does NOT start with the target's
+    own uid) must NOT be treated as satisfied."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    _write_uid_prefixed_target(
+        wiki, uid="fa2aeafa", slug="sublime-default-rule", name="Sublime Default Rule"
+    )
+    src_a = wiki / "src-a.md"
+    src_b = wiki / "src-b.md"
+    _write_tombstone(src_a, name="Src A", folded_into="other-sublime-default-rule")
+    _write_tombstone(src_b, name="Src B", folded_into="other-sublime-default-rule")
+
+    block = render_block(
+        merge_target_name="sublime-default-rule",
+        sources=[str(src_a), str(src_b)],
+        rationale="r",
+        draft_merged_body="draft",
+        confidence=0.95,
+        created_at="2026-07-01",
+    )
+    merges_path = _write_sidecar(wiki, block)
+
+    result = revalidate_pending_merges(merges_path, apply=True, now=_FIXED_NOW)
+
+    assert result.satisfied == []
+    assert [r.merge_target_name for r in result.retired] == ["sublime-default-rule"]
+    archive_text = (wiki / "_pending_merges_archive.md").read_text(encoding="utf-8")
+    assert "**Retired**:" in archive_text
+    assert "**Archived**:" not in archive_text

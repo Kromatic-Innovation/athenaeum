@@ -3313,6 +3313,55 @@ def _describe_source_staleness(
     return "; ".join(parts)
 
 
+def _own_target_identity(own_target_path: Path) -> tuple[str | None, str | None]:
+    """The (bare slug, own ``uid:``) pair identifying *own_target_path*,
+    read from its own frontmatter (issue athenaeum#2522).
+
+    Reuses :func:`identity_slug` — the SAME shared identity rule
+    :func:`find_identity_pages`/:func:`resolve_target_page` already resolve
+    a fold target by (issue athenaeum#1642) — rather than inventing a
+    second slug/uid split. Returns ``(None, None)`` when the file can't be
+    read/parsed, or its own identity can't be resolved (:func:`identity_slug`'s
+    existing rules: a malformed/missing ``name:``, or a filename prefix
+    that is not the page's own ``uid:``).
+    """
+    try:
+        text = own_target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    meta, _ = parse_frontmatter(text)
+    slug = identity_slug(own_target_path, meta)
+    uid = meta.get("uid") if isinstance(meta, dict) else None
+    return slug, (str(uid).strip() if uid and str(uid).strip() else None)
+
+
+def _folded_into_matches(
+    folded_into: str | None, *, target_slug: str, own_uid: str | None
+) -> bool:
+    """Whether a tombstone's ``folded_into`` value names *target_slug*
+    (issue athenaeum#2522).
+
+    A fold stamps a tombstone's ``folded_into`` with the target's real
+    filename STEM (:func:`_apply_fold_into_existing`'s docstring) — which
+    is ``<uid>-<slug>`` for a uid-prefixed canonical, not the bare slug.
+    Pre-athenaeum#2545 folds stamped the bare slug regardless, so a legacy
+    tombstone's value and a uid-prefixed target's CURRENT stem can name
+    the same page while differing in shape. Normalising BOTH sides down
+    to the bare slug (stripping *only* the known-correct ``<own_uid>-``
+    prefix, never an arbitrary one) before comparing by equality is what
+    makes the two forms comparable — never by substring/``endswith``,
+    which would also match an unrelated, longer slug (``sublime-default-rule``
+    inside ``other-sublime-default-rule``) and misreport a live, distinct
+    proposal as already satisfied.
+    """
+    if folded_into is None:
+        return False
+    normalized = folded_into
+    if own_uid and folded_into.startswith(f"{own_uid}-"):
+        normalized = folded_into[len(own_uid) + 1 :]
+    return normalized == target_slug
+
+
 def revalidate_pending_merges(
     merges_path: Path,
     *,
@@ -3423,35 +3472,43 @@ def revalidate_pending_merges(
             # none still live) AND every one of them folded into THIS
             # proposal's OWN target -> the merge already happened in
             # effect. Resolve "own target" the same way approve-time does
-            # (:func:`resolve_target_page`) and compare against the live
-            # target's own filename stem -- the same identity
-            # :func:`_apply_fold_into_existing` stamps a tombstone's
-            # `folded_into` with, never the bare slug (see that function's
-            # docstring). A WRONG target (folded into some third page) or a
-            # PARTIAL fold (some sources still live or missing) does not
-            # qualify and falls through to the ordinary stale path below.
+            # (:func:`resolve_target_page`), then compare by NORMALISED
+            # bare slug (:func:`_folded_into_matches`) rather than raw
+            # filename-stem equality -- a legacy, pre-athenaeum#2545
+            # tombstone's `folded_into` is a bare slug even when its target
+            # is uid-prefixed, so comparing stems verbatim misses it. A
+            # WRONG target (folded into some third page) or a PARTIAL fold
+            # (some sources still live or missing) does not qualify and
+            # falls through to the ordinary stale path below.
             if folded and len(folded) == len(pm.sources):
                 own_target_path = resolve_target_page(pm.merge_target_name, wiki_root)
-                own_target_stem = (
-                    own_target_path.stem if own_target_path is not None else None
-                )
-                if own_target_stem is not None and all(
-                    st.folded_into == own_target_stem for st in folded
-                ):
-                    result.satisfied.append(
-                        SatisfiedProposal(
-                            id=pm.id,
-                            merge_target_name=pm.merge_target_name,
-                            n_sources=len(pm.sources),
-                            confidence=pm.confidence,
-                            folded_into=own_target_stem,
+                if own_target_path is not None:
+                    own_target_slug, own_target_uid = _own_target_identity(
+                        own_target_path
+                    )
+                    if own_target_slug is not None and all(
+                        _folded_into_matches(
+                            st.folded_into,
+                            target_slug=own_target_slug,
+                            own_uid=own_target_uid,
                         )
-                    )
-                    satisfied_blocks.append(
-                        f"{block_text}\n\n**Archived**: {ts} — satisfied: "
-                        f"all sources already folded into {own_target_stem!r}\n"
-                    )
-                    continue
+                        for st in folded
+                    ):
+                        result.satisfied.append(
+                            SatisfiedProposal(
+                                id=pm.id,
+                                merge_target_name=pm.merge_target_name,
+                                n_sources=len(pm.sources),
+                                confidence=pm.confidence,
+                                folded_into=own_target_path.stem,
+                            )
+                        )
+                        satisfied_blocks.append(
+                            f"{block_text}\n\n**Archived**: {ts} — satisfied: "
+                            f"all sources already folded into "
+                            f"{own_target_path.stem!r}\n"
+                        )
+                        continue
 
             if missing_count or folded:
                 reason = _describe_source_staleness(
