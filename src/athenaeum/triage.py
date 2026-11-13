@@ -234,7 +234,7 @@ from typing import Any, Protocol
 
 from athenaeum.calibration import sample_triage_decision
 from athenaeum.config import resolve_dimensions
-from athenaeum.decision_answers import write_decision_answer
+from athenaeum.decision_answers import CoordinateAnswerRefused, write_decision_answer
 from athenaeum.decision_framing import (
     ROUTING_CLASSES,
     ROUTING_COMPETENCE,
@@ -437,6 +437,7 @@ def submit_answer(
     decision_id: str,
     decision_type: str,
     answer: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> TriageSubmission:
     """Validate + write one decision answer — the SAME sequence
     ``athenaeum decisions answer`` runs (:func:`athenaeum._cmd_decisions._cmd_answer`),
@@ -454,10 +455,21 @@ def submit_answer(
     this issue's concurrency note).
 
     Refuses (returns ``ok=False``) exactly where the CLI would: an
-    unanswerable type, a schema-invalid answer. Writing is deferred to
-    the SAME ``athenaeum ingest-answers`` tick that applies every other
-    answer file — this function never mutates ``_pending_questions.md``/
-    ``_pending_merges.md``/the calibration ledger itself.
+    unanswerable type, a schema-invalid answer, and — issue athenaeum#2544
+    — a ``coordinate`` verdict that fails
+    :func:`athenaeum.decision_answers.validate_coordinate_answer` (the
+    SAME deep check :func:`athenaeum._cmd_decisions._cmd_answer` is
+    refused by; ``write_decision_answer`` runs it for every caller, this
+    one included). *config* is forwarded so that check resolves the real
+    dimension registry rather than the kernel-only default.
+
+    Issue athenaeum#2544 AC3: before writing, logs (never refuses — this
+    is an unattended, operator-absent path, so warn-only is the safe
+    default) any unapplied answer file already on disk for *decision_id*.
+    Writing is deferred to the SAME ``athenaeum ingest-answers`` tick that
+    applies every other answer file — this function never mutates
+    ``_pending_questions.md``/``_pending_merges.md``/the calibration
+    ledger itself.
     """
     applier_type = answerable_as(decision_type)
     if applier_type is None:
@@ -475,18 +487,43 @@ def submit_answer(
             message="; ".join(errors),
         )
 
-    path = write_decision_answer(
-        knowledge_root / "raw",
-        decision_id=decision_id,
-        decision_type=applier_type,
-        verdict=str(answer["verdict"]),
-        note=str(answer.get("note", "")),
-        # Issue athenaeum#2016: forward a "rename" answer's human-chosen
-        # dimension name, type-agnostically (``validate_answer`` above
-        # already refused a "name" the decision_type's own schema does not
-        # declare, so this is empty for every other type).
-        name=str(answer.get("name", "")),
-    )
+    try:
+        from athenaeum.decision_answers import check_pending_conflicts
+
+        conflicts = check_pending_conflicts(
+            knowledge_root / "raw",
+            knowledge_root / "wiki",
+            decision_id=decision_id,
+            decision_type=applier_type,
+        )
+        for conflict in conflicts:
+            log.warning(
+                "triage: %s already has an unapplied answer on disk (%s, %s): %s",
+                decision_id,
+                conflict.decision_type,
+                conflict.resolved_at,
+                conflict.path,
+            )
+    except Exception as exc:  # noqa: BLE001 - visibility only, never blocks a write
+        log.debug("triage: pending-conflict scan skipped (%s): %s", type(exc).__name__, exc)
+
+    try:
+        path = write_decision_answer(
+            knowledge_root / "raw",
+            decision_id=decision_id,
+            decision_type=applier_type,
+            verdict=str(answer["verdict"]),
+            note=str(answer.get("note", "")),
+            # Issue athenaeum#2016: forward a "rename" answer's human-chosen
+            # dimension name, type-agnostically (``validate_answer`` above
+            # already refused a "name" the decision_type's own schema does not
+            # declare, so this is empty for every other type).
+            name=str(answer.get("name", "")),
+            config=config,
+            wiki_root=knowledge_root / "wiki",
+        )
+    except CoordinateAnswerRefused as exc:
+        return TriageSubmission(ok=False, error_code=exc.error_code, message=exc.message)
     return TriageSubmission(ok=True, path=path)
 
 
@@ -692,6 +729,7 @@ def run_triage(
             decision_id=decision_id,
             decision_type=decision_type,
             answer={"verdict": verdict_to_submit},
+            config=config,
         )
         if not submission.ok:
             log.warning(
