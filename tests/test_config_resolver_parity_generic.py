@@ -116,6 +116,19 @@ resolver cannot silently join the exclusion set without this file changing):
   Exercised directly, with real bucket names, in
   ``TestDecayHorizonResolverDirect``.
 
+- ``resolve_page_type_field_groups`` (issue athenaeum#2197): only two literal
+  keys are discoverable from its source (``librarian``, ``field_groups`` —
+  the ``page_type``/``group_name`` levels below them are operator-chosen,
+  not literals), so ``_candidate_nestings`` can only ever construct a
+  TWO-deep path. The real shape is THREE levels deep with a list-of-strings
+  leaf (``librarian.field_groups.<page_type>.<group_name>`` -> field names),
+  which no sentinel in ``_SENTINEL_VALUES`` can reach — every candidate the
+  prober can build is rejected by the resolver's own defensive validation
+  (a non-dict ``page_type``/group entry, or a non-list leaf) and returns the
+  empty-dict baseline, reading identically to "never read the key". Same
+  shape gap as ``resolve_witness_keys`` above, same treatment: covered
+  directly in ``tests/test_structured_upsert.py::TestResolvePageTypeFieldGroupsDirect``.
+
 Every other resolver goes through the full generic check.
 """
 
@@ -201,6 +214,9 @@ _STRUCTURED_CONTAINER_VALUE = frozenset(
         "resolve_quarantine_retry_delays_days",
         "resolve_raw_file_max_api_calls_by_source",
         "resolve_witness_keys",
+        # Issue athenaeum#2197: double-nested (page_type -> group_name ->
+        # field list), covered directly instead — see module docstring.
+        "resolve_page_type_field_groups",
     }
 )
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
