@@ -783,10 +783,12 @@ off-corpus root's on-disk name) and resolved back to a path via
 other hit shape (`wiki/`, extra-root) already resolves through, not a
 second resolution path. `athenaeum.off_corpus.erase_off_corpus_record`
 deletes the content key and incrementally rebuilds both off-corpus index
-shards in the same call, so a caller that erases a record and then calls
-`recall` again observes it gone from BOTH content and the federated result
-set — see [`docs/design/security-posture.md`](security-posture.md#off-corpus-erasure-boundary-athenaeum984)
-for the full erasure-boundary account.
+shards in the same call, so a call to this primitive followed by `recall`
+would observe the record gone from BOTH content and the federated result
+set — though nothing in the CLI or MCP tool surface calls this primitive
+today; see [`docs/design/security-posture.md`](security-posture.md#off-corpus-erasure-boundary-athenaeum984)
+for the full erasure-boundary account, including that it is not yet a
+user-facing operation.
 
 **Off by default.** With `off_corpus.enabled` unset, `query_off_corpus`
 returns `None` immediately and `_recall_via_backend` behaves byte-identically

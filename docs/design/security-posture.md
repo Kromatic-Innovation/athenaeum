@@ -248,6 +248,12 @@ exact guarantee into every redaction-ledger record's `to_dict()` output
 ledger after an erasure sees the disclosure attached to the action, not just
 in this document.
 
+**None of this is reachable from a CLI command or an MCP tool today.** The
+guarantee above describes what the primitives in `athenaeum.erasure` are
+designed to carry once an erase operation exists; no such operation can be
+invoked by a user yet. Full, user-facing erasure will be designed
+separately.
+
 This does not weaken the erasure guarantee for what the system DOES
 control — it says precisely what "erasure" does and does not reach, the
 same posture §2.2's L6 note takes for the outbound-LLM path ("the outbound
@@ -324,6 +330,12 @@ force-pushed everywhere, so it is not an erasure. `athenaeum.off_corpus`
 a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
 `os.unlink`-level removal, with no git history for it to survive in.
 
+**This is a primitive, not a user-facing operation.** Nothing in the CLI or
+the MCP tool surface calls `erase_off_corpus_record` today; it is exercised
+only by this module's own test suite. Erasure and key purge are not yet
+available as operator-invokable operations — a user-facing erase command
+will be designed separately.
+
 - **Enforced at configuration time, not merely documented.**
   `athenaeum.off_corpus.off_corpus_root` refuses (`OffCorpusConfigError`,
   fail-closed) to resolve an `off_corpus.adapter` whose `surface_root` lands
@@ -339,11 +351,12 @@ a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
   `knowledge_root/.git` exists) — so `versioned` reads `False` for the
   physically-correct reason (no `.git` there), not because the flag was
   hand-set.
-- **Single-store, single-operation erasure.** `erase_off_corpus_record`
-  deletes the content key and incrementally rebuilds BOTH off-corpus index
-  shards (FTS5 + vector) in the same call, so a caller cannot observe an
-  intermediate state where the content is gone but a stale index shard still
-  serves it through `recall`.
+- **Single-store, single-operation erasure (primitive only; not yet
+  user-facing).** `erase_off_corpus_record` deletes the content key and
+  incrementally rebuilds BOTH off-corpus index shards (FTS5 + vector) in the
+  same call, so a caller cannot observe an intermediate state where the
+  content is gone but a stale index shard still serves it through `recall`.
+  No CLI command or MCP tool calls this function today.
 - **Federation does not widen the audience gate.** An off-corpus hit
   federated into `recall` (see
   [`docs/design/recall-architecture.md`](recall-architecture.md#off-corpus-federation-athenaeum984))
