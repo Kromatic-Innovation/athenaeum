@@ -48,7 +48,7 @@ athenaeum#658 D1 describes and it needs a human, not a verdict.
 
 Layering: L4. Reads the pending-merge sidecar and the corpus, calls the
 comparator, writes only to the verdict ledger. The CLI wrapper lives in
-:mod:`athenaeum._cmd_merges` (``athenaeum merges recompare``).
+:mod:`athenaeum._cmd_merges` (``athenaeum decisions recompare``).
 """
 
 from __future__ import annotations
@@ -368,7 +368,7 @@ def recompare_pending_merges(
 
     *apply* controls one thing and one thing only: whether pair verdicts are
     appended to the verdict ledger. Dry-run (the default, mirroring
-    ``athenaeum merges revalidate``'s shape) still performs the comparisons
+    ``athenaeum decisions revalidate``'s shape) still performs the comparisons
     and reports what it would record. ``_pending_merges.md`` is never written
     by either mode -- see the module docstring.
 

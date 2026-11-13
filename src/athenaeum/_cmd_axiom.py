@@ -19,7 +19,7 @@ acknowledgement was chosen over routing through the athenaeum#401 decisions-queu
                  promotion or not) plus its full promote/demote history
                  (when/why/by-whom), oldest-first.
 
-Mirrors ``athenaeum merges provenance`` in shape (a thin CLI dispatcher over
+Mirrors ``athenaeum decisions provenance`` in shape (a thin CLI dispatcher over
 :mod:`athenaeum.axiom_governance`, no logic of its own).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in

@@ -21,7 +21,7 @@ handful of top-level commands (``dedupe``, ``auto-memory``, ``questions``,
 ``merges``, ``decisions``, ``authority``, ``axiom``, ``calibration``,
 ``storage``, ``push-metrics``, ``measure``, ``memory-class``,
 ``description``, ``verdicts``, ``dimensions``) DO have their own
-nested sub-subparsers (e.g. ``athenaeum merges revalidate``) — the walk
+nested sub-subparsers (e.g. ``athenaeum decisions revalidate``) — the walk
 recurses into those.
 
 One flat, alphabetically-sorted section per node (group or leaf) in the tree,

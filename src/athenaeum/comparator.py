@@ -144,7 +144,7 @@ folded into this comparator; that remains an explicit, separate, future
 step. :func:`athenaeum.config.resolve_comparator_enabled` is the documented,
 default-off knob every one of these call sites gates on, mirroring
 :func:`athenaeum.config.resolve_verdict_ledger_enabled`'s shape exactly. Its
-other live reader is ``athenaeum merges recompare``
+other live reader is ``athenaeum decisions recompare``
 (:mod:`athenaeum._cmd_merges`), the explicit opt-in command that re-runs this
 comparator over the pending merge queue. Nothing in this module reads that
 knob itself (the same way :mod:`athenaeum.verdicts` never reads

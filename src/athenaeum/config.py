@@ -214,6 +214,13 @@ _REMOVED_LIBRARIAN_KEYS: dict[str, str] = {
         "(the containment gate suppressed 0 of 28,951 candidate pairs); this "
         "key is no longer read and has no effect on merge behavior"
     ),
+    "deprecated_cli_surfaces_enabled": (
+        "removed in athenaeum#2457 together with the surfaces it announced "
+        "(`athenaeum merges` and `athenaeum questions`, deleted in 0.24.0 per "
+        "athenaeum#1992); it only ever toggled their stderr deprecation "
+        "warning, so with no deprecated surface left it is no longer read and "
+        "has no effect"
+    ),
 }
 
 
@@ -3488,123 +3495,6 @@ def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
             if isinstance(raw, bool):
                 return raw
     return False
-
-
-#: Issue athenaeum#2138: the version the deprecated surfaces below are
-#: scheduled to be deleted in. Named in every deprecation message so the
-#: warning is a dated commitment rather than an open-ended one. Removing a
-#: public surface bumps MINOR pre-1.0 (see CONTRIBUTING "Versioning and
-#: releases"), so this is a MINOR, never a PATCH — and one MINOR of headroom
-#: past the next cut, so an unrelated removal taking 0.23.0 does not make the
-#: promise wrong.
-DEPRECATED_CLI_SURFACE_REMOVAL_VERSION = "0.24.0"
-
-#: Issue athenaeum#1992: the CLI surfaces whose data now lives in the unified
-#: ``athenaeum decisions`` queue (:mod:`athenaeum.decisions`), and the
-#: human-readable message shown when one is used while deprecated. Keyed by
-#: the surface's own registered subcommand name (``add_*_subparser`` in
-#: ``cli.py`` — ``"merges"``, ``"questions"``). A surface not listed here is
-#: simply never deprecated; nothing elsewhere needs updating to add one. Every
-#: message names :data:`DEPRECATED_CLI_SURFACE_REMOVAL_VERSION` (issue
-#: athenaeum#2138) — a deprecation with no target version tells a reader
-#: nothing about when to act.
-DEPRECATED_CLI_SURFACE_MESSAGES: dict[str, str] = {
-    "merges": (
-        "'athenaeum merges' is deprecated (athenaeum#1992) and is scheduled "
-        f"for removal in {DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, in favor "
-        "of 'athenaeum decisions' — pending-merge proposals are surfaced "
-        "there too, framed with a response schema you can answer directly."
-    ),
-    "questions": (
-        "'athenaeum questions' is deprecated (athenaeum#1992) and is "
-        "scheduled for removal in "
-        f"{DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, in favor of 'athenaeum "
-        "decisions' — pending questions are surfaced there too, framed with "
-        "a response schema you can answer directly."
-    ),
-}
-
-#: Issue athenaeum#2456: per-VERB override for :data:`DEPRECATED_CLI_SURFACE_MESSAGES`.
-#: ``revalidate``/``recompare``/``scrub-pii``/``propose-fold``/``provenance``
-#: moved wholesale under ``athenaeum decisions`` — no unification happened,
-#: ``decisions revalidate`` IS ``merges revalidate`` under a new name — so
-#: telling a caller "use athenaeum decisions" (the generic message above)
-#: leaves them to guess the replacement verb themselves. Keyed by surface,
-#: then by the surface's own subcommand name (``merges_target`` /
-#: ``questions_target``); a verb not listed here falls back to the generic
-#: surface message (``list``/``next``/``count`` — those feed the UNIFIED
-#: decisions queue rather than a same-named decisions verb one-for-one, so
-#: the generic "use athenaeum decisions" wording already names the right
-#: surface). A surface with no entry here behaves exactly as before.
-DEPRECATED_CLI_SURFACE_VERB_MESSAGES: dict[str, dict[str, str]] = {
-    "merges": {
-        verb: (
-            f"'athenaeum merges {verb}' is deprecated (athenaeum#1992) and is "
-            f"scheduled for removal in {DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, "
-            f"in favor of 'athenaeum decisions {verb}'."
-        )
-        for verb in ("revalidate", "recompare", "scrub-pii", "propose-fold", "provenance")
-    },
-}
-
-
-def resolve_deprecated_cli_surfaces_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve whether deprecated-CLI-surface warnings are shown (issue athenaeum#1992).
-
-    ON by default: a deprecated surface (see
-    :data:`DEPRECATED_CLI_SURFACE_MESSAGES`) prints a one-line warning to
-    stderr before running, on every invocation, pointing at its
-    ``athenaeum decisions`` replacement — the documented deprecation-flag
-    mechanism athenaeum#717's "no separate queue survives... behind a
-    documented deprecation flag" escape hatch requires. The flagged surface
-    itself keeps working unchanged either way; this flag only toggles the
-    warning's visibility, never behavior, so a scripted consumer mid
-    transition is never broken by it. Precedence:
-    ``ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`` env >
-    ``librarian.deprecated_cli_surfaces_enabled`` yaml > ``True``. Any env
-    value other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
-    case-insensitive) is truthy; a non-bool yaml value falls through to the
-    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
-    :func:`resolve_push_metrics_enabled`'s shape.
-    """
-    env = os.environ.get("ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED")
-    if env is not None:
-        return env.strip().lower() not in ("0", "false", "no", "off", "")
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("deprecated_cli_surfaces_enabled")
-            if isinstance(raw, bool):
-                return raw
-    return True
-
-
-def deprecated_cli_surface_message(
-    surface: str, config: dict[str, Any] | None, verb: str | None = None
-) -> str:
-    """The deprecation message for *surface*, or ``""`` if not flagged / silenced.
-
-    The one call a CLI surface's own dispatcher makes to "declare itself
-    against" the mechanism (issue athenaeum#1992 AC1) — combines
-    :data:`DEPRECATED_CLI_SURFACE_MESSAGES` with
-    :func:`resolve_deprecated_cli_surfaces_enabled` so neither needs to be
-    consulted separately at any call site.
-
-    ``verb`` (issue athenaeum#2456) lets a surface with more than one
-    subcommand name the EXACT replacement spelling for the specific verb
-    invoked, via :data:`DEPRECATED_CLI_SURFACE_VERB_MESSAGES`, rather than
-    the generic "use athenaeum decisions" wording. Omitted or not found in
-    that per-verb table: falls back to the surface's generic message
-    unchanged, so every existing call site (none of which pass ``verb``)
-    keeps its current behavior.
-    """
-    if not resolve_deprecated_cli_surfaces_enabled(config):
-        return ""
-    if verb is not None:
-        per_verb = DEPRECATED_CLI_SURFACE_VERB_MESSAGES.get(surface, {})
-        if verb in per_verb:
-            return per_verb[verb]
-    return DEPRECATED_CLI_SURFACE_MESSAGES.get(surface, "")
 
 
 def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
@@ -7391,7 +7281,7 @@ def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     confidence/suppression-gate algorithm that pass used to run
     unconditionally was DELETED (not merely branched around) as part of the
     cut-over; there is exactly one implementation, gated by this one knob.
-    ``athenaeum merges recompare`` (:mod:`athenaeum._cmd_merges`) remains
+    ``athenaeum decisions recompare`` (:mod:`athenaeum._cmd_merges`) remains
     the other live reader, unchanged. Mirrors
     :func:`resolve_verdict_ledger_enabled`'s shape exactly: env
     ``ATHENAEUM_COMPARATOR_ENABLED`` (``1``/``true``/``yes``/``on``,

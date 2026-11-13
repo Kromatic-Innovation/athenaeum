@@ -129,7 +129,7 @@ regression.
 
 The other live reader of the new (page-level) path besides
 `athenaeum.wiki_dedupe` above is the explicit, opt-in
-`athenaeum merges recompare` command, which re-runs the comparator over the
+`athenaeum decisions recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.
 
@@ -169,7 +169,7 @@ ResolutionProposal (winner? action? rationale? confidence? precedence?)
      ▼
 ~/knowledge/wiki/_pending_questions.md
      │
-     │  athenaeum questions  /  SessionStart hook  (athenaeum#128)
+     │  athenaeum decisions  /  SessionStart hook  (athenaeum#128)
      ▼
 user accepts / overrides / defers
      │
@@ -192,7 +192,7 @@ Stage-by-stage:
 | Detect | `athenaeum.contradictions` | Haiku per cluster | `ContradictionResult` |
 | Resolve | `athenaeum.resolutions` | Opus per detection (capped) | `ResolutionProposal` |
 | Escalate | `athenaeum.tiers.tier4_escalate` | none | block in `_pending_questions.md` |
-| Surface | `athenaeum questions` CLI + hook | none | SessionStart prompt |
+| Surface | `athenaeum decisions` CLI + hook | none | SessionStart prompt |
 | Record | `resolve-questions` skill + `resolve_question` MCP | none | decision-answer file under `raw/answers/` (deferred, athenaeum#908) |
 | Apply | `athenaeum ingest-answers` (tier 0) | none — no LLM call | `[x]` mark + answer ingested + archived |
 
@@ -466,18 +466,23 @@ The athenaeum#128 surface closes that gap.
 
 ### CLI
 
+This surface shipped as `athenaeum questions {count,next,list}`, which
+athenaeum#1992 deprecated and athenaeum#2457 removed in 0.24.0 in favour of
+the unified decision queue. The modes below are the current spelling:
+
 ```bash
-athenaeum questions count [--json]
-athenaeum questions next  [--with-proposal] [--json]
-athenaeum questions list  [--with-proposal] [--limit N] [--json]
+athenaeum decisions count [--json]
+athenaeum decisions next  [--with-proposal] [--json]
+athenaeum decisions list  [--with-proposal] [--limit N] [--json]
 ```
 
-`count` returns `N unresolved (oldest: <iso-date>)`. `next` returns the
-oldest unresolved entry as one block. `list` walks them all. With
-`--with-proposal`, each block includes the four `**Proposed resolution**`
-keys when present. JSON output is stable (`{id, entity, source, question,
-conflict_type, description, created_at, proposal}`) so hooks and skills
-can rely on the shape.
+`count` returns the pending total with a per-type breakdown and the oldest
+item's age. `next` returns the oldest unresolved entry as one block. `list`
+walks them all. With `--with-proposal`, each question item includes the four
+`**Proposed resolution**` keys when present. JSON output is stable
+(`{type, id, created_at, summary, confidence, payload}`, with a question's
+`entity` / `source` / `question` / `conflict_type` / `description` /
+`proposal` under `payload`) so hooks and skills can rely on the shape.
 
 The CLI is fail-silent on missing or empty `_pending_questions.md` — the
 SessionStart hook depends on this.
@@ -489,7 +494,7 @@ SessionStart hook depends on this.
 1. Honors `~/.cache/athenaeum/pending-questions-snoozed-until` (ISO-8601
    UTC; lexicographic compare against `date -u +%FT%TZ`). If snoozed,
    exits silently.
-2. Calls `athenaeum questions count --json`.
+2. Calls `athenaeum decisions count --json`.
 3. Prints a one-block prompt to stdout when count > 0.
 
 Wire it into `~/.claude/settings.json`:
@@ -516,8 +521,8 @@ must NEVER block session startup.
 `.claude/skills/resolve-questions/SKILL.md` is the interactive walk-through
 the SessionStart hook points at. Six-step flow:
 
-1. `athenaeum questions count --json`. If 0 — stop.
-2. Loop: `athenaeum questions next --with-proposal --json`, render to user.
+1. `athenaeum decisions count --json`. If 0 — stop.
+2. Loop: `athenaeum decisions next --with-proposal --json`, render to user.
 3. Ask: **accept** / **override** / **defer** / **stop**.
 4. **accept** → call MCP `resolve_question(id, answer=<action-from-proposal>)`.
 5. **override** → ask user for answer text → call `resolve_question`.

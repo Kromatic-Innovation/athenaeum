@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``athenaeum merges recompare`` (issue athenaeum#715).
+"""Tests for ``athenaeum decisions recompare`` (issue athenaeum#715).
 
 One class per acceptance criterion, mirroring ``tests/test_comparator.py``'s
 convention. Everything is offline: Gate 2 is a mocked client, and no test
@@ -550,16 +550,11 @@ class TestCli:
     def test_recompare_refuses_when_the_comparator_is_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        import argparse
-
-        from athenaeum._cmd_merges import cmd_merges
+        from athenaeum.cli import main
 
         monkeypatch.delenv("ATHENAEUM_COMPARATOR_ENABLED", raising=False)
         (tmp_path / "wiki").mkdir()
-        args = argparse.Namespace(
-            merges_target="recompare", path=tmp_path, json=False, apply=False, limit=0
-        )
-        assert cmd_merges(args) == 2
+        assert main(["decisions", "recompare", "--path", str(tmp_path)]) == 2
         assert "comparator is disabled" in capsys.readouterr().err
 
 

@@ -1,22 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum merges {list,next,count,provenance}`` — pending + executed merges.
+"""Merge-queue maintenance verbs, registered under ``athenaeum decisions``.
 
-The mirror of ``athenaeum questions`` for the resolver's merge-proposal
-sidecar (``wiki/_pending_merges.md``). Before issue athenaeum#401 merges had **no CLI
-at all** — they were reachable only through the ``list_pending_merges`` MCP
-tool, so a real backlog (34 proposals aged 1–4 weeks, found 2026-07-20) could
-sit unseen because no briefing path could read it.
+Handlers and argparse builders for the five maintenance commands over the
+resolver's merge-proposal sidecar (``wiki/_pending_merges.md``) and its
+executed-merge ledger (``wiki/_merge_provenance.jsonl``):
 
-Each item is rendered as an **answerable question**: the source pages are
-named by their human title (frontmatter ``name:``, not the uuid-slug) with a
-one-line gist each, and a ``question`` field phrases the decision plainly —
-so a human can decide approve/reject without opening the raw wiki files.
-
-Six modes:
-
-- ``list``        all unresolved merges (optionally ``--limit``, ``--json``)
-- ``next``        the OLDEST unresolved merge (one block)
-- ``count``       ``N unresolved (oldest: <iso-date>)`` summary
 - ``provenance``  EXECUTED merges from ``wiki/_merge_provenance.jsonl``
                    (issue athenaeum#425) — which source pages a merge relied on,
                    queryable by ``--canonical-slug`` / ``--merge-id``.
@@ -39,6 +27,17 @@ Six modes:
                    no hand-built proposal is needed. Dry-run by default;
                    ``--apply`` queues via the existing ``write_pending_merge``.
 
+These verbs were reachable as ``athenaeum merges <verb>`` until issue
+athenaeum#2456 moved them wholesale under ``athenaeum decisions`` (same
+flags, output and exit codes), and issue athenaeum#2457 then removed the
+``merges`` noun outright in 0.24.0 along with the ``questions`` noun. This
+module keeps the handlers and the ``_add_*_subparser`` builders;
+:mod:`athenaeum._cmd_decisions` is their only registrar, and the
+list/next/count views of the queue live there, in the unified decisions
+listing. The browse-the-queue rendering this module used to own
+(``list``/``next``/``count`` over ``_pending_merges.md``) is gone with the
+noun — :func:`athenaeum.decisions.list_pending_decisions` serves it.
+
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
 is where a NEW subcommand goes, not inline in ``cli.py``'s ``main()``. This
@@ -55,13 +54,8 @@ import re
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _acquire_or_exit, _resolve_knowledge_root, _resolve_wiki_root
-from athenaeum.config import (
-    DEFAULT_KNOWLEDGE_ROOT,
-    deprecated_cli_surface_message,
-    load_config,
-)
-from athenaeum.decisions import list_pending_merges_rich
+from athenaeum._cli_shared import _acquire_or_exit, _resolve_wiki_root
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.provenance import read_merge_provenance
 
 #: Same shape as ``models._FM_RE``, re-declared rather than imported per the
@@ -96,28 +90,6 @@ def _uid_text(value: object) -> str:
     real one (issue athenaeum#2125 AC2).
     """
     return "" if value is None else str(value).strip()
-
-
-def _resolve_merges_path(args: argparse.Namespace) -> Path:
-    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    return knowledge_root / "wiki" / "_pending_merges.md"
-
-
-def _format_block(merge: dict) -> str:
-    """Human-readable rendering for stdout (non-JSON path)."""
-    lines = [
-        f"## [{merge['created_at']}] Merge: {merge['merge_target_name']!r} "
-        f"(confidence {merge['confidence']:.2f})",
-        f"  id: {merge['id']}",
-        f"  question: {merge['question']}",
-    ]
-    if merge.get("rationale"):
-        lines.append(f"  rationale: {merge['rationale']}")
-    lines.append("  sources:")
-    for src in merge["sources"]:
-        gist = f" — {src['gist']}" if src["gist"] else ""
-        lines.append(f"    - {src['title']}{gist}")
-    return "\n".join(lines)
 
 
 def _format_provenance_record(record: dict) -> str:
@@ -188,7 +160,7 @@ def _resolve_page_by_uid(wiki_root: Path, ref: str) -> list[Path]:
 
 
 def _cmd_propose_fold(args: argparse.Namespace) -> int:
-    """``athenaeum merges propose-fold --into A --source B [--source C ...]``.
+    """``athenaeum decisions propose-fold --into A --source B [--source C ...]``.
 
     Operator-facing entry point for the fold path (issue athenaeum#747). Proposes
     folding one or more source pages INTO a named canonical page, deriving
@@ -487,14 +459,13 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
 
 
 def _cmd_revalidate(args: argparse.Namespace) -> int:
-    """``athenaeum merges revalidate [--apply]`` — issue athenaeum#481.
+    """``athenaeum decisions revalidate [--apply]`` — issue athenaeum#481.
 
     Re-validate existing unresolved ``_pending_merges.md`` blocks against the
     CURRENT suppression gate and archive stale ones. Dry-run by default,
     mirroring ``authority convert``'s shape: it reports what WOULD be retired
     and writes nothing unless ``--apply`` is passed.
     """
-    from athenaeum.config import load_config
     from athenaeum.pending_merges import revalidate_pending_merges
 
     knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
@@ -543,7 +514,7 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
 
 
 def _cmd_scrub_pii(args: argparse.Namespace) -> int:
-    """``athenaeum merges scrub-pii [--apply]`` — issue athenaeum#1276.
+    """``athenaeum decisions scrub-pii [--apply]`` — issue athenaeum#1276.
 
     Redact contact data out of ``_pending_merges.md`` proposal bodies IN
     PLACE. A proposal stores its ``draft_merged_body`` verbatim, so migrating
@@ -566,7 +537,6 @@ def _cmd_scrub_pii(args: argparse.Namespace) -> int:
     Dry-run by default, mirroring ``revalidate``/``recompare``: it reports
     what WOULD be redacted and writes nothing unless ``--apply`` is passed.
     """
-    from athenaeum.config import load_config
     from athenaeum.pending_merges_pii import scrub_pending_merges
 
     knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
@@ -678,7 +648,7 @@ def _verdict_counts(result) -> dict[str, int]:
 
 
 def _cmd_recompare(args: argparse.Namespace) -> int:
-    """``athenaeum merges recompare [--apply]`` — issue athenaeum#715.
+    """``athenaeum decisions recompare [--apply]`` — issue athenaeum#715.
 
     Re-run the five-verdict comparator over every UNRESOLVED proposal in
     ``_pending_merges.md`` and record a verdict per source PAIR in the verdict
@@ -693,7 +663,7 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
     (:func:`athenaeum.config.resolve_comparator_enabled`); refuses otherwise
     rather than silently doing nothing.
     """
-    from athenaeum.config import load_config, resolve_comparator_enabled
+    from athenaeum.config import resolve_comparator_enabled
     from athenaeum.recompare import recompare_pending_merges
 
     knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
@@ -835,12 +805,12 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
 
 
 def _cmd_provenance(args: argparse.Namespace) -> int:
-    """``athenaeum merges provenance`` — issue athenaeum#425.
+    """``athenaeum decisions provenance`` — issue athenaeum#425.
 
     List EXECUTED merges from ``wiki/_merge_provenance.jsonl`` — which source
     pages a completed merge relied on, queryable by ``--canonical-slug`` /
-    ``--merge-id``. Factored out of :func:`cmd_merges`'s dispatch (issue
-    athenaeum#2456) so ``athenaeum decisions provenance`` can delegate to this
+    ``--merge-id``. Factored out of the removed ``merges`` dispatcher (issue
+    athenaeum#2456) so ``athenaeum decisions provenance`` delegates to this
     SAME function rather than a second copy.
     """
     wiki_root = _resolve_wiki_root(args)
@@ -862,113 +832,8 @@ def _cmd_provenance(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_merges(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum merges {list,next,count,provenance}``.
-
-    Like ``questions``, never raises on a missing/empty ``_pending_merges.md``:
-    count returns 0 / null oldest, list/next print nothing and exit 0. Same
-    discipline for ``provenance`` against a missing/empty
-    ``_merge_provenance.jsonl``.
-
-    Issue athenaeum#1992: this whole surface is flagged deprecated in favor
-    of ``athenaeum decisions`` (pending-merge proposals are now surfaced,
-    framed, and answerable there too). A one-line warning is printed to
-    stderr before dispatch — on EVERY subcommand. Issue athenaeum#2456:
-    ``revalidate``/``recompare``/``scrub-pii``/``propose-fold``/``provenance``
-    moved wholesale under ``athenaeum decisions`` (same flags, output, exit
-    codes — see the ``_add_*_subparser`` functions below, shared with
-    ``_cmd_decisions.add_decisions_subparser``), so the warning now names
-    the exact per-verb replacement spelling for those five instead of the
-    generic "use decisions"; nothing about this surface's own behavior
-    changes; see :func:`athenaeum.config.deprecated_cli_surface_message`.
-    """
-    sub = getattr(args, "merges_target", None)
-    if sub not in (
-        "list",
-        "next",
-        "count",
-        "provenance",
-        "revalidate",
-        "propose-fold",
-        "recompare",
-        "scrub-pii",
-    ):
-        print(
-            "usage: athenaeum merges "
-            "{list,next,count,provenance,revalidate,propose-fold,recompare,"
-            "scrub-pii} [...]",
-            file=sys.stderr,
-        )
-        return 2
-
-    message = deprecated_cli_surface_message(
-        "merges", load_config(_resolve_knowledge_root(args)), verb=sub
-    )
-    if message:
-        print(f"DEPRECATED: {message}", file=sys.stderr)
-
-    if sub == "propose-fold":
-        return _cmd_propose_fold(args)
-
-    if sub == "scrub-pii":
-        return _cmd_scrub_pii(args)
-
-    if sub == "recompare":
-        return _cmd_recompare(args)
-
-    if sub == "revalidate":
-        return _cmd_revalidate(args)
-
-    if sub == "provenance":
-        return _cmd_provenance(args)
-
-    merges_path = _resolve_merges_path(args)
-    merges = list_pending_merges_rich(merges_path)
-
-    if sub == "count":
-        oldest = merges[0]["created_at"] if merges else None
-        if args.json:
-            sys.stdout.write(json.dumps({"count": len(merges), "oldest": oldest}) + "\n")
-        elif not merges:
-            print("0 unresolved")
-        else:
-            print(f"{len(merges)} unresolved (oldest: {oldest})")
-        return 0
-
-    if sub == "next":
-        if not merges:
-            if args.json:
-                sys.stdout.write("null\n")
-            return 0
-        merge = merges[0]
-        if args.json:
-            sys.stdout.write(json.dumps(merge) + "\n")
-        else:
-            print(_format_block(merge))
-        return 0
-
-    # sub == "list"
-    limit = getattr(args, "limit", 0) or 0
-    if limit > 0:
-        merges = merges[:limit]
-
-    if args.json:
-        sys.stdout.write(json.dumps(merges) + "\n")
-        return 0
-
-    if not merges:
-        print("0 unresolved")
-        return 0
-
-    for idx, merge in enumerate(merges):
-        if idx > 0:
-            print()
-        print(_format_block(merge))
-    return 0
-
-
 def _add_merges_common_args(parser: argparse.ArgumentParser) -> None:
-    """Shared ``--path``/``--json`` flags for every ``merges``/``decisions`` verb."""
+    """Shared ``--path``/``--json`` flags for every ``decisions`` merge verb."""
     parser.add_argument(
         "--path",
         type=Path,
@@ -983,11 +848,11 @@ def _add_merges_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 # Issue athenaeum#2456: each of the five functions below builds ONE verb's
-# subparser and is called from BOTH `add_merges_subparser` (registering under
-# `merges_target`) and `_cmd_decisions.add_decisions_subparser` (registering
-# the identical flags under `decisions_target`) — a single source of truth
-# for "same flags, output and exit codes as today's merges verbs" rather than
-# two argparse definitions that could drift apart. Each returns the built
+# subparser. They were shared by `add_merges_subparser` (under
+# `merges_target`) and `_cmd_decisions.add_decisions_subparser` (the
+# identical flags under `decisions_target`) so the two spellings could not
+# drift apart; issue athenaeum#2457 removed the `merges` noun, leaving
+# `add_decisions_subparser` as the only registrar. Each returns the built
 # parser, matching `subparsers.add_parser`'s own return convention, though no
 # caller currently needs the return value.
 
@@ -1159,38 +1024,3 @@ def _add_provenance_subparser(sub: argparse._SubParsersAction) -> argparse.Argum
         help="Filter to the record for this merge id.",
     )
     return provenance_p
-
-
-def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum merges`` and its three modes on ``subparsers``."""
-    m_parser = subparsers.add_parser(
-        "merges",
-        help=(
-            "Inspect unresolved resolver merge proposals in "
-            "`wiki/_pending_merges.md`. Three modes: list, next, count. "
-            "The merges half of `athenaeum decisions`."
-        ),
-    )
-    m_parser.set_defaults(func=cmd_merges)
-    m_sub = m_parser.add_subparsers(dest="merges_target")
-
-    list_p = m_sub.add_parser("list", help="List all unresolved merge proposals.")
-    _add_merges_common_args(list_p)
-    list_p.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Truncate to first N (default: 0 = unlimited).",
-    )
-
-    next_p = m_sub.add_parser("next", help="Show the oldest unresolved merge (single block).")
-    _add_merges_common_args(next_p)
-
-    count_p = m_sub.add_parser("count", help="Print `N unresolved (oldest: <iso-date>)`.")
-    _add_merges_common_args(count_p)
-
-    _add_revalidate_subparser(m_sub)
-    _add_recompare_subparser(m_sub)
-    _add_scrub_pii_subparser(m_sub)
-    _add_propose_fold_subparser(m_sub)
-    _add_provenance_subparser(m_sub)

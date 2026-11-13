@@ -387,7 +387,7 @@ def scan_qualified_name_splits(
     That has a consequence a reviewer of such a set must know. The proposals
     in a multi-twin set are ALTERNATIVES, not a batch: approving one folds
     the qualified page away, so the remaining blocks in the set name a source
-    that no longer exists. Resolve one, then run ``athenaeum merges
+    that no longer exists. Resolve one, then run ``athenaeum decisions
     revalidate`` (:func:`athenaeum.pending_merges.revalidate_pending_merges`)
     to retire the rest, rather than approving several in a row. The bare
     twins in such a set are themselves an EXACT name collision, which is

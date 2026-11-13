@@ -140,8 +140,6 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_recovery_yield_subparser",
     ),
     "pii-restore": ("athenaeum._cmd_pii_restore", "add_pii_restore_subparser"),
-    "questions": ("athenaeum._cmd_questions", "add_questions_subparser"),
-    "merges": ("athenaeum._cmd_merges", "add_merges_subparser"),
     "decisions": ("athenaeum._cmd_decisions", "add_decisions_subparser"),
     "authority": ("athenaeum._cmd_authority", "add_authority_subparser"),
     "axiom": ("athenaeum._cmd_axiom", "add_axiom_subparser"),
@@ -233,7 +231,6 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
-    from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
     from athenaeum._cmd_paste_cleanup import add_paste_cleanup_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
@@ -241,7 +238,6 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_quarantine import add_quarantine_subparser
     from athenaeum._cmd_query import add_query_subparsers
-    from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_quiesce import add_quiesce_subparser
     from athenaeum._cmd_receipts import add_receipts_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
@@ -296,8 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
-    add_questions_subparser(subparsers)  # questions
-    add_merges_subparser(subparsers)  # merges
+    # questions / merges removed in 0.24.0 (issue athenaeum#2457), as the
+    # athenaeum#1992 deprecation announced: `decisions` carries every mode
+    # either offered — list/next/count through the unified queue, and
+    # revalidate/recompare/scrub-pii/propose-fold/provenance moved verbatim
+    # by athenaeum#2456. See docs/guides/upgrading.md for the mapping.
     add_decisions_subparser(subparsers)  # decisions
     add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
     add_paste_cleanup_subparser(subparsers)  # paste-cleanup (issue athenaeum#1717)

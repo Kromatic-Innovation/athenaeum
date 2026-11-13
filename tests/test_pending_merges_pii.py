@@ -2,7 +2,7 @@
 """Tests for the merge-sidecar PII scrub (issue athenaeum#1276).
 
 Covers the library transform (:mod:`athenaeum.pending_merges_pii`), the
-``athenaeum merges scrub-pii`` CLI, and the migration-coupled pass wired into
+``athenaeum decisions scrub-pii`` CLI, and the migration-coupled pass wired into
 ``athenaeum storage migrate-pii``.
 
 The driving bug: a proposal stores its ``draft_merged_body`` VERBATIM, so
@@ -303,7 +303,7 @@ class TestScrubPendingMerges:
 
 
 # ---------------------------------------------------------------------------
-# `athenaeum merges scrub-pii` — the zero-LLM purge path (AC3)
+# `athenaeum decisions scrub-pii` — the zero-LLM purge path (AC3)
 # ---------------------------------------------------------------------------
 
 
@@ -313,7 +313,7 @@ class TestScrubPiiCli:
         merges_path = _queue_proposal(root)
         before = merges_path.read_text(encoding="utf-8")
 
-        rc = main(["merges", "scrub-pii", "--path", str(root)])
+        rc = main(["decisions", "scrub-pii", "--path", str(root)])
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -328,7 +328,7 @@ class TestScrubPiiCli:
         root = _seed_root(tmp_path)
         merges_path = _queue_proposal(root)
 
-        rc = main(["merges", "scrub-pii", "--path", str(root), "--apply"])
+        rc = main(["decisions", "scrub-pii", "--path", str(root), "--apply"])
 
         assert rc == 0
         assert "Redacted 2 contact value(s)" in capsys.readouterr().out
@@ -344,7 +344,7 @@ class TestScrubPiiCli:
         root = _seed_root(tmp_path)
         _queue_proposal(root)
 
-        rc = main(["merges", "scrub-pii", "--path", str(root), "--json"])
+        rc = main(["decisions", "scrub-pii", "--path", str(root), "--json"])
 
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
@@ -357,7 +357,7 @@ class TestScrubPiiCli:
         root = _seed_root(tmp_path)
         _queue_proposal(root, draft="# Widgets\n\nNothing personal here.\n")
 
-        rc = main(["merges", "scrub-pii", "--path", str(root)])
+        rc = main(["decisions", "scrub-pii", "--path", str(root)])
 
         assert rc == 0
         assert "0 proposals carry contact data" in capsys.readouterr().out
@@ -369,7 +369,7 @@ class TestScrubPiiCli:
         merges_path = root / "wiki" / "_pending_merges.md"
         merges_path.write_bytes(b"# Pending Merges\n\n\xff\xfe not utf-8\n")
 
-        rc = main(["merges", "scrub-pii", "--path", str(root)])
+        rc = main(["decisions", "scrub-pii", "--path", str(root)])
 
         captured = capsys.readouterr()
         assert rc == 1
@@ -379,7 +379,7 @@ class TestScrubPiiCli:
     def test_missing_sidecar_is_not_an_error(self, tmp_path, capsys) -> None:
         root = _seed_root(tmp_path)
 
-        rc = main(["merges", "scrub-pii", "--path", str(root)])
+        rc = main(["decisions", "scrub-pii", "--path", str(root)])
 
         assert rc == 0
         assert "0 proposals carry contact data" in capsys.readouterr().out

@@ -131,8 +131,7 @@ high-authority data. → [modules/conflicts](docs/modules/conflicts.md)
 picks a side on every ambiguity will eventually pick the wrong one, and nobody will know to
 check. Conflicts the pipeline can't settle land in a durable decisions queue you can list,
 answer, and audit — `athenaeum decisions` is the one queue for every pending item (questions,
-merge proposals, and more); the older `athenaeum merges` / `athenaeum questions` surfaces
-are deprecated in its favor. → [guides/decisions](docs/guides/decisions.md)
+merge proposals, and more). → [guides/decisions](docs/guides/decisions.md)
 
 **Recall is scoped, and fails closed.** A scheduled agent that needs operational context
 must not be able to reach PII or client-confidential pages — and "visible unless labeled
@@ -180,8 +179,9 @@ minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
   serving with OIDC auth, `promptwitness`, and the source trust graph). They sit
   outside `athenaeum.__all__` and may change in any minor release without a
   deprecation cycle.
-- **Scheduled removal.** `athenaeum merges` and `athenaeum questions` are removed in
-  0.24.0. Use `athenaeum decisions` instead.
+- **Removed surfaces.** `athenaeum merges` and `athenaeum questions` were removed
+  in 0.24.0, as announced. Use `athenaeum decisions` — see
+  [Upgrading](docs/guides/upgrading.md) for the command-by-command mapping.
 - **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
   for supported versions and how to report a vulnerability.
 

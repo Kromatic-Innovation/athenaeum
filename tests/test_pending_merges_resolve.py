@@ -990,7 +990,7 @@ def test_post_cutover_block_without_confidence_line_parses_cleanly(
     writes to ``_pending_merges.md`` at all (it writes fold evidence — see
     ``athenaeum.verdict_effects``), so no NEW block will ever carry a
     ``**Confidence**:`` line going forward. A hand-authored or otherwise
-    Confidence-less block (e.g. via ``athenaeum merges propose-fold``) must
+    Confidence-less block (e.g. via ``athenaeum decisions propose-fold``) must
     still parse cleanly with no line to read — the grammar tolerates the
     field being present (legacy data, above) OR absent (everything from now
     on), never requiring a live-store rewrite either way."""

@@ -2,7 +2,7 @@
 """``athenaeum verdicts {count,list-by-verdict,show-one-pair,show-stale}``.
 
 The sanctioned CLI read path for the verdict ledger (:mod:`athenaeum.verdicts`,
-issue athenaeum#712) — mirroring the repo's ``athenaeum merges`` precedent
+issue athenaeum#712) — mirroring the repo's ``athenaeum decisions`` precedent
 (:mod:`athenaeum._cmd_merges`). Hand-parsing ``wiki/_verdicts/*.jsonl`` is
 not a supported access pattern; this (or the library functions it calls) is.
 
