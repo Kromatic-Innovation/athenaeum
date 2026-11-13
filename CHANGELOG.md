@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
+  rename primitive: dry-run by default, `--apply` sets `name:`, appends the
+  previous name to `aliases:` (deduplicated), rebuilds the recall index,
+  and writes a provenance record; `--reslug` additionally moves the file
+  and rewrites inbound `[[wikilinks]]` (reusing the fold's own rewrite
+  helper). Idempotent, and takes the run lock on `--apply` (athenaeum#2488).
+
 - `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
   ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
   and source object produced a compiled page, or says plainly that none was
@@ -98,6 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecar block that fails to parse at all — athenaeum#2455's unresolved-only
   filter dropped both, so their raw members became retirable while the
   system still needed them (athenaeum#2497).
+
+- The `resolve_merge` MCP tool's docstring and `docs/design/contradiction-detection.md`
+  said approving a `fold-into-existing` merge "deletes the old source wiki
+  files"; the code has tombstoned them (`status: folded`, `folded_into:`
+  set, file kept) since athenaeum#716. Both now describe tombstoning, and a
+  test guards the published tool description against the wording coming
+  back (athenaeum#2543).
 
 ### Removed
 

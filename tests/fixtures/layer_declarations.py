@@ -235,6 +235,7 @@ MODULE_LAYER: dict[str, int] = {
     "dedupe": 4,
     "drain": 4,
     "entity_resolution": 4,
+    "entity_rename": 4,  # athenaeum#2488: page rename primitive
     "fold_graph_lint": 4,
     "intake_audit": 4,
     "librarian": 4,
