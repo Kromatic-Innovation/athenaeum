@@ -87,6 +87,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Merge proposals a human rejected, and proposals `athenaeum decisions
+  revalidate --apply` archived as stale, are no longer re-proposed the next
+  night. The nightly name-collision scan was the one proposer of three that
+  never consulted prior rulings, and nothing recorded "archived as stale" as
+  a ruling at all; the sweep now stamps a content digest of a proposal's
+  source pages on the archived block, and the archive binds every proposer
+  until one of those pages actually changes (athenaeum#2514).
+
+- A human-approved fold into a canonical page that has no frontmatter — or
+  an empty `{}` block — now backfills that page's separator coordinates from
+  the folded sources in the fold preflight, so it applies instead of raising
+  a widen question nothing can answer. An open widen question on a dimension
+  the fold settles without a human is withdrawn on the next `ingest-answers`
+  tick, whether or not the fold itself applies (athenaeum#2514).
+
+- When several files under `raw/answers/` decide the same decision id, only
+  the newest applies; the older ones are reported as `superseded` and kept
+  on disk. An older answer file used to win, because every conformant file
+  was dispatched in turn and the first one to land settled the decision
+  (athenaeum#2514).
+
 - `split-oversize` and the `librarian.oversize_page_action: split`
   disposition no longer split a compiled page at its lone top-level `#
   <Name>` title heading (moving the whole body into one child renamed
