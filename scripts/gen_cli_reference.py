@@ -163,7 +163,7 @@ def _flatten(node: _Node, out: list[_Node]) -> None:
         _flatten(child, out)
 
 
-def _render_leaf_flags(parser: argparse.ArgumentParser) -> list[str]:
+def _render_leaf_flags(parser: argparse.ArgumentParser, *, note_if_empty: bool = True) -> list[str]:
     lines: list[str] = []
     positionals = [
         a
@@ -213,7 +213,7 @@ def _render_leaf_flags(parser: argparse.ArgumentParser) -> list[str]:
             help_text = _sanitize(a.help).replace("|", "\\|") or "—"
             lines.append(f"| {flags} | {default} | {choices} | {help_text} |")
         lines.append("")
-    if not positionals and not options:
+    if not positionals and not options and note_if_empty:
         lines.append("No flags beyond `-h`/`--help`.")
         lines.append("")
     return lines
@@ -249,6 +249,18 @@ def _render_command_sections(nodes: list[_Node]) -> list[str]:
             lines.append(help_text)
             lines.append("")
         if n.children:
+            # Issue athenaeum#2488: a group's OWN flags, when it has any beyond
+            # `-h`/the subparsers action itself — e.g. `athenaeum entity`'s
+            # `--uid`/`--class`/.../`--path` for its default (no sub-action)
+            # read mode. Every PRE-existing group (`axiom`, `decisions`,
+            # `dedupe`, ...) carries no flags of its own, so
+            # `note_if_empty=False` means this is a silent no-op for every
+            # one of them — zero diff — and only a group that genuinely has
+            # its own flags gains this table, printed BEFORE the
+            # "Subcommands:" list.
+            own_flags = _render_leaf_flags(n.parser, note_if_empty=False)
+            if own_flags:
+                lines.extend(own_flags)
             lines.append("Subcommands:")
             lines.append("")
             for name in sorted(n.children.keys()):

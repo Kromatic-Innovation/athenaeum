@@ -235,6 +235,7 @@ MODULE_LAYER: dict[str, int] = {
     "dedupe": 4,
     "drain": 4,
     "entity_resolution": 4,
+    "entity_rename": 4,  # athenaeum#2488: page rename primitive
     "fold_graph_lint": 4,
     # Issue athenaeum#2545: dangling-fold-target repair. Imports
     # pending_merges (L4 sibling, for find_identity_pages' identity
