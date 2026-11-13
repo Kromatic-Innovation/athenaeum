@@ -48,7 +48,6 @@ import hashlib
 import importlib.resources
 import json
 import logging
-import os
 import re
 import textwrap
 import time
@@ -7822,17 +7821,8 @@ def tier4_escalate(
         return (getattr(prop, "confidence", 0.0) >= thr, thr)
 
     # Issue athenaeum#157: dedup escalations by source-memory pair (Members involved
-    # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
-    # ATHENAEUM_TIER4_DEDUP env var so a downstream user can force the
-    # legacy always-append behavior.
-    dedup_enabled = os.environ.get(
-        "ATHENAEUM_TIER4_DEDUP", "true"
-    ).strip().lower() not in (
-        "false",
-        "0",
-        "no",
-        "off",
-    )
+    # tuple, or sha1(passages) fallback). Always on (athenaeum#2461) — the
+    # legacy always-append behavior has no planned use.
 
     # Build the open-pair index from the file's currently-open ([ ]) blocks.
     # Archived/[x] blocks are deliberately excluded — a previously-answered
@@ -7855,8 +7845,6 @@ def tier4_escalate(
                 continue
             if pq.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES:
                 open_oversize_entities.add(pq.entity)
-            if not dedup_enabled:
-                continue
             key = _pair_key_from_description(pq.description)
             if key is not None and key not in open_index:
                 # First-seen wins — if the file already has duplicates from a
@@ -8115,7 +8103,7 @@ def tier4_escalate(
             # Auto-only cache hit, OR un-appliable human verdict -> fall
             # through to normal escalation.
 
-        key = _pair_key_from_description(item.description) if dedup_enabled else None
+        key = _pair_key_from_description(item.description)
         if key is not None and item_fingerprint and key not in key_fingerprints:
             key_fingerprints[key] = item_fingerprint
             item_passages = extract_passages(item.description)

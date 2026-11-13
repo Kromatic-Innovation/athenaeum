@@ -553,18 +553,13 @@ def stamp_related_edges(
 _RUN_INDEX: dict[Path, RelatednessIndex | None] = {}
 
 
-def run_index(wiki_root: Path, *, config: dict[str, Any] | None = None) -> RelatednessIndex | None:
+def run_index(wiki_root: Path) -> RelatednessIndex | None:
     """The index for this run, built on first use for *wiki_root*.
 
-    ``None`` means "propose no edges" -- either the writer is disabled
-    (``librarian.relatedness_writer: false``) or the wiki is larger than
-    :data:`DEFAULT_MAX_INDEX_PAGES`. ``None`` is cached too, so a disabled or
-    over-size wiki is not re-scanned once per raw file.
+    ``None`` means "propose no edges" -- the wiki is larger than
+    :data:`DEFAULT_MAX_INDEX_PAGES`. ``None`` is cached too, so an over-size
+    wiki is not re-scanned once per raw file.
     """
-    from athenaeum.config import resolve_relatedness_writer_enabled
-
-    if not resolve_relatedness_writer_enabled(config):
-        return None
     key = wiki_root.resolve()
     if key not in _RUN_INDEX:
         _RUN_INDEX[key] = build_index_from_wiki(wiki_root)
