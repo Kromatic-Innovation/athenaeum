@@ -55,7 +55,7 @@ from athenaeum.tiers import (
     CreateNameDemotedError,
     CreateNameEscalatedError,
     CreateNameRejectedError,
-    demote_oversize_pages,
+    _perform_oversize_log_demote,
     gate_create_name_classifications,
     resolve_create_name_escalate_max_chars,
     validate_create_name,
@@ -903,8 +903,8 @@ class TestFullRunDisambiguatesAcrossRuns:
 # Issue athenaeum#1406: a log-demoted page's name must not be re-mintable --
 # validate_create_name()/gate_create_name_classifications()'s half of the
 # guard. tests/test_page_size_gate.py::TestLogDemoteRetiredNameGuard covers
-# the record demote_oversize_pages() writes; this covers what a subsequent
-# create attempt does with it.
+# the record _perform_oversize_log_demote() writes; this covers what a
+# subsequent create attempt does with it.
 # ---------------------------------------------------------------------------
 
 
@@ -918,8 +918,8 @@ def _demoted_wiki(
     wiki = tmp_path / "wiki"
     target = _write_page(wiki, f"{uid}.md", uid=uid, name=name, type_="person", aliases=aliases)
     config = {"librarian": {"preserved_log_dir": "logs"}}
-    results = demote_oversize_pages([target], wiki, config)
-    assert results[0].demoted is True
+    dest = _perform_oversize_log_demote(target, wiki, config)
+    assert dest is not None
     return wiki
 
 
