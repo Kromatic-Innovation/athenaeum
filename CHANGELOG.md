@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `_detect_field_group_misfits` no longer refuses an ordinary same-record
+  update (e.g. a deal's stage advancing while its name/amount stay put) as
+  a field-group misfit: a misfit now requires that NO other field in the
+  same declared group still agrees between the raw and the page, matching
+  the issue's own "from a different source record" acceptance criterion.
+  `librarian.process_one` also no longer appends to
+  `wiki/_schema_amendment_proposals.jsonl` on a `dry_run=True` structured-
+  upsert refusal — a preview no longer creates a visible pending decision
+  (post-merge review fix, athenaeum#2197).
+
 - `athenaeum doctor` now ends its report with a short note when one or more
   checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
   install until setup is complete and pointing back at the per-FAIL `fix:`
