@@ -64,6 +64,43 @@ never read and never written. Nothing is deleted or migrated automatically;
 if you want those old rows, merge the leftover file into the corresponding
 file in your cache directory yourself, then remove the old copy.
 
+## I want to know which ledgers stopped being written, and where the old files are
+
+A cleanup audit found five internal ledgers written by live code but read
+by nothing outside their own tests. One is kept and newly exposed; the
+other four are no longer written at all. Nothing on disk from before this
+change is touched — each leftover file is simply ignored from now on, and
+you may delete it:
+
+- **Adapter provenance — kept, now readable.** `athenaeum provenance
+  adapter --uid <uid>` prints which adapter and source object produced a
+  compiled page, or says none was recorded. `--json` for machine output.
+  This is the one ledger of the five that is still written; nothing about
+  it changed except that you can now read it from the command line.
+- **Compile routes — stopped.** The per-file "which page did this raw file
+  write to" record is no longer kept. The one-way routing GUARD it rode
+  alongside (refusing or logging a write that lands on the wrong person's
+  page) is unaffected. Old file: `_compile_route_records.jsonl` under your
+  cache directory (`~/.cache/athenaeum` by default, or `ATHENAEUM_CACHE_DIR`
+  if you set it).
+- **LLM schema observations — stopped.** The per-parse "did the model's
+  response match the expected shape" record is no longer kept; a shape
+  mismatch is still logged to the process log as before, just no longer
+  durably recorded. The `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` environment
+  variable that used to gate this is gone — setting it now does nothing.
+  Old file: `_llm_schema_observations.jsonl` under your cache directory.
+- **Wiki-dedupe attribution report — stopped.** The per-run snapshot of
+  which candidate page pairs the dedupe pass examined, and why each one
+  did or didn't become a merge proposal, is no longer written. The dedupe
+  pass itself still proposes (or doesn't propose) merges exactly as before.
+  Old files: `_wiki_dedupe_attribution.jsonl` and its timestamped rotations
+  under `wiki/` in your knowledge directory.
+- **Never-ingest refusals — stopped.** The append-only record of which
+  files were refused for matching a configured never-ingest class is no
+  longer kept. The refusal itself is unchanged: a matching file is still
+  excluded from compilation this run and still left untouched on disk.
+  Old file: `_never_ingest_refusals.jsonl` under your cache directory.
+
 ## I want to know what gets moved vs. what's held back
 
 Only non-contradictory clusters are retired. A cluster is **held** in the

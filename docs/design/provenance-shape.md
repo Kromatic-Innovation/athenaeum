@@ -1320,7 +1320,7 @@ changed underneath it.
 | §10 channel split + model + asserter | athenaeum#326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
 | §10.6 model + session on the `claude:inferred` default | athenaeum#2148 | `mcp_server.remember`'s `_DEFAULT_INFERRED_SOURCE` branch stamps `model`/`originSessionId` extras; `intake.py`'s `coerce_source_type` block fills `AutoMemoryFile.model`/`.source_ref` in memory for AI-attributed defaults via `SessionRecoverer.model_for_write`/`.model_for_session`. Neither touches the `claude:inferred` scalar. |
 | §12 claim kind + opinion attribution | athenaeum#327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
-| §13 adapter frontmatter provenance ledger | athenaeum#1462 | New `src/athenaeum/adapter_provenance.py`: bounded `SOURCE_OBJECT_ID_KEYS`/`ADAPTER_PROVENANCE_VALUE_KEYS`, `record_adapter_provenance_for_pages` wired into `librarian._apply_tier3_results`, `resolve_source_for_page` for the raw-file-independent join. Mechanism (b) chosen over (a); rejected-alternative reasoning in the module docstring. |
+| §13 adapter frontmatter provenance ledger | athenaeum#1462 | New `src/athenaeum/adapter_provenance.py`: bounded `SOURCE_OBJECT_ID_KEYS`/`ADAPTER_PROVENANCE_VALUE_KEYS`, `record_adapter_provenance_for_pages` wired into `librarian._apply_tier3_results`, `resolve_source_for_page` for the raw-file-independent join. Mechanism (b) chosen over (a); rejected-alternative reasoning in the module docstring. **CLI read surface (athenaeum#2468): `athenaeum provenance adapter --uid <uid>`.** |
 
 ## 12. Claim kind + opinion attribution (`claim_kind:`, `attribute_both`)
 
@@ -1425,3 +1425,25 @@ Pinned by `tests/test_adapter_provenance_1462.py`, including an end-to-end
 test that compiles a fixture record through `athenaeum.librarian.process_one`,
 deletes the raw file, and resolves page → source object from the ledger
 alone.
+
+**CLI read surface (issue athenaeum#2468).** `resolve_source_for_page`
+above was, until this issue, reachable only from inside athenaeum (tests and
+any future in-process caller) — an operator or script had no way to ask
+"which adapter/source produced this page" without hand-reading the JSONL
+ledger. `athenaeum provenance adapter --uid <uid>` is the read command: it
+calls `resolve_source_for_page` for the given page uid and prints every
+matching row (`source`, `source_object_id`, `raw_ref`, `recorded_at`, and
+the captured `fields`), or says plainly that no provenance was recorded for
+that uid. `--json` emits the same rows as a JSON object instead of text.
+Read-only — it takes no run lock and writes nothing. See
+`src/athenaeum/_cmd_provenance.py` and `docs/reference/cli.md`'s generated
+`provenance` entry.
+
+Issue athenaeum#2468 also retired four OTHER observability ledgers that this
+ledger was once lumped in with for review purposes (compile routes, LLM
+schema observations, the wiki-dedupe attribution report, and the
+never-ingest refusal record) — none of those are provenance-shape
+artifacts and none are described by this document; see `CHANGELOG.md` and
+`docs/guides/upgrading.md` for what changed and where their old files sit.
+This adapter-provenance ledger is the one ledger of that review that was
+kept and, as of this issue, exposed.

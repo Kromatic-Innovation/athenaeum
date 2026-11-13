@@ -197,18 +197,6 @@ from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
 from athenaeum.vecmath import cosine, mean_pool
 from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME, queue_coordinate_batch
-from athenaeum.wiki_dedupe_attribution import (
-    ERASURE_CLASS_REFUSED_REASON,
-    OUTCOME_BELOW_CONFIDENCE_FLOOR,
-    OUTCOME_CROSS_CLASS_REJECTED,
-    OUTCOME_DECIDED,
-    OUTCOME_FRESH,
-    OUTCOME_NO_VERDICT,
-    OUTCOME_READ_ERROR,
-    AttributionRow,
-    build_attribution_row,
-    write_attribution_report,
-)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.provider import LLMBackend
@@ -250,15 +238,11 @@ _WIKI_FALLBACK_WARNED = False
 # Issue athenaeum#1243 (AC5 — the gate this comment used to name as open):
 # athenaeum#1227's cut-over removed ``DEFAULT_WIKI_SUPPRESSIONS_FILENAME`` here,
 # stranding athenaeum#1142's suppression ledger with no producer under the
-# comparator path. It is RE-SITED as of this commit:
-# :mod:`athenaeum.wiki_dedupe_attribution` writes one durable, machine-readable
-# row per candidate pair this pass examines — including the pairs that produce
-# no verdict at all, which the measurement in athenaeum#1243 shows is 100% of
-# them on the live corpus today — each row carrying the embedder identity that
-# ``Cluster.embedder`` previously computed on every run and threw away. That
-# module's docstring carries the retention argument (athenaeum#1243 AC4: a
-# per-run snapshot + rotation pruned to ``librarian.rotation_retention``, NOT a
-# row in the unbounded-in-production ``wiki/_verdicts/``).
+# comparator path. It was RE-SITED as :mod:`athenaeum.wiki_dedupe_attribution`
+# (one durable row per candidate pair examined); issue athenaeum#2468 then
+# stopped that re-sited ledger too (nothing outside its own tests read it) —
+# see that module's docstring for the archaeology. This pass no longer writes
+# or reads an attribution snapshot of any kind.
 #
 # ``comparator_enabled`` remains OFF by default and this commit does not flip
 # it. The observability gate is satisfied; the separate PRECONDITION under it
@@ -772,18 +756,13 @@ def propose_wiki_page_merges(
     athenaeum#2132 AC1): the pairs not reached are simply not examined this
     run, so the next run sees them exactly as this one did. Everything the
     partial pass DID decide is still flushed by the ``finally`` below — the
-    batched ``coordinate`` queue items, the attribution snapshot and the
-    comparator-unavailable warning — the same shape a mid-loop exception
-    already produced.
+    batched ``coordinate`` queue items and the comparator-unavailable
+    warning — the same shape a mid-loop exception already produced.
 
-    Side effects (issue athenaeum#1243): every real (non-dry-run,
-    lock-held) call writes :mod:`athenaeum.wiki_dedupe_attribution`'s
-    per-run snapshot -- one durable row per candidate pair examined,
-    carrying the embedder identity and, for a pair that produced no
-    verdict, exactly why. The return value below covers only the DECIDED
-    pairs; the snapshot covers ALL of them, which is the point: on the
-    live corpus the decided set is empty and the undecided set is 22,040
-    pairs (see athenaeum#1243's measurement comment).
+    Issue athenaeum#2468 removed this pass's per-run attribution snapshot
+    (:mod:`athenaeum.wiki_dedupe_attribution`'s ``write_attribution_report``)
+    — nothing outside its own tests read it. The return value below covers
+    only the DECIDED pairs.
 
     Returns:
         A list of dicts, one per pair this call actually decided a verdict
@@ -853,7 +832,7 @@ def propose_wiki_page_merges(
         """Issue athenaeum#2132 (AC2): hand the caller this pass's exit reason
         and what it left behind. Called from the ``finally`` below (and the
         zero-cluster early return) so a mid-loop exception still reports
-        whatever was examined, the same discipline as ``_flush_attribution``."""
+        whatever was examined."""
         if out_stop is None:
             return
         out_stop["reason"] = stop_reason
@@ -885,40 +864,16 @@ def propose_wiki_page_merges(
     )
     heartbeat.start()
 
-    # Issue athenaeum#1243 (AC1/AC4): this pass writes its per-run attribution
-    # snapshot only when it actually RUNS. A dry run decides and enacts
-    # nothing, and a run skipped for want of a lock examines nothing — neither
-    # has run state to snapshot, and since the canonical file is a REPLACE (not
-    # an append), writing an empty one for either would clobber the last real
-    # run's rows. A run that ran and examined zero pairs DOES write an empty
-    # snapshot, which is athenaeum#1142's own
-    # ``test_ledger_written_even_with_zero_suppressions`` guarantee: the
-    # canonical file always reflects THIS run's state, so a stale prior run can
-    # never be misread as current.
+    # ``writes_attribution`` originally also gated this pass's per-run
+    # attribution snapshot (issue athenaeum#1243); issue athenaeum#2468
+    # removed that snapshot (nothing outside its own tests read it). The
+    # flag survives as the general "is this actually running for real"
+    # gate — a dry run decides and enacts nothing, and a run skipped for
+    # want of a lock examines nothing — reused below for the
+    # effort-budget-breach computation.
     writes_attribution = not dry_run and lock is not None
-    attribution_rows: list[AttributionRow] = []
-
-    def _flush_attribution() -> None:
-        if not writes_attribution:
-            return
-        try:
-            write_attribution_report(
-                attribution_rows,
-                wiki_root,
-                knowledge_root=knowledge_root,
-                config=resolved_config,
-            )
-        except OSError as exc:
-            # Observability must never take the pass down with it — the same
-            # posture as the heartbeat and the fallback WARNING above.
-            log.warning(
-                "wiki-page dedup: could not write the attribution snapshot "
-                "(issue athenaeum#1243): %s",
-                exc,
-            )
 
     if not clusters:
-        _flush_attribution()
         _publish_stop()  # issue athenaeum#2132: ran, examined zero pairs
         heartbeat.done()
         return []
@@ -938,10 +893,9 @@ def propose_wiki_page_merges(
     # needs it, but re-deriving it inside that per-pair call would mean
     # re-listing the entire pending-decisions queue for every candidate pair
     # this cluster pass examines. Only computed for a run that can actually
-    # enact a fold (`writes_attribution`, the same "really running" gate the
-    # attribution snapshot above already uses) -- a dry run never calls
-    # `enact_verdict_effect` with auto-apply armed, so there is nothing for
-    # this value to gate.
+    # enact a fold (`writes_attribution`, the "really running" gate) -- a dry
+    # run never calls `enact_verdict_effect` with auto-apply armed, so there
+    # is nothing for this value to gate.
     effort_budget_breach = False
     if writes_attribution:
         try:
@@ -990,9 +944,8 @@ def propose_wiki_page_merges(
                 record_shapes=False,
             )
             effort_budget_breach = bool(budget.get("breach"))
-        except Exception as exc:  # noqa: BLE001 — best-effort, same discipline
-            # as the attribution-snapshot writer above: a read hiccup here
-            # must never take the whole dedupe pass down. Failing OPEN
+        except Exception as exc:  # noqa: BLE001 — best-effort: a read hiccup
+            # here must never take the whole dedupe pass down. Failing OPEN
             # (breach=False, i.e. no extra refusal) rather than failing
             # closed matches every other budget-instrumentation call site's
             # "must never break the pipeline" posture (see status.py) --
@@ -1111,7 +1064,7 @@ def propose_wiki_page_merges(
                 path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
                 sources = [str(path_a), str(path_b)]
                 # Issue athenaeum#2080 AC3: this pair's embedding cosine,
-                # recorded on every result/attribution row. ``None`` only when
+                # recorded on every decided result. ``None`` only when
                 # a vector is missing, which clustering makes unreachable.
                 vec_a = pair_embeddings.get(str(am_a.path))
                 vec_b = pair_embeddings.get(str(am_b.path))
@@ -1134,23 +1087,6 @@ def propose_wiki_page_merges(
                         path_a,
                         path_b,
                     )
-                    # Issue athenaeum#1243 AC1: 46.4% of live-corpus pairs land
-                    # here. The log line above is the only prior evidence, and
-                    # it lives in a rotating log — exactly what athenaeum#1142
-                    # was filed to end.
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_CROSS_CLASS_REJECTED,
-                            embedder=cluster.embedder,
-                            reason=rejection.reason,
-                            detail=rejection.detail,
-                            cluster_id=cluster.cluster_id,
-                            cluster_threshold=resolved_threshold,
-                            n_cluster_members=len(members),
-                        )
-                    )
                     continue
 
                 matched = match_rulings(
@@ -1164,25 +1100,11 @@ def propose_wiki_page_merges(
                         path_a,
                         path_b,
                     )
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_NO_VERDICT,
-                            embedder=cluster.embedder,
-                            reason="prior-human-ruling",
-                            detail=ruling.describe(),
-                            cluster_id=cluster.cluster_id,
-                            cluster_threshold=resolved_threshold,
-                            n_cluster_members=len(members),
-                        )
-                    )
                     continue
 
                 # Issue athenaeum#2094 (AC2): the cooldown lapsed, so this pair is
-                # a fresh question -- but every attribution row it produces
-                # names the earlier rejection and its note, the way
-                # ``propose_qualified_name_merges`` does in its rationale.
+                # a fresh question -- but ``enact_verdict_effect`` below still
+                # gets told about the earlier rejection (issue athenaeum#2101).
                 earlier_ruling = (
                     f"Earlier ruling on this pair ({matched.expired.merge_id}): "
                     f"{matched.expired.describe()}; the rejection cooldown has "
@@ -1190,9 +1112,6 @@ def propose_wiki_page_merges(
                     if matched.expired is not None
                     else ""
                 )
-
-                def _with_earlier(detail: str, _earlier: str = earlier_ruling) -> str:
-                    return f"{detail} {_earlier}".strip() if _earlier else detail
 
                 try:
                     page_a = page_from_path(path_a)
@@ -1204,19 +1123,6 @@ def propose_wiki_page_merges(
                         path_a,
                         path_b,
                         exc,
-                    )
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_READ_ERROR,
-                            embedder=cluster.embedder,
-                            reason="page-read-failed",
-                            detail=_with_earlier(str(exc)),
-                            cluster_id=cluster.cluster_id,
-                            cluster_threshold=resolved_threshold,
-                            n_cluster_members=len(members),
-                        )
                     )
                     continue
 
@@ -1251,38 +1157,10 @@ def propose_wiki_page_merges(
                     lock=lock,
                     reopen_declared_rejection=matched.expired is not None,
                 )
-                # Issue athenaeum#1243 AC1/AC2: one row per examined pair, on
-                # EVERY branch below. ``embedder`` is ``Cluster.embedder``,
-                # which athenaeum#1227's cut-over computed on every run and
-                # then read from nowhere (AC2's "computed and then discarded").
-                row_kwargs: dict[str, Any] = {
-                    "embedder": cluster.embedder,
-                    "cluster_id": cluster.cluster_id,
-                    "cluster_threshold": resolved_threshold,
-                    "n_cluster_members": len(members),
-                    "pair": record.get("pair"),
-                    "confidence": pair_confidence,
-                }
-                if earlier_ruling:
-                    row_kwargs["detail"] = earlier_ruling
                 if not record["ok"]:
-                    # AC1's sharper half. ``record_comparison``'s own docstring
-                    # says "nothing ledgered" here and this caller used to
-                    # discard ``reason`` on the floor; measured on the live
-                    # corpus this is 53.6% of pairs, 100% of them
-                    # ``llm-unavailable``. See
-                    # ERASURE_CLASS_REFUSED_REASON for the ONE pair shape
-                    # deliberately NOT recorded.
-                    if record.get("reason") != ERASURE_CLASS_REFUSED_REASON:
-                        attribution_rows.append(
-                            build_attribution_row(
-                                path_a,
-                                path_b,
-                                OUTCOME_NO_VERDICT,
-                                reason=str(record.get("reason") or ""),
-                                **row_kwargs,
-                            )
-                        )
+                    # ``record_comparison``'s own docstring says "nothing
+                    # ledgered" here: Gate 2 unavailable, or Gate 1 could not
+                    # settle the pair.
                     continue
                 # Issue athenaeum#2080 AC3 (review fix): the confidence floor is a
                 # QUEUE-side gate over a DURABLE verdict (athenaeum#715 bans
@@ -1351,48 +1229,16 @@ def propose_wiki_page_merges(
                     fresh_unenacted_duplicate and below_floor
                 ):
                     # Decided on a PRIOR run and still fresh, so this run
-                    # deliberately did not re-decide it. Recorded so a reader
-                    # can tell "examined, memoized" apart from "not examined"
-                    # — a distinction AC1 needs and a bare ``continue`` erased.
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_FRESH,
-                            reason="memoized-fresh-verdict",
-                            verdict=record.get("verdict"),
-                            **row_kwargs,
-                        )
-                    )
+                    # deliberately did not re-decide it.
                     continue
                 # Issue athenaeum#2080 AC3: a ``duplicate`` (fresh-decided or memoized) whose
                 # pair cosine is below the configured floor is ARCHIVED, not
                 # enacted -- no fold evidence, no queue item, and (crucially) no
-                # auto-apply authorization to evaluate. The verdict is already
-                # ledgered above; the attribution snapshot row below is the
-                # provenance note. Only the real embedder's cosines are gated
-                # on: the hashing-trick fallback embedder's scores are on a
-                # different scale, so a floor calibrated on MiniLM vectors
-                # would be meaningless against them (recorded, never gated).
+                # auto-apply authorization to evaluate. Only the real embedder's
+                # cosines are gated on: the hashing-trick fallback embedder's
+                # scores are on a different scale, so a floor calibrated on
+                # MiniLM vectors would be meaningless against them.
                 if record["verdict"] == VERDICT_DUPLICATE and below_floor:
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_BELOW_CONFIDENCE_FLOOR,
-                            reason=OUTCOME_BELOW_CONFIDENCE_FLOOR,
-                            verdict=record.get("verdict"),
-                            action="archived",
-                            **{
-                                **row_kwargs,
-                                "detail": _with_earlier(
-                                    f"duplicate verdict archived: pair cosine "
-                                    f"{pair_confidence:.4f} < "
-                                    f"wiki_dedupe_min_confidence {confidence_floor:.4f}"
-                                ),
-                            },
-                        )
-                    )
                     results.append(
                         {
                             "pair": record["pair"],
@@ -1413,17 +1259,8 @@ def propose_wiki_page_merges(
                 outcome = record.get("outcome")
                 if outcome is None:
                     # Defensive: ``ok=True`` and not fresh should always carry
-                    # an outcome. If that contract ever breaks, the pair is
-                    # still accounted for rather than vanishing.
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_NO_VERDICT,
-                            reason="no-outcome-returned",
-                            **row_kwargs,
-                        )
-                    )
+                    # an outcome. If that contract ever breaks, skip the pair
+                    # rather than mishandling it.
                     continue
                 # Issue athenaeum#2093: T1 screens a ``duplicate`` verdict that
                 # survived BOTH the prior-ruling check (athenaeum#2077, above)
@@ -1456,22 +1293,6 @@ def propose_wiki_page_merges(
                             exc,
                         )
                 if t1_rejected:
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_DECIDED,
-                            verdict=record.get("verdict"),
-                            action="t1-rejected",
-                            **{
-                                **row_kwargs,
-                                "detail": _with_earlier(
-                                    "duplicate verdict not queued: the T1 "
-                                    "reasoning tier rejected the merge proposal"
-                                ),
-                            },
-                        )
-                    )
                     results.append(
                         {
                             "pair": record["pair"],
@@ -1509,22 +1330,11 @@ def propose_wiki_page_merges(
                     coordinate_sink=coordinate_members,
                     effort_budget_breach=effort_budget_breach,
                     # Issue athenaeum#2101: the human reviewing the queued
-                    # fold sees the earlier rejection too, not only the
-                    # attribution report.
+                    # fold sees the earlier rejection too.
                     earlier_ruling=earlier_ruling,
                 )
                 if effect.action == "coordinate-pending" and coordinate_members:
                     coordinate_members[-1]["cluster_id"] = cluster.cluster_id
-                attribution_rows.append(
-                    build_attribution_row(
-                        path_a,
-                        path_b,
-                        OUTCOME_DECIDED,
-                        verdict=record.get("verdict"),
-                        action=effect.action,
-                        **row_kwargs,
-                    )
-                )
                 results.append(
                     {
                         "pair": record["pair"],
@@ -1555,8 +1365,7 @@ def propose_wiki_page_merges(
         flush_content_relation_unavailable_warning()
         # Issue athenaeum#1991: flush every ``underdetermined`` pair this run
         # decided into one or more BATCHED queue items — never one per
-        # pair_key. In the same ``finally`` as the attribution snapshot
-        # below, for the same reason: ``record_comparison`` already
+        # pair_key, for the same reason: ``record_comparison`` already
         # ledgered these pairs' verdicts, so a mid-loop exception must not
         # drop their coordinate requests along with it (they would read as
         # "fresh" and be silently skipped on the next run otherwise).
@@ -1571,10 +1380,9 @@ def propose_wiki_page_merges(
         # this function's documented "one entry per decided pair" contract
         # exactly as it was before this issue.
         #
-        # Wrapped in try/except, same posture as ``_flush_attribution``
-        # just below: a failure here must not swallow a real exception
-        # already propagating out of the main loop, nor skip the
-        # attribution flush and ``heartbeat.done()`` that still need to run.
+        # Wrapped in try/except: a failure here must not swallow a real
+        # exception already propagating out of the main loop, nor skip the
+        # ``_publish_stop()`` / ``heartbeat.done()`` that still need to run.
         if coordinate_members:
             try:
                 pair_to_result = {
@@ -1603,11 +1411,6 @@ def propose_wiki_page_merges(
                     len(coordinate_members),
                     sorted({m["pair_key"] for m in coordinate_members}),
                 )
-        # Issue athenaeum#1243: in the SAME ``finally``, and for the same
-        # reason athenaeum#1245 put the warning flush here — a mid-loop
-        # exception still snapshots whatever this partial pass accounted for,
-        # instead of discarding every row along with the exception.
-        _flush_attribution()
         # Issue athenaeum#2132 (AC2): in the SAME ``finally``, for the same
         # reason — a mid-loop exception still reports what this partial pass
         # examined instead of discarding the count along with the exception.
