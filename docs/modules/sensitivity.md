@@ -61,7 +61,9 @@ of the two sanctioned paths below, does.
 - A purged erasure key (`purge_erasure_key`) deletes the per-machine HMAC key used to hash
   erasure-class content, permanently unlinking every previously computed hash. There is no
   rotation or grace window — a grace window would keep exactly the linkability this exists to
-  destroy.
+  destroy. **Not yet available as a user-facing operation** — no CLI command or MCP tool
+  calls `purge_erasure_key` today; it is exercised only by this module's own test suite, and
+  an operator-invokable purge will be designed separately.
 
 ## What it refuses
 

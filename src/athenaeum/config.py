@@ -3524,6 +3524,29 @@ DEPRECATED_CLI_SURFACE_MESSAGES: dict[str, str] = {
     ),
 }
 
+#: Issue athenaeum#2456: per-VERB override for :data:`DEPRECATED_CLI_SURFACE_MESSAGES`.
+#: ``revalidate``/``recompare``/``scrub-pii``/``propose-fold``/``provenance``
+#: moved wholesale under ``athenaeum decisions`` — no unification happened,
+#: ``decisions revalidate`` IS ``merges revalidate`` under a new name — so
+#: telling a caller "use athenaeum decisions" (the generic message above)
+#: leaves them to guess the replacement verb themselves. Keyed by surface,
+#: then by the surface's own subcommand name (``merges_target`` /
+#: ``questions_target``); a verb not listed here falls back to the generic
+#: surface message (``list``/``next``/``count`` — those feed the UNIFIED
+#: decisions queue rather than a same-named decisions verb one-for-one, so
+#: the generic "use athenaeum decisions" wording already names the right
+#: surface). A surface with no entry here behaves exactly as before.
+DEPRECATED_CLI_SURFACE_VERB_MESSAGES: dict[str, dict[str, str]] = {
+    "merges": {
+        verb: (
+            f"'athenaeum merges {verb}' is deprecated (athenaeum#1992) and is "
+            f"scheduled for removal in {DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, "
+            f"in favor of 'athenaeum decisions {verb}'."
+        )
+        for verb in ("revalidate", "recompare", "scrub-pii", "propose-fold", "provenance")
+    },
+}
+
 
 def resolve_deprecated_cli_surfaces_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve whether deprecated-CLI-surface warnings are shown (issue athenaeum#1992).
@@ -3557,7 +3580,7 @@ def resolve_deprecated_cli_surfaces_enabled(config: dict[str, Any] | None) -> bo
 
 
 def deprecated_cli_surface_message(
-    surface: str, config: dict[str, Any] | None
+    surface: str, config: dict[str, Any] | None, verb: str | None = None
 ) -> str:
     """The deprecation message for *surface*, or ``""`` if not flagged / silenced.
 
@@ -3566,9 +3589,21 @@ def deprecated_cli_surface_message(
     :data:`DEPRECATED_CLI_SURFACE_MESSAGES` with
     :func:`resolve_deprecated_cli_surfaces_enabled` so neither needs to be
     consulted separately at any call site.
+
+    ``verb`` (issue athenaeum#2456) lets a surface with more than one
+    subcommand name the EXACT replacement spelling for the specific verb
+    invoked, via :data:`DEPRECATED_CLI_SURFACE_VERB_MESSAGES`, rather than
+    the generic "use athenaeum decisions" wording. Omitted or not found in
+    that per-verb table: falls back to the surface's generic message
+    unchanged, so every existing call site (none of which pass ``verb``)
+    keeps its current behavior.
     """
     if not resolve_deprecated_cli_surfaces_enabled(config):
         return ""
+    if verb is not None:
+        per_verb = DEPRECATED_CLI_SURFACE_VERB_MESSAGES.get(surface, {})
+        if verb in per_verb:
+            return per_verb[verb]
     return DEPRECATED_CLI_SURFACE_MESSAGES.get(surface, "")
 
 

@@ -13,7 +13,7 @@
 #      If the file exists with an ISO-8601 datetime in the future, the hook
 #      exits 0 silently. The skill (or the user) writes that file when they
 #      defer; this hook only reads it.
-#   3. Calls `athenaeum questions count --json` to get count + oldest date.
+#   3. Calls `athenaeum decisions count --json` to get count + oldest date.
 #   4. If count > 0, prints a one-block prompt to stdout (Claude Code
 #      injects stdout as additional system context).
 #
@@ -119,12 +119,12 @@ fi
 
 # ── Query pending count ───────────────────────────────────────────────────
 _json="$(
-  "${_cli_argv[@]}" questions count --path "${KNOWLEDGE_ROOT}" --json 2>/dev/null \
+  "${_cli_argv[@]}" decisions count --path "${KNOWLEDGE_ROOT}" --json 2>/dev/null \
     || true
 )"
 
 if [ -z "${_json}" ]; then
-  _debug "questions count returned empty"
+  _debug "decisions count returned empty"
   exit 0
 fi
 
@@ -144,7 +144,7 @@ fi
 {
   echo "[Pending memory questions] ${_count} unresolved (oldest: ${_oldest:-unknown})."
   echo "Resolve interactively now, defer to tomorrow, or skip?"
-  echo "Available via: \`athenaeum questions next --with-proposal\` or the resolve-questions skill."
+  echo "Available via: \`athenaeum decisions next --with-proposal\` or the resolve-questions skill."
 } || true
 
 exit 0

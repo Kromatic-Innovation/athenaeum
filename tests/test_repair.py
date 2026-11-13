@@ -10,13 +10,51 @@ from pathlib import Path
 import pytest
 import yaml
 
-from athenaeum import cli
+from athenaeum import _cli_shared, cli
 from athenaeum.repair import (
     LEGACY_SLUG_MAP,
     migrate_legacy_source_slugs,
     repair_tag_indent,
     repair_value_quoting,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#2452: the three ``--bounce-fold`` tests below that omit
+    ``--knowledge-root`` (``test_cli_bounce_fold_dry_run_returns_2_and_does_not_write``,
+    ``test_cli_bounce_fold_clean_store_returns_0``,
+    ``test_cli_bounce_fold_missing_contacts_root_returns_1``) reach
+    ``_cmd_repair._cmd_repair_bounce_fold``'s
+    ``knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")``
+    with no override, which falls back to the real default. Issue
+    athenaeum#2445 routed ``_cmd_repair.py``'s knowledge-root fallback through
+    ``athenaeum._cli_shared._resolve_knowledge_root`` instead of a
+    locally-imported ``DEFAULT_KNOWLEDGE_ROOT`` — the module "no longer binds
+    the name at all" (see ``tests/fixtures/default_root_guard.py``'s
+    ``default_knowledge_root_under_lock`` docstring) — so the fallback's
+    actual source of truth is ``_cli_shared``'s own bound
+    ``DEFAULT_KNOWLEDGE_ROOT``, not ``athenaeum._cmd_repair``'s. On a machine
+    with a real ``~/knowledge`` (carrying a real ``athenaeum.yaml``), the
+    resulting ``load_config(knowledge_root)`` call genuinely opens it,
+    tripping the athenaeum#2183 default-root-open guard.
+
+    The file's OTHER bounce-fold tests already learned this lesson one test
+    at a time (`--knowledge-root` passed explicitly, or the
+    `default_knowledge_root_under_lock` fixture for the one that needs the
+    default separately locked) — this autouse fixture covers the three that
+    didn't, once, the same way `tests/test_spend.py`'s
+    `_isolate_default_knowledge_root` covers its own file's omissions.
+    Every other mode in this file (`--tag-indent`/`--all`/
+    `--legacy-source-slugs`) takes `--wiki-root` directly and never consults
+    `DEFAULT_KNOWLEDGE_ROOT`, so this redirect cannot affect them.
+    """
+    monkeypatch.setattr(
+        _cli_shared, "DEFAULT_KNOWLEDGE_ROOT", tmp_path / "unused-default-knowledge-root"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fixture builders

@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Merge-queue maintenance commands (`revalidate`, `recompare`, `scrub-pii`,
+  `propose-fold`, `provenance`) are now available under `athenaeum
+  decisions`; `recompare --apply` exits 75 when the run lock is held
+  (athenaeum#2456).
+
 ### Fixed
+
+- `athenaeum doctor` now ends its report with a short note when one or more
+  checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
+  install until setup is complete and pointing back at the per-FAIL `fix:`
+  lines above it. Not printed when every check is OK or SKIP; exit codes
+  are unchanged (athenaeum#2450).
+
+- `schema migrate` and `description backfill` now take the run lock and exit
+  75 while another run holds it (athenaeum#2453). User-visible: both
+  commands' `--apply` mode can now return exit code 75 (`EXIT_LOCK_HELD`)
+  instead of racing a concurrent `athenaeum run`'s wiki writes; dry-run mode
+  is unaffected.
+
+- The test suite now passes on a machine with a real, populated athenaeum
+  install (a real `~/knowledge` and `~/.cache/athenaeum`), with no `HOME`
+  isolation wrapper. Several `tests/test_spend.py` CLI tests omitted
+  `--path`, so `cmd_spend` fell through to the real default knowledge root
+  and (when a real `athenaeum.yaml` lives there) actually opened it —
+  tripping the athenaeum#2183 default-root-open guard; a module-level
+  autouse fixture now redirects the default for the whole file.
+  `tests/test_llm_schemas.py::TestObservationsPathIsolation`'s nested-pytest
+  pollution check reads the real cache dir by design, so it now carries the
+  declared `reads_live_knowledge_tree` opt-in instead of tripping the same
+  guard. `CONTRIBUTING.md` no longer tells contributors to isolate `HOME`
+  (athenaeum#2452).
 
 - `athenaeum run` now honours the compile kill switch: `athenaeum disable`
   (scope `all` or `--compile`) and `ATHENAEUM_DISABLED` all make `run` exit 0
@@ -19,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while the decision queue's effort budget is in breach, and fails CLOSED
   with a distinct reason when the breach signal cannot be read at all
   (athenaeum#2449).
+
+- Retire now ignores resolved pending entries when deciding whether a
+  member is held: `retire.py`'s pending-queue crosscheck read
+  `_pending_merges.md` / `_pending_questions.md` by substring-matching the
+  raw file text, so a member named anywhere in either sidecar — including
+  inside a long-RESOLVED block — stayed held back from retirement forever.
+  It now reads both sidecars through the sanctioned parsers
+  (`parse_pending_merges()` / `parse_pending_questions()`) filtered to
+  UNRESOLVED entries only. **Behaviour change:** a member referenced only
+  by a resolved question or merge proposal is now retire-eligible instead
+  of held indefinitely — this changes which atoms retire on the next run
+  (athenaeum#2455).
 
 ### Removed
 
@@ -32,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the unwired field-constraints scanner and its docs
   (athenaeum#2471). The write-boundary guard that still refuses a
   violating Tier-3 write is unaffected.
+
+### Changed
+
+- Docs: security docs now state that erasure is not yet available
+  (athenaeum#2454).
 
 ## [0.23.5] - 2026-11-12
 

@@ -785,6 +785,7 @@ class TestObservationsPathIsolation:
         ),
     ]
 
+    @pytest.mark.reads_live_knowledge_tree
     @pytest.mark.parametrize("artifact_filename, child_body", _NESTED_POLLUTION_CASES)
     def test_nested_pytest_run_does_not_pollute_real_cache_dir_artifact(
         self, artifact_filename: str, child_body: str
@@ -795,6 +796,17 @@ class TestObservationsPathIsolation:
         fixture code) for each artifact, snapshotting that artifact's real
         line count (or its absence) before and after, and asserting it is
         unchanged.
+
+        Carries ``@pytest.mark.reads_live_knowledge_tree`` (issue
+        athenaeum#2452; opt-in mechanism from athenaeum#2183's
+        ``tests/fixtures/default_root_guard.py``): the real ``before``/
+        ``after`` read of ``~/.cache/athenaeum/<artifact>`` below is this
+        test's documented job, not an accidental leak — on a machine whose
+        real cache dir is actually populated, an unguarded read there trips
+        the default-root-open guard the same way an accidental one would.
+        The opt-in only lifts the guard for *this* test; every other
+        unmarked test in the suite is still forbidden from touching either
+        real default root.
 
         Each child's test calls the artifact's own production write function
         with NO explicit ``cache_dir``, so if ``tests/conftest.py``'s

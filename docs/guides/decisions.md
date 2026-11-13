@@ -25,10 +25,12 @@ whether two pages *should* merge.
 **`athenaeum merges` and `athenaeum questions` (below) are deprecated** in
 favor of this unified surface — each prints a reminder to stderr on every
 call, pointing back here. Nothing about either surface's own behavior
-changes, and their maintenance-only modes (`revalidate`, `recompare`,
-`scrub-pii`, `provenance`) have no equivalent here yet, so they remain the
-right tool for those jobs; use `athenaeum decisions` for listing and
-answering. `athenaeum decisions migrate` additionally materializes every
+changes. The merge queue's maintenance-only modes (`revalidate`,
+`recompare`, `scrub-pii`, `propose-fold`, `provenance`) are available here
+too, as `athenaeum decisions revalidate` / `recompare` / `scrub-pii` /
+`propose-fold` / `provenance` — same flags, output and exit codes as the
+`merges` spelling, just reached through this surface. `athenaeum decisions
+migrate` additionally materializes every
 pending-merge and pending-question record (resolved and unresolved) into a
 persisted unified-schema file (`wiki/_decisions_queue.jsonl`) alongside the
 two legacy sidecars, with every id and disposition carried over unchanged —
@@ -77,27 +79,31 @@ filesystem:
 
 ## I want to work through the merge-proposal queue
 
-`athenaeum merges` mirrors `athenaeum questions`, plus four merge-only
-modes:
+`athenaeum decisions` mirrors the old `athenaeum merges` one-for-one, plus
+five merge-only modes — this is the sanctioned spelling; `athenaeum merges
+<verb>` still works (deprecated) but reaches the exact same code:
 
 ```bash
-athenaeum merges list  [--limit N] [--json]        # all unresolved proposals
-athenaeum merges next  [--json]                     # the oldest unresolved proposal
-athenaeum merges count [--json]                     # "N unresolved (oldest: <iso-date>)"
-athenaeum merges revalidate [--apply] [--json]      # re-check the queue against the CURRENT gate
-athenaeum merges recompare [--apply] [--limit N] [--json]
+athenaeum decisions list  [--limit N] [--json]        # all unresolved proposals
+athenaeum decisions next  [--json]                     # the oldest unresolved proposal
+athenaeum decisions count [--json]                     # "N unresolved (oldest: <iso-date>)"
+athenaeum decisions revalidate [--apply] [--json]      # re-check the queue against the CURRENT gate
+athenaeum decisions recompare [--apply] [--limit N] [--json]
                                                     # re-run the five-verdict comparator over every
                                                     # unresolved proposal and ledger a verdict per
                                                     # source pair. Dry-run by default; --apply writes
                                                     # to the ledger only — it never approves, rejects,
                                                     # or archives a proposal, and PII-hazard proposals
                                                     # always route to a human.
-athenaeum merges scrub-pii [--apply] [--allowlist F] [--json]
+athenaeum decisions scrub-pii [--apply] [--allowlist F] [--json]
                                                     # redact contact data out of proposal BODIES in
                                                     # place. Zero LLM cost, and it does NOT force the
                                                     # merge decision — the proposal stays unresolved.
                                                     # Dry-run by default.
-athenaeum merges provenance [--canonical-slug S] [--merge-id ID] [--json]
+athenaeum decisions propose-fold --into PAGE --source PAGE [--source PAGE ...] [--apply]
+                                                    # propose folding one or more source pages INTO a
+                                                    # named canonical page. Dry-run by default.
+athenaeum decisions provenance [--canonical-slug S] [--merge-id ID] [--json]
 ```
 
 **`revalidate` is the first move for "is the merge queue healthy?"** It
@@ -114,12 +120,12 @@ relied on.
 **Never hand-parse `wiki/_pending_merges.md`.** It's a hand-rolled
 markdown sidecar with nested code fences and multi-line fields —
 grep/awk against it is fragile. `parse_pending_merges()` is the only
-sanctioned reader; the `athenaeum merges` subcommands above are the
+sanctioned reader; the `athenaeum decisions` subcommands above are the
 sanctioned CLI surface built on top of it. The MCP `list_pending_decisions`
 / `resolve_merge` view also adds derived fields that don't exist in the
 file itself, most visibly `sources_omitted` — don't assume a field you
-saw in that view is present in the markdown or in `athenaeum merges` JSON
-output.
+saw in that view is present in the markdown or in `athenaeum decisions`
+JSON output.
 
 ## I want a resolved answer to actually reach the wiki
 
