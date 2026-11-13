@@ -804,8 +804,65 @@ def _apply_page_split_proposal_answer(
     )
 
 
+def _resolve_auto_apply_effort_budget_breach(
+    wiki_root: Path, config: dict[str, Any] | None
+) -> bool:
+    """Resolve the effort-budget ``breach`` boolean the SAME way
+    :mod:`athenaeum.wiki_dedupe`'s duplicate-fold guard does (around its
+    lines 955-1000): :func:`athenaeum.decisions.list_pending_decisions`
+    then :func:`athenaeum.decision_budget.budget_report` (``record_shapes=
+    False``) against the configured budget resolvers.
+
+    Deliberately does NOT catch read failures itself -- unlike
+    ``wiki_dedupe.py``'s own call site, which fails OPEN on exactly this
+    read. The ratchet guard in :func:`_apply_auto_apply_threshold_proposal_answer`
+    (issue athenaeum#2449) fails CLOSED instead: it lets any exception here
+    propagate so the caller can refuse the ratification with
+    ``RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE`` rather than treating an
+    unreadable signal as "no breach".
+    """
+    from athenaeum.config import (
+        load_config,
+        resolve_decisions_budget_decision_minutes_p50_max,
+        resolve_decisions_budget_decision_minutes_p95_max,
+        resolve_decisions_budget_item_age_p95_days_max,
+        resolve_decisions_budget_items_per_day_max,
+        resolve_decisions_budget_window_days,
+        resolve_decisions_max_item_context_tokens,
+        resolve_decisions_max_sources_per_merge,
+    )
+    from athenaeum.decision_budget import budget_report
+    from athenaeum.decisions import list_pending_decisions
+
+    resolved_config = config if config is not None else load_config(wiki_root.parent)
+    pending_items = list_pending_decisions(
+        wiki_root,
+        max_sources_per_merge=resolve_decisions_max_sources_per_merge(resolved_config),
+        max_item_context_tokens=resolve_decisions_max_item_context_tokens(
+            resolved_config
+        ),
+    )
+    budget = budget_report(
+        wiki_root,
+        pending_items,
+        items_per_day_max=resolve_decisions_budget_items_per_day_max(resolved_config),
+        decision_minutes_p50_max=resolve_decisions_budget_decision_minutes_p50_max(
+            resolved_config
+        ),
+        decision_minutes_p95_max=resolve_decisions_budget_decision_minutes_p95_max(
+            resolved_config
+        ),
+        item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(
+            resolved_config
+        ),
+        window_days=resolve_decisions_budget_window_days(resolved_config),
+        record_shapes=False,
+    )
+    return bool(budget.get("breach"))
+
+
 def _apply_auto_apply_threshold_proposal_answer(
-    wiki_root: Path, answer: DecisionAnswer
+    wiki_root: Path, answer: DecisionAnswer, *, config: dict[str, Any] | None = None
 ) -> DecisionAnswerOutcome:
     """Apply one ``auto-apply-threshold`` decision answer against the real
     store (:mod:`athenaeum.auto_apply_proposals`, issue athenaeum#2018) —
@@ -817,10 +874,32 @@ def _apply_auto_apply_threshold_proposal_answer(
     type's own ledger — it never touches ``_pending_questions.md`` /
     ``_pending_merges.md`` or any already-decided verdict. Mirrors
     :func:`_apply_proposed_rule_answer`'s shape exactly.
+
+    **Ratchet guard (issue athenaeum#2449, athenaeum#2019):** an ``approve``
+    is refused while the decision queue's effort budget is in breach —
+    resolved once per call via :func:`_resolve_auto_apply_effort_budget_breach`
+    (a batch of answer files typically carries at most one
+    ``auto-apply-threshold`` entry, so resolving per-answer rather than
+    hoisting a batch-level cache into the shared loop in
+    :func:`apply_decision_answers` keeps this guard self-contained and
+    independently testable) and checked via
+    :func:`athenaeum.decision_budget.ratification_refusal`. **Fails
+    CLOSED**, the deliberate opposite of the fail-OPEN duplicate-fold guard
+    in ``wiki_dedupe.py`` (operator ruling, 2026-11-12): when the signal
+    cannot be read, the approve is refused with
+    ``RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE`` rather than proceeding as
+    if there were no breach. A ``reject`` verdict is never refused by this
+    guard, readable signal or not — rejecting a widening is always the
+    safe direction, and the proposal stays pending either way so it can be
+    ratified once the budget recovers.
     """
     from athenaeum.auto_apply_proposals import (
         approve_auto_apply_threshold_proposal,
         reject_auto_apply_threshold_proposal,
+    )
+    from athenaeum.decision_budget import (
+        RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE,
+        ratification_refusal,
     )
 
     decision = answer.verdict.strip().lower()
@@ -833,6 +912,53 @@ def _apply_auto_apply_threshold_proposal_answer(
             error_code="invalid_decision",
             message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
         )
+
+    if decision == "approve":
+        try:
+            effort_budget_breach = _resolve_auto_apply_effort_budget_breach(
+                wiki_root, config
+            )
+        except Exception as exc:  # noqa: BLE001 — fails CLOSED on purpose:
+            # an unreadable breach signal refuses the approve rather than
+            # being treated as "no breach" (operator ruling, 2026-11-12) —
+            # the deliberate opposite of wiki_dedupe.py's fail-open catch
+            # of this same read.
+            log.warning(
+                "decision_answers: auto-apply-threshold effort-budget "
+                "signal unreadable (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return DecisionAnswerOutcome(
+                path=answer.path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                applied=False,
+                error_code=RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE,
+                message=(
+                    "auto-apply-threshold proposal refused "
+                    f"({RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE}): the "
+                    "effort-budget breach signal could not be read; the "
+                    "proposal stays pending"
+                ),
+            )
+
+        refusal = ratification_refusal(
+            "auto-apply-threshold", effort_budget_breach=effort_budget_breach
+        )
+        if refusal is not None:
+            return DecisionAnswerOutcome(
+                path=answer.path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                applied=False,
+                error_code=refusal,
+                message=(
+                    f"auto-apply-threshold proposal refused ({refusal}): the "
+                    "decision queue's effort budget is in breach; the "
+                    "proposal stays pending"
+                ),
+            )
 
     try:
         if decision == "approve":
@@ -1607,7 +1733,9 @@ def apply_decision_answers(
         elif answer.decision_type == "page-split":
             outcome = _apply_page_split_proposal_answer(wiki_root, answer)
         elif answer.decision_type == "auto-apply-threshold":
-            outcome = _apply_auto_apply_threshold_proposal_answer(wiki_root, answer)
+            outcome = _apply_auto_apply_threshold_proposal_answer(
+                wiki_root, answer, config=config
+            )
         elif answer.decision_type == "dimension-proposal":
             # Issue athenaeum#2016: converts the prior child's bare
             # ``else: # "proposed-rule" — only other member`` into an

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The auto-apply-threshold ratification applier now enforces the ratchet
+  guard athenaeum#2019 specified but never wired: an `approve` is refused
+  while the decision queue's effort budget is in breach, and fails CLOSED
+  with a distinct reason when the breach signal cannot be read at all
+  (athenaeum#2449).
+
 ### Removed
 
 - Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
