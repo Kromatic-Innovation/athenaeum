@@ -96,6 +96,16 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--all.",
     )
     repair_mode.add_argument(
+        "--fold-targets",
+        action="store_true",
+        help="Rewrite a tombstone's dangling bare-slug `folded_into` (one "
+        "stamped before issue athenaeum#2545's fix, naming no file when the "
+        "canonical lives at <uid>-<slug>.md) to the resolved canonical's "
+        "filename stem, when the bare slug resolves to exactly one live "
+        "page. Ambiguous (0 or >1 candidates) slugs are reported, never "
+        "touched. Not included in --all.",
+    )
+    repair_mode.add_argument(
         "--all",
         action="store_true",
         help="Run all repair passes in sequence (tag-indent then value-quoting).",
@@ -184,6 +194,13 @@ def cmd_repair(args: argparse.Namespace) -> int:
     # plus the wiki's uids and merge records.
     if getattr(args, "contact_records", False):
         return _cmd_repair_contact_records(args)
+
+    # Fold-target repair (issue athenaeum#2545) has its own report shape
+    # (dangling/ambiguous, not RepairReport's files_scanned/files_changed),
+    # so it branches BEFORE the generic wiki_root resolution's RepairReport
+    # pipeline below, same as the other non-RepairReport modes above.
+    if getattr(args, "fold_targets", False):
+        return _cmd_repair_fold_targets(args)
 
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
@@ -384,6 +401,70 @@ def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
                 print(f"    ... and {len(report.folded) - 20} more")
 
         if not args.apply and pairs_found > 0:
+            return 2
+        return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+
+def _cmd_repair_fold_targets(args: argparse.Namespace) -> int:
+    """Run the athenaeum#2545 dangling-fold-target repair pass over the wiki.
+
+    Exit codes (same contract as the other repair modes — see
+    :func:`cmd_repair`):
+        0 — clean run (zero dangling targets found, OR ``--apply`` succeeded
+            with no errors).
+        1 — errors encountered (read/write failures).
+        2 — dry-run found dangling targets that WOULD be rewritten (CI gate
+            signal).
+    """
+    from athenaeum.fold_target_repair import repair_dangling_fold_targets
+
+    wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    # --apply rewrites tombstone frontmatter and can race a concurrent
+    # `run`, so it takes the run lock (issue athenaeum#309), same as the
+    # other write-capable repair modes. A dry-run reads only — no lock.
+    lock: RunLock | int | None = None
+    if args.apply:
+        from athenaeum.config import load_config
+
+        lock = _acquire_or_exit(wiki_root.parent, args, load_config(wiki_root.parent))
+        if isinstance(lock, int):
+            return lock
+    try:
+        mode = "APPLY" if args.apply else "DRY RUN"
+        report = repair_dangling_fold_targets(wiki_root, apply=args.apply)
+
+        print(f"=== repair fold-targets ({mode}) ===")
+        print(f"  pages_scanned: {report.pages_scanned}")
+        print(f"  dangling:      {report.dangling}")
+        print(f"  repaired:      {report.repaired if args.apply else 0}")
+        print(f"  ambiguous:     {len(report.ambiguous)}")
+        print(f"  ledger_slugs:  {report.ledger_records_updated}")
+        if report.changes and not args.apply:
+            for path, old, new in report.changes[:20]:
+                print(f"    {path.name}: {old!r} -> {new!r}")
+            if len(report.changes) > 20:
+                print(f"    ... and {len(report.changes) - 20} more")
+        for name, folded_into, candidate_names in report.ambiguous[:20]:
+            print(
+                f"  AMBIGUOUS {name}: folded_into={folded_into!r} "
+                f"({len(candidate_names)} live candidates)",
+                file=sys.stderr,
+            )
+        if len(report.ambiguous) > 20:
+            print(f"  ... and {len(report.ambiguous) - 20} more", file=sys.stderr)
+        for path, err in report.errors[:20]:
+            print(f"  ERR {path.name}: {err}", file=sys.stderr)
+
+        if report.errors:
+            return 1
+        if not args.apply and report.changes:
             return 2
         return 0
     finally:

@@ -102,7 +102,18 @@ def _scan_pages(wiki_root: Path) -> tuple[int, dict[str, Path], dict[str, bool],
         if tomb:
             target = tombstone_target(meta)
             if target:
-                edges[slug] = target
+                # Issue athenaeum#2545 (review follow-up): normalize through
+                # the SAME slugify() this scan already applies to every
+                # node's own key (``slug = slugify(path.stem)`` above).
+                # Post-athenaeum#2545, a fold stamps `folded_into` with the
+                # canonical's raw filename stem (unbounded length), while
+                # slugify() caps at 60 chars -- comparing the raw value
+                # against a slugify()'d node key would silently re-break
+                # the match for any stem over that cap. The canonical's own
+                # stem and its folded_into value are the identical string
+                # by construction, so slugify()ing both sides here makes
+                # truncation symmetric again rather than one-sided.
+                edges[slug] = slugify(target)
     return pages_scanned, slug_to_path, slug_is_tombstone, edges
 
 

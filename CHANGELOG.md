@@ -80,6 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --json` now emits a single-line JSON object, matching `propose-fold
   --json` (athenaeum#2544).
 
+- A fold now stamps a tombstone's `folded_into` from the canonical's
+  resolved filename stem instead of the bare slug of its `name:`
+  frontmatter, so the redirect names a real file even when the canonical
+  lives at `<uid>-<slug>.md` (the real corpus shape); `tombstone_target`
+  readers resolve both the old bare-slug and new stem forms, and the
+  merge-provenance ledger's `canonical_slug` was aligned to match so unfold
+  keeps working. `athenaeum repair --fold-targets` (dry-run by default,
+  `--apply` to write) repairs pre-existing dangling tombstones whose bare
+  slug resolves to exactly one live page (athenaeum#2545).
+
 - `_detect_field_group_misfits` no longer refuses an ordinary same-record
   update (e.g. a deal's stage advancing while its name/amount stay put) as
   a field-group misfit: a misfit now requires that NO other field in the
