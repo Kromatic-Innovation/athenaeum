@@ -219,3 +219,39 @@ class TestCLI:
     def test_missing_wiki_dir_errors(self, tmp_path: Path) -> None:
         rc = main(["schema", "migrate", "--path", str(tmp_path / "nope")])
         assert rc == 1
+
+    def test_apply_refuses_when_the_run_lock_is_held(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``migrate --apply`` WRITES, so it takes the run lock the way
+        every other writing ``_cmd_*`` module does (issue athenaeum#2453)."""
+        from athenaeum._cli_shared import EXIT_LOCK_HELD
+        from athenaeum.runlock import RunLock
+
+        path = _page(wiki, "a.md", "uid: '1'\ntype: concept\nname: A")
+        before = path.read_text(encoding="utf-8")
+
+        knowledge_root = wiki.parent
+        lock = RunLock(knowledge_root, wait=0)
+        lock.acquire()
+        try:
+            rc = main(["schema", "migrate", "--path", str(knowledge_root), "--apply"])
+        finally:
+            lock.release()
+
+        assert rc == EXIT_LOCK_HELD
+        assert "holds the lock" in capsys.readouterr().err
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_apply_succeeds_when_the_run_lock_is_free(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Existing successful --apply behaviour is unchanged when the lock
+        is free (issue athenaeum#2453)."""
+        path = _page(wiki, "a.md", "uid: '1'\ntype: concept\nname: A")
+        rc = main(["schema", "migrate", "--path", str(wiki.parent), "--apply"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "applied: 1 file(s) written" in out
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["schema_version"] == 1
