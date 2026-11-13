@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inference_blocks.py` after the detector's retirement
   (athenaeum#1256). No user-visible behaviour changes (athenaeum#2435).
 
+### Changed
+
+- Docs: security docs now state that erasure is not yet available
+  (athenaeum#2454).
+
 ## [0.23.5] - 2026-11-12
 
 **Summary.** 0.23.5 is a roll-up of three workstreams built on `develop` since
