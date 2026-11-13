@@ -155,7 +155,9 @@ def test_count_empty_text(tmp_path: Path) -> None:
 
 
 def test_count_warns_about_malformed_block_at_most_once_across_repeated_calls(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Issue athenaeum#2516: `decisions count` parses `_pending_questions.md`
     # on every call (`list_pending_decisions` -> `migrate_legacy_queues` ->
@@ -164,6 +166,15 @@ def test_count_warns_about_malformed_block_at_most_once_across_repeated_calls(
     # requests during one interactive session) must see one malformed
     # block's warning fire once total across every call, not once per call
     # — and the real count must still print correctly on every call.
+    import athenaeum.answers as answers_module
+
+    # This test specifically asserts the warn-once dedupe behaviour, so (like
+    # test_answers.py's own dedupe test) it resets the process-global dedupe
+    # set itself rather than relying on test order — the dedupe set is
+    # process-lifetime by design (that's the whole point of the fix), so an
+    # earlier test's unrelated malformed-block encounter must not leak in.
+    monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
     wiki = tmp_path / "wiki"
     wiki.mkdir()
     (wiki / "_pending_questions.md").write_text(

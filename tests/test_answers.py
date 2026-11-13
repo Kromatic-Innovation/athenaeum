@@ -120,8 +120,21 @@ class TestParsePendingQuestions:
         assert len({pq.id for pq in parsed}) == 2
 
     def test_skips_malformed_header(
-        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        pending_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        import athenaeum.answers as answers_module
+
+        # The malformed-header warn-once dedupe set (issue athenaeum#2516)
+        # is process-global module state — reset it so an earlier test's
+        # byte-identical malformed-block fixture can't mask this assertion
+        # (mirrors the existing reset idiom for
+        # ``wiki_dedupe._WIKI_FALLBACK_WARNED`` /
+        # ``search._EMBED_TEXTS_NONE_WARNED``).
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
         content = (
             "# Pending Questions\n\n"
             "## Not a real header\n"
@@ -136,7 +149,10 @@ class TestParsePendingQuestions:
         assert "malformed header" in err
 
     def test_malformed_block_warns_once_across_many_parses_in_one_process(
-        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        pending_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Issue athenaeum#2516: the real trigger is a long-lived process
         # (the MCP server, or any caller) parsing the SAME file many times
@@ -144,6 +160,15 @@ class TestParsePendingQuestions:
         # parse, flooding stderr with thousands of identical lines. Drive N
         # REAL parses in this one test process (not a mock) and assert the
         # warning fires exactly once total, not once per parse.
+        import athenaeum.answers as answers_module
+
+        # Reset ONCE, before the parse loop below — not inside it. The N
+        # parses that follow are what this test is actually proving;
+        # resetting here only neutralizes state left by an EARLIER,
+        # unrelated test (same dedupe-set necessity as the sibling test
+        # above), it does not participate in the dedup assertion itself.
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
         content = (
             "# Pending Questions\n\n"
             "## Not a real header\n"
@@ -161,11 +186,18 @@ class TestParsePendingQuestions:
         assert err.count("malformed header") == 1
 
     def test_distinct_malformed_blocks_each_warn_once(
-        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        pending_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Two malformed blocks with genuinely different content must each
         # still get their own warning — the dedupe key is content-derived,
         # not a single global "already warned" flag.
+        import athenaeum.answers as answers_module
+
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
         content = (
             "# Pending Questions\n\n"
             "## Not a real header one\n"
@@ -190,11 +222,18 @@ class TestParsePendingQuestions:
         assert "Not a real header two" in err
 
     def test_malformed_block_warning_names_block_index(
-        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        pending_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC: the warning must name where the block sits (here, its 1-based
         # position among the file's blocks) so the operator can find it.
         # The malformed block is second in the file.
+        import athenaeum.answers as answers_module
+
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
         content = (
             "# Pending Questions\n\n"
             + _block(entity="Acme Corp")
@@ -549,6 +588,7 @@ class TestIngestAnswers:
         raw_root: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Issue athenaeum#1446: `ingest_answers(..., quiet=True)` threads
         # `quiet` down to `_parse_block`, which gates only the bare
@@ -558,6 +598,15 @@ class TestIngestAnswers:
         # direct caller (or a `caplog`-based test like this one) still sees
         # them.
         import logging
+
+        import athenaeum.answers as answers_module
+
+        # Issue athenaeum#2516: this fixture's malformed block text is
+        # byte-identical to the sibling test below (and to
+        # test_cli.py's ``_write_mixed_corpus``) — reset the process-global
+        # warn-once dedupe set so an earlier test's encounter with the same
+        # content can't mask this one's own first-encounter assertions.
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         answered = _block(checkbox="[x]", answer="ok")
         malformed = (
@@ -583,9 +632,17 @@ class TestIngestAnswers:
         pending_path: Path,
         raw_root: Path,
         capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC3 positive control at the library layer: the default (no
         # `quiet` argument) is unchanged — the print still fires.
+        import athenaeum.answers as answers_module
+
+        # Same byte-identical malformed-block content as the sibling test
+        # above — reset so THIS test's own first encounter is what gets
+        # asserted (issue athenaeum#2516).
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
         answered = _block(checkbox="[x]", answer="ok")
         malformed = (
             "## Not a real header\n" "- [x] garbled\n" "**Conflict type**: ???\n"
