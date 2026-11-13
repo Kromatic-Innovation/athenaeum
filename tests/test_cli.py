@@ -834,6 +834,7 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC2 counter-example: `--quiet` against a fixture with a malformed
         # block and a valid answered block still prints the summary line but
@@ -850,6 +851,15 @@ class TestIngestAnswers:
         # subprocess: both noise lines appear on stderr unflagged and both
         # disappear under `--quiet`.
         import logging
+
+        import athenaeum.answers as answers_module
+
+        # Issue athenaeum#2516: `_write_mixed_corpus`'s malformed block text
+        # is byte-identical across this test and the two siblings below (and
+        # across two tests in test_answers.py) — reset the process-global
+        # warn-once dedupe set so an earlier test's encounter can't mask
+        # this one's own first-encounter assertions.
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
@@ -870,8 +880,13 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import logging
+
+        import athenaeum.answers as answers_module
+
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
@@ -889,6 +904,7 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC3 positive control: the SAME fixture without `--quiet` still
         # emits both noise strings — proving the flag is additive, not a
@@ -896,6 +912,14 @@ class TestIngestAnswers:
         # for why "Preserving malformed" (log-only, no paired print) is
         # asserted via `caplog` rather than `capsys`.
         import logging
+
+        import athenaeum.answers as answers_module
+
+        # Same byte-identical malformed-block content as the two sibling
+        # tests above — reset so THIS test's own first encounter (the AC3
+        # positive control: the print must still fire) is what gets
+        # asserted (issue athenaeum#2516).
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
