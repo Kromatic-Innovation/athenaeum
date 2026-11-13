@@ -2,13 +2,13 @@
 """Declared-relationship primitive (athenaeum#1682, port of C4 §3.8) — L1/L2 primitive.
 
 Extracted out of :mod:`athenaeum.merge`'s ``_declared_relationship``
-(issue athenaeum#167 / athenaeum#715), which pairwise-compares two
+(issue athenaeum#167 / athenaeum#715), which pairwise-compared two
 ``AutoMemoryFile``s' own declared ``refines``/``supersedes``/
 ``merge_rejected_with`` frontmatter to short-circuit a pair that has
 already been adjudicated by a human (or by ``pending_merges.resolve_merge``
-on the reviewer's behalf) — no LLM call needed. C4's ``_filter_declared_pairs``
-(``merge.py:271``) wraps this primitive with N-way chunk-pruning bookkeeping
-that only exists because C4 batches multiple cluster members into one Haiku
+on the reviewer's behalf) — no LLM call needed. C4 also had a chunk-level
+pruning helper that wrapped this primitive with N-way bookkeeping, which
+only existed because C4 batched multiple cluster members into one Haiku
 call; the primitive itself was already pure and pairwise.
 
 athenaeum#1682 ports the primitive (not the chunk-batching wrapper) onto
@@ -16,10 +16,12 @@ athenaeum#1682 ports the primitive (not the chunk-batching wrapper) onto
 to begin with. Rather than have ``comparator.py`` import ``merge.py`` (an
 upward edge — ``merge.py`` is L4, sitting above ``comparator.py``'s own L4
 position with a cross-domain dependency neither module should carry on the
-other) this module holds the primitive on its own, low enough that BOTH
-``merge.py`` and ``comparator.py`` import it downward. ``merge.py``'s
-``_declared_relationship`` now delegates here; its name, signature, and
-docstring are unchanged, only its body became an adapter.
+other) this module holds the primitive on its own, low enough that
+``comparator.py`` imports it downward. ``merge.py``'s own adapter around
+this primitive (and the chunk-pruning wrapper above it) were dead code —
+issue athenaeum#1256's C4 retirement left them with zero ``src/`` callers —
+and issue athenaeum#2435 deleted both; this primitive is now reached only
+through ``comparator.py``.
 
 Layering: L1/L2 boundary primitive — imports only :mod:`athenaeum.models`
 (L1, for :func:`~athenaeum.models.slugify`) and the stdlib ``logging``
@@ -73,8 +75,10 @@ def declared_relationship(
     """Return a rationale slug when ``a`` and ``b`` declare each other.
 
     Direct port of :mod:`athenaeum.merge`'s ``_declared_relationship``
-    (issue athenaeum#167) over plain facts instead of ``AutoMemoryFile``s,
-    so a caller that has no ``AutoMemoryFile`` (e.g.
+    (issue athenaeum#167; that adapter and its own chunk-pruning caller
+    were deleted as dead code by issue athenaeum#2435) over plain facts
+    instead of ``AutoMemoryFile``s, so a
+    caller that has no ``AutoMemoryFile`` (e.g.
     :class:`athenaeum.comparator.ComparatorPage`) can reuse the exact same
     logic. Matches by slug (:func:`~athenaeum.models.slugify`), matching
     ``merge.py``'s original case-/punctuation-insensitive comparison

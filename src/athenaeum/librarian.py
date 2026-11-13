@@ -9600,9 +9600,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
                             # persistently-failing action). The failing action is
-                            # named via the annotation tier3_write set on the
-                            # exception; ``None`` when the failure happened outside
-                            # the tier-3 action loop.
+                            # named via the annotation tier3_derive_actions set on
+                            # the exception; ``None`` when the failure happened
+                            # outside the tier-3 action loop.
                             if not ctx.dry_run:
                                 _crossed = _record_stuck_failure(
                                     stuck_ledger,

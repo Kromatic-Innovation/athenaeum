@@ -15,10 +15,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from athenaeum.answers import parse_pending_questions
+from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 from athenaeum.models import EntityAction, EntityIndex, EscalationItem, RawFile, parse_frontmatter
 from athenaeum.tiers import (
     _MAX_EXISTING_BODY_CHARS,
-    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
     check_page_size_gate,
     close_moot_notices,
     reresolve_open_questions,

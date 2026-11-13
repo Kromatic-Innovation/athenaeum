@@ -37,12 +37,13 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 from athenaeum.name_structure import (
     merged_body_within_page_size_threshold,
     propose_qualified_name_merges,
     scan_qualified_name_splits,
 )
-from athenaeum.tiers import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS, resolve_page_size_threshold_chars
+from athenaeum.tiers import resolve_page_size_threshold_chars
 from tests.evals.corpus import build_corpus, load_redundant_clusters
 from tests.evals.decomposition import (
     ROLE_SPLIT_FROM,

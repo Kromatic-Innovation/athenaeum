@@ -561,37 +561,43 @@ class TestWaiterStaleFdReopen:
     """
 
     def test_holds_current_inode_true_for_live_fd(self, tmp_path: Path) -> None:
+        from athenaeum import store
+
         lock = RunLock(tmp_path)
-        fd = lock._open_fd()
+        fd = store.lease_open_fd(lock.lockfile)
         try:
-            assert lock._holds_current_inode(fd)
+            assert store.lease_holds_current_inode(fd, lock.lockfile)
         finally:
             os.close(fd)
 
     def test_holds_current_inode_false_after_break(self, tmp_path: Path) -> None:
+        from athenaeum import store
+
         lockfile = tmp_path / runlock.LOCKFILE_NAME
         lock = RunLock(tmp_path)
-        fd = lock._open_fd()  # descriptor on inode X
+        fd = store.lease_open_fd(lock.lockfile)  # descriptor on inode X
         try:
-            assert lock._holds_current_inode(fd)
+            assert store.lease_holds_current_inode(fd, lock.lockfile)
             # Simulate a break: unlink + re-create → a new inode now at the path.
-            lock._break_lock()
-            fd2 = lock._open_fd()
+            store.lease_break_lockfile(lock.lockfile)
+            fd2 = store.lease_open_fd(lock.lockfile)
             os.close(fd2)
             assert os.stat(lockfile).st_ino != os.fstat(fd).st_ino
             # The pre-break fd is now an orphan — the guard must reject it.
-            assert not lock._holds_current_inode(fd)
+            assert not store.lease_holds_current_inode(fd, lock.lockfile)
         finally:
             os.close(fd)
 
     def test_holds_current_inode_false_when_path_unlinked(
         self, tmp_path: Path
     ) -> None:
+        from athenaeum import store
+
         lock = RunLock(tmp_path)
-        fd = lock._open_fd()
+        fd = store.lease_open_fd(lock.lockfile)
         try:
-            lock._break_lock()  # unlink, leave nothing at the path
-            assert not lock._holds_current_inode(fd)
+            store.lease_break_lockfile(lock.lockfile)  # unlink, leave nothing at the path
+            assert not store.lease_holds_current_inode(fd, lock.lockfile)
         finally:
             os.close(fd)
 

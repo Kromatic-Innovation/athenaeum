@@ -16,9 +16,7 @@ with the deterministic hashing-trick fallback for any file the recall index has
 not embedded). It does NOT rely on chromadb's approximate-nearest-neighbor
 ranking, so the affected-cluster set is a provable SUPERSET of the clusters that
 actually change between the prior report and a full re-cluster — no ANN recall
-gap can silently drop an affected cluster. The by-vector ANN primitive
-:meth:`athenaeum.search.VectorBackend.query_neighbors` is provided for a future
-memory-bounded closure on very large corpora; this exact closure is used by
+gap can silently drop an affected cluster. This exact closure is used by
 default because athenaeum#370 PR2's mandate is correctness > speed and fetching the
 stored vectors is cheap (a pure read — never re-embeds).
 

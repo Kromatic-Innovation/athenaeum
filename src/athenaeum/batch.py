@@ -1990,7 +1990,7 @@ def process_batch_run(
             t3_outcome = execute_batch(
                 effective_write_client,
                 t3_requests,
-                description="tier3_write",
+                description="tier3_derive_actions",
                 usage=usage,
                 knob="write",
                 sleep=sleep,
@@ -2029,7 +2029,7 @@ def process_batch_run(
 
     # --- Finalize per file, in intake order ---
     # All of a file's calls must have succeeded before anything is written
-    # (mirrors process_one / tier3_write's defer-writes-until-success).
+    # (mirrors process_one / tier3_derive_actions's defer-writes-until-success).
     # Same-page synchronous merges execute here, serialized in intake
     # order, re-reading the page fresh so each sees the previous write.
     resolved_config = config if config is not None else load_config(wiki_root.parent)

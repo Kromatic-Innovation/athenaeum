@@ -24,6 +24,7 @@ derivation is actually reading `src/`, not the doc.
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -235,3 +236,72 @@ class TestDerivationExcludesNonCalls:
             "    ...\n"
         )
         assert _modules_calling_acquire_or_exit(fixture_src) == set()
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2441: every command `docs/reference/exit-codes.md` names must be
+# a command that actually exists in `athenaeum.cli.build_parser()`. The doc
+# previously named several commands that do not exist as such — `athenaeum
+# curate`, `athenaeum index`, `athenaeum pending` — because their real
+# subcommands (`dedupe`/`claims`/`auto-memory`, `reindex`/`rebuild-index`/
+# `compile`/`registry`/`ingest`/`session-end`, `ingest-answers`/
+# `ingest-merges`/`reresolve-questions`/`dedup-oversize-escalations`) are
+# flat top-level commands in this CLI, not children of a parent command that
+# was never registered. A future rename should fail this test instead of
+# silently going stale.
+# ---------------------------------------------------------------------------
+
+#: Matches a backtick-quoted `` `athenaeum <name>` `` mention and captures
+#: only the single token immediately following ``athenaeum `` — deliberately
+#: NOT the rest of the backtick span. This means `` `athenaeum decisions
+#: challenge-coordinate` `` is read as naming the command ``decisions`` (the
+#: real top-level token `build_parser()` registers) with ``challenge-
+#: coordinate`` left as descriptive prose about one of its sub-actions, never
+#: itself asserted to be a top-level command. A backtick span naming several
+#: alternatives must repeat ``athenaeum`` once per alternative (e.g.
+#: `` `athenaeum rebuild-index`/`athenaeum ingest`/`athenaeum session-end` ``)
+#: for each to be checked — this is the convention the doc itself follows.
+_DOC_COMMAND_RE = re.compile(r"`athenaeum ([a-z][a-z0-9-]*)")
+
+
+def _top_level_command_names() -> set[str]:
+    """Return every top-level subcommand name `athenaeum.cli.build_parser()`
+    registers (the real `choices` of its one `_SubParsersAction`)."""
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    (subparsers_action,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return set(subparsers_action.choices.keys())
+
+
+def _commands_named_in_doc(doc_text: str) -> set[str]:
+    """Return every command name `doc_text` asserts exists, per
+    `_DOC_COMMAND_RE`'s convention."""
+    return set(_DOC_COMMAND_RE.findall(doc_text))
+
+
+class TestDocCommandsExistInParser:
+    def test_every_named_command_exists_in_build_parser(self) -> None:
+        real_commands = _top_level_command_names()
+        named_in_doc = _commands_named_in_doc(EXIT_CODES_DOC.read_text())
+        missing = named_in_doc - real_commands
+
+        assert not missing, (
+            "docs/reference/exit-codes.md names a command that does not "
+            f"exist in athenaeum.cli.build_parser(): {sorted(missing)}"
+        )
+
+    def test_the_derivation_is_non_trivial(self) -> None:
+        """Guard against a vacuous pass: the doc must actually name a
+        reasonable number of real commands, and `build_parser()` must expose
+        more commands than the doc happens to name (otherwise a derivation
+        bug that returned everything, or nothing, from both sides could
+        still agree)."""
+        real_commands = _top_level_command_names()
+        named_in_doc = _commands_named_in_doc(EXIT_CODES_DOC.read_text())
+
+        assert len(named_in_doc) >= 20
+        assert len(real_commands) > len(named_in_doc)
+        assert named_in_doc <= real_commands

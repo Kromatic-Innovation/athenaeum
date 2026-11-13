@@ -132,9 +132,9 @@ class TestExcludedSurfaceFailsClosed:
         # nowhere, so zero hits is the expected/safe outcome for that probe).
         assert all("alice-contact" not in fname for fname, _name, _score in hits)
         # Direct proof the excluded root was never part of the scanned set.
-        from athenaeum.search import _scan_all_entries
+        from athenaeum.search import _scan_indexed_records
 
-        scanned = {name for name, _p in _scan_all_entries(wiki_root, None)}
+        scanned = {name for name, *_ in _scan_indexed_records(wiki_root, None)}
         assert "alice-public.md" in scanned
         assert not any("alice-contact" in n for n in scanned)
 
@@ -212,18 +212,16 @@ class TestPiiFlagBeltAndSuspenders:
         backend = FTS5Backend()
         count = backend.build_index(wiki_root, cache_dir)
         assert count == 1
-        from athenaeum.search import _scan_all_entries
-
-        scanned = {name for name, _p in _scan_all_entries(wiki_root, None)}
-        # _scan_all_entries itself doesn't filter pii (that happens in
-        # _scan_indexed_records) — confirm via the actual indexed record scan.
+        # The pii filter lives in the real index-build scan
+        # (_scan_indexed_records), not at the filesystem level — confirm via
+        # the actual indexed record scan.
         from athenaeum.search import _scan_indexed_records
 
         recs = list(_scan_indexed_records(wiki_root, None))
         names = {n for n, _p, _h, _t, _m, _s in recs}
         assert "bob.md" not in names
         assert "carol.md" in names
-        assert "bob.md" in scanned  # present on disk, just excluded from the index
+        assert (wiki_root / "bob.md").exists()  # on disk, just excluded from the index
 
     def test_flagged_page_excluded_from_keyword_recall(self, tmp_path: Path) -> None:
         wiki_root = tmp_path / "wiki"

@@ -75,6 +75,8 @@ integrating anything.
 - [Environment variables](reference/environment.md) — the common knobs and the precedence chain.
 - [Data formats](reference/data-formats.md) — raw intake, wiki frontmatter, degraded-run artifacts.
 - [Exit codes](reference/exit-codes.md).
+- [0.23.5 build notes](changelog/0.23.5-build-notes.md) — the release digest and per-merge entries behind the
+  `[0.23.5]` changelog section.
 
 ## Extending
 
@@ -136,7 +138,7 @@ does not answer.
 - [Eval trigger surface](design/eval-trigger-surface.md) — when a change must carry a paid
   eval receipt: the symbol-level reasoning surface, the structural fingerprint, and the
   structured exemption line.
-- [Trust graph](design/trust-graph.md) (unstable, under redesign; do not build on it) — domain-scoped source trust edges as an override
+- [Trust graph](design/trust-graph.md) (experimental; design under reconsideration, do not build on it) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
 - [Cursor as a host](design/host-cursor.md) — what Cursor desktop, the CLI and cloud agents
