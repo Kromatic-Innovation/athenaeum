@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `athenaeum run` now honours the compile kill switch: `athenaeum disable`
+  (scope `all` or `--compile`) and `ATHENAEUM_DISABLED` all make `run` exit 0
+  with a no-op, without taking the run lock or touching the librarian
+  (athenaeum#2448). Previously only `session-end` checked it.
+
 - The auto-apply-threshold ratification applier now enforces the ratchet
   guard athenaeum#2019 specified but never wired: an `approve` is refused
   while the decision queue's effort budget is in breach, and fails CLOSED
