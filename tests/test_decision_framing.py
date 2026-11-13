@@ -55,6 +55,8 @@ LIVE_DECISION_TYPES = (
     # Issue athenaeum#2019 (athenaeum#719 Plan step 6).
     "tier-movement-proposal",
     "policy-pack-edit",
+    # Issue athenaeum#2197.
+    "schema-amendment-proposal",
 )
 
 
