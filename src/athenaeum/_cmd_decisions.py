@@ -147,6 +147,32 @@ def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, int, str | 
     )
 
 
+def _duplicate_decision_ids(decisions: list[dict]) -> list[str]:
+    """Ids shared by more than one item in *decisions* (issue athenaeum#2517 AC3).
+
+    A single O(n) pass over an already-built list — cheap enough to run on
+    every ``decisions list`` call. A duplicate here means two in-flight
+    decisions share one id: an answer keyed on that id resolves whichever
+    block the resolver meets first, silently leaving (or double-answering)
+    the other. The write path (``athenaeum.answers.mint_unique_block_id``)
+    is what actually prevents a NEW collision; this is the read-path safety
+    net for anything already on disk from before that existed, or for an
+    id this function's own callers don't mint (merges, retractions, ...).
+    Returns a sorted list of the colliding ids (empty when none collide).
+    """
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for d in decisions:
+        did = d.get("id")
+        if not did:
+            continue
+        if did in seen:
+            dupes.add(did)
+        else:
+            seen.add(did)
+    return sorted(dupes)
+
+
 def _cmd_scan_retractions(args: argparse.Namespace) -> int:
     """Run the retraction cascade (issue athenaeum#435): flag dependent merges for review.
 
@@ -496,6 +522,18 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         return 0
 
     # sub == "list"
+    # Issue athenaeum#2517 AC3: warn on the FULL unified list, before any
+    # `--limit` slice hides a duplicate off the tail of a short page.
+    # Printed to stderr so it never corrupts `--json`'s stdout payload.
+    dup_ids = _duplicate_decision_ids(decisions)
+    if dup_ids:
+        print(
+            "[warn] duplicate decision id(s) in queue, athenaeum#2517 "
+            "(two pending items share one id -- an answer keyed on it "
+            f"resolves only one of them): {', '.join(dup_ids)}",
+            file=sys.stderr,
+        )
+
     limit = getattr(args, "limit", 0) or 0
     if limit > 0:
         decisions = decisions[:limit]

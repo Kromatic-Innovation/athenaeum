@@ -7875,6 +7875,8 @@ def tier4_escalate(
     # Archived/[x] blocks are deliberately excluded — a previously-answered
     # pair that re-fires deserves a fresh block (resurrection case).
     from athenaeum.answers import (
+        _ID_SALT_PREFIX,
+        mint_unique_block_id,
         parse_pending_questions,
         render_conflicting_claims_field,
         render_observation_field,
@@ -7890,8 +7892,14 @@ def tier4_escalate(
     # claim-PAIR tuples) because oversize items have no member-pair key at
     # all: their dedup identity is just the entity name.
     open_oversize_entities: set[str] = set()
+    # Issue athenaeum#2517: every id already on disk (answered or not), so a
+    # brand-new block minted below (Path C) cannot collide with one. Grown
+    # as new blocks are minted so two items in THIS batch can't collide with
+    # each other either (see `seen_ids` below).
+    existing_question_ids: set[str] = set()
     if pending_path.exists():
         for pq in parse_pending_questions(pending_path):
+            existing_question_ids.add(pq.id)
             if pq.answered:
                 continue
             if pq.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES:
@@ -7901,6 +7909,7 @@ def tier4_escalate(
                 # First-seen wins — if the file already has duplicates from a
                 # pre-athenaeum#157 run, only the first is merged into.
                 open_index[key] = pq.raw_block
+    seen_ids: set[str] = set(existing_question_ids)
 
     today = date.today().isoformat()
     sections: list[str] = []
@@ -8236,8 +8245,23 @@ def tier4_escalate(
             if item.conflicting_claims.strip()
             else ""
         )
+        # Issue athenaeum#2517: mint a creation-time id disambiguator and
+        # persist it as `**Id salt**:` so two blocks that would otherwise
+        # share one id — same header (entity/date/raw_ref) AND same
+        # question (the collision this issue reports: a detector-raised
+        # generic question line that collapses two different field
+        # corrections to one line), different `**Description**:` — get
+        # different ids. `seen_ids` is primed from every id already on
+        # disk and grown below so two items minted in THIS batch can't
+        # collide with each other either.
+        header_line = f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})'
+        id_salt, _new_block_id = mint_unique_block_id(
+            header_line, question, item.description, seen_ids
+        )
+        seen_ids.add(_new_block_id)
+        id_salt_line = f"{_ID_SALT_PREFIX} {id_salt}\n"
         block = (
-            f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
+            f"{header_line}\n"
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {_desc_head}\n"
@@ -8246,6 +8270,7 @@ def tier4_escalate(
             f"{conflicting_claims_field}"
             f"{fingerprint_line}"
             f"{decision_kind_line}"
+            f"{id_salt_line}"
         )
         proposal = getattr(item, "proposal", None)
         item_members = getattr(item, "members", None)
