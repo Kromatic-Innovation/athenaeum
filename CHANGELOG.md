@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A contradiction question raised during Tier 3 merge (`ESCALATE:`) now
+  stores its own durable copy of the conflicting claims and the path of
+  the compiled wiki page they landed in, captured at raise time; answering
+  it writes back to that page from the stored copy even after its raw
+  source (a session transcript or assistant note) has been deleted by the
+  librarian's normal intake-consumption schedule — unchanged by this fix.
+  A question raised before this change (no stored copy) keeps the prior
+  behaviour (athenaeum#2519).
+
 - `athenaeum doctor` now ends its report with a short note when one or more
   checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
   install until setup is complete and pointing back at the per-FAIL `fix:`
