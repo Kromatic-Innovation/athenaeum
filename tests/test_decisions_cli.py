@@ -154,6 +154,52 @@ def test_count_empty_text(tmp_path: Path) -> None:
     assert out.strip() == "0 decisions pending"
 
 
+def test_count_warns_about_malformed_block_at_most_once_across_repeated_calls(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue athenaeum#2516: `decisions count` parses `_pending_questions.md`
+    # on every call (`list_pending_decisions` -> `migrate_legacy_queues` ->
+    # `parse_pending_questions`). A long-lived caller invoking it many times
+    # in one process (e.g. the MCP server answering repeated queue-status
+    # requests during one interactive session) must see one malformed
+    # block's warning fire once total across every call, not once per call
+    # — and the real count must still print correctly on every call.
+    import athenaeum.answers as answers_module
+
+    # This test specifically asserts the warn-once dedupe behaviour, so (like
+    # test_answers.py's own dedupe test) it resets the process-global dedupe
+    # set itself rather than relying on test order — the dedupe set is
+    # process-lifetime by design (that's the whole point of the fix), so an
+    # earlier test's unrelated malformed-block encounter must not leak in.
+    monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "_pending_questions.md").write_text(
+        "# Pending Questions\n\n"
+        '## [2026-07-01] Entity: "Acme Corp" (from sessions/x.md)\n'
+        "- [ ] Is Acme still Series A?\n"
+        "**Conflict type**: principled\n"
+        "**Description**: two conflicting statements\n"
+        "\n---\n\n"
+        "## Not a real header\n"
+        "- [ ] garbled\n"
+        "**Conflict type**: ???\n",
+        encoding="utf-8",
+    )
+
+    for _ in range(5):
+        rc, out = _run(["decisions", "count", "--path", str(tmp_path)])
+        assert rc == 0
+        # The malformed block never counts as a pending decision.
+        assert "1 decisions pending (1 questions, 0 merges" in out
+
+    err = capsys.readouterr().err
+    assert err.count("malformed header") == 1
+
+
 def test_list_unified_oldest_first(knowledge_root: Path) -> None:
     rc, out = _run(["decisions", "list", "--path", str(knowledge_root), "--json"])
     assert rc == 0
@@ -230,6 +276,55 @@ def test_list_empty_text(tmp_path: Path) -> None:
     rc, out = _run(["decisions", "list", "--path", str(tmp_path)])
     assert rc == 0
     assert out.strip() == "0 decisions pending"
+
+
+def test_list_warns_on_duplicate_decision_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue athenaeum#2517 AC3: two pending items sharing one id warn.
+
+    `mint_unique_block_id` is the WRITE-side fix — it only guards the file
+    it is itself writing to at the time. Two byte-identical blocks landing
+    in the same file some other way (a hand edit, a pre-athenaeum#2517 file,
+    a merge of two files) are exactly what this read-path check exists to
+    catch. The warning must land on stderr (never stdout), so `--json`'s
+    stdout payload is never corrupted by it.
+    """
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    block = (
+        '## [2026-07-01] Entity: "Acme Corp" (from sessions/x.md)\n'
+        "- [ ] Is Acme still Series A?\n"
+        "**Conflict type**: principled\n"
+        "**Description**: two conflicting statements\n"
+    )
+    (wiki / "_pending_questions.md").write_text(
+        "# Pending Questions\n\n" + block + "\n---\n\n" + block,
+        encoding="utf-8",
+    )
+
+    rc, out = _run(["decisions", "list", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "athenaeum#2517" in err
+    assert "duplicate decision id" in err
+    # The duplicate pair shares exactly one id -- it should be named once.
+    payload = json.loads(out)
+    ids = [d["id"] for d in payload]
+    assert len(ids) == 2
+    assert ids[0] == ids[1]
+    assert ids[0] in err
+
+
+def test_list_no_warning_when_ids_are_unique(
+    knowledge_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No duplicate ids in the fixture -- no warning (the common case)."""
+    rc, _ = _run(["decisions", "list", "--path", str(knowledge_root), "--json"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "athenaeum#2517" not in err
+    assert "duplicate decision id" not in err
 
 
 def test_list_text_with_proposal_renders_proposal(knowledge_root: Path) -> None:
