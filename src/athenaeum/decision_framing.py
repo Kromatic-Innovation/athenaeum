@@ -594,6 +594,45 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "something any detector's confidence settles on its own."
         ),
     },
+    "schema-amendment-proposal": {
+        # Issue athenaeum#2197: the proposal only ever grows a ledger record
+        # (`athenaeum.schema_amendment_proposals`) that names a count and a
+        # suggested amendment -- nothing it does mutates `athenaeum.yaml` or
+        # any page. Same "nothing to undo" reasoning as "tier-movement-
+        # proposal": reversible is the honest class.
+        "reversibility": REVERSIBILITY_REVERSIBLE,
+        # Whether to widen a page type's schema (e.g. add a `deal` entity
+        # type) is the operator's deployment-policy call, same reasoning as
+        # "proposed-rule"/"dimension-proposal" -- never something a misfit
+        # count alone settles.
+        "routing": ROUTING_AUTHORITY,
+        # Pre-ratification, same posture as "dimension-proposal" before its
+        # athenaeum#2016 ratification child: a real answer schema a future
+        # applier could check against, but DELIBERATELY absent from
+        # `ANSWERABLE_AS` below -- adopting an amendment (e.g. actually
+        # introducing the suggested entity type) is each its own follow-up
+        # issue per athenaeum#2197's own "Out of scope", not something this
+        # module's drafter or any wired applier enacts.
+        "schema": _approve_reject_schema(
+            description="approve = treat the proposed amendment as adopted "
+            "deployment policy (an operator applies it by hand -- no "
+            "applier exists yet); reject = dismiss the proposal.",
+        ),
+        "default_action": "leave unadopted",
+        "default_consequences": (
+            "The colliding field group's second value keeps being refused "
+            "and the raw stays on disk; the affected-page count keeps "
+            "growing on each new misfit of the same shape until a human "
+            "widens the page type's schema."
+        ),
+        "rationale": (
+            "A declared single-valued field group on a page type kept "
+            "receiving a second, different value from what must be a "
+            "different source record. Whether to widen that page type's "
+            "schema (and how) is deployment policy, not something the "
+            "misfit count alone can decide."
+        ),
+    },
 }
 
 #: Issue athenaeum#2019 (athenaeum#719 Plan step 6, the delegation-ratchet

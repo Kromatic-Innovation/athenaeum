@@ -1453,6 +1453,55 @@ Returns the operator's ``librarian.ephemeral_scopes`` list when set
 set), else the built-in `_DEFAULT_EPHEMERAL_SCOPES`. A present-but-
 empty list disables scope-based ephemeral classification entirely.
 
+### `resolve_page_type_field_groups`
+
+- **YAML path:** `librarian.field_groups`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.field_groups`` -- per page type, the declared
+single-valued field groups a misfit can fire against
+(``librarian.field_groups.<page_type>.<group_name>``, a list of field
+names).
+
+A field group names a set of frontmatter fields that, together, hold
+ONE record's worth of data for a page -- a second, distinct record's
+values competing for the same fields is a misfit the structured-upsert
+merge (`athenaeum.structured_upsert`) must not silently overwrite,
+interleave, or drop (see that module's ``field_group_misfits`` output).
+
+Example -- a deployment whose CRM importer flattens each person's deals
+onto `crm_*` frontmatter fields, and wants a misfit flagged the moment a
+second, different deal collides with the first:
+```
+librarian:
+  field_groups:
+    person:
+      deal:
+        - crm_deal_name
+        - crm_deal_amount
+        - crm_deal_stage
+```
+
+**Declared groups only -- there is no built-in grouping heuristic.** An
+importer-prefix default was considered and explicitly dropped as
+deployment policy (operator ruling 2026-11-13). A page type absent from
+this config -- or present with no groups -- has NO field groups, however
+related its field names look; the misfit path in
+`athenaeum.structured_upsert` never fires for it. Only fields also
+listed under that type's ``librarian.structured_upsert.<type>.set_keys``
+(`resolve_structured_upsert`) are eligible: a field group names
+scalar, single-valued slots, not the list-valued ``union_keys`` this
+module's structured-upsert merge unions instead of overwriting.
+
+Validation never raises: a non-dict ``field_groups``/page-type/group
+entry, a non-string page type or group name, or a group with no
+non-empty string field names is dropped (logged at WARNING) rather than
+half-applied. Missing or malformed config returns an empty mapping, so
+every existing deployment is unaffected.
+
 ### `resolve_full_compile_every_days`
 
 - **YAML path:** `librarian.full_compile_every_days`
