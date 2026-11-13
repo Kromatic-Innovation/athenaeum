@@ -787,7 +787,7 @@ Turn athenaeum's background work off (compile, detectors, recall, notifications)
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory for the state file (default: ~/.cache/athenaeum). |
-| `--compile` | off (flag absent) | — | Granular: stop only the expensive compile/detect pass (session-end contradiction detection); leave recall on. |
+| `--compile` | off (flag absent) | — | Granular: stop only the expensive compile/detect pass -- 'athenaeum session-end' and 'athenaeum run' both no-op -- leave recall on. |
 | `--reason` | — | — | Optional note recorded in the state file and shown by 'athenaeum status'. |
 
 ## `athenaeum doctor`
