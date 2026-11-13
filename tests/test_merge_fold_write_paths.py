@@ -35,7 +35,6 @@ from athenaeum.pending_merges import (
     NAME_COLLISION_RATIONALE_PREFIX,
     _apply_fold_into_existing,
     parse_pending_merges,
-    resolve_alias_slug,
     resolve_merge,
     write_pending_merge,
 )
@@ -561,38 +560,6 @@ class TestReferenceRewriteAndAliases:
         assert result["aliases_added"] == []  # already present, nothing new
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["aliases"] == ["old-a"]  # no duplicate
-
-    def test_link_time_resolution_via_resolve_alias_slug(self, tmp_path: Path) -> None:
-        """A not-yet-processed raw memory's [[old-slug]] link must resolve
-        to the canonical page via aliases: frontmatter."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        target = wiki / "canonical.md"
-        _write_wiki_page(target, name="Canonical", body="old\n")
-        src_a = wiki / "old-a.md"
-        _write_wiki_page(src_a, name="Old A", body="a\n")
-
-        init_git_repo(wiki)
-        merges_path = wiki / "_pending_merges.md"
-        write_pending_merge(
-            merges_path,
-            merge_target_name="Canonical",
-            sources=[str(src_a)],
-            rationale="r",
-            draft_merged_body="merged\n",
-            confidence=0.9,
-            write_kind="fold-into-existing",
-        )
-        pm_id = parse_pending_merges(merges_path)[0].id
-        resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
-
-        # A raw memory processed AFTER the fold links [[old-a]] — must
-        # resolve to the canonical page's own slug.
-        assert resolve_alias_slug(wiki, "old-a") == "canonical"
-        # A slug that was never an alias resolves to itself unchanged.
-        assert resolve_alias_slug(wiki, "never-existed") == "never-existed"
-        # The canonical slug itself resolves to itself.
-        assert resolve_alias_slug(wiki, "canonical") == "canonical"
 
 
 # ---------------------------------------------------------------------------

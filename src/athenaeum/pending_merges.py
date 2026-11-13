@@ -1341,54 +1341,6 @@ def _add_aliases_to_frontmatter(meta: dict, new_aliases: list[str]) -> dict:
     return out
 
 
-def resolve_alias_slug(wiki_root: Path, slug: str) -> str:
-    """Resolve ``slug`` to its canonical slug via wiki ``aliases:`` frontmatter.
-
-    Link-time resolution for issue athenaeum#425: a ``[[old-slug]]`` wikilink in a
-    not-yet-processed ``raw/`` memory (or any body prose) should resolve to
-    the canonical page once ``old-slug`` has been folded away and recorded
-    in the canonical page's ``aliases:`` list. Scans every ``*.md`` directly
-    under ``wiki_root`` (sidecars excluded) for an ``aliases:`` entry whose
-    slugified form matches ``slug``; returns that page's own slug (its
-    filename stem) on a hit, else returns ``slug`` unchanged (not an alias,
-    or already canonical). First match wins on a (should-not-happen)
-    multi-hit; unreadable/malformed files are skipped.
-
-    Intentional, retained helper (issue athenaeum#539 settling of §4.4). It is the
-    READ-side of athenaeum#425 (resolving a ``[[old-slug]]`` link to its canonical page
-    via ``aliases:``), the complement to — NOT superseded by — the WRITE-side
-    :func:`_apply_fold_into_existing` (which folds a page away and records the
-    alias). It has no in-repo caller today because the recall/link-rewrite
-    consumer that would resolve stale wikilinks on read is not yet wired; the
-    resolver itself is correct and tested, so it is kept rather than deleted.
-    An intentional internal helper (not on the stable ``__all__`` surface).
-    """
-    target = slugify(slug)
-    if not target:
-        return slug
-    try:
-        candidates = sorted(wiki_root.glob("*.md"))
-    except OSError:
-        return slug
-    for path in candidates:
-        if path.name.startswith("_"):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        meta, _ = parse_frontmatter(text)
-        if not isinstance(meta, dict):
-            continue
-        aliases_raw = meta.get("aliases")
-        if not isinstance(aliases_raw, list):
-            continue
-        for alias in aliases_raw:
-            if slugify(str(alias)) == target:
-                return path.stem
-    return slug
-
-
 def _purge_vector_ids(
     slugs: list[str],
     *,
