@@ -9,46 +9,39 @@ long after the file it points at is gone.
 
 Move-then-retire (:mod:`athenaeum.retire`) ``git rm``\\s a retired member but
 historically never rewrote the sibling index, so every retirement left a
-dangling pointer behind. This module supplies the two pieces that close that
-gap:
+dangling pointer behind. This module supplies the piece that closes that
+gap going forward:
 
 - :func:`index_line_target` / :func:`rewrite_index` — the pure parsing
   primitives used *inline* by the retire pass to drop a just-retired member's
   pointer in the same commit as the deletion (prevents NEW dangling pointers).
-- :func:`build_dangling_report` / :func:`apply_prune_index` — a one-shot
-  backfill over EXISTING dangling pointers (``athenaeum auto-memory
-  prune-index``), committed separately so its diff stays reviewable.
 
-Both paths only ever *drop* a sibling pointer whose target ``.md`` is gone;
+The one-shot backfill that used to live here (``build_dangling_report`` /
+``apply_prune_index``, exposed as ``athenaeum auto-memory prune-index``) was
+removed once the inline fix above shipped and the pre-existing dangling
+pointers it was written to sweep were cleared (athenaeum#2466): the inline
+fix is sufficient to prevent new dangling pointers going forward.
+
+This path only ever *drops* a sibling pointer whose target ``.md`` is gone;
 non-pointer lines and pointers into other trees (``../wiki/x.md``, URLs) are
-preserved verbatim. Rewrites are git-tracked and therefore recoverable.
+preserved verbatim.
 
 **Factoring rule:** this module owns parsing/rewriting the ``MEMORY.md``
-pointer-list TEXT and the git commit for the backfill sweep. It does NOT
-decide WHEN a member is retired (:mod:`athenaeum.retire` owns that decision
-and calls in here inline) and does NOT touch any file other than a scope's
-``MEMORY.md`` — a retired member's own deletion is the caller's job.
+pointer-list TEXT. It does NOT decide WHEN a member is retired
+(:mod:`athenaeum.retire` owns that decision and calls in here inline) and
+does NOT touch any file other than a scope's ``MEMORY.md`` — a retired
+member's own deletion is the caller's job.
 
-**Layering:** L3 service. Module scope imports only :mod:`athenaeum.atomic_io`
-(L2), :mod:`athenaeum.store` (L0/L1, for the ``capabilities.versioned`` gate —
-issue athenaeum#978) plus stdlib (``subprocess`` for the backfill's git
-commit). Never imports L4. Consumed inline by :mod:`athenaeum.retire` (L4,
-same commit as a retirement) and by the standalone ``athenaeum auto-memory
-prune-index`` CLI
-backfill.
+**Layering:** L3 service. Module scope has no non-stdlib imports. Never
+imports L4. Consumed inline by :mod:`athenaeum.retire` (L4, same commit as a
+retirement).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import subprocess
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable
-
-from athenaeum.atomic_io import atomic_write_text
-from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -104,158 +97,3 @@ def rewrite_index(
             continue
         kept.append(line)
     return "".join(kept), dropped
-
-
-# ---------------------------------------------------------------------------
-# Backfill: prune EXISTING dangling pointers (issue athenaeum#388, one-shot sweep)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ScopeIndexPrune:
-    """One scope's ``MEMORY.md`` with the dangling pointers it would lose."""
-
-    index_path: Path
-    dangling: list[str]
-    total_pointers: int
-    new_text: str
-
-
-@dataclass
-class DanglingReport:
-    """Outcome of a prune-index pass (dry-run or apply)."""
-
-    scopes: list[ScopeIndexPrune] = field(default_factory=list)
-    scanned_indexes: int = 0
-    applied: bool = False
-    committed: bool = False
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def total_dangling(self) -> int:
-        return sum(len(s.dangling) for s in self.scopes)
-
-
-def build_dangling_report(intake_roots: list[Path]) -> DanglingReport:
-    """Scan every ``<scope>/MEMORY.md`` for sibling pointers with no file on disk.
-
-    A pointer is *dangling* when its bare ``<file>.md`` target does not exist in
-    the same scope directory — exactly the residue move-then-retire left behind
-    before athenaeum#388. Scopes with no dangling pointer are omitted from the report
-    (nothing to rewrite). Unreadable indexes are recorded as errors and skipped
-    (conservative: never rewrite what we could not fully read).
-    """
-    report = DanglingReport()
-    for root in intake_roots:
-        if not root.is_dir():
-            continue
-        for scope_dir in sorted(root.iterdir()):
-            if not scope_dir.is_dir():
-                continue
-            index_path = scope_dir / INDEX_FILENAME
-            if not index_path.is_file():
-                continue
-            report.scanned_indexes += 1
-            try:
-                text = index_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                report.errors.append(f"{scope_dir.name}/{INDEX_FILENAME}: unreadable ({exc})")
-                continue
-            total = sum(
-                1 for line in text.splitlines() if index_line_target(line) is not None
-            )
-            new_text, dropped = rewrite_index(
-                text, lambda t: not (scope_dir / t).exists()
-            )
-            if dropped:
-                report.scopes.append(
-                    ScopeIndexPrune(index_path, dropped, total, new_text)
-                )
-    return report
-
-
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
-    )
-
-
-def apply_prune_index(
-    knowledge_root: Path,
-    report: DanglingReport,
-    *,
-    store: Store | None = None,
-) -> DanglingReport:
-    """Rewrite the dangling-carrying indexes and commit them in one labeled commit.
-
-    Mirrors the move-then-retire / auto-memory-prune safety contract: refuses
-    to act against a store that is not versioned (design note §4.4 R1; issue
-    athenaeum#978 — the rewrite must be recoverable), stages and commits ONLY
-    the rewritten index paths (a scoped pathspec, so unrelated working-tree
-    edits can never be swept into the "prune index pointers" commit), and
-    no-ops when there is nothing dangling. Mutates and returns *report*.
-
-    *store* is the Tier-A recoverability gate, injectable so a test can
-    supply a fake declaring ``capabilities.versioned=False`` without a real
-    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
-    *knowledge_root*.
-    """
-    if not report.scopes:
-        log.info("prune-index: no dangling pointers — nothing to rewrite")
-        return report
-
-    store = store if store is not None else FilesystemStore(knowledge_root, {})
-    if not store.capabilities.versioned:
-        msg = (
-            f"store at {knowledge_root} is not versioned — refusing to "
-            "prune index (the rewrite must be git-recoverable)"
-        )
-        log.warning("prune-index: %s", msg)
-        report.errors.append(msg)
-        return report
-
-    kr = knowledge_root.resolve()
-    rel_paths: list[str] = []
-    for scope in report.scopes:
-        try:
-            rel = str(scope.index_path.resolve().relative_to(kr))
-        except ValueError:
-            report.errors.append(
-                f"{scope.index_path.parent.name}/{INDEX_FILENAME}: outside "
-                "knowledge_root — not pruned"
-            )
-            continue
-        atomic_write_text(scope.index_path, scope.new_text)
-        rel_paths.append(rel)
-
-    if not rel_paths:
-        return report
-
-    total = sum(len(s.dangling) for s in report.scopes)
-    try:
-        _git(knowledge_root, "add", "--", *rel_paths)
-        _git(
-            knowledge_root,
-            "commit",
-            "-m",
-            f"chore(auto-memory): prune {total} dangling MEMORY.md pointer(s) "
-            f"across {len(rel_paths)} scope(s) (athenaeum#388)",
-            "--",
-            *rel_paths,
-        )
-    except subprocess.CalledProcessError as exc:
-        msg = (
-            "git operation failed during prune-index "
-            f"({' '.join(exc.cmd)!r}): {exc.stderr or exc}"
-        )
-        log.error("prune-index: %s", msg)
-        report.errors.append(msg)
-        return report
-    report.applied = True
-    report.committed = True
-    log.info(
-        "prune-index: rewrote %d index file(s) dropping %d dangling pointer(s); committed",
-        len(rel_paths),
-        total,
-    )
-    return report
