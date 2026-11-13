@@ -356,6 +356,22 @@ class TestEF5DuplicateEffectQueuesProposal(object):
         assert questions.is_file()
         assert "Approve folding" in questions.read_text(encoding="utf-8")
 
+    def test_question_wording_states_approving_folds_immediately(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2518 AC5: the question text itself must say that
+        approving folds the two pages immediately, not that "a human writes
+        the actual fold" (the pre-athenaeum#2518 wording, back when nothing
+        downstream could ever apply the answer)."""
+        wiki_root = tmp_path / "wiki"
+        page_a = _page("alpha", body="claim one")
+        page_b = _page("beta", body="claim one restated")
+        outcome = _outcome(VERDICT_DUPLICATE, widened_coords={})
+        apply_verdict_effect(page_a, page_b, outcome, wiki_root=wiki_root)
+        text = (wiki_root / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "folds the two pages immediately" in text
+        assert "a human writes the actual fold" not in text
+
     def test_duplicate_never_writes_pending_merges_file(self, tmp_path: Path) -> None:
         wiki_root = tmp_path / "wiki"
         outcome = _outcome(VERDICT_DUPLICATE, widened_coords={})
