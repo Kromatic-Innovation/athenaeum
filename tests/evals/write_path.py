@@ -285,8 +285,8 @@ def _ensure_git_repo(knowledge_root: Path) -> None:
 
 
 # Every model knob athenaeum's ``models.<knob>`` yaml block resolves through
-# :func:`athenaeum.config.resolve_model` (or, for ``resolve``, the legacy-key
-# variant :func:`athenaeum.resolutions._get_model` layers on top of the same
+# :func:`athenaeum.config.resolve_model` (for ``resolve``,
+# :func:`athenaeum.resolutions._get_model` is a thin wrapper over the same
 # helper) that a full :func:`athenaeum.librarian.run` compile can reach:
 # ``write`` (:mod:`athenaeum.tiers` tier3 create/merge — also the write-tier-
 # compare precedent's own knob), ``classify`` (:mod:`athenaeum.tiers` tier2,
