@@ -73,6 +73,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 
 
@@ -87,7 +88,7 @@ def cmd_surface_divergence(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    knowledge_root = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args)
     config = load_config(knowledge_root)
     wiki_root = args.wiki_root or (knowledge_root / "wiki")
     contacts_root = args.contacts_root or contacts_surface_root(knowledge_root, config)

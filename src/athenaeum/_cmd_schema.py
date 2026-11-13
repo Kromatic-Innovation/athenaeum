@@ -19,6 +19,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
@@ -30,7 +31,7 @@ def cmd_schema(args: argparse.Namespace) -> int:
 
     from athenaeum.schema_migrate import apply_migrations, build_migrate_report
 
-    knowledge_root = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     if not wiki_root.is_dir():
         print(f"error: no wiki directory at {wiki_root}", file=sys.stderr)

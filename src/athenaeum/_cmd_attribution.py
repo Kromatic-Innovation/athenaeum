@@ -91,7 +91,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ def _resolve_roots(args: argparse.Namespace) -> tuple[Path, dict[str, Any] | Non
     from athenaeum.config import load_config
     from athenaeum.pii import contacts_surface_root
 
-    knowledge_root = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args)
     config = load_config(knowledge_root)
     contacts_root = (
         args.contacts_root.expanduser().resolve()
