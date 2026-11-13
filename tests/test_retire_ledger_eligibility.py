@@ -48,13 +48,15 @@ from athenaeum.verdicts import (
 )
 
 
-def _entry(*, contradictions_detected: bool = False) -> MergedWikiEntry:
-    """A minimal cluster entry -- only ``contradictions_detected`` is read."""
+def _entry() -> MergedWikiEntry:
+    """A minimal cluster entry for ``_move_eligibility`` -- nothing on it is
+    read any more (issue athenaeum#2435 removed the ``contradictions_detected``
+    short-circuit this helper used to parameterize)."""
     return MergedWikiEntry(
         topic_slug="t",
         cluster_id="c-1",
         cluster_centroid_score=1.0,
-        contradictions_detected=contradictions_detected,
+        contradictions_detected=False,
     )
 
 
@@ -199,25 +201,6 @@ class TestHoldCases:
 
         assert eligible is False
         assert "underdetermined" in reason
-
-    def test_hold_contradictions_detected_flag_short_circuits(self, tmp_path: Path) -> None:
-        """Belt-and-suspenders: a (now-residual, no longer set by merge.py)
-        ``contradictions_detected`` flag still holds regardless of ledger
-        state -- it can only ever force a HOLD, never override one."""
-        wiki_root = tmp_path / "wiki"
-        a, b = _member(tmp_path, "a"), _member(tmp_path, "b")
-        id_a = page_id_for_path(a, root=wiki_root)
-        id_b = page_id_for_path(b, root=wiki_root)
-
-        with RunLock(tmp_path) as lock:
-            _write_verdict(wiki_root, lock, id_a, id_b, "duplicate")
-
-        eligible, reason = _move_eligibility(
-            _entry(contradictions_detected=True), wiki_root, [a, b]
-        )
-
-        assert eligible is False
-        assert reason == "contradiction flagged — queued for human confirmation"
 
 
 # ---------------------------------------------------------------------------

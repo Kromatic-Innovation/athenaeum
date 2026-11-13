@@ -3323,8 +3323,9 @@ class TestReciprocalRankFusion:
     # cross-lane regression). Both default to a no-op -- pinned here --
     # after a sweep against the four measured regressions found neither
     # lever fixes them without breaking far more than it fixes; see
-    # ``_DEFAULT_HYBRID_FTS5_WEIGHT`` / ``_DEFAULT_HYBRID_GUARD_RANK`` /
-    # ``_DEFAULT_HYBRID_K``'s own comments in search.py for the swept
+    # ``athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`` /
+    # ``RECALL_HYBRID_GUARD_RANK_DEFAULT``'s own comments and
+    # ``_DEFAULT_HYBRID_K``'s comment in search.py for the swept
     # values. Kept as reviewable, working knobs for a different corpus
     # shape, not this issue's fix.
     # -----------------------------------------------------------------

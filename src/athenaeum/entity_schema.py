@@ -93,10 +93,6 @@ def declared_entity_classes(wiki_root: Path) -> frozenset[str]:
     return frozenset(declared) if declared else frozenset(KNOWN_TYPES)
 
 
-#: Backwards-compatible alias for the pre-athenaeum#1194 private name.
-_load_declared_types = declared_entity_classes
-
-
 def resolve_entity_classes(
     wiki_root: Path,
     *,

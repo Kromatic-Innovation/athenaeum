@@ -12,7 +12,7 @@ These tests build the index through ``athenaeum reindex`` -- the same CLI
 entry point a real deployment runs (``cmd_rebuild_index`` in
 ``_cmd_index.py``) -- starting from a written ``athenaeum.yaml``, and inspect
 the resulting on-disk index for rows attributable to the configured root via
-the ``<root_name>/<relpath>`` filename convention ``_iter_extra_root_entries``
+the ``<root_name>/<relpath>`` filename convention ``_scan_indexed_records``
 (search.py) already encodes for every extra-root hit.
 
 Out of scope (per the issue): changing ``resolve_extra_intake_roots``'s
@@ -75,7 +75,7 @@ def _rows_for_root(cache_dir: Path, root_name: str) -> int:
     """Count indexed rows attributable to *root_name*, via the same
     ``<root_name>/<relpath>`` filename prefix a recall consumer already
     relies on to separate wiki hits from extra-root hits (search.py's
-    ``_iter_extra_root_entries``). Production behaviour, not a
+    ``_scan_indexed_records``). Production behaviour, not a
     test-invented signal.
     """
     conn = sqlite3.connect(str(_require_index(cache_dir)))

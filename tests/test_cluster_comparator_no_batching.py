@@ -7,7 +7,8 @@ concurrently-edited file in another lane) rather than an addition to it --
 keeps this issue's footprint in that file at zero.
 
 Why this test exists (issue athenaeum#1682's Motivation, item 3): C4's
-``merge.py::_filter_declared_pairs`` needs an internal "partial prune" step
+``merge.py::_filter_declared_pairs`` (dead code, deleted by issue
+athenaeum#2435) needed an internal "partial prune" step
 (``has_undeclared_partner`` bookkeeping) ONLY because C4 batches every
 member of a cluster into ONE shared Haiku call, and the prune's job is to
 drop chunk members that do not need to be in that shared call.
@@ -83,9 +84,10 @@ def test_run_cluster_comparator_issues_one_gate2_call_per_pair_not_one_per_clust
 ) -> None:
     """A 3-member cluster forms C(3, 2) = 3 candidate pairs. If the driver
     batched the whole cluster into a single Gate-2 call (the shape C4's
-    ``_filter_declared_pairs``/``has_undeclared_partner`` prune exists to
-    manage), the client would be called ONCE. It is instead called once
-    PER PAIR -- proving no chunk exists for a partial-prune step to act on.
+    now-deleted ``_filter_declared_pairs``/``has_undeclared_partner`` prune
+    existed to manage), the client would be called ONCE. It is instead
+    called once PER PAIR -- proving no chunk exists for a partial-prune
+    step to act on.
     """
     members = [
         _write_am(tmp_path, "member-a.md", "claim A"),

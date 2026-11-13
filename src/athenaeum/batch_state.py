@@ -449,8 +449,10 @@ def retire_handle(cache_dir: Path, batch_id: str) -> None:
     """Drop *batch_id*'s handle entirely — it was collected. No-op if absent.
 
     This is the collect-side terminal: the batch's results have landed, so
-    neither the handle nor its lease has anything left to protect. Use
-    :func:`release_lease` instead to free the refs while KEEPING the handle.
+    neither the handle nor its lease has anything left to protect. To free the
+    refs while KEEPING the handle (an abandoned-but-not-yet-reconciled batch),
+    let the lease expire — :func:`release_expired_leases` clears it
+    automatically on the next claim pass.
     """
     if not batch_id:
         return
@@ -458,30 +460,6 @@ def retire_handle(cache_dir: Path, batch_id: str) -> None:
     if batch_id in handles:
         del handles[batch_id]
         _save(cache_dir, handles)
-
-
-def release_lease(cache_dir: Path, batch_id: str) -> None:
-    """Clear *batch_id*'s lease, keeping the handle. No-op if absent.
-
-    The refs become claimable again on the next claim pass while the handle
-    stays recorded — the shape an abandoned-but-not-yet-reconciled batch
-    needs, and what :func:`release_expired_leases` applies automatically.
-    """
-    if not batch_id:
-        return
-    handles = load(cache_dir)
-    handle = handles.get(batch_id)
-    if handle is None or handle.leased_until is None:
-        return
-    handles[batch_id] = PendingBatch(
-        batch_id=handle.batch_id,
-        knob=handle.knob,
-        submitted_at=handle.submitted_at,
-        phase=handle.phase,
-        leased_until=None,
-        refs=handle.refs,
-    )
-    _save(cache_dir, handles)
 
 
 def leased_refs(cache_dir: Path, *, now: datetime | None = None) -> set[str]:
@@ -632,12 +610,18 @@ RECONCILE_LEDGER_FILENAME = "batch_reconcile.jsonl"
 
 
 def reconcile_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """``<wiki_root>/batch_reconcile.jsonl``, with the legacy cache-dir fallback.
+    """``<wiki_root>/batch_reconcile.jsonl``, with a legacy cache-dir fallback.
 
-    Mirrors :func:`athenaeum.spend.durable_ledger_path` exactly, including its
-    migration rule: an installation that already has records at the legacy
-    ``<cache_dir>`` path keeps using it until something copies the file
-    forward; a fresh or already-migrated store resolves behind the seam.
+    **Docstring correction, athenaeum#2437:** this no longer mirrors
+    :func:`athenaeum.spend.durable_ledger_path` — athenaeum#1601 moved that
+    function's resolution to ALWAYS be ``<cache_dir>/spend.jsonl`` (never
+    ``wiki_root``). This function was not part of that move and still
+    resolves into *wiki_root* by default: a fresh or already-migrated store
+    returns the ``wiki_root`` path, and only an installation that already has
+    records at the legacy ``<cache_dir>`` path (and none yet at
+    ``wiki_root``) keeps using that legacy path until something copies the
+    file forward. Whether to move this ledger out of ``wiki_root`` too is a
+    separate operator decision (see athenaeum#2437's Out of scope).
     """
     new_path = Path(wiki_root) / RECONCILE_LEDGER_FILENAME
     legacy_path = Path(

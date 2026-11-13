@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Issue athenaeum#663 — a reliably-failing file must not be a silent permanent no-progress loop.
 
-``tier3_write`` defers a raw file's disk writes until *every* action for that
-file has succeeded (the all-or-nothing boundary, deliberately preserved here —
-see the invariant argued in ``tier3_write``'s docstring). A single reliably-
-failing LLM call (e.g. an entity page large enough to time out every night)
-therefore discards the file's other ~17 successful merges and the file is
-retried WHOLE on the next run — forever, silently.
+``tier3_derive_actions`` makes every Tier-3 LLM call and defers a raw file's
+disk writes until *every* action for that file has succeeded — it writes
+NOTHING itself; the caller (the librarian's own flush,
+``librarian._apply_tier3_results``) only flushes ``pending_updates`` after
+this function returns cleanly (the all-or-nothing boundary, deliberately
+preserved here — see the invariant argued in ``tier3_derive_actions``'s
+docstring). A single reliably-failing LLM call (e.g. an entity page large
+enough to time out every night) therefore discards the file's other ~17
+successful merges and the file is retried WHOLE on the next run — forever,
+silently.
 
 This suite covers the fix, which does NOT weaken the boundary (that cannot be
 done safely: actions are re-derived non-deterministically each run, so partial
 application + whole-file retry would double-apply). Instead:
 
-- ``tier3_write`` annotates the propagating exception with the failing action's
-  ``kind:name``, and applies NO writes on the failure path (invariant preserved).
+- ``tier3_derive_actions`` annotates the propagating exception with the
+  failing action's ``kind:name``, and applies NO writes on the failure path
+  (invariant preserved -- it never writes on ANY path).
 - the entity loop keeps a persistent per-file consecutive-failure ledger; a file
   over the threshold (on unchanged content) is SKIPPED and surfaced as
   machine-detectable run state (``out_run_stats["stuck_files"]`` + a greppable
@@ -40,7 +45,7 @@ from athenaeum.librarian import (
     run,
 )
 from athenaeum.models import EntityAction, RawFile
-from athenaeum.tiers import tier3_write
+from athenaeum.tiers import tier3_derive_actions
 
 # Reuse the deadline suite's run harness — the stuck-file loop lives in the same
 # per-file entity phase and must be exercised against the same run scaffold.
@@ -109,7 +114,7 @@ def _write_page(path: Path, uid: str, name: str) -> None:
     )
 
 
-def test_tier3_write_mid_file_failure_applies_no_writes_and_names_action(
+def test_tier3_derive_actions_mid_file_failure_applies_no_writes_and_names_action(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The load-bearing invariant test (AC 2/3/4).
@@ -154,13 +159,14 @@ def test_tier3_write_mid_file_failure_applies_no_writes_and_names_action(
 
     raw = _make_raw("Notes about Alice and Bob.")
     with pytest.raises(RuntimeError) as excinfo:
-        tier3_write(raw, actions, index, wiki, MagicMock())
+        tier3_derive_actions(raw, actions, index, wiki, MagicMock())
 
     # The failing action is named on the exception.
     assert getattr(excinfo.value, "athenaeum_failing_action", None) == "update:Bob"
 
-    # Invariant preserved: NEITHER page changed on disk. Alice's merge succeeded
-    # in-memory but the deferred flush never ran, so no partial write landed.
+    # Invariant preserved: NEITHER page changed on disk. tier3_derive_actions
+    # writes nothing itself -- Alice's merge succeeded in-memory but the
+    # caller's deferred flush never ran, so no partial write landed.
     assert page_a.read_text(encoding="utf-8") == before_a
     assert page_b.read_text(encoding="utf-8") == before_b
 
@@ -221,13 +227,13 @@ def test_content_change_resets_consecutive_count(tmp_path: Path) -> None:
 
 def _raising_process_one(action: str = "update:Foo"):
     """A ``process_one`` stand-in that fails every file, naming the action the
-    way ``tier3_write`` annotates a real mid-file timeout."""
+    way ``tier3_derive_actions`` annotates a real mid-file timeout."""
     calls = {"n": 0}
 
     def fake_process_one(raw, *args, **kwargs):
         calls["n"] += 1
         exc = RuntimeError("simulated reliably-failing action")
-        # Mirror tier3_write's annotation so the ledger records the failing action.
+        # Mirror tier3_derive_actions's annotation so the ledger records the failing action.
         exc.athenaeum_failing_action = action  # type: ignore[attr-defined]
         raise exc
 

@@ -804,8 +804,8 @@ class TestAC11DistinctRecordsSeparator:
 
 # ---------------------------------------------------------------------------
 # athenaeum#1682 — declared-relationship Gate 1 short-circuit, ported from
-# merge.py's C4 ``_declared_relationship`` (merge.py:216) via the shared
-# athenaeum.declared_relationships primitive. Mirrors
+# merge.py's C4 ``_declared_relationship`` (removed by athenaeum#2435) via
+# the shared athenaeum.declared_relationships primitive. Mirrors
 # TestAC11DistinctRecordsSeparator.test_gate1_disjoint_scope_records_separator
 # above -- same "settled before Gate 2, client never called" shape.
 # ---------------------------------------------------------------------------
