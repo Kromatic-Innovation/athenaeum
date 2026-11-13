@@ -174,7 +174,7 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | `24`                          | Snooze TTL for `pending-questions-surface.sh` (consumed by the `resolve-questions` skill when writing the snooze file) |
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0`                              | Set to `1` to log `pending-questions-surface.sh` diagnostics to stderr |
-| `SEARCH_BACKEND`         | from `athenaeum.yaml`, else `vector` | `fts5` or `vector`. **These hooks default to `vector`** — the `fts5` default belongs to `athenaeum context --backend` / `codex-context --backend`, not here. See [`../../docs/reference/environment.md`](../../docs/reference/environment.md) for the per-entry-point table |
+| `SEARCH_BACKEND`         | from `athenaeum.yaml`, else `vector` | `fts5` or `vector`. **One rule everywhere:** `athenaeum.config.resolve_search_backend` — `athenaeum.yaml`'s `search_backend` over the shipped default `vector`. No entry point carries a default of its own; `athenaeum context --backend` / `codex-context --backend` override the configured value when passed and resolve it when omitted. See [`../../docs/reference/environment.md`](../../docs/reference/environment.md) |
 | `AUTO_RECALL`            | from `athenaeum.yaml` (`true`)    | Set to `false` to disable per-turn recall                      |
 
 ## Hybrid recall: why both backends

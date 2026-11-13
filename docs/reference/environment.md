@@ -36,21 +36,36 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | No | Snooze TTL in hours for pending-questions surfacing (default: `24`; consumed by the `resolve-questions` skill) |
 | `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
-| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). **The default differs by entry point** — see below |
+| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: the resolved `search_backend`, `vector` on a default install |
 
-**`SEARCH_BACKEND`'s default differs by entry point**, so there is no single
-default to quote:
+**One resolution rule, every entry point** (issue athenaeum#2458). There is a
+single answer to "which backend answers a recall query", and it is
+`athenaeum.config.resolve_search_backend`: `athenaeum.yaml`'s `search_backend`
+over the shipped default `vector` (`config._DEFAULTS["search_backend"]`). The
+`recall` CLI, the MCP `recall` tool, `athenaeum context`,
+`athenaeum codex-context`, the Codex Tier-2 adapter, the packaged
+`athenaeum-claude-hook` adapter, `reindex`/`session-end`, `doctor` and the
+shell hooks (whose `${SEARCH_BACKEND:-vector}` mirrors the same default) all
+read that one value.
 
-| Entry point | Default | Where |
-|---|---|---|
-| The Claude Code hooks (`session-start-recall.sh`, `rebuild-index.sh`), the packaged `athenaeum-claude-hook` adapter, and `athenaeum.yaml`'s own `search_backend` | `vector` | `config._DEFAULTS["search_backend"]`, mirrored by each hook's `${SEARCH_BACKEND:-vector}` |
-| `athenaeum context --backend` | `fts5` | that flag's own argparse default |
-| `athenaeum codex-context --backend` | `fts5` | same |
+Two things still override it, in this order: `SEARCH_BACKEND` in the hook
+shell environment, and an explicit `--backend` on a command that offers the
+flag. Omitting `--backend` on `athenaeum context` / `athenaeum codex-context`
+means "whatever is configured" — until athenaeum#2458 those two flags carried
+their own `fts5` default, and that per-entry-point divergence
+(issue athenaeum#2232) no longer exists.
 
-The `fts5` keyword defaults on `context.build_context` /
-`build_context_for_turn` are not reachable from the hooks: the adapter always
-passes `search_backend` explicitly. They are the default only for an
-in-process caller that omits the argument.
+`context.build_context` / `build_context_for_turn` take
+`search_backend=None` by default and resolve it the same way, so an
+in-process caller that omits the argument also gets the configured backend
+rather than a fixed one.
+
+The recall-cap ceiling has exactly one rule too
+(`athenaeum.config.resolve_recall_cap_ceiling`):
+`ATHENAEUM_RECALL_CAP_CEILING` env over `recall.cap.ceiling` yaml over
+`RECALL_CAP_CEILING_DEFAULT`. `session-start-recall.sh` caches the resolved
+**yaml** value into `config.env` as `RECALL_CAP_CEILING`; the env override is
+applied per turn, never baked into that cache.
 
 **Shell-env overrides.** `AUTO_RECALL` and `SEARCH_BACKEND` are read from the
 shell environment after the hook sources `~/.cache/athenaeum/config.env`, so

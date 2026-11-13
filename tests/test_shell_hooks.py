@@ -5542,9 +5542,15 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
     """The documented `SEARCH_BACKEND` default matches the code.
 
     Issue athenaeum#2232 item 1: the hooks default to `vector` and the docs
-    said `fts5`, which is the CLI flags' default. Asserted against the live
-    defaults so the docs cannot drift back, and so a future change to
+    said `fts5`, which was then the CLI flags' default. Asserted against the
+    live defaults so the docs cannot drift back, and so a future change to
     either default fails here rather than in a reader's install.
+
+    Issue athenaeum#2458 removed the divergence this class was named after
+    rather than re-documenting it: the two CLI flags now default to `None`
+    and resolve through `athenaeum.config.resolve_search_backend`, so there
+    IS one default and `vector` is it. The assertions below moved with the
+    code; the doc-drift guard stays, now pinning the one-rule wording.
     """
 
     def test_the_hooks_and_the_yaml_resolver_default_to_vector(self) -> None:
@@ -5556,21 +5562,27 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
                 'SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"' in hook.read_text()
             ), f"{hook.name} no longer defaults SEARCH_BACKEND to vector"
 
-    def test_the_two_cli_flags_default_to_fts5(self) -> None:
+    def test_the_two_cli_flags_defer_to_the_resolver(self) -> None:
         """Read through `parse_args`, not the parser's internals.
 
         An argparse default read off `_actions` can be right while the flag
         resolves to something else (a parser-level `set_defaults`, a
         subparser override); parsing an argv with the flag omitted is the
         same path a real invocation takes.
+
+        Issue athenaeum#2458: an omitted `--backend` must arrive as `None` --
+        the signal "resolve it" -- and never as a backend name of its own.
+        A flag that silently re-acquired an argparse default would reinstate
+        exactly the per-surface divergence this class documents.
         """
         from athenaeum.cli import build_parser
 
         parser = build_parser()
-        assert parser.parse_args(["context", "a prompt"]).backend == "fts5"
-        assert (
-            parser.parse_args(["codex-context", "--seed", "a topic"]).backend == "fts5"
-        )
+        assert parser.parse_args(["context", "a prompt"]).backend is None
+        assert parser.parse_args(["codex-context", "--seed", "a topic"]).backend is None
+
+        explicit = parser.parse_args(["context", "a prompt", "--backend", "fts5"])
+        assert explicit.backend == "fts5"
 
     def test_neither_doc_still_claims_a_single_fts5_default(self) -> None:
         readme = (HOOKS_DIR / "README.md").read_text()
@@ -5579,6 +5591,10 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
         ).read_text()
         assert "from `athenaeum.yaml` (`fts5`)" not in readme
         assert "`fts5` (default) or `vector`" not in readme
-        # The per-entry-point table is what replaced the single claim.
-        assert "differs by entry point" in environment
-        assert "`athenaeum context --backend`" in environment
+        # Issue athenaeum#2458: the per-entry-point table that replaced the
+        # single `fts5` claim is itself gone -- there is one rule again, and
+        # the docs must say so rather than reviving either earlier wording.
+        assert "differs by entry point" not in environment
+        assert "One resolution rule, every entry point" in environment
+        assert "resolve_search_backend" in environment
+        assert "resolve_search_backend" in readme
