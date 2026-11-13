@@ -171,6 +171,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test guards the published tool description against the wording coming
   back (athenaeum#2543).
 
+- `_parse_block`'s "skipping pending-question block with malformed header"
+  warning now fires at most once per distinct malformed block per process,
+  instead of once per parse — a long-lived caller (the MCP server serving
+  repeated `decisions count`/`decisions list` calls) previously reprinted
+  the same line thousands of times over a session, burying the real count.
+  The warning now also names the block's 1-based position in the file
+  (`block #N`) so the operator can find it (athenaeum#2516).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
