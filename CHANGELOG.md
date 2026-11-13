@@ -187,6 +187,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test guards the published tool description against the wording coming
   back (athenaeum#2543).
 
+- `_parse_block`'s "skipping pending-question block with malformed header"
+  warning now fires at most once per distinct malformed block per process,
+  instead of once per parse — a long-lived caller (the MCP server serving
+  repeated `decisions count`/`decisions list` calls) previously reprinted
+  the same line thousands of times over a session, burying the real count.
+  The warning now also names the block's 1-based position in the file
+  (`block #N`) so the operator can find it (athenaeum#2516).
+
+- Two pending questions sharing one header + the same (often generic)
+  question line — e.g. two detector-raised field-correction items that
+  differ only in `**Description**:` — no longer collapse onto one
+  decision id: every new block now carries a `**Id salt**:` line (a
+  creation-time disambiguator, hashed once from the block's own
+  description/context and persisted — never recomputed), folded into the
+  id hash alongside header + question. A block written before this
+  change (no salt line) still hashes exactly as before, so an in-flight
+  cached id or answer keeps resolving. If a writer's minted id would
+  still collide with one already in the file, it disambiguates (mints a
+  fresh one) rather than silently dropping the item. `decisions list`
+  now also warns on stderr if it ever finds two pending items sharing one
+  id (athenaeum#2517).
+
+- T1's `reason_code` on a model-path reject no longer defaults to
+  `different_entities` unconditionally; the model is now asked for its own
+  `reason_code` (`different_entities` or `other`) alongside its verdict and
+  reason, and a reject with a missing/mismatched `reason_code` degrades to
+  `pass_up` like any other schema violation. Before the fix, every
+  model-path T1 reject was stamped `different_entities` regardless of what
+  the free-text reason said — on a live store, 1893/1893 reason_code-bearing
+  T1 decisions carried that one value, including 1609 whose reason called
+  the pages a "duplicate"/"same entity". On the 158 human-reviewed
+  calibration samples the mislabeling concentrates where review disagreement
+  also concentrates: a deterministic replay of the fixed classification
+  over those samples' stored reasons found the subgroup the fix
+  reclassifies away from `different_entities` was overturned at roughly 3x
+  the rate (53% vs. 17%) of the subgroup whose label was already accurate;
+  the overall overturn rate (76/158, 48%) is unchanged by this fix alone,
+  since it corrects the label only, not T1's reject-vs-pass_up verdict
+  (athenaeum#2521).
+
+- The calibration audit sampler (`sample_tier_decision`) now stratifies by
+  `cluster_id`: once one near-duplicate-page burst's `cluster_id` has
+  contributed `librarian.audit_max_per_cluster` (default 5) audit items,
+  further draws from that same cluster are skipped for the rest of the run,
+  so one abnormally large burst can no longer fill the sample on volume
+  alone — live evidence showed 140+ of 158 human-reviewed T1 samples coming
+  from exactly one such family. `cluster_id` is an optional field on the
+  audit record now, wired through both the T1 and T2 merge-proposal screens
+  (`athenaeum.reasoning_screens`); callers that supply none (e.g. the
+  ATTRIBUTION tier) are unaffected (athenaeum#2521).
+
+- `decisions revalidate` (`athenaeum.pending_merges.revalidate_pending_merges`)
+  no longer reports a source that was folded into another page the same
+  way as a source that is genuinely gone — both used to collapse into one
+  `source page missing: N of M` reason. A folded source is now reported as
+  `source folded into <target>: N of M`, and a proposal whose sources are
+  ALL folded into its OWN target is archived as satisfied
+  (`**Archived**:`) rather than stale (`**Retired**:`) — a wrong-target
+  fold or a partial fold still reports as stale (athenaeum#2522).
+
+- A merge approved or rejected from a human answer no longer records
+  `decided_by: pipeline:merge-<decision>` in the verdict ledger, indistinguishable
+  from an automated decision. The MCP `resolve_merge` tool and the
+  `decisions answer` CLI command — the only two surfaces that can answer a
+  merge decision today — now stamp a `human:<actor>` decided_by instead
+  (`human:unattributed` until athenaeum#2489's attributable-answer field
+  exists to supply a real actor); an answer with no human signal keeps the
+  pre-existing `pipeline:merge-<decision>` stamp unchanged (athenaeum#2523).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
