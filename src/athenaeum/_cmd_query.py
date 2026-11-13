@@ -5,6 +5,18 @@ Five subcommands grouped here because each is a shell-accessible, read-only
 query or diagnostic over the compiled wiki / search stack, used by validation
 harnesses, hooks, and operator debugging — none mutates the knowledge base.
 
+**One exception (issue athenaeum#2488): ``entity rename``.** A nested sub-action
+of ``entity`` (dispatched internally from :func:`cmd_entity` via
+``entity_target`, mirroring how ``athenaeum decisions``/``athenaeum dedupe``
+dispatch their own verbs) — dry-run by default, ``--apply`` writes
+``name:``/``aliases:``, optionally the file slug + inbound wikilinks, takes
+the run lock, and is the one mutating path in this otherwise read-only
+module. Placed here rather than its own ``_cmd_*.py`` because it is a verb
+of the existing ``entity`` noun, not a new top-level command — the actual
+rename mechanics live in :mod:`athenaeum.entity_rename` (L4), imported
+lazily by :func:`cmd_entity_rename` exactly like every other subcommand
+handler in this module imports its library layer.
+
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` (or a small same-domain group module like this
 one) and registers via ``add_<name>_subparser`` — this is where a NEW
@@ -22,7 +34,14 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from athenaeum._cli_shared import EXIT_INTERNAL_ERROR, EXIT_NOT_FOUND, _iso_date
+from athenaeum._cli_shared import (
+    EXIT_INTERNAL_ERROR,
+    EXIT_NOT_FOUND,
+    _acquire_or_exit,
+    _add_lock_args,
+    _iso_date,
+    rebuild_recall_index,
+)
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 
 if TYPE_CHECKING:
@@ -74,8 +93,16 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     entity_parser.add_argument(
         "--uid",
-        required=True,
-        help="The entity's durable uid.",
+        required=False,
+        default=None,
+        help="The entity's durable uid. Required for the default read mode "
+        "(enforced in cmd_entity, not by argparse — issue athenaeum#2488: a "
+        "nested `rename` sub-action below needs its OWN, independently "
+        "required `--uid`, and argparse's PARSER-nargs subparsers action "
+        "swallows every token after the sub-action name, including any "
+        "`--uid` meant for THIS parser — so this one can no longer be "
+        "`required=True` at the argparse level without breaking `entity "
+        "rename --uid ...`).",
     )
     entity_parser.add_argument(
         "--class",
@@ -109,6 +136,100 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Knowledge directory (default: ~/knowledge)",
     )
     entity_parser.set_defaults(func=cmd_entity)
+
+    # entity rename (issue athenaeum#2488) — the sanctioned rename primitive,
+    # nested under `entity` as a sub-action (dispatched from cmd_entity via
+    # entity_target; see that function's docstring for why this does not
+    # give the "rename" subparser its own set_defaults(func=...)).
+    entity_sub = entity_parser.add_subparsers(dest="entity_target")
+    rename_parser = entity_sub.add_parser(
+        "rename",
+        help="Rename a wiki page by uid: sets name:, records the previous "
+        "name in aliases: (deduplicated), refreshes the recall index, and "
+        "writes a provenance record. Dry-run by default; --apply writes.",
+        description="Rename a wiki page by uid (issue athenaeum#2488). Default is "
+        "dry-run: prints the planned old-name -> new-name change (and, with "
+        "--reslug, the file/slug move and inbound-wikilink rewrite count) "
+        "without writing anything. --apply sets name:, appends the previous "
+        "name to aliases: (deduplicated), rebuilds the recall index, and "
+        "appends a provenance record (who/when/reason/old->new) to "
+        "wiki/_rename_provenance.jsonl. The uid and file slug are left "
+        "unchanged unless --reslug is given, in which case the file is "
+        "renamed to the new slug and every inbound [[old-slug]] wikilink is "
+        "rewritten to the new slug (the same rewrite the fold-into-existing "
+        "merge write path uses). Idempotent: renaming to the CURRENT name is "
+        "always a clean no-op (exit 0), whether or not the page was already "
+        "renamed by an earlier call. Takes the run lock (issue athenaeum#309) "
+        "on --apply only.\n\n"
+        "Exit codes (mirroring athenaeum repair/decay-sweep/retire-pages): 0 - "
+        "clean (uid unknown is NOT this — see below; a no-op rename, or "
+        "--apply succeeded with no errors). 1 - error (unknown uid, empty "
+        "--name, unparseable page, a --reslug target colliding with a "
+        "different existing page). 2 - dry-run found a change that WOULD be "
+        "applied (CI / sign-off signal). 75 (EXIT_LOCK_HELD) - --apply could "
+        "not acquire the run lock.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    rename_parser.add_argument(
+        "--uid",
+        required=True,
+        help="The page's durable uid.",
+    )
+    rename_parser.add_argument(
+        "--name",
+        required=True,
+        help="The new name: value. Equal to the page's CURRENT name is a "
+        "no-op (idempotent rename).",
+    )
+    rename_parser.add_argument(
+        "--reason",
+        default="",
+        help="Why this page is being renamed. Recorded verbatim in the "
+        "provenance record (--apply only).",
+    )
+    rename_parser.add_argument(
+        "--by",
+        default=None,
+        help="Who is authorizing the rename, recorded in the provenance "
+        "record. Default: the OS user running this command "
+        "(getpass.getuser()).",
+    )
+    rename_parser.add_argument(
+        "--reslug",
+        action="store_true",
+        help="Also rename the file to the new slug and rewrite every "
+        "inbound [[old-slug]] wikilink to the new slug. Default off: the "
+        "uid and file slug are left unchanged and only name:/aliases: "
+        "change.",
+    )
+    rename_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the rename. Without this flag the command is a dry-run "
+        "that changes nothing.",
+    )
+    rename_parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    rename_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory, used both for the single-uid resolution fast "
+        "path and the recall-index rebuild after --apply "
+        "(default: ~/.cache/athenaeum).",
+    )
+    rename_parser.add_argument(
+        "--backend",
+        choices=["fts5", "vector"],
+        default=None,
+        help="Override the recall index backend for the post-apply rebuild "
+        "(default: read from athenaeum.yaml). --apply only.",
+    )
+    _add_lock_args(rename_parser)
 
     # query-topics command — LLM-based topic extraction for hook query rewriting
     query_topics_parser = subparsers.add_parser(
@@ -604,7 +725,32 @@ def cmd_entity(args: argparse.Namespace) -> int:
     keying off the exit status (``google-contact-sync``'s ``read_person()`` is
     one) can tell "this person doesn't exist" from "this person exists but the
     read broke" instead of collapsing both to the same signal.
+
+    ``entity rename`` (issue athenaeum#2488) is a nested sub-action dispatched
+    from here exactly like ``athenaeum decisions``/``athenaeum dedupe`` dispatch
+    their own verbs internally (``entity_target`` mirrors ``decisions_target``/
+    ``dedupe_target``) — chosen over a per-subparser ``set_defaults(func=...)``
+    override because no other nested-subparser command in this codebase relies
+    on that argparse mechanic; every one of them (``axiom``, ``decisions``,
+    ``dedupe``) uses a single dispatcher function reading the sub-target
+    attribute instead, so this follows the same, already-exercised shape. A
+    bare ``athenaeum entity --uid X`` (no sub-action token) leaves
+    ``entity_target`` unset (``None``), so every pre-existing invocation of
+    this command is byte-for-byte unaffected.
     """
+    if getattr(args, "entity_target", None) == "rename":
+        return cmd_entity_rename(args)
+    if not args.uid:
+        # --uid is no longer `required=True` at the argparse level (issue
+        # athenaeum#2488's "rename" sub-action needs its own independent
+        # --uid; see entity_parser's --uid registration above) — enforced
+        # here instead, for this (read) mode only. Usage-error code `2`,
+        # matching this doc's "`2` as a usage error" dispatcher convention.
+        print(
+            "athenaeum entity: error: the following arguments are required: --uid",
+            file=sys.stderr,
+        )
+        return 2
     return _read_entity_to_stdout(
         args.path,
         args.uid,
@@ -613,6 +759,86 @@ def cmd_entity(args: argparse.Namespace) -> int:
         usage_classes=args.usage_class or None,
         not_found_label="entity",
     )
+
+
+def cmd_entity_rename(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum entity rename`` (issue athenaeum#2488).
+
+    Exit codes (mirroring ``athenaeum repair``/``decay-sweep``/``retire-pages``'s
+    "0/1/2 dry-run/apply ternary" — see ``docs/reference/exit-codes.md``'s
+    "Dry-run/apply commands" convention):
+
+        0 - a no-op rename (the page already carries *new_name*), OR
+            ``--apply`` succeeded with no errors.
+        1 - an error (unknown uid, empty --name, unparseable page, a
+            --reslug target colliding with a different existing page).
+        2 - dry-run found a change that WOULD be applied.
+        75 (EXIT_LOCK_HELD) - ``--apply`` could not acquire the run lock.
+    """
+    import getpass
+
+    from athenaeum.config import load_config
+    from athenaeum.entity_rename import apply_rename, build_rename_preview
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    cache_dir = resolve_cache_dir(args.cache_dir).resolve()
+
+    preview = build_rename_preview(
+        wiki_root,
+        args.uid,
+        args.name,
+        reslug=args.reslug,
+        cache_dir=cache_dir,
+    )
+    if preview.error is not None:
+        print(f"  ERR {preview.error}", file=sys.stderr)
+        return 1
+
+    if preview.noop:
+        print(f"=== entity rename (NO-OP) ===\n  {args.uid}: already named {preview.new_name!r}")
+        return 0
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"=== entity rename ({mode}) ===")
+    print(f"  uid:    {args.uid}")
+    print(f"  name:   {preview.old_name!r} -> {preview.new_name!r}")
+    print(f"  alias:  {preview.old_name!r} will be added to aliases: (deduplicated)")
+    if preview.reslug and preview.new_slug != preview.old_slug and preview.new_page_path:
+        print(
+            f"  reslug: {preview.page_path.name} -> {preview.new_page_path.name} "
+            "(inbound [[wikilinks]] will be rewritten)"
+        )
+
+    if not args.apply:
+        print("\nDry-run — nothing written. Re-run with --apply to write.")
+        return 2
+
+    cfg = load_config(knowledge_root)
+
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        by = (getattr(args, "by", None) or "").strip() or getpass.getuser()
+        result = apply_rename(wiki_root, preview, by=by, reason=args.reason or "")
+        print(
+            f"\n  renamed {args.uid} -> {result.new_name!r}; aliases added: "
+            f"{result.aliases_added or '[]'}"
+        )
+        if result.reslugged:
+            print(f"  reslugged to {result.page_path.name}; {result.links_rewritten} "
+                  "inbound-wikilink file(s) rewritten")
+        if not result.provenance_written:
+            print("  WARN provenance record was not written (see debug log)", file=sys.stderr)
+        rebuild_recall_index(knowledge_root, cfg, args)
+        return 0
+    finally:
+        lock.release()
 
 
 def _read_entity_to_stdout(
