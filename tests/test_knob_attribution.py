@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cross-module coverage for per-knob spend attribution (issue athenaeum#781).
 
-The eight model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
-``reasoning_t1`` / ``reasoning_t2`` / ``rule_proposals`` / ``attribution``,
-the last added by issue athenaeum#2211) are defined once in
+The ten model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
+``reasoning_t1`` / ``reasoning_t2`` / ``rule_proposals`` / ``attribution`` /
+``page_recompile`` / ``verify``, the last two added by issue
+athenaeum#2537) are defined once in
 ``prompt_registry._META_ROWS`` (:data:`athenaeum.prompt_registry.KNOBS`). This
 file exercises the REAL call site for each knob -- not just
 ``TokenUsage.add(knob=...)`` directly (that's covered in ``test_models.py``)
@@ -235,6 +236,65 @@ class TestAttributionKnob:
 
 
 # ---------------------------------------------------------------------------
+# page_recompile / verify -- propose_plan and verify_summary
+# (src/athenaeum/page_recompile_plan.py)
+# ---------------------------------------------------------------------------
+
+
+def _recompile_segment():
+    from athenaeum.page_recompile import segment_page
+
+    return segment_page(
+        "Acme builds widgets.[^src-1]\n\n[^src-1]: **Source:** notes\n"
+    )
+
+
+class TestPageRecompileKnob:
+    def test_propose_plan_tags_the_page_recompile_knob(self) -> None:
+        from athenaeum.page_recompile_plan import propose_plan
+
+        segment = _recompile_segment()
+        client = _mock_client('{"groups": [], "assignments": [], "summary": "x"}')
+        usage = TokenUsage()
+        propose_plan(
+            segment,
+            {},
+            (),
+            client,
+            page_name="Acme",
+            page_type="company",
+            body="Acme builds widgets.[^src-1]\n",
+            usage=usage,
+        )
+        assert usage.per_knob["page_recompile"]["input_tokens"] == 111
+        assert usage.per_knob["page_recompile"]["output_tokens"] == 22
+
+
+class TestVerifyKnob:
+    def test_verify_summary_tags_the_verify_knob(self) -> None:
+        from athenaeum.page_recompile_plan import RecompilePlan, verify_summary
+
+        segment = _recompile_segment()
+        plan = RecompilePlan(
+            uid="c-acme",
+            content_hash="0" * 64,
+            dispositions=(),
+            groups=(),
+            merges=(),
+            page_actions=(),
+            summary="Acme builds widgets.[^src-1]",
+            scope="structure-only",
+            issues=(),
+            verified=None,
+        )
+        client = _mock_client('{"sentences": [{"index": 0, "verdict": "supported"}]}')
+        usage = TokenUsage()
+        verify_summary(plan, segment, client, usage=usage)
+        assert usage.per_knob["verify"]["input_tokens"] == 111
+        assert usage.per_knob["verify"]["output_tokens"] == 22
+
+
+# ---------------------------------------------------------------------------
 # Drift guard -- the knobs exercised above (plus the two noted elsewhere)
 # must equal prompt_registry's derived set (issue athenaeum#781:
 # prompt_registry._META_ROWS is the single source of truth; this test fails
@@ -259,5 +319,10 @@ def test_all_registry_knobs_are_exercised_above() -> None:
         # test_records_usage_and_knob_attribution
         "rule_proposals",
         "attribution",
+        # "page_recompile" and "verify" (issue athenaeum#2537) are the page-
+        # recompile planner's two knobs, exercised at their real call sites
+        # by TestPageRecompileKnob / TestVerifyKnob above.
+        "page_recompile",
+        "verify",
     }
     assert exercised == set(KNOBS)

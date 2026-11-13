@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `athenaeum recompile plan --uid <uid>` plans the recompilation of one
+  oversized page — a model labels its units on the `classify` knob (cached by
+  unit hash, so a re-plan over unchanged bytes makes no labelling call),
+  groups and routes them by unit id on the new `page_recompile` knob, and
+  writes a footnote-cited parent summary that a `verify`-knob call then
+  checks sentence by sentence. The plan is validated in code (unknown unit
+  id, missing target uid, a unit assigned twice, a model-asserted duplicate
+  whose text differs, a merge of fewer than two units, an uncited summary
+  sentence all reject it), classified structure-only or cross-page, and
+  appended to `wiki/_page_recompiles.jsonl` as a shadow record pinned to the
+  page's content hash. `athenaeum recompile show <plan id>` prints it.
+  Shadow only: no page is written (athenaeum#2537).
+
 - `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
   rename primitive: dry-run by default, `--apply` sets `name:`, appends the
   previous name to `aliases:` (deduplicated), rebuilds the recall index,

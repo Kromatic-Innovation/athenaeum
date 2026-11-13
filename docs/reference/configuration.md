@@ -5693,7 +5693,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLASSIFY_MAX_TOKENS` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
+| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/page_recompile_plan.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/config.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
@@ -5722,6 +5722,13 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_THINKING` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS` | `src/athenaeum/tiers.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_LABEL_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_LABEL_THINKING` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_MODEL` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_THINKING` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_VERIFY_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_VERIFY_THINKING` | `src/athenaeum/page_recompile_plan.py` |
 | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_QUARANTINE_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_REASONING_T1_LLM_PROVIDER` | `src/athenaeum/provider.py` |
@@ -5758,6 +5765,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_TOPIC_MAX_TOKENS` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
+| `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/page_recompile_plan.py` |
 | `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` | `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

@@ -270,6 +270,11 @@ MODULE_LAYER: dict[str, int] = {
     # docstring states "Layering: L4 domain/pipeline, same layer as
     # athenaeum.oversize_split and athenaeum.page_decompose").
     "page_recompile": 4,
+    # Issue athenaeum#2537 (page-recompile slice S3): the planner that routes
+    # units by id and writes the parent summary (own docstring states
+    # "Layering: L4 domain/pipeline, the same layer as its S1 sibling
+    # athenaeum.page_recompile").
+    "page_recompile_plan": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,
