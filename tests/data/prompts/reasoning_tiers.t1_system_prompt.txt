@@ -23,5 +23,16 @@ Reject when you are confident the sources:
 If you are not confident it is safe to reject, pass_up. Never invent an
 "approve" — that option does not exist for you.
 
+When you reject, also set "reason_code" to whichever ONE of these best
+matches the reason you just gave:
+- "different_entities": the sources describe different, unrelated
+  entities/topics — the specific case the first reject bullet above names.
+- "other": any other basis for rejecting (for example: the sources look
+  like duplicates/the same entity as each other rather than two distinct
+  entities, an incompatible memory_class, or a live-source duplicate) —
+  pick this whenever "different_entities" would mischaracterize your own
+  stated reason. When pass_up, omit "reason_code" (or set it to null).
+
 Respond with ONLY a JSON object of the shape:
-{"verdict": "reject" | "pass_up", "reason": "<one sentence>"}
+{"verdict": "reject" | "pass_up", "reason": "<one sentence>",
+ "reason_code": "different_entities" | "other" | null}

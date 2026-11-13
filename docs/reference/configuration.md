@@ -620,6 +620,41 @@ See `resolve_relay_local_prefixes` for why this inlines its own
 ``librarian`` -> ``attribution`` -> ``thresholds`` chain rather than
 sharing a helper.
 
+### `resolve_audit_max_per_cluster`
+
+- **YAML path:** `librarian.audit_max_per_cluster`
+- **Environment variable:** `ATHENAEUM_AUDIT_MAX_PER_CLUSTER`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the per-``cluster_id`` cap on calibration audit items.
+
+`athenaeum.calibration.sample_tier_decision` draws each ``(tier,
+proposal_id)`` independently at a flat rate
+(`resolve_audit_sample_rate_t1_rejects` etc.) — a uniform per-item
+rate still lets one abnormally LARGE ``cluster_id`` dominate the sample
+purely by volume: every pairwise T1/T2 screen generated from one
+near-duplicate-page burst shares the same ``cluster_id``
+(`athenaeum.cluster_comparator.t1_rejects_pair_paths` /
+`athenaeum.wiki_dedupe`), so a single oversized burst draws many
+more independent samples than a normal, small cluster at the identical
+rate. Observed live: 140+ of 158 human-reviewed T1-reject audit samples
+came from one such burst family.
+
+This caps how many ``kind: "audit"`` records any one ``cluster_id`` may
+contribute to the calibration ledger; once a cluster has already
+reached the cap, further draws from it are skipped outright — the
+sample for that run is simply smaller, never backfilled from another
+cluster (a smaller, more representative sample is the point; silently
+reallocating the skipped slot would just move the skew elsewhere).
+Callers that have no ``cluster_id`` to offer (e.g. the ATTRIBUTION
+tier) are unaffected — the cap only applies when a caller supplies one.
+
+Env ``ATHENAEUM_AUDIT_MAX_PER_CLUSTER`` > yaml
+``librarian.audit_max_per_cluster`` > `DEFAULT_AUDIT_MAX_PER_CLUSTER`.
+``<= 0`` disables the cap (every draw is kept, pre- behavior).
+
 ### `resolve_audit_on_touch_freshness_hours`
 
 - **YAML path:** `librarian.audit_on_touch_freshness_hours`
