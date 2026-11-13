@@ -88,6 +88,77 @@ class TestBlockedBucketAC2:
         assert scan.candidates == ()
         assert [b.reason for b in scan.blocked] == ["invalid_frontmatter"]
 
+    def test_malformed_yaml_frontmatter_is_blocked_small(self, tmp_path: Path) -> None:
+        """A frontmatter-shaped block that fails to PARSE (not merely a
+        non-mapping) -- `models.parse_frontmatter` fails open to `({},
+        text)` on a `yaml.YAMLError`, the same shape as "no frontmatter at
+        all", so this page must not fall through to a silent drop just
+        because it happens to be small."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "badyaml.md").write_text(
+            "---\nname: [unclosed\n  bad: : :\n---\n\nbody text here\n",
+            encoding="utf-8",
+        )
+
+        scan = find_recompile_candidates(wiki)
+
+        assert scan.candidates == ()
+        assert [b.reason for b in scan.blocked] == ["invalid_frontmatter"]
+
+    def test_malformed_yaml_frontmatter_is_blocked_large(self, tmp_path: Path) -> None:
+        """Same malformed block, but large enough to clear the threshold --
+        `parse_frontmatter`'s fail-open `body` is the WHOLE text (fences
+        included) here, so size is not meaningful for this page either way;
+        it must be blocked with the RIGHT reason, not `no_uid`."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "badyamlbig.md").write_text(
+            "---\nname: [unclosed\n  bad: : :\n---\n\n" + ("x" * 1000) + "\n",
+            encoding="utf-8",
+        )
+
+        scan = find_recompile_candidates(
+            wiki, {"librarian": {"page_size_threshold_chars": 10}}
+        )
+
+        assert scan.candidates == ()
+        assert [b.reason for b in scan.blocked] == ["invalid_frontmatter"]
+
+    def test_no_frontmatter_at_all_small_is_not_reported(self, tmp_path: Path) -> None:
+        """A page with no `---` fence at all is a different case from a
+        malformed block -- there was never an attempt at frontmatter here,
+        so a small one is unremarkable and not reported at all (deliberate
+        choice, see the large case below for where it DOES surface)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "plain.md").write_text(
+            "Just plain text, no frontmatter at all.\n", encoding="utf-8"
+        )
+
+        scan = find_recompile_candidates(wiki)
+
+        assert scan.candidates == ()
+        assert scan.blocked == ()
+
+    def test_no_frontmatter_at_all_but_over_threshold_is_blocked_no_uid(
+        self, tmp_path: Path
+    ) -> None:
+        """Large enough to qualify as a candidate (over threshold) with no
+        frontmatter at all -- it genuinely has no `uid`, so `no_uid` is the
+        correct, deliberate bucket for it (not `invalid_frontmatter`: no
+        frontmatter was ever attempted, so nothing about it is malformed)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "plainbig.md").write_text("x" * 50 + "\n", encoding="utf-8")
+
+        scan = find_recompile_candidates(
+            wiki, {"librarian": {"page_size_threshold_chars": 10}}
+        )
+
+        assert scan.candidates == ()
+        assert [b.reason for b in scan.blocked] == ["no_uid"]
+
 
 # ---------------------------------------------------------------------------
 # AC3: deterministic ordering -- discriminates from plain size order.

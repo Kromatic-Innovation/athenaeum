@@ -64,6 +64,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from athenaeum.config import (
     resolve_oversize_hard_ceiling_chars,
     resolve_page_size_threshold_chars,
@@ -80,6 +82,49 @@ from athenaeum.page_relations import is_inactive_relation_target
 # ---------------------------------------------------------------------------
 # AC1 / AC2 / AC3: candidate scan.
 # ---------------------------------------------------------------------------
+
+#: Same frontmatter-fence SHAPE `models._FM_RE` matches, duplicated here
+#: deliberately as a narrow, LOCAL positive-signal check rather than
+#: reaching into that private regex. `models.parse_frontmatter` fails OPEN
+#: on a `yaml.YAMLError` -- returns `({}, text)`, the SAME shape it returns
+#: for "no frontmatter at all" and for a genuinely empty frontmatter block
+#: (own docstring: "every caller's existing `except yaml.YAMLError`
+#: handling is unchanged") -- so a caller cannot tell "unparseable" apart
+#: from "absent"/"empty" just by looking at the collapsed `({}, text)`
+#: result. `models.py` exposes no public primitive that makes this
+#: distinction (checked: `is_tombstone`, `parse_superseded_by`, etc. all
+#: operate on an already-parsed `meta` dict), so this module keeps its own
+#: check instead of guessing.
+_FRONTMATTER_BLOCK_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+
+
+def _frontmatter_block_is_malformed(text: str) -> bool:
+    """True when *text* opens with a frontmatter-shaped fence block whose
+    YAML does not parse at all (issue athenaeum#2534 AC2 -- a Seer finding
+    on PR athenaeum#2567 caught this: a page with unparseable YAML between
+    the fences used to fall through `find_recompile_candidates` either
+    silently dropped or mislabeled `no_uid`, because
+    :func:`athenaeum.models.parse_frontmatter`'s `({}, text)` fail-open
+    return is indistinguishable from "no frontmatter at all").
+
+    Re-attempts the SAME match-then-parse locally, with its own
+    ``yaml.YAMLError`` catch, rather than trusting the already-collapsed
+    result. A block that matches the fence shape but parses to ``None`` or
+    ``{}`` (a genuinely EMPTY frontmatter block -- valid YAML, just no
+    fields) is NOT malformed by this check: only a block that fails to
+    parse at all is. No match at all (no ``---`` fence present) is also not
+    malformed -- that page never attempted frontmatter in the first place;
+    see :func:`find_recompile_candidates`'s own comment for where that
+    case is deliberately routed instead.
+    """
+    match = _FRONTMATTER_BLOCK_RE.match(text)
+    if match is None:
+        return False
+    try:
+        yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -177,6 +222,17 @@ def find_recompile_candidates(
             # rather than silently skipped (AC2).
             blocked.append(BlockedPage(path=fpath, uid="", reason="invalid_frontmatter"))
             continue
+        if not meta and _frontmatter_block_is_malformed(text):
+            # Genuinely unparseable YAML: parse_frontmatter fails open to
+            # ({}, text) here -- the SAME shape as "no frontmatter at all"
+            # (see _frontmatter_block_is_malformed's docstring) -- and
+            # `body` in this branch is the WHOLE text including the ``---``
+            # fences, so a size/threshold check on it would be meaningless.
+            # Checked and blocked here, BEFORE the threshold gate below, so
+            # it is reported regardless of size rather than only when it
+            # happens to be large enough to look like a candidate (AC2).
+            blocked.append(BlockedPage(path=fpath, uid="", reason="invalid_frontmatter"))
+            continue
         if is_inactive_relation_target(meta):
             continue
         flagged = meta.get(NEEDS_SPLIT_KEY) is True
@@ -185,6 +241,14 @@ def find_recompile_candidates(
             continue
         uid = str(meta.get("uid") or "")
         if not uid:
+            # Deliberate: a page with NO frontmatter at all (meta == {} and
+            # _frontmatter_block_is_malformed(text) is False -- no ``---``
+            # fence was ever found) lands here too, as an ordinary missing-
+            # uid page, not as `invalid_frontmatter` -- nothing about it is
+            # malformed, it simply never had a uid to find. It is only
+            # reported at all once it already qualifies as a candidate
+            # (flagged/over threshold) above; a small plain-text file with
+            # no frontmatter is unremarkable and never reaches this line.
             blocked.append(BlockedPage(path=fpath, uid="", reason="no_uid"))
             continue
         candidates.append(
