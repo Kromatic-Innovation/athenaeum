@@ -285,3 +285,133 @@ class TestSessionEndGuard:
         )
         assert rc == 0
         assert json.loads(capsys.readouterr().out.strip())["noop"] is True
+
+
+# ---------------------------------------------------------------------------
+# `athenaeum run` honours the compile aspect too (issue athenaeum#2448) --
+# previously only `session-end` checked it, so a scheduled nightly `run`
+# silently bypassed `athenaeum disable`. These tests pin the fix: disabled
+# (via the state file, scope all or compile, and via ATHENAEUM_DISABLED)
+# means `run` exits 0 with the session-end-shaped JSON no-op line and never
+# reaches the librarian's `run` function -- plus a negative control proving
+# that function IS reached once the switch is off, so the disabled cases
+# are a real guard and not a vacuously-passing test double.
+# ---------------------------------------------------------------------------
+
+
+def _never_call_run(**_kwargs: object) -> int:
+    raise AssertionError(
+        "athenaeum.librarian.run must not be called while the compile "
+        "aspect is disabled"
+    )
+
+
+class TestRunGuard:
+    def test_noop_when_disabled_all(
+        self,
+        tmp_path: Path,
+        cache: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", _never_call_run)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        killswitch.disable(killswitch.SCOPE_ALL, cache_dir=cache)
+
+        rc = main(["run", "--knowledge-root", str(tmp_path)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload == {
+            "command": "run",
+            "noop": True,
+            "reason": "disabled",
+            "scope": "all",
+            "source": "file",
+        }
+
+    def test_noop_when_disabled_compile_flag(
+        self,
+        tmp_path: Path,
+        cache: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", _never_call_run)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        killswitch.disable(killswitch.SCOPE_COMPILE, cache_dir=cache)
+
+        rc = main(["run", "--knowledge-root", str(tmp_path)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["noop"] is True and payload["scope"] == "compile"
+        assert payload["command"] == "run" and payload["reason"] == "disabled"
+
+    def test_noop_via_env_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", _never_call_run)
+        monkeypatch.setenv("ATHENAEUM_DISABLED", "1")
+
+        rc = main(["run", "--knowledge-root", str(tmp_path)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["noop"] is True and payload["source"] == "env"
+        assert payload["scope"] == "all"
+
+    def test_dry_run_also_short_circuits(
+        self,
+        tmp_path: Path,
+        cache: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """AC2 decision (issue athenaeum#2448): `--dry-run` does NOT exempt a
+        disabled run from the gate -- it short-circuits too, matching
+        `session-end`'s own kill-switch placement, which already fires
+        unconditionally regardless of `--dry-run` (see the quiesce-gate
+        comment in `cmd_session_end`, which notes the same reasoning: a
+        no-cost check gets no dry-run exemption)."""
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", _never_call_run)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        killswitch.disable(killswitch.SCOPE_ALL, cache_dir=cache)
+
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["noop"] is True
+
+    def test_control_run_is_reached_when_enabled(
+        self,
+        tmp_path: Path,
+        cache: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Negative control: with the switch off, `run` DOES reach the
+        librarian -- proving the disabled cases above fail for the right
+        reason (the new gate) rather than because `run` never gets there
+        regardless."""
+        import athenaeum.librarian as librarian_mod
+
+        called: dict[str, bool] = {}
+
+        def fake_run(**_kwargs: object) -> int:
+            called["hit"] = True
+            return 0
+
+        monkeypatch.setattr(librarian_mod, "run", fake_run)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert called.get("hit") is True
