@@ -112,6 +112,29 @@ ENVELOPE_VERSION = SCHEMA_VERSION
 
 DEFAULT_BUDGET_TOKENS = 1200
 
+#: The shipped ``search_backend`` default, duplicated here as a same-module
+#: constant (issue athenaeum#2458). Same reasoning as
+#: :data:`_FALLBACK_STOPWORDS` below and :func:`_recall_disabled`'s docstring:
+#: a ``from athenaeum.config import resolve_search_backend`` reached on EVERY
+#: call adds real marginal cost on top of the already-paid package-root cost
+#: (``config.py`` pulls in ``yaml`` and ``athenaeum.models``), and this
+#: module's wall-clock budget cannot afford it. Measured at ~15ms per call --
+#: 30% of the 50ms delta budget
+#: ``tests/test_context_core.py::test_fts5_path_wall_clock_budget`` pins,
+#: enough to red that guard on a CI runner on its own.
+#:
+#: :func:`build_context` therefore imports the resolver ONLY when there is a
+#: ``config`` to resolve from. With ``config=None`` there is nothing to
+#: honour, so the resolver's default is the only answer it could return and
+#: this constant is it -- identical behaviour, no import.
+#:
+#: This is a deliberate second copy of a value, so it is pinned:
+#: ``tests/test_recall_backend_resolution.py``'s
+#: ``test_context_default_backend_constant_matches_the_resolver`` asserts it
+#: equals BOTH ``config._DEFAULTS["search_backend"]`` and
+#: ``resolve_search_backend(None)``, so it cannot drift from either.
+_DEFAULT_SEARCH_BACKEND = "vector"
+
 # Baked-in minimal fallback, used ONLY when the caller supplies no stopword
 # set at all (e.g. a fresh cache dir with no cached list yet). Callers that
 # have `athenaeum.search.STOPWORDS` available (the canonical list, issue
@@ -693,7 +716,10 @@ def build_context(
     through :func:`athenaeum.config.resolve_search_backend` — the same
     yaml-over-shipped-default rule every other recall surface applies —
     rather than silently pinning ``fts5``. Pass an explicit name to
-    override it (a ``--backend`` flag still wins over the config).
+    override it (a ``--backend`` flag still wins over the config). With
+    ``config=None`` as well, the answer is :data:`_DEFAULT_SEARCH_BACKEND`
+    without importing the resolver at all — identical value, no import
+    cost; see that constant's own comment.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -704,14 +730,23 @@ def build_context(
     # default). It was a hardcoded `"fts5"` default, which silently
     # overrode a `search_backend: vector` deployment for `athenaeum
     # context`, `athenaeum codex-context` and every library caller that
-    # did not pass the argument. Function-local, like every other import
-    # in this module's optional legs: a caller that DOES pass a backend
-    # (the per-turn adapter always does) never pays for `athenaeum.config`
-    # at all, so this module's import-weight contract is untouched.
+    # did not pass the argument.
+    #
+    # The `config is None` arm is NOT an optimization to be tidied away: it
+    # IS this module's import-weight contract (see the module docstring and
+    # `_DEFAULT_SEARCH_BACKEND`). With no config there is nothing to resolve
+    # FROM, so the resolver could only return its own default -- and
+    # reaching for `athenaeum.config` to be told that costs ~15ms per call
+    # against a 50ms delta budget. A caller that passes either a config or
+    # an explicit backend name (the per-turn adapter passes a name) never
+    # touches `athenaeum.config` here at all.
     if search_backend is None:
-        from athenaeum.config import resolve_search_backend
+        if config is None:
+            search_backend = _DEFAULT_SEARCH_BACKEND
+        else:
+            from athenaeum.config import resolve_search_backend
 
-        search_backend = resolve_search_backend(config)
+            search_backend = resolve_search_backend(config)
 
     # Kill switch (issue athenaeum#379), honoured at entry. See
     # `_recall_disabled`'s own docstring for why this is a same-module

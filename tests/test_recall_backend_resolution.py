@@ -432,6 +432,73 @@ class TestHandBuiltConfigGetsResolverDefault:
         assert SHIPPED_BACKEND in result.detail
 
 
+def test_context_default_backend_constant_matches_the_resolver() -> None:
+    """`athenaeum.context` keeps its OWN copy of the shipped backend default.
+
+    Deliberately, and for the reason that module's import-weight contract
+    gives: reaching `from athenaeum.config import resolve_search_backend`
+    on every `build_context` call that names no backend costs ~15ms, which
+    is 30% of the 50ms budget
+    `tests/test_context_core.py::test_fts5_path_wall_clock_budget` pins --
+    it reds that guard on a CI runner on its own. So `build_context` imports
+    the resolver only when there IS a config to resolve from, and answers
+    `config=None` from the constant instead.
+
+    A second copy of a value is only safe if something keeps the copies
+    equal. This is that something: the constant must equal both the yaml
+    default the resolver reads and what the resolver itself returns for "no
+    config", so flipping `_DEFAULTS["search_backend"]` without updating
+    `context.py` fails here rather than silently splitting the sidecar path
+    off from every other recall surface.
+    """
+    from athenaeum import context as context_mod
+    from athenaeum.config import _DEFAULTS
+
+    assert context_mod._DEFAULT_SEARCH_BACKEND == _DEFAULTS["search_backend"]
+    assert context_mod._DEFAULT_SEARCH_BACKEND == resolve_search_backend(None)
+
+
+def test_build_context_does_not_import_config_when_given_no_config() -> None:
+    """The import-weight half of the contract above, asserted directly.
+
+    The constant being correct is not enough -- `build_context` must also
+    actually take the no-import arm. Checked in a clean subprocess (an
+    in-process check is void: `athenaeum.config` is already in `sys.modules`
+    by the time any test runs) with an explicit positive control, so a probe
+    that simply cannot observe the import can never pass as a clean result.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from athenaeum.context import build_context\n"
+        "assert 'athenaeum.config' not in sys.modules, 'config imported at import time'\n"
+        "build_context('a prompt', 's', cache_dir=Path(sys.argv[1]), use_llm=False)\n"
+        "print('NO_CONFIG', 'athenaeum.config' in sys.modules)\n"
+        "build_context('a prompt', 's', cache_dir=Path(sys.argv[1]), use_llm=False,\n"
+        "              config={'auto_recall': True})\n"
+        "print('WITH_CONFIG', 'athenaeum.config' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe, "/nonexistent-cache-dir-for-this-probe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.split()
+    # The no-config call must NOT have pulled athenaeum.config in...
+    assert "NO_CONFIG False" in result.stdout, result.stdout
+    # ...and the positive control proves the probe can see it when it does.
+    assert "WITH_CONFIG True" in result.stdout, (
+        "positive control failed: passing a config dict must reach the "
+        f"resolver, so athenaeum.config must be importable-and-imported ({lines})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC-d: the Codex adapter honours `recall.cap.ceiling` from yaml AND env.
 # ---------------------------------------------------------------------------
