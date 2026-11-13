@@ -881,6 +881,7 @@ Enumerate every entity of a declared type matching field predicates — no query
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
 | `--cursor` | — | — | Opaque continuation token from a prior call's `next_cursor`. |
 | `--field` | `[]` | — | Additional declared field to include per hit (repeatable), beyond the always-present uid/type/name. |
+| `--include-split` | off (flag absent) | — | Include split-created sub-pages (`via: split`) — excluded by default since they inherit their parent's type. Pages attached via attach/fold/manual are always listed. |
 | `--limit` | `50` | — | Max rows to return (default: 50; 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sort` | `name` | — | Frontmatter field to sort by (default: name). |

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum import mcp_server
 from athenaeum.mcp_server import (
     _recall_metadata_lines,
     _snippet,
@@ -3146,3 +3147,353 @@ class TestRecallSearchChromadbMissing:
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1, warnings
         assert "chromadb" in warnings[0].message
+
+
+# ---------------------------------------------------------------------------
+# Parent/Sub-pages relation lines (issue athenaeum#2538)
+# ---------------------------------------------------------------------------
+
+
+def _relation_line(result: str, label: str) -> str:
+    """The single ``**<label>:**`` line in a rendered recall result, or
+    ``""``."""
+    for line in result.splitlines():
+        if line.startswith(f"**{label}:**"):
+            return line
+    return ""
+
+
+def _write_parent_and_children(
+    wiki: Path,
+    *,
+    parent_uid: str = "company-acme",
+    parent_name: str = "Acme Corp",
+    children: list[tuple[str, str, str | None]] = (),  # (uid, name, audience)
+) -> None:
+    """Write one parent page and N child pages, new-shape relation, each
+    child optionally carrying an ``audience:`` grant (issue athenaeum#2538
+    AC3's test fixture shape)."""
+    related_lines = "\n".join(
+        f"  - uid: {uid}\n    role: child\n    via: attach" for uid, _name, _aud in children
+    )
+    related_block = f"related:\n{related_lines}\n" if children else ""
+    (wiki / f"{parent_uid}.md").write_text(
+        f"---\nuid: {parent_uid}\ntype: company\nname: {parent_name}\n"
+        f"{related_block}---\n\n{parent_name} is a company.\n"
+    )
+    for uid, name, audience in children:
+        audience_line = f"audience: [{audience}]\n" if audience else ""
+        (wiki / f"{uid}.md").write_text(
+            f"---\nuid: {uid}\ntype: company\nname: {name}\nparent: {parent_uid}\n"
+            f"{audience_line}---\n\n{name} is a sub-page.\n"
+        )
+
+
+class TestParentAndSubPagesLines:
+    """AC1/AC2/AC4: a child hit names its parent; a parent hit names its
+    sub-pages (capped, with a remainder count); a uid on either line is not
+    repeated on ``**Links:**``."""
+
+    def test_child_hit_renders_parent_line(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki, children=[("company-acme-finance", "Acme Finance", None)]
+        )
+        result = recall_search(wiki, "Acme Finance sub-page")
+        assert (
+            _relation_line(result, "Parent")
+            == "**Parent:** company-acme — Acme Corp"
+        )
+
+    def test_parent_hit_renders_sub_pages_line(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki,
+            children=[
+                ("company-acme-finance", "Acme Finance", None),
+                ("company-acme-ops", "Acme Ops", None),
+            ],
+        )
+        result = recall_search(wiki, "Acme Corp company")
+        line = _relation_line(result, "Sub-pages")
+        assert "company-acme-finance — Acme Finance" in line
+        assert "company-acme-ops — Acme Ops" in line
+        assert "more)" not in line  # both within the default cap
+
+    def test_sub_pages_line_capped_with_remainder_count(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        children = [
+            (f"company-acme-child{i}", f"Acme Child {i}", None) for i in range(3)
+        ]
+        _write_parent_and_children(wiki, children=children)
+        result = recall_search(
+            wiki, "Acme Corp company", config={"recall": {"sub_pages_cap": 2}}
+        )
+        line = _relation_line(result, "Sub-pages")
+        assert "(+1 more)" in line
+        # Exactly 2 names shown, matching the cap.
+        assert line.count(" — Acme Child") == 2
+
+    def test_page_with_no_relation_renders_neither_line(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "lonely.md").write_text(
+            "---\nuid: lonely\ntype: company\nname: Lonely Co\n---\n\n"
+            "Lonely Co has no relation at all.\n"
+        )
+        result = recall_search(wiki, "Lonely Co")
+        assert "**Parent:**" not in result
+        assert "**Sub-pages:**" not in result
+
+    def test_relation_uids_are_not_repeated_on_links_line(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki, children=[("company-acme-finance", "Acme Finance", None)]
+        )
+        # The parent ALSO links to its child via an ordinary wikilink in
+        # body -- the uid must appear on Sub-pages, never a second time on
+        # Links.
+        (wiki / "company-acme.md").write_text(
+            "---\nuid: company-acme\ntype: company\nname: Acme Corp\n"
+            "related:\n  - uid: company-acme-finance\n    role: child\n    via: attach\n"
+            "---\n\nAcme Corp is a company. See [[company-acme-finance]] and "
+            "[[other-page]].\n"
+        )
+        (wiki / "other-page.md").write_text(
+            "---\nuid: other-page\ntype: reference\nname: Other Page\n---\n\nOther.\n"
+        )
+        result = recall_search(wiki, "Acme Corp company")
+        sub_pages_line = _relation_line(result, "Sub-pages")
+        links_line = _links_line(result)
+        assert "company-acme-finance" in sub_pages_line
+        assert "company-acme-finance" not in links_line
+        assert "other-page" in links_line
+
+
+class TestParentSubPagesAudienceFilter:
+    """AC3: both lines pass through the SAME audience/policy filter as the
+    hit. A sub-page the caller may not see is neither named nor counted --
+    the remainder count is computed AFTER filtering, never before."""
+
+    def _wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki,
+            parent_name="Acme Corp",
+            children=[
+                ("company-acme-visible", "Acme Visible", "secondary"),
+                ("company-acme-restricted", "Acme Restricted", "other-role"),
+            ],
+        )
+        # Parent itself is public so both audiences see the hit at all.
+        (wiki / "company-acme.md").write_text(
+            "---\nuid: company-acme\ntype: company\nname: Acme Corp\naccess: open\n"
+            "related:\n"
+            "  - uid: company-acme-visible\n    role: child\n    via: attach\n"
+            "  - uid: company-acme-restricted\n    role: child\n    via: attach\n"
+            "---\n\nAcme Corp is a company.\n"
+        )
+        return wiki
+
+    def test_owner_sees_both_children(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        result = recall_search(wiki, "Acme Corp company")
+        line = _relation_line(result, "Sub-pages")
+        assert "Acme Visible" in line
+        assert "Acme Restricted" in line
+        assert "more)" not in line
+
+    def test_restricted_audience_sees_one_name_and_no_remainder_count(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = self._wiki(tmp_path)
+        result = recall_search(
+            wiki, "Acme Corp company", caller_audience={"secondary"}
+        )
+        line = _relation_line(result, "Sub-pages")
+        assert "Acme Visible" in line
+        assert "Acme Restricted" not in line
+        assert "company-acme-restricted" not in line
+        # Load-bearing discriminator: no remainder count leaking the
+        # restricted sub-page's existence.
+        assert "more)" not in line
+        assert "(+1" not in result
+
+    def test_restricted_audience_with_no_visible_children_renders_no_line(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki, children=[("company-acme-restricted", "Acme Restricted", "other-role")]
+        )
+        (wiki / "company-acme.md").write_text(
+            "---\nuid: company-acme\ntype: company\nname: Acme Corp\naccess: open\n"
+            "related:\n  - uid: company-acme-restricted\n    role: child\n    via: attach\n"
+            "---\n\nAcme Corp is a company.\n"
+        )
+        result = recall_search(
+            wiki, "Acme Corp company", caller_audience={"secondary"}
+        )
+        assert "**Sub-pages:**" not in result
+
+
+class TestParentSubPagesRankingUnchanged:
+    """AC5: ranking and the hit set are unchanged by this slice -- the
+    ordered hit list is identical whether or not a relation is present;
+    only the rendered relation lines differ."""
+
+    @staticmethod
+    def _build(root: Path, *, with_relation: bool) -> Path:
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        related_block = (
+            "related:\n  - uid: company-acme-finance\n    role: child\n    via: attach\n"
+            if with_relation
+            else ""
+        )
+        parent_block = "parent: company-acme\n" if with_relation else ""
+        (wiki / "company-acme.md").write_text(
+            f"---\nuid: company-acme\ntype: company\nname: Acme Corp\n{related_block}"
+            "---\n\nAcme Corp is a retainer client of note.\n"
+        )
+        (wiki / "company-acme-finance.md").write_text(
+            f"---\nuid: company-acme-finance\ntype: company\nname: Acme Finance\n"
+            f"{parent_block}---\n\nAcme Finance handles the retainer billing.\n"
+        )
+        (wiki / "company-other.md").write_text(
+            "---\nuid: company-other\ntype: company\nname: Other Retainer\n---\n\n"
+            "Other Retainer is also a retainer client of note.\n"
+        )
+        return wiki
+
+    def test_ranked_hits_identical_with_and_without_relation(
+        self, tmp_path: Path
+    ) -> None:
+        without_relation = recall_search(
+            self._build(tmp_path / "a", with_relation=False), "retainer client"
+        )
+        with_relation = recall_search(
+            self._build(tmp_path / "b", with_relation=True), "retainer client"
+        )
+        assert _ranked_hits(without_relation) == _ranked_hits(with_relation)
+        assert _ranked_hits(without_relation) != []
+
+    @staticmethod
+    def _ordered_uids(result: str) -> list[str]:
+        """The ``**Uid:**`` value off each hit, in RENDER order -- a plain
+        ``list[str]``, so a test comparing two of these with ``==`` would
+        actually fail on a reorder (a ``set`` comparison would not)."""
+        return [
+            line.removeprefix("**Uid:** ").strip()
+            for line in result.splitlines()
+            if line.startswith("**Uid:**")
+        ]
+
+    def test_ordered_uid_sequence_is_identical_with_and_without_relation(
+        self, tmp_path: Path
+    ) -> None:
+        """AC5, stated as the exact discriminator the issue names: "the
+        ordered hit list for a fixture query is identical before and
+        after." Asserted on the ordered uid LIST (would fail under a
+        reorder), never a set (which would not)."""
+        without_relation = recall_search(
+            self._build(tmp_path / "a", with_relation=False), "retainer client"
+        )
+        with_relation = recall_search(
+            self._build(tmp_path / "b", with_relation=True), "retainer client"
+        )
+        without_uids = self._ordered_uids(without_relation)
+        with_uids = self._ordered_uids(with_relation)
+        # Sanity: a real, non-trivial 3-hit ordering exists to compare (not
+        # a degenerate single-hit fixture that would pass trivially).
+        assert without_uids == ["company-other", "company-acme", "company-acme-finance"]
+        assert without_uids == with_uids
+
+    @staticmethod
+    def _without_relation_lines(text: str) -> str:
+        return "\n".join(
+            line
+            for line in text.splitlines()
+            if not line.startswith(("**Parent:**", "**Sub-pages:**"))
+        )
+
+    def test_only_relation_lines_differ(self, tmp_path: Path) -> None:
+        # A relation line is an ADDED line (not a same-position rewrite like
+        # the Links line is), so the two renderings have different line
+        # counts -- strip the relation lines from both and compare what's
+        # left, rather than a positional zip.
+        without_relation = recall_search(
+            self._build(tmp_path / "a", with_relation=False), "retainer client"
+        )
+        with_relation = recall_search(
+            self._build(tmp_path / "b", with_relation=True), "retainer client"
+        )
+        assert without_relation != with_relation
+        assert self._without_relation_lines(without_relation) == self._without_relation_lines(
+            with_relation
+        )
+        assert not any(
+            line.startswith(("**Parent:**", "**Sub-pages:**"))
+            for line in without_relation.splitlines()
+        )
+        assert any(
+            line.startswith(("**Parent:**", "**Sub-pages:**"))
+            for line in with_relation.splitlines()
+        )
+
+
+class TestParentSubPagesLaziness:
+    """AC6: a recall whose hits carry no relation makes no extra file reads
+    -- matching the laziness of ``_LinkNameIndex``. Proven by spying on the
+    exact resolution primitive both the Links line and the relation lines
+    share (``_LinkNameIndex.meta_for``), never by an output-shape
+    assertion alone."""
+
+    def test_no_relation_resolution_calls_when_no_hit_carries_a_relation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "lonely.md").write_text(
+            "---\nuid: lonely\ntype: company\nname: Lonely Co\n---\n\n"
+            "Lonely Co has no relation and no outbound links at all.\n"
+        )
+        calls: list[str] = []
+        original = mcp_server._LinkNameIndex.meta_for
+
+        def _spy(self: "mcp_server._LinkNameIndex", uid: str) -> object:
+            calls.append(uid)
+            return original(self, uid)
+
+        monkeypatch.setattr(mcp_server._LinkNameIndex, "meta_for", _spy)
+        result = recall_search(wiki, "Lonely Co")
+        assert "Lonely Co" in result
+        assert calls == []
+
+    def test_relation_resolution_only_fires_for_a_hit_that_carries_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative control on the spy itself: a hit that DOES carry a
+        relation must trigger at least one resolution call, proving the
+        zero-call result above is laziness, not a broken spy."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _write_parent_and_children(
+            wiki, children=[("company-acme-finance", "Acme Finance", None)]
+        )
+        calls: list[str] = []
+        original = mcp_server._LinkNameIndex.meta_for
+
+        def _spy(self: "mcp_server._LinkNameIndex", uid: str) -> object:
+            calls.append(uid)
+            return original(self, uid)
+
+        monkeypatch.setattr(mcp_server._LinkNameIndex, "meta_for", _spy)
+        recall_search(wiki, "Acme Finance sub-page")
+        assert calls  # the child hit's Parent line resolved at least one uid

@@ -548,6 +548,54 @@ to string-parse the `<uid>-<slug>.md` filename. Inbound backlinks are
 explicitly OUT of scope — serving them needs a new index this issue does not
 build; see the issue's own "Out of scope" section.
 
+**Parent/sub-page relation lines (athenaeum#2538, slice R2 of this design).**
+Built on the first-class parent/child relation athenaeum#2535 added
+(`athenaeum.page_relations`): a recall hit on a child additionally renders a
+`**Parent:** <uid> — <Name>` line read off its `parent:` key; a hit on a
+parent renders a `**Sub-pages:** <uid> — <Name>, ...` line from its `related`
+child rows, capped at a configurable number
+(`athenaeum.config.resolve_recall_sub_pages_cap`) with a count of the
+remainder. Both lines are rendered by `mcp_server._render_relation_lines`,
+next to `_render_outbound_links`, and resolve names through the SAME
+per-call `_LinkNameIndex` the Links line already uses — so a call whose hits
+carry no relation touches the filesystem no more than it did before this
+slice (laziness parity). Both lines pass through the identical audience/
+policy predicate the hit itself passed (`_relation_target_visible`) —
+applied BEFORE the Sub-pages remainder count is computed, so a sub-page a
+restricted caller may not see is neither named nor counted; the count can
+never leak a withheld page's existence. A uid named on either line is
+dropped from the same hit's `**Links:**` line so it is never repeated.
+Ranking and the hit set are untouched — this slice only adds rendered lines
+to an already-selected hit; a sub-page is never pulled into the result list
+on its own (explicitly out of scope per the issue).
+
+A page whose relation is `via: split` (the oversize-page-split machinery,
+`tiers.py:_build_split_child_pages`) is additionally hidden from
+`enumerate_entities`, `entity_schema`'s page counts, and (historically)
+`athenaeum people` by default — it inherits its parent's type, so an
+unfiltered listing of a type like `company` would otherwise include every
+company's split-created sub-pages. `athenaeum people` was itself removed
+by athenaeum#1079 (superseded by `enumerate_entities`) before this issue was
+filed, so the filter lives on the one surviving primitive plus
+`entity_schema`'s count; both call the single shared predicate
+`page_relations.is_hidden_split_child` rather than each re-deriving "has a
+parent" independently. A page attached via `attach`/`fold`/`manual` is a
+real entity of its own type and is ALWAYS listed, regardless of this
+default — only `via: split` is filtered. `include_split=True` (a parameter
+on `enumerate_entities`/`resolve_entity_classes`, `--include-split` on the
+CLI) includes it.
+
+The per-turn (Tier-1) hook bullet gets a narrower version of the same idea:
+when the caller resolving a turn's context supplies `wiki_root` to
+`athenaeum.context.build_context`/`build_context_for_turn` (the shipped
+Claude Code adapter does), a child candidate's bullet reads `<Name> (under
+<Parent name>) — <description>` unless `<Name>` already contains the
+parent's name. Resolution is lazy and bounded (at most one extra read of the
+candidate's own page, plus one of its parent's, memoized per parent across
+sibling candidates) and is a strict no-op — zero extra file reads, matching
+this module's pre-existing "no I/O beyond the FTS5/vector index" contract —
+for any caller that does not pass `wiki_root`.
+
 **Entity-class discovery — the `entity_schema` MCP tool.** The ONE new MCP
 tool this issue adds (deliberately the only addition — "the only other
 endpoint or MCP tooling we should be adding is schema queries," per the

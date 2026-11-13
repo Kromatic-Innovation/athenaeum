@@ -1155,3 +1155,165 @@ def test_fts5_match_columns_are_the_audited_sets() -> None:
 
     # And the shipped hook example holds no column list of its own to drift.
     assert "FTS_MATCH_COLS" not in SHELL_HOOK.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Per-turn hook bullet names a child's parent (issue athenaeum#2538 AC8)
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateParentNameBullet:
+    """Unit-level coverage of ``Candidate.bullet`` and
+    ``_resolve_parent_names`` directly, ahead of the end-to-end
+    ``build_context`` tests below."""
+
+    def test_bullet_names_parent_when_set(self) -> None:
+        from athenaeum.context import Candidate
+
+        c = Candidate(
+            filename="x.md",
+            name="Finance Desk",
+            description="handles billing",
+            backend="fts5",
+            relevance=1.0,
+            audience="",
+            parent_name="Acme Corp",
+        )
+        assert c.bullet == "Finance Desk (under Acme Corp) — handles billing"
+
+    def test_bullet_omits_parent_when_name_already_contains_it(self) -> None:
+        from athenaeum.context import Candidate
+
+        c = Candidate(
+            filename="x.md",
+            name="Acme Corp Finance Desk",
+            description="",
+            backend="fts5",
+            relevance=1.0,
+            audience="",
+            parent_name="Acme Corp",
+        )
+        assert c.bullet == "Acme Corp Finance Desk"
+
+    def test_bullet_unaffected_when_parent_name_unset(self) -> None:
+        from athenaeum.context import Candidate
+
+        c = Candidate(
+            filename="x.md",
+            name="Lonely Page",
+            description="no relation",
+            backend="fts5",
+            relevance=1.0,
+            audience="",
+        )
+        assert c.bullet == "Lonely Page — no relation"
+
+    def test_parent_name_excluded_from_to_dict(self) -> None:
+        """The envelope's published candidate schema is pinned separately
+        (``test_sidecar_envelope_schema.py``) -- `parent_name` must stay an
+        internal input to the bullet, never a new published field."""
+        from athenaeum.context import Candidate
+
+        c = Candidate(
+            filename="x.md",
+            name="Finance Desk",
+            description="",
+            backend="fts5",
+            relevance=1.0,
+            audience="",
+            parent_name="Acme Corp",
+        )
+        assert "parent_name" not in c.to_dict()
+
+
+def test_resolve_parent_names_noop_without_wiki_root(tmp_path: Path) -> None:
+    from athenaeum.context import Candidate, _resolve_parent_names
+
+    c = Candidate(
+        filename="child.md", name="Finance Desk", description="", backend="fts5",
+        relevance=1.0, audience="",
+    )
+    _resolve_parent_names([c], None)
+    assert c.parent_name == ""
+
+
+def test_resolve_parent_names_reads_relation_off_disk(tmp_path: Path) -> None:
+    from athenaeum.context import Candidate, _resolve_parent_names
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "child.md").write_text(
+        "---\nuid: child\ntype: company\nname: Finance Desk\nparent: company-acme\n"
+        "---\n\nBody.\n"
+    )
+    (wiki_root / "company-acme.md").write_text(
+        "---\nuid: company-acme\ntype: company\nname: Acme Corp\n---\n\nBody.\n"
+    )
+    c = Candidate(
+        filename="child.md", name="Finance Desk", description="", backend="fts5",
+        relevance=1.0, audience="",
+    )
+    _resolve_parent_names([c], wiki_root)
+    assert c.parent_name == "Acme Corp"
+
+
+def test_resolve_parent_names_no_op_for_a_page_with_no_parent(tmp_path: Path) -> None:
+    from athenaeum.context import Candidate, _resolve_parent_names
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "lonely.md").write_text(
+        "---\nuid: lonely\ntype: company\nname: Lonely Co\n---\n\nBody.\n"
+    )
+    c = Candidate(
+        filename="lonely.md", name="Lonely Co", description="", backend="fts5",
+        relevance=1.0, audience="",
+    )
+    _resolve_parent_names([c], wiki_root)
+    assert c.parent_name == ""
+
+
+def test_build_context_bullet_names_parent_when_wiki_root_supplied(tmp_path: Path) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "child-page.md").write_text(
+        "---\nuid: child-page\ntype: company\nname: Finance Desk\n"
+        "parent: company-acme\n---\n\nBody.\n"
+    )
+    (wiki_root / "company-acme.md").write_text(
+        "---\nuid: company-acme\ntype: company\nname: Acme Corp\n---\n\nBody.\n"
+    )
+    _build_index(
+        tmp_path / "wiki-index.db",
+        0,
+        extra_rows=[
+            (
+                "child-page.md",
+                "Finance Desk",
+                "finance",
+                "",
+                "handles billing for the retainer",
+                "|__access_open__|",
+                "company",
+                "hot",
+            )
+        ],
+    )
+    from athenaeum.context import build_context
+
+    without_wiki_root = build_context(
+        "finance desk retainer", "sess", cache_dir=tmp_path, use_llm=False
+    )
+    text_without = without_wiki_root["render"]["text"]
+    assert "Finance Desk" in text_without
+    assert "(under" not in text_without
+
+    with_wiki_root = build_context(
+        "finance desk retainer",
+        "sess",
+        cache_dir=tmp_path,
+        use_llm=False,
+        wiki_root=wiki_root,
+    )
+    text_with = with_wiki_root["render"]["text"]
+    assert "Finance Desk (under Acme Corp) — handles billing for the retainer" in text_with

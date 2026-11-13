@@ -121,6 +121,7 @@ from typing import Any
 
 from athenaeum.entity_schema import resolve_entity_classes
 from athenaeum.models import is_page_authorized, parse_frontmatter, resolve_page_type
+from athenaeum.page_relations import is_hidden_split_child
 from athenaeum.search import FTS5Backend
 
 #: Default row limit when the caller doesn't specify one (matches
@@ -387,6 +388,7 @@ def enumerate_entities(
     extra_roots: Sequence[Path] | None = None,
     config: dict[str, Any] | None = None,
     known_classes: Collection[str] | None = None,
+    include_split: bool = False,
 ) -> EnumerationResult:
     """Return every ``entity_type`` page matching *predicates*, paginated.
 
@@ -435,6 +437,16 @@ def enumerate_entities(
             (mirroring how ``recall``'s dynamic type description is computed
             once at ``create_server`` time, never per call) rather than
             paying a full corpus scan on every tool call.
+        include_split: Issue athenaeum#2538 (AC7): a page whose relation is
+            ``via: split`` (created by the oversize-page-split machinery,
+            :func:`athenaeum.page_relations.is_hidden_split_child`) is
+            EXCLUDED by default -- it inherits its parent's type, so
+            without this filter a listing of e.g. every company would
+            include every company's split-created sub-pages. Pages
+            attached under a parent via ``attach``/``fold``/``manual`` are
+            real entities of their own type and are ALWAYS listed,
+            regardless of this flag. Default ``False`` (excluded); pass
+            ``True`` to include them.
     """
     extra_roots_list = list(extra_roots or [])
 
@@ -487,6 +499,14 @@ def enumerate_entities(
         if resolve_page_type(meta) != entity_type:
             # Defensive: a stale index entry (schema-version mismatch window,
             # concurrent edit) should never leak a wrong-typed hit.
+            continue
+        # Issue athenaeum#2538 (AC7): a split-created sub-page is excluded by
+        # default -- it inherits its parent's type, so without this a
+        # listing of e.g. every company would include every company's
+        # sub-pages. Checked via the ONE relation reader
+        # (`page_relations.is_hidden_split_child`), never a second
+        # "has a parent" guess -- attach/fold/manual children stay listed.
+        if not include_split and is_hidden_split_child(meta):
             continue
         if not all(_predicate_matches(meta, p) for p in predicates):
             continue

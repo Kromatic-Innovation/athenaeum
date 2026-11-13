@@ -87,11 +87,18 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
     "calibration_summary": {"properties": [], "required": []},
     "entity_schema": {"properties": [], "required": []},
     "enumerate_entities": {
+        # Re-pinned for athenaeum#2538 AC7: `include_split` is the flag that
+        # includes a split-created sub-page, excluded from this tool's
+        # listing by default. Confirmed the ONLY delta against the prior
+        # pin (no property removed, none reordered beyond its own
+        # alphabetical slot) by diffing a live server's schema against this
+        # map before editing it.
         "properties": [
             "cursor",
             "descending",
             "entity_type",
             "fields",
+            "include_split",
             "limit",
             "predicates",
             "sort_key",

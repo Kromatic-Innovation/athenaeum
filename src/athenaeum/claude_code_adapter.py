@@ -242,6 +242,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
     resolve_cache_dir,
     resolve_hook_budget_seconds,
     resolve_recall_cap_ceiling,
@@ -760,6 +761,18 @@ def main(argv: list[str] | None = None) -> int:
     """
     try:
         cache_dir = resolve_cache_dir(None)
+        # Issue athenaeum#2538 (AC8): a pure Path computation, no I/O -- the
+        # actual read (if any) happens lazily, inside
+        # `context._resolve_parent_names`, only for a final candidate that
+        # carries a `parent:` key. Threading this through is what lets the
+        # per-turn bullet name a child's parent at all; omitting it would
+        # leave the mechanism wired to nothing (`build_context` defaults
+        # `wiki_root=None`, its pre-existing no-op).
+        # `.joinpath(...)`, not `/` -- this module's own AC2 guard
+        # (`tests/test_claude_code_adapter.py::_scan_for_retrieval_logic`)
+        # forbids ANY `ast.BinOp` in this source, and `Path.__truediv__`
+        # parses as exactly that.
+        wiki_root = DEFAULT_KNOWLEDGE_ROOT.expanduser().joinpath("wiki")
         _load_config_env(cache_dir)
 
         # Read stdin exactly once, before anything else below — the witness
@@ -823,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
                     os.environ.get("SEARCH_BACKEND") or resolve_search_backend(None)
                 ),
                 n=_resolve_recall_cap_ceiling(),
+                wiki_root=wiki_root,
             )
             text = envelope["render"]["text"]
             preamble = envelope["render"]["preamble"]
