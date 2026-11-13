@@ -6531,8 +6531,9 @@ OVERSIZE_ESCALATION_CONFLICT_TYPES = frozenset(
 # value outside this tuple. Both routes degrade back to "review" (page
 # left untouched) rather than raising whenever they cannot proceed -- no
 # preserved_log_dir configured (log_demote), no markdown heading to split
-# on (split, issue athenaeum#1248 -- the no-heading cohort is athenaeum#1282's job,
-# not this one's), or the filesystem operation itself failing partway
+# on, or only one resulting child page (split, issue athenaeum#1248 and
+# athenaeum#2524 -- the no-heading cohort is athenaeum#1282's job, not
+# this one's), or the filesystem operation itself failing partway
 # (see check_page_size_gate's docstring for the atomicity contract both
 # routes give).
 VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
@@ -6601,12 +6602,32 @@ def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
     docstring) treats this as "cannot split", not as "split into one
     section": a heading-less oversized page is left to the existing
     ``review`` route (the no-headings cohort is issue athenaeum#1282's job).
+
+    Issue athenaeum#2524: when there is exactly ONE heading at the
+    shallowest depth, it is a page TITLE (e.g. a lone ``# <Name>``
+    carrying the whole body), not a section to split on -- it has nothing
+    to be split *from* at its own depth. In that case the split depth
+    moves one level down, to the shallowest depth actually present
+    BENEATH that lone heading, so a ``# Name`` page whose real structure
+    lives under ``##`` splits on the ``##`` headings instead of yielding
+    one child holding the entire body. The lone title heading and any
+    text before/after it at that depth folds into the leading
+    ``("", preamble_text)`` pair like any other pre-heading content, so
+    it stays on the hub rather than becoming a same-named child. If
+    nothing is nested beneath the lone heading, the depth is left alone
+    (the caller's exactly-one-child refusal below is what catches that
+    case, the same way it catches the no-heading case).
     """
     matches = list(_SECTION_HEADING_RE.finditer(body))
     if not matches:
         return []
     top_level = min(len(m.group(1)) for m in matches)
     top_matches = [m for m in matches if len(m.group(1)) == top_level]
+    if len(top_matches) == 1:
+        deeper = [m for m in matches if len(m.group(1)) > top_level]
+        if deeper:
+            top_level = min(len(m.group(1)) for m in deeper)
+            top_matches = [m for m in deeper if len(m.group(1)) == top_level]
     sections: list[tuple[str, str]] = []
     if top_matches[0].start() > 0:
         sections.append(("", body[: top_matches[0].start()]))
@@ -6694,8 +6715,12 @@ def _perform_oversize_page_split(
 
     Returns ``True`` on a fully-committed split. Returns ``False`` -- with
     *existing_path* and the whole corpus otherwise UNTOUCHED -- when
-    *existing_body* has no markdown heading to split on at all; the caller
-    falls back to the ``review`` disposition in that case.
+    *existing_body* has no markdown heading to split on at all, OR (issue
+    athenaeum#2524) when splitting would yield exactly ONE child page --
+    the lone-title-heading degenerate case that used to rename the whole
+    body ``<Name>: <Name>`` instead of actually splitting it. Both are the
+    SAME refusal: the caller falls back to the ``review`` disposition
+    either way.
 
     **Atomicity contract (issue athenaeum#1248 AC).** Every child page is
     computed FIRST (:func:`_build_split_child_pages`, pure, no I/O), then
@@ -6713,7 +6738,12 @@ def _perform_oversize_page_split(
     this call, no child page left on disk) -- never a partial split.
     """
     sections = _split_into_atomic_sections(existing_body)
-    if not any(heading for heading, _ in sections):
+    # Refuse (same degraded path) on no heading to split on at all, AND
+    # (issue athenaeum#2524) on exactly one resulting child -- a lone
+    # title heading with nothing to split alongside it is "cannot split",
+    # not "split into one section that just gets renamed".
+    child_count = sum(1 for heading, _ in sections if heading)
+    if child_count <= 1:
         return False
 
     today = date.today().isoformat()

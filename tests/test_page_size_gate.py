@@ -123,6 +123,42 @@ def _make_split_fixture_page(wiki: Path, *, n_sections: int = 3) -> tuple[Path, 
     return path, meta, existing_body
 
 
+def _make_titled_split_fixture_page(
+    wiki: Path, *, name: str = "Big Project", n_sections: int = 5, uid: str = "aaaa1111"
+) -> tuple[Path, dict, str]:
+    """A compiled-page-shaped oversized fixture (issue athenaeum#2524): a
+    LONE top-level ``# <name>`` title heading, with its real structure
+    under ``##`` sections -- the shape that used to make the shallowest-
+    heading split cut at the title itself, yielding one child holding the
+    whole body and named ``<name>: <name>``."""
+    # 800 (not the 400 other fixtures in this module use) so even the
+    # single-section fixture (AC2's refusal case) clears the threshold on
+    # its own -- this helper has to work for n_sections=1 too.
+    sections = "\n\n".join(
+        f"## Key Contacts {i}\n\nUnique detail for section {i}. " + ("Filler prose. " * 800)
+        for i in range(n_sections)
+    )
+    body = (
+        f"# {name}\n\nIntro paragraph under the title, before any ## heading.\n\n"
+        + sections
+        + "\n"
+    )
+    frontmatter = (
+        "---\n"
+        f"uid: {uid}\n"
+        "type: project\n"
+        f"name: {name}\n"
+        "access: internal\n"
+        "tags:\n"
+        "  - active\n"
+        "---\n\n"
+    )
+    path = wiki / f"{uid}-{name.lower().replace(' ', '-')}.md"
+    path.write_text(frontmatter + body)
+    meta, existing_body = parse_frontmatter(path.read_text())
+    return path, meta, existing_body
+
+
 def _make_flat_fixture_page(wiki: Path) -> tuple[Path, dict, str]:
     """A real oversized page with NO markdown heading at all (issue
     athenaeum#1248) -- the shape ``split`` explicitly refuses (leaving it to
@@ -491,6 +527,83 @@ class TestOversizePageSplit:
             )
         hub_related_uids = {r["uid"] for r in hub_meta.get("related", [])}
         assert child_uids <= hub_related_uids
+
+    def test_lone_title_heading_splits_at_the_section_level_not_the_title(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2524 AC1: a page that opens with a single ``#
+        <Name>`` title and keeps its real sections under ``##`` must split
+        on the ``##`` sections -- five of them here -- not degenerate into
+        one child holding the whole body under the title heading."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path, meta, existing_body = _make_titled_split_fixture_page(
+            wiki, name="Big Project", n_sections=5
+        )
+        assert len(existing_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+
+        action = _update_action(name="Big Project", existing_uid="aaaa1111")
+        config = {"librarian": {"oversize_page_action": "split"}}
+
+        result = check_page_size_gate(
+            action,
+            existing_body,
+            "sessions/x.md",
+            config,
+            existing_path=path,
+            existing_meta=meta,
+            wiki_root=wiki,
+        )
+
+        assert isinstance(result, EscalationItem)
+        assert result.conflict_type == "oversize_split"
+
+        children = [p for p in wiki.glob("*.md") if p != path]
+        assert len(children) == 5  # athenaeum#2524 AC1: split on ## not on the lone #
+
+        child_metas = [parse_frontmatter(c.read_text())[0] for c in children]
+        child_names = {m["name"] for m in child_metas}
+        # athenaeum#2524 AC3: names come from the SECTION heading, never
+        # "<Name>: <Name>".
+        assert "Big Project: Big Project" not in child_names
+        for i in range(5):
+            assert f"Big Project: Key Contacts {i}" in child_names
+
+        # The title line and the intro paragraph under it fold into the
+        # hub as ordinary pre-heading content -- nothing is dropped.
+        hub_meta, hub_body = parse_frontmatter(path.read_text())
+        assert "Intro paragraph under the title" in hub_body
+
+    def test_single_resulting_child_is_refused_like_no_heading(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2524 AC2: a lone ``# <Name>`` title with only ONE
+        ``##`` section beneath it would still yield exactly one child --
+        refused via the SAME degraded path the no-heading cohort already
+        uses (flag ``needs_split`` and let the merge proceed; the corpus is
+        otherwise untouched), not written as a one-child split."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path, meta, existing_body = _make_titled_split_fixture_page(
+            wiki, name="Lone Section Co", n_sections=1, uid="dddd4444"
+        )
+        before = path.read_text()
+
+        action = _update_action(name="Lone Section Co", existing_uid="dddd4444")
+        config = {"librarian": {"oversize_page_action": "split"}}
+
+        result = check_page_size_gate(
+            action,
+            existing_body,
+            "sessions/x.md",
+            config,
+            existing_path=path,
+            existing_meta=meta,
+            wiki_root=wiki,
+        )
+
+        assert result is None  # degraded to flag-and-merge, same as no-heading
+        assert meta["needs_split"] is True
+        assert path.read_text() == before
+        assert list(wiki.glob("*.md")) == [path]
 
     def test_split_without_headings_falls_back_to_review_untouched(
         self, tmp_path: Path
