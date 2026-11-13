@@ -498,8 +498,8 @@ def format_budget_report(report: dict[str, Any]) -> str:
 #:
 #: ``"policy-pack-edit"`` is this issue's own type (see
 #: :mod:`athenaeum.policy_pack_edit_proposals`). ``"auto-apply-threshold"``
-#: is the SIBLING child's type (athenaeum#2018, "Memory model v6 self-tuning loop:
-#: page-split + auto-apply-threshold proposals") -- named here BY STRING, not
+#: is the SIBLING child's type (athenaeum#2018's auto-apply-threshold
+#: proposal drafter) -- named here BY STRING, not
 #: by importing that child's module, so this module gains no edge toward
 #: whichever module athenaeum#2018 lands its drafter in (this module already
 #: sits at the bottom of the decision_budget/decisions/quarantine cycle

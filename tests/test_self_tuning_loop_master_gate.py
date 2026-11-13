@@ -66,16 +66,6 @@ _DIMENSION_PROPOSALS_PHASE_FN_NAME = "_run_signal_mining_phase"
 # `*_proposals` modules deliberately NOT scheduled by the nightly run at
 # all -- each reason is load-bearing; this is not a "not yet done" list.
 _EXCLUDED_PROPOSAL_MODULES: dict[str, str] = {
-    # The detector consumes `page_decompose.DecomposeReport`s, and nothing
-    # in the nightly run produces them; scheduling it would require
-    # deciding the cost of decomposing every page nightly, which is an
-    # open product decision tracked by the follow-up issue.
-    "page_split_proposals": (
-        "detector consumes page_decompose.DecomposeReport objects, which no "
-        "nightly phase produces; scheduling it means deciding the cost of "
-        "decomposing every page nightly -- an open product decision, not a "
-        "missing line of wiring"
-    ),
     # Has no detector BY DESIGN -- the module's own docstring states "No
     # detector exists yet" and the drafter only takes caller-supplied
     # candidates. There is nothing to schedule.

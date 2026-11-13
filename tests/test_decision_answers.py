@@ -1358,9 +1358,8 @@ class TestApplyProposedRule:
 # Ratchet guard 1, wired)
 # ---------------------------------------------------------------------------
 
-#: Mirrors ``tests/test_page_split_auto_apply_wiring.py``'s
-#: ``_AUTO_APPLY_CONFIG`` exactly -- same disagreement trigger/widen step,
-#: so a proposal seeded here is guaranteed drafted.
+#: Same disagreement trigger/widen step `_seed_auto_apply_threshold_pending`
+#: below relies on -- so a proposal seeded here is guaranteed drafted.
 _RATCHET_AUTO_APPLY_CONFIG = {
     "librarian": {
         "audit_sample_rate_t1_rejects": 1.0,
@@ -1375,10 +1374,8 @@ _RATCHET_AUTO_APPLY_CONFIG = {
 
 def _seed_auto_apply_threshold_pending(wiki_root: Path) -> str:
     """Seed one pending ``auto-apply-threshold`` widen proposal; return its
-    id. Mirrors ``tests/test_page_split_auto_apply_wiring.py``'s
-    ``_seed_auto_apply_pending`` (same calibration-sample-then-review dance
-    that makes ``run_auto_apply_proposal_detection`` draft a real widen
-    proposal), duplicated locally rather than imported across test modules.
+    id (same calibration-sample-then-review dance that makes
+    ``run_auto_apply_proposal_detection`` draft a real widen proposal).
     """
     from athenaeum.auto_apply_proposals import (
         list_pending_auto_apply_threshold_proposals,
@@ -1956,6 +1953,48 @@ class TestFailSoft:
         # The malformed file is left in place, not deleted (audit trail).
         assert (answers_dir / "20260101T000000Z-bad.md").exists()
 
+    def test_stale_page_split_answer_file_skipped_batch_continues(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """athenaeum#2465: a pre-upgrade ``page-split`` answer file sitting in
+        an operator's queue must not crash ``apply_decision_answers`` -- it
+        is skipped the same way :data:`VALID_DECISION_TYPES` refuses any
+        other unrecognized ``decision_type`` (see
+        ``TestLoadDecisionAnswerEdgeCases::
+        test_removed_page_split_decision_type_raises_malformed``), and a good
+        file in the same batch still applies.
+
+        Written as raw frontmatter text, not via ``write_decision_answer``
+        -- that helper itself now refuses ``decision_type="page-split"``
+        (it validates against the same :data:`VALID_DECISION_TYPES`), so it
+        cannot construct the stale file this test needs; a file written by
+        a pre-upgrade athenaeum version would have no such guard.
+        """
+        answers_dir = raw_root / "answers"
+        answers_dir.mkdir(parents=True)
+        (answers_dir / "20260101T000000Z-page-split-ps1.md").write_text(
+            "---\nsource: decision_answer\ndecision_id: ps1\n"
+            "decision_type: page-split\nverdict: approve\n"
+            "resolved_at: 2026-01-01T00:00:00Z\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="Series B."
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        assert report.skipped == 1
+        malformed_outcomes = [o for o in report.outcomes if o.error_code == "malformed"]
+        assert len(malformed_outcomes) == 1
+        assert malformed_outcomes[0].decision_id is None
+        # The stale file is left in place, not deleted (audit trail).
+        assert (answers_dir / "20260101T000000Z-page-split-ps1.md").exists()
+
     def test_invalid_merge_verdict_rejected_without_mutation(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
@@ -2280,6 +2319,27 @@ class TestLoadDecisionAnswerEdgeCases:
         path.write_text(
             "---\nsource: decision_answer\ndecision_id: q1\n"
             "decision_type: question\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(MalformedDecisionAnswer):
+            _load_decision_answer(path)
+
+    def test_removed_page_split_decision_type_raises_malformed(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2465: ``page-split`` was a registered ``decision_type``
+        and is now removed from :data:`VALID_DECISION_TYPES`. An existing
+        answer file an operator drafted before the upgrade (or a stale
+        pending-decisions entry carried over the same way) must not crash
+        the loader -- it is refused the same way any other unrecognized
+        ``decision_type`` is, via :class:`MalformedDecisionAnswer`.
+        """
+        assert "page-split" not in VALID_DECISION_TYPES
+        path = tmp_path / "stale-page-split.md"
+        path.write_text(
+            "---\nsource: decision_answer\ndecision_id: ps1\n"
+            "decision_type: page-split\nverdict: approve\n"
+            "resolved_at: 2026-01-01T00:00:00Z\n---\n\nbody\n",
             encoding="utf-8",
         )
         with pytest.raises(MalformedDecisionAnswer):
