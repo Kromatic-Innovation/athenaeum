@@ -739,7 +739,10 @@ class TestRefusalPersistedToLedger:
             "reason": "budget",
             "files": 0,
         }
-        assert records[0]["v"] == 3
+        # ``>= 3``, not ``== 3``: the three-state refusal contract holds
+        # at and above v3 (``refusal_in_record`` gates on ``>=``), and
+        # athenaeum#2536's additive v4 bump is not a regression in it.
+        assert records[0]["v"] >= 3
 
     def test_evaluated_clean_run_writes_tripped_false_not_an_omission(
         self, tmp_path: Path
@@ -828,7 +831,10 @@ class TestUnevaluatedVerdictOmitsRefusalField:
         records = read_run_summary_ledger(ledger_path)
         assert len(records) == 1
         assert "refusal" not in records[0]
-        assert records[0]["v"] == 3
+        # ``>= 3``, not ``== 3``: the three-state refusal contract holds
+        # at and above v3 (``refusal_in_record`` gates on ``>=``), and
+        # athenaeum#2536's additive v4 bump is not a regression in it.
+        assert records[0]["v"] >= 3
         # The actual reader contract, exercised end to end: an omitted key
         # on a v3 record reads as None (cannot speak), NOT False (clean).
         assert refusal_in_record(records[0]) is None
