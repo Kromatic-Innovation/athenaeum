@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decisions`; `recompare --apply` exits 75 when the run lock is held
   (athenaeum#2456).
 
+- Person dedupe's strong-identifier fields are now configurable
+  (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
+  fields (athenaeum#2472).
+
 ### Fixed
 
 - `athenaeum doctor` now ends its report with a short note when one or more
