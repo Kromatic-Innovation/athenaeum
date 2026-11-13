@@ -111,6 +111,7 @@ from athenaeum.provider import (
 )
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.structured_upsert import (
@@ -1396,6 +1397,17 @@ def process_batch_run(
                 if su_outcome.status == STATUS_REFUSED:
                     st.skipped.append(su_outcome.skipped_label)
                     st.retain_raw = True
+                    if su_outcome.field_group_misfits:
+                        # Issue athenaeum#2197: same schema-amendment
+                        # proposal rail the synchronous path raises from
+                        # (see athenaeum.librarian.process_one) -- the
+                        # batch transport must not silently drop the same
+                        # misfit signal.
+                        record_field_group_misfits(
+                            su_outcome.field_group_misfits,
+                            wiki_root=wiki_root,
+                            uid=su_outcome.uid,
+                        )
                 elif su_outcome.status == STATUS_APPLIED:
                     st.updated_uids.append(su_outcome.uid)
                 st.done = True

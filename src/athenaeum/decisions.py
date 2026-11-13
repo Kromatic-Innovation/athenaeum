@@ -121,6 +121,7 @@ from athenaeum.policy_pack_edit_proposals import list_pending_policy_pack_edit_p
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
+from athenaeum.schema_amendment_proposals import list_pending_schema_amendment_proposals
 from athenaeum.tier_movement_proposals import list_pending_tier_movement_proposals
 
 log = logging.getLogger(__name__)
@@ -914,6 +915,48 @@ def policy_pack_edit_proposal_to_decision(rec: dict) -> dict:
     }
 
 
+def schema_amendment_proposal_to_decision(rec: dict) -> dict:
+    """Convert a schema-amendment-proposal ledger record to a unified
+    decision dict (issue athenaeum#2197).
+
+    A ``type: "schema-amendment-proposal"`` item: a declared single-valued
+    field group (:mod:`athenaeum.structured_upsert`'s
+    ``REASON_FIELD_GROUP_MISFIT``) that keeps receiving a second, different
+    value from what must be a different source record. ``confidence`` is
+    ``None`` -- deterministically derived from the misfit count, no model
+    score, same convention as every other proposal builder in this module.
+    Same visible-but-not-yet-answerable posture as ``dimension-proposal``
+    pre-ratification (see :mod:`athenaeum.schema_amendment_proposals`'s
+    module docstring): adopting the amendment is each its own follow-up
+    issue, never something this item or any applier enacts.
+    """
+    page_type = rec.get("page_type", "")
+    field_group = rec.get("field_group", "")
+    count = rec.get("affected_page_count", 0)
+    amendment = rec.get("proposed_amendment", "")
+    summary = (
+        f"{count} page(s) of type {page_type!r} received a second, different "
+        f"value for the {field_group!r} field group, which only holds one "
+        f"value per page -- approve to treat the amendment below as adopted "
+        f"deployment policy, or reject to dismiss the finding. Proposed "
+        f"amendment: {amendment}"
+    )
+    return {
+        "type": "schema-amendment-proposal",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "page_type": page_type,
+            "field_group": field_group,
+            "affected_page_count": count,
+            "affected_uids": rec.get("affected_uids", []),
+            "proposed_amendment": amendment,
+        },
+    }
+
+
 def list_pending_decisions(
     wiki_root: Path,
     *,
@@ -1096,6 +1139,16 @@ def list_pending_decisions(
         decisions += [
             policy_pack_edit_proposal_to_decision(rec)
             for rec in list_pending_policy_pack_edit_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2197: schema-amendment proposals -- a declared
+        # single-valued field group that kept receiving a second, different
+        # value. Same owner-only, visible-but-not-yet-answerable posture as
+        # dimension-proposal/tier-movement-proposal/policy-pack-edit above
+        # (no readable source-page path to authorize against for a
+        # restricted caller; this module writes no resolution kind at all).
+        decisions += [
+            schema_amendment_proposal_to_decision(rec)
+            for rec in list_pending_schema_amendment_proposals(wiki_root)
         ]
     # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
     # point every item passes through, so no item can enter the queue unframed
