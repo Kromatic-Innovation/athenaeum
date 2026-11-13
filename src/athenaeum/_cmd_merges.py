@@ -55,7 +55,7 @@ import re
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _resolve_knowledge_root, _resolve_wiki_root
+from athenaeum._cli_shared import _acquire_or_exit, _resolve_knowledge_root, _resolve_wiki_root
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
     deprecated_cli_surface_message,
@@ -695,7 +695,6 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
     """
     from athenaeum.config import load_config, resolve_comparator_enabled
     from athenaeum.recompare import recompare_pending_merges
-    from athenaeum.runlock import RunLock
 
     knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -736,7 +735,16 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
         )
 
     if apply:
-        with RunLock(knowledge_root) as lock:
+        # Issue athenaeum#2456: a bare `with RunLock(knowledge_root)` had no
+        # `LockHeld` handling, so a contended lock died with a traceback and
+        # exit 1 instead of the standard EXIT_LOCK_HELD (75) every other
+        # mutating command returns. `_acquire_or_exit` is that standard path:
+        # it prints the holder to stderr and returns 75 on contention,
+        # BEFORE any write is attempted.
+        lock = _acquire_or_exit(knowledge_root, args, config)
+        if isinstance(lock, int):
+            return lock
+        try:
             result = recompare_pending_merges(
                 wiki_root,
                 config=config,
@@ -745,6 +753,8 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
                 limit=limit,
                 lock=lock,
             )
+        finally:
+            lock.release()
     else:
         result = recompare_pending_merges(
             wiki_root, config=config, client=client, apply=False, limit=limit
@@ -824,6 +834,34 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_provenance(args: argparse.Namespace) -> int:
+    """``athenaeum merges provenance`` — issue athenaeum#425.
+
+    List EXECUTED merges from ``wiki/_merge_provenance.jsonl`` — which source
+    pages a completed merge relied on, queryable by ``--canonical-slug`` /
+    ``--merge-id``. Factored out of :func:`cmd_merges`'s dispatch (issue
+    athenaeum#2456) so ``athenaeum decisions provenance`` can delegate to this
+    SAME function rather than a second copy.
+    """
+    wiki_root = _resolve_wiki_root(args)
+    records = read_merge_provenance(
+        wiki_root,
+        canonical_slug=getattr(args, "canonical_slug", None),
+        merge_id=getattr(args, "merge_id", None),
+    )
+    if args.json:
+        sys.stdout.write(json.dumps(records) + "\n")
+        return 0
+    if not records:
+        print("0 recorded")
+        return 0
+    for idx, record in enumerate(records):
+        if idx > 0:
+            print()
+        print(_format_provenance_record(record))
+    return 0
+
+
 def cmd_merges(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum merges {list,next,count,provenance}``.
 
@@ -835,11 +873,14 @@ def cmd_merges(args: argparse.Namespace) -> int:
     Issue athenaeum#1992: this whole surface is flagged deprecated in favor
     of ``athenaeum decisions`` (pending-merge proposals are now surfaced,
     framed, and answerable there too). A one-line warning is printed to
-    stderr before dispatch — on EVERY subcommand, including the
-    maintenance-only ones (``revalidate``/``recompare``/``scrub-pii``/
-    ``propose-fold``/``provenance``) that have no ``decisions`` equivalent —
-    but nothing about this surface's own behavior changes; see
-    :func:`athenaeum.config.deprecated_cli_surface_message`.
+    stderr before dispatch — on EVERY subcommand. Issue athenaeum#2456:
+    ``revalidate``/``recompare``/``scrub-pii``/``propose-fold``/``provenance``
+    moved wholesale under ``athenaeum decisions`` (same flags, output, exit
+    codes — see the ``_add_*_subparser`` functions below, shared with
+    ``_cmd_decisions.add_decisions_subparser``), so the warning now names
+    the exact per-verb replacement spelling for those five instead of the
+    generic "use decisions"; nothing about this surface's own behavior
+    changes; see :func:`athenaeum.config.deprecated_cli_surface_message`.
     """
     sub = getattr(args, "merges_target", None)
     if sub not in (
@@ -861,7 +902,7 @@ def cmd_merges(args: argparse.Namespace) -> int:
         return 2
 
     message = deprecated_cli_surface_message(
-        "merges", load_config(_resolve_knowledge_root(args))
+        "merges", load_config(_resolve_knowledge_root(args)), verb=sub
     )
     if message:
         print(f"DEPRECATED: {message}", file=sys.stderr)
@@ -879,23 +920,7 @@ def cmd_merges(args: argparse.Namespace) -> int:
         return _cmd_revalidate(args)
 
     if sub == "provenance":
-        wiki_root = _resolve_wiki_root(args)
-        records = read_merge_provenance(
-            wiki_root,
-            canonical_slug=getattr(args, "canonical_slug", None),
-            merge_id=getattr(args, "merge_id", None),
-        )
-        if args.json:
-            sys.stdout.write(json.dumps(records) + "\n")
-            return 0
-        if not records:
-            print("0 recorded")
-            return 0
-        for idx, record in enumerate(records):
-            if idx > 0:
-                print()
-            print(_format_provenance_record(record))
-        return 0
+        return _cmd_provenance(args)
 
     merges_path = _resolve_merges_path(args)
     merges = list_pending_merges_rich(merges_path)
@@ -942,48 +967,33 @@ def cmd_merges(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum merges`` and its three modes on ``subparsers``."""
-    m_parser = subparsers.add_parser(
-        "merges",
-        help=(
-            "Inspect unresolved resolver merge proposals in "
-            "`wiki/_pending_merges.md`. Three modes: list, next, count. "
-            "The merges half of `athenaeum decisions`."
-        ),
+def _add_merges_common_args(parser: argparse.ArgumentParser) -> None:
+    """Shared ``--path``/``--json`` flags for every ``merges``/``decisions`` verb."""
+    parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
     )
-    m_parser.set_defaults(func=cmd_merges)
-    m_sub = m_parser.add_subparsers(dest="merges_target")
-
-    def _add_common(parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(
-            "--path",
-            type=Path,
-            default=DEFAULT_KNOWLEDGE_ROOT,
-            help="Knowledge directory (default: ~/knowledge)",
-        )
-        parser.add_argument(
-            "--json",
-            action="store_true",
-            help="Emit machine-readable JSON instead of plain text.",
-        )
-
-    list_p = m_sub.add_parser("list", help="List all unresolved merge proposals.")
-    _add_common(list_p)
-    list_p.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Truncate to first N (default: 0 = unlimited).",
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
     )
 
-    next_p = m_sub.add_parser("next", help="Show the oldest unresolved merge (single block).")
-    _add_common(next_p)
 
-    count_p = m_sub.add_parser("count", help="Print `N unresolved (oldest: <iso-date>)`.")
-    _add_common(count_p)
+# Issue athenaeum#2456: each of the five functions below builds ONE verb's
+# subparser and is called from BOTH `add_merges_subparser` (registering under
+# `merges_target`) and `_cmd_decisions.add_decisions_subparser` (registering
+# the identical flags under `decisions_target`) — a single source of truth
+# for "same flags, output and exit codes as today's merges verbs" rather than
+# two argparse definitions that could drift apart. Each returns the built
+# parser, matching `subparsers.add_parser`'s own return convention, though no
+# caller currently needs the return value.
 
-    revalidate_p = m_sub.add_parser(
+
+def _add_revalidate_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    revalidate_p = sub.add_parser(
         "revalidate",
         help=(
             "Re-validate existing unresolved merge proposals against the "
@@ -991,7 +1001,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Dry-run by default; pass --apply to write."
         ),
     )
-    _add_common(revalidate_p)
+    _add_merges_common_args(revalidate_p)
     revalidate_p.add_argument(
         "--apply",
         action="store_true",
@@ -1000,8 +1010,11 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "dry-run — report only, write nothing."
         ),
     )
+    return revalidate_p
 
-    recompare_p = m_sub.add_parser(
+
+def _add_recompare_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    recompare_p = sub.add_parser(
         "recompare",
         help=(
             "Re-run the five-verdict comparator over every unresolved merge "
@@ -1009,10 +1022,11 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "ledger (issue athenaeum#715). Dry-run by default; --apply writes to "
             "the LEDGER only — this command never approves, rejects, or "
             "archives a proposal, and PII-hazard proposals always route to a "
-            "human regardless of verdict."
+            "human regardless of verdict. --apply acquires the run lock and "
+            "exits 75 if another process already holds it (issue athenaeum#2456)."
         ),
     )
-    _add_common(recompare_p)
+    _add_merges_common_args(recompare_p)
     recompare_p.add_argument(
         "--apply",
         action="store_true",
@@ -1027,8 +1041,11 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=0,
         help="Only re-run the first N unresolved proposals (default: 0 = all).",
     )
+    return recompare_p
 
-    scrub_p = m_sub.add_parser(
+
+def _add_scrub_pii_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    scrub_p = sub.add_parser(
         "scrub-pii",
         help=(
             "Redact contact data out of merge-proposal bodies in place "
@@ -1038,7 +1055,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "the merge. Dry-run by default; --apply writes."
         ),
     )
-    _add_common(scrub_p)
+    _add_merges_common_args(scrub_p)
     scrub_p.add_argument(
         "--apply",
         action="store_true",
@@ -1058,8 +1075,11 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "(issue athenaeum#2007) is honoured the same way."
         ),
     )
+    return scrub_p
 
-    fold_p = m_sub.add_parser(
+
+def _add_propose_fold_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    fold_p = sub.add_parser(
         "propose-fold",
         help=(
             "Propose folding one or more source pages INTO a named canonical "
@@ -1068,7 +1088,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "hand-built proposal. Dry-run by default; --apply to queue."
         ),
     )
-    _add_common(fold_p)
+    _add_merges_common_args(fold_p)
     fold_p.add_argument(
         "--into",
         required=True,
@@ -1116,15 +1136,18 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Queue the proposal. Default: dry-run — print the plan, write nothing.",
     )
+    return fold_p
 
-    provenance_p = m_sub.add_parser(
+
+def _add_provenance_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    provenance_p = sub.add_parser(
         "provenance",
         help=(
             "List EXECUTED merges from `wiki/_merge_provenance.jsonl` "
             "(issue athenaeum#425) — which source pages each merge relied on."
         ),
     )
-    _add_common(provenance_p)
+    _add_merges_common_args(provenance_p)
     provenance_p.add_argument(
         "--canonical-slug",
         default=None,
@@ -1135,3 +1158,39 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Filter to the record for this merge id.",
     )
+    return provenance_p
+
+
+def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
+    """Register ``athenaeum merges`` and its three modes on ``subparsers``."""
+    m_parser = subparsers.add_parser(
+        "merges",
+        help=(
+            "Inspect unresolved resolver merge proposals in "
+            "`wiki/_pending_merges.md`. Three modes: list, next, count. "
+            "The merges half of `athenaeum decisions`."
+        ),
+    )
+    m_parser.set_defaults(func=cmd_merges)
+    m_sub = m_parser.add_subparsers(dest="merges_target")
+
+    list_p = m_sub.add_parser("list", help="List all unresolved merge proposals.")
+    _add_merges_common_args(list_p)
+    list_p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Truncate to first N (default: 0 = unlimited).",
+    )
+
+    next_p = m_sub.add_parser("next", help="Show the oldest unresolved merge (single block).")
+    _add_merges_common_args(next_p)
+
+    count_p = m_sub.add_parser("count", help="Print `N unresolved (oldest: <iso-date>)`.")
+    _add_merges_common_args(count_p)
+
+    _add_revalidate_subparser(m_sub)
+    _add_recompare_subparser(m_sub)
+    _add_scrub_pii_subparser(m_sub)
+    _add_propose_fold_subparser(m_sub)
+    _add_provenance_subparser(m_sub)

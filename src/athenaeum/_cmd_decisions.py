@@ -48,6 +48,18 @@ from athenaeum._cli_shared import (
     _resolve_knowledge_root,
     _resolve_wiki_root,
 )
+from athenaeum._cmd_merges import (
+    _add_propose_fold_subparser,
+    _add_provenance_subparser,
+    _add_recompare_subparser,
+    _add_revalidate_subparser,
+    _add_scrub_pii_subparser,
+    _cmd_propose_fold,
+    _cmd_provenance,
+    _cmd_recompare,
+    _cmd_revalidate,
+    _cmd_scrub_pii,
+)
 from athenaeum.answers import raise_pending_question
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
@@ -353,6 +365,12 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     Never raises on missing/empty sidecars: count returns zeros, list/next
     print nothing (or ``null`` JSON for ``next``) and exit 0.
+
+    Issue athenaeum#2456: ``revalidate``/``recompare``/``scrub-pii``/
+    ``propose-fold``/``provenance`` delegate to the SAME handler functions
+    ``athenaeum merges`` dispatches to (:mod:`athenaeum._cmd_merges`) — same
+    flags, output and exit codes, just reached through this surface too,
+    with no deprecation warning (this is the sanctioned spelling).
     """
     sub = getattr(args, "decisions_target", None)
     if sub not in (
@@ -365,11 +383,17 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "budget",
         "challenge-coordinate",
         "migrate",
+        "revalidate",
+        "recompare",
+        "scrub-pii",
+        "propose-fold",
+        "provenance",
     ):
         print(
             "usage: athenaeum decisions "
             "{list,next,count,scan-retractions,raise-confirmation,answer,budget,"
-            "challenge-coordinate,migrate} [...]",
+            "challenge-coordinate,migrate,revalidate,recompare,scrub-pii,"
+            "propose-fold,provenance} [...]",
             file=sys.stderr,
         )
         return 2
@@ -391,6 +415,21 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "migrate":
         return _cmd_migrate(args)
+
+    if sub == "revalidate":
+        return _cmd_revalidate(args)
+
+    if sub == "recompare":
+        return _cmd_recompare(args)
+
+    if sub == "scrub-pii":
+        return _cmd_scrub_pii(args)
+
+    if sub == "propose-fold":
+        return _cmd_propose_fold(args)
+
+    if sub == "provenance":
+        return _cmd_provenance(args)
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
@@ -634,8 +673,8 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "AND merges, each tagged by type, every item framed with its "
             "reversibility class, proposed default and response schema. "
             "Modes: list, next, count, scan-retractions, raise-confirmation, "
-            "answer, budget, challenge-coordinate."
-            "answer, budget, migrate."
+            "answer, budget, challenge-coordinate, migrate, revalidate, "
+            "recompare, scrub-pii, propose-fold, provenance."
         ),
     )
     d_parser.set_defaults(func=cmd_decisions)
@@ -849,3 +888,16 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_common(migrate_p, with_proposal=False)
+
+    # Issue athenaeum#2456: revalidate/recompare/scrub-pii/propose-fold/
+    # provenance moved here from `athenaeum merges` — no replacement exists
+    # for these five under `decisions` until now, so the move is a straight
+    # re-registration of the SAME subparser-building functions
+    # `add_merges_subparser` uses, onto THIS surface's `d_sub` instead of
+    # `merges`' `m_sub`. Same flags, same dispatch target functions (see
+    # `cmd_decisions` above) — only the parent command name differs.
+    _add_revalidate_subparser(d_sub)
+    _add_recompare_subparser(d_sub)
+    _add_scrub_pii_subparser(d_sub)
+    _add_propose_fold_subparser(d_sub)
+    _add_provenance_subparser(d_sub)
