@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or removes it by hand (exits 75 under a held run lock); `athenaeum
   doctor` reports the count of one-sided pairs (athenaeum#2535).
 
+- Page recompile, slice S1 (`src/athenaeum/page_recompile.py`): a candidate
+  scan over active pages that are over `librarian.page_size_threshold_chars`
+  or flagged `needs_split: true`, ordered over-ceiling-first / most-recently-
+  updated / largest, with a `blocked` bucket (reason `no_uid` /
+  `invalid_frontmatter` / `unreadable`) instead of silently dropping a page;
+  and a segmenter cutting a page body into ordered, addressable units (one
+  per heading group, cut further at paragraph/list-item boundaries past a
+  size cap) plus pure conservation and marker-resolution checkers.
+  `athenaeum recompile candidates` reports counts only. No LLM call, no page
+  write (athenaeum#2534).
+
 - Recall and entity listings are now aware of the parent/child page
   relation: a `recall` hit on a child renders a `**Parent:** <uid> —
   <Name>` line, a hit on a parent renders a `**Sub-pages:** <uid> —
