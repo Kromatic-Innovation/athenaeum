@@ -272,7 +272,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "stamp --if-triggered completion writes. Exit codes: 2 = a trigger "
         "fired, 0 = none fired, 1 = an error occurred evaluating (mirrors "
         "this repo's dry-run-found-something ternary, e.g. `athenaeum "
-        "decay`/`athenaeum repair`). Cannot be combined with --if-triggered.",
+        "decay-sweep`/`athenaeum repair`). Cannot be combined with --if-triggered.",
     )
     ingest_parser.add_argument(
         "--verbose",
@@ -857,8 +857,8 @@ def _cmd_ingest_evaluate_only(
     :func:`athenaeum.librarian._load_timestamp_stamp`) directly.
 
     Exit codes mirror this repo's established dry-run-found-something
-    ternary (``athenaeum decay``, ``athenaeum repair`` — see
-    :func:`athenaeum._cmd_decay.cmd_decay`'s docstring): ``0`` - no trigger
+    ternary (``athenaeum decay-sweep``, ``athenaeum repair`` — see
+    :func:`athenaeum._cmd_decay.cmd_decay_sweep`'s docstring): ``0`` - no trigger
     fired (nothing to do), ``1`` - an error occurred evaluating triggers,
     ``2`` - a trigger fired (a "found something" signal: the caller should
     now run ``ingest --if-triggered`` to actually compile).

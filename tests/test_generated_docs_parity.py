@@ -247,6 +247,38 @@ class TestGenerationIsGenuine:
         assert "--throwaway-test-flag-for-parity-check" not in committed
 
 
+class TestBooleanFlagRendering:
+    """athenaeum#2440: a ``store_true``/``store_false`` flag's own
+    ``argparse.Action.default`` is construction boilerplate, not the
+    resolved runtime default of its ``dest`` — for a mutually exclusive
+    pair sharing one ``dest`` (``ingest --incremental``/``--full``,
+    ``session-end --incremental``/``--full``), the FIRST-registered
+    action's default wins at parse time, so printing the second action's
+    own ``.default`` renders an inverted value (``--full`` shown as
+    "Default `True`", i.e. full mode on by default, when the real default
+    is incremental). The generator must render presence/absence instead.
+    """
+
+    def test_store_false_flag_does_not_print_dest_default(self) -> None:
+        generated = gen_cli_reference.generate()
+        start = generated.index("## `athenaeum ingest`")
+        end = generated.index("\n## `", start + 1)
+        section = generated[start:end]
+        full_line = next(line for line in section.splitlines() if line.startswith("| `--full`"))
+        assert "off (flag absent)" in full_line
+        assert "`True`" not in full_line
+
+    def test_store_true_flag_in_the_same_pair_also_avoids_dest_default(self) -> None:
+        generated = gen_cli_reference.generate()
+        start = generated.index("## `athenaeum ingest`")
+        end = generated.index("\n## `", start + 1)
+        section = generated[start:end]
+        incremental_line = next(
+            line for line in section.splitlines() if line.startswith("| `--incremental`")
+        )
+        assert "off (flag absent)" in incremental_line
+
+
 class TestCuratedSetIsClosed:
     """``_CURATED`` in ``gen_config_reference.py`` is a small, justified
     exception list (resolvers whose signature/return shape makes generic
