@@ -27,8 +27,8 @@ mistake is harder to repeat). The checked set today:
 - The Codex Tier-2 context adapter (:mod:`athenaeum.codex_adapter`,
   ``aspect="recall"``).
 
-Other compile-class CLI commands — ``ingest``, ``drain``, ``index
-rebuild-index``, ``curate`` — do **not** check it (tracked separately per
+Other compile-class CLI commands — ``ingest``, ``drain``, ``reindex``,
+``curate`` — do **not** check it (tracked separately per
 issue athenaeum#2448's "Out of scope"; do not assume they are covered).
 
 Two scopes:

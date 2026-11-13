@@ -29,7 +29,6 @@
     "push-metrics",
     "query-topics",
     "questions",
-    "rebuild-index",
     "recall",
     "registry",
     "reindex",

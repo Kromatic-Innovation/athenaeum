@@ -3,8 +3,8 @@
 
 Five subcommands grouped here because each is a deterministic (mostly no-LLM)
 operation over the compiled wiki / search index: rebuild the search index
-(``reindex``, aliased ``rebuild-index``), on-demand incremental compile
-(``ingest``), the change-gated compile+reindex composition used by the
+(``reindex``), on-demand incremental compile (``ingest``), the
+change-gated compile+reindex composition used by the
 SessionEnd hook (``session-end``), a historical as-of recompile (``compile``),
 and the source-handle registry builder (``registry``). None of these run the
 full librarian pipeline (that is ``athenaeum run``, see ``_cmd_run.py``).
@@ -36,15 +36,12 @@ if TYPE_CHECKING:
 
 
 def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``reindex``/``rebuild-index``, ``compile``, ``registry``,
+    """Register ``reindex``, ``compile``, ``registry``,
     ``ingest``, ``session-end``."""
 
     # reindex command (issue athenaeum#349) — rebuild the search index out-of-band.
-    # ``rebuild-index`` is kept as a back-compat alias for the athenaeum#348 spelling;
-    # both dispatch to the identical handler (no duplicated index engine).
     rebuild_parser = subparsers.add_parser(
         "reindex",
-        aliases=["rebuild-index"],
         help="Rebuild the search index (FTS5 or vector, per config). "
         "--incremental (default) applies only the athenaeum#348 hash-diff delta; "
         "--full rebuilds from scratch. The incremental delta is keyed off each "
@@ -522,9 +519,9 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     )
     from athenaeum.search import build_fts5_index, build_vector_index
 
-    # Issue athenaeum#349: `reindex` is the canonical name; `rebuild-index` is a
-    # back-compat alias routed here. Report whichever the user invoked.
-    command = getattr(args, "command", "reindex") or "reindex"
+    # Issue athenaeum#349: `reindex` is the canonical name (the `rebuild-index`
+    # back-compat alias that used to route here was removed, athenaeum#2459).
+    command = "reindex"
     t0 = time.monotonic()
 
     knowledge_root = args.path.expanduser().resolve()

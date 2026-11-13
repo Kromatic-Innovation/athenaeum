@@ -66,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the `rebuild-index` alias; use `athenaeum reindex` (athenaeum#2459).
+  The alias printed no deprecation warning, so there was no transition
+  period to preserve; see `docs/guides/upgrading.md` for anyone whose cron
+  job or wrapper still calls it.
+
 - Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
   key and its `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` environment-variable
   override, along with the rest of the C4 contradiction-detector code left
