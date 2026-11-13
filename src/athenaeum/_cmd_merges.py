@@ -10,7 +10,10 @@ executed-merge ledger (``wiki/_merge_provenance.jsonl``):
                    queryable by ``--canonical-slug`` / ``--merge-id``.
 - ``revalidate``  re-validate existing unresolved proposals against the
                    CURRENT suppression gate and archive stale ones (issue
-                   athenaeum#481). Dry-run by default; ``--apply`` writes.
+                   athenaeum#481). Also archives a proposal whose sources were
+                   ALL folded into its own target as satisfied, distinct from
+                   one that's genuinely stale (issue athenaeum#2522). Dry-run
+                   by default; ``--apply`` writes.
 - ``recompare``   re-run the five-verdict comparator over every unresolved
                    proposal and ledger a verdict per source pair (issue
                    athenaeum#715). Dry-run by default; ``--apply`` writes to the
@@ -491,21 +494,52 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
                         }
                         for r in result.retired
                     ],
+                    # Issue athenaeum#2522: a block whose sources were all
+                    # folded into ITS OWN target is archived as satisfied,
+                    # not stale -- a distinct bucket from "retired" so a
+                    # caller can tell "already done" from "needs a human".
+                    "satisfied": [
+                        {
+                            "id": s.id,
+                            "merge_target_name": s.merge_target_name,
+                            "n_sources": s.n_sources,
+                            "confidence": s.confidence,
+                            "folded_into": s.folded_into,
+                        }
+                        for s in result.satisfied
+                    ],
                 }
             )
             + "\n"
         )
         return 0
 
-    if not result.retired:
+    if not result.retired and not result.satisfied:
         print("0 stale proposals — nothing to retire against the current gate")
         return 0
 
-    verb = "Retired" if result.applied else "Would retire"
-    print(f"{verb} {len(result.retired)} stale proposal(s) against the current suppression gate:")
-    for r in result.retired:
-        print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
-    if not result.applied:
+    if result.satisfied:
+        verb = "Archived" if result.applied else "Would archive"
+        print(
+            f"{verb} {len(result.satisfied)} already-satisfied proposal(s) "
+            "(every source already folded into its own target):"
+        )
+        for s in result.satisfied:
+            print(
+                f"  - {s.merge_target_name!r} ({s.n_sources} sources) "
+                f"-> folded into {s.folded_into!r}"
+            )
+
+    if result.retired:
+        verb = "Retired" if result.applied else "Would retire"
+        print(
+            f"{verb} {len(result.retired)} stale proposal(s) against "
+            "the current suppression gate:"
+        )
+        for r in result.retired:
+            print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
+
+    if not result.applied and (result.retired or result.satisfied):
         print(
             "\nDry-run — no changes written. Re-run with --apply to archive "
             "them to _pending_merges_archive.md."
