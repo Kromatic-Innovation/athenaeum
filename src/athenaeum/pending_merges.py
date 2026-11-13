@@ -281,14 +281,24 @@ def _withdraw_stale_widen_question(
 ) -> None:
     """Resolve (not re-raise) an EARLIER ``fold_widen_impossible`` pending
     question this exact fold previously raised against *dimension_name* —
-    issue athenaeum#2071: once the IDENTITY-coordinate case below applies the
-    fold automatically, the question athenaeum#2069 raised asking a human
-    "what should the canonical's value be?" is now stale (the answer
-    already landed on disk). Reuses :func:`athenaeum.answers.resolve_by_id`
+    issue athenaeum#2071: once the fold settles that dimension on its own,
+    the question athenaeum#2069 raised asking a human "what should the
+    canonical's value be?" is now stale (the answer already landed on
+    disk). Reuses :func:`athenaeum.answers.resolve_by_id`
     — the SAME flip-checkbox-and-archive-on-next-tick path a human
     answering by hand goes through — rather than inventing a second
     "withdraw" mechanism; a block this resolves gets archived on the next
     ``ingest-answers`` run exactly like any other answered question.
+
+    Issue athenaeum#2514 AC4: called PER DIMENSION, from inside the widen
+    loop, the moment that dimension stops needing a human — not once at
+    the end of a fold that succeeded. A fold refused on dimension B left
+    dimension A's already-moot question open forever, because the only
+    withdrawal ran after every refusal point; 12 such questions, made
+    stale by athenaeum#2083 on 2026-10-22, were still open three weeks
+    later. Whether the FOLD applies is a different question from whether
+    THIS dimension still needs an answer, and only the second one decides
+    this.
 
     Matches by ``entity == target_slug`` and the dimension name embedded in
     the question text (the exact phrasing the pending-decision branch below
@@ -330,12 +340,11 @@ def _withdraw_stale_widen_question(
             pending_path,
             pq.id,
             (
-                f"Resolved automatically (athenaeum#2071): the fold now "
-                f"applies with the canonical's {dimension_name!r} coordinate "
-                f"set to {resolved_value!r} — opaque-identifier dimension, "
-                "folded sources' ids preserved as aliases on the canonical. "
-                "No human adjudication needed for a name-collision-scan "
-                "approval."
+                f"Resolved automatically (athenaeum#2071, athenaeum#2514): "
+                f"the fold of proposal {proposal_id} settles the canonical's "
+                f"{dimension_name!r} coordinate as {resolved_value!r} without "
+                "a human — this question no longer needs an answer, whether "
+                "or not the fold itself goes on to apply."
             ),
         )
 
@@ -1744,6 +1753,56 @@ def _json_safe_coordinate(value: Any) -> Any:
     return value
 
 
+def _backfill_stub_canonical_coordinates(
+    prior_meta: dict[str, Any],
+    source_metas_in_order: list[dict[str, Any]],
+    *,
+    registry: DimensionRegistry,
+    human_approved: bool,
+) -> dict[str, Any]:
+    """Give a STUB canonical the separator coordinates its sources carry,
+    in place, and report what was filled (issue athenaeum#2514 AC3).
+
+    A stub is a canonical page with NO frontmatter whatsoever — either none
+    at all (the live corpus's five ``## From wiki/...`` pages) or an empty
+    ``{}`` block (the sixth). Both parse to an empty mapping, which is the
+    whole predicate: this never touches a canonical that carries any
+    frontmatter, so a page that deliberately omits ONE coordinate still
+    falls through to the pending-question path that exists to ask about it.
+
+    *source_metas_in_order* is consulted in order and the FIRST entry
+    carrying a concrete value for a dimension wins — the folded sources
+    first (they are the real evidence) and the proposal's own draft last.
+    Values round-trip through :func:`athenaeum.dimensions.coordinate_value` /
+    :func:`parsed_coordinate` / :func:`_write_coordinate`, the same pair the
+    widen loop itself uses, so no second frontmatter-key mapping exists to
+    drift.
+
+    HUMAN-APPROVED folds only, matching the athenaeum#2115 AC3 rule this
+    unblocks: the approval is what rules the pages to be the same thing, and
+    without it a backfill would be inventing a coordinate for a page no
+    human has looked at.
+    """
+    if not human_approved or prior_meta:
+        return {}
+    filled: dict[str, Any] = {}
+    for dimension in registry:
+        if not dimension.separates:
+            continue
+        for meta in source_metas_in_order:
+            value = (
+                parsed_coordinate(dimension, meta)
+                if dimension.kind == DimensionKind.INTERVAL
+                else coordinate_value(dimension, meta)
+            )
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            _write_coordinate(prior_meta, dimension, value)
+            filled[dimension.name] = value
+            break
+    return filled
+
+
 #: Phrase every ``fold_widen_impossible`` question carries (issue
 #: athenaeum#2069), shared by the raiser, the stale-question withdrawal and the
 #: answer read-back (issue athenaeum#2115) so the three cannot drift.
@@ -2109,6 +2168,29 @@ def _apply_fold_into_existing(
     if not isinstance(draft_meta, dict):
         draft_meta = {}
     widened_draft_meta = dict(draft_meta)
+    # Issue athenaeum#2514 AC3: a STUB canonical — no frontmatter at all, or
+    # an empty ``{}`` block — carries no coordinate on any dimension, so the
+    # athenaeum#2115 AC3 rule below ("a human approve is the identity
+    # ruling, so the canonical keeps its own class") has nothing to keep and
+    # falls straight through to raising the widen question again. Six of the
+    # eleven folds athenaeum#2115 was meant to unblock were stuck exactly
+    # there. Backfill from the folded sources FIRST, here in the preflight,
+    # so the repair reaches a fold that has never applied — the only kind
+    # that can be stuck.
+    backfilled_coordinates = _backfill_stub_canonical_coordinates(
+        prior_meta,
+        [source_metas[s] for s in folded_sources] + [draft_meta],
+        registry=registry,
+        human_approved=human_approved,
+    )
+    if backfilled_coordinates:
+        log.info(
+            "fold-stub-canonical-backfill proposal=%s canonical=%s coordinates=%s "
+            "— canonical page had no frontmatter to widen from",
+            pm.id,
+            target_slug,
+            sorted(backfilled_coordinates),
+        )
     coordinates_widened: dict[str, Any] = {}
     # Issue athenaeum#2071: dimension names resolved via the IDENTITY-kind
     # branch just below — the narrowing-invariant loop that follows this one
@@ -2129,14 +2211,23 @@ def _apply_fold_into_existing(
     #     human-approved fold, with the sources' differing values recorded.
     answered_dimensions: dict[str, tuple[str, str]] = {}
     kept_dimensions: dict[str, dict[str, Any]] = {}
+    # Issue athenaeum#2514 AC4: set per iteration, for the dimensions this
+    # fold settles WITHOUT a human. Any widen question still open on such a
+    # dimension is moot the instant it is set — see the withdrawal at the
+    # bottom of this loop for why that cannot wait for the fold to apply.
+    settled_without_human = False
     for dimension in registry:
         if not dimension.separates:
             continue
+        settled_without_human = False
         metas_in_order = [prior_meta, draft_meta] + [
             source_metas[s] for s in folded_sources
         ]
         try:
             widened_value = _widen_over_metas(dimension, metas_in_order)
+            # Every side agreed, or widened cleanly into one covering
+            # coordinate: nothing here for a human to adjudicate.
+            settled_without_human = True
         except CoordinateWidenImpossible as exc:
             if widen_path_eligible and dimension.kind == DimensionKind.IDENTITY:
                 # An opaque per-page identifier (``subject`` is the only
@@ -2171,6 +2262,7 @@ def _apply_fold_into_existing(
                     widened_value = chosen
                     identity_resolved_dimensions[dimension.name] = chosen
                     identity_aliases.extend(v for v in concrete_values if v != chosen)
+                    settled_without_human = True
                 else:
                     # Every side the widen saw is the sentinel/null —
                     # CoordinateWidenImpossible requires two concrete,
@@ -2194,6 +2286,7 @@ def _apply_fold_into_existing(
                 # hard refusal, and a canonical with NO class falls through
                 # to the question below.
                 widened_value = canonical_class
+                settled_without_human = True
                 kept_dimensions[dimension.name] = {
                     "kept": canonical_class,
                     "differing": sorted(
@@ -2207,6 +2300,7 @@ def _apply_fold_into_existing(
                 }
             elif widen_path_eligible and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
+                settled_without_human = True
             elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
                 # Issue athenaeum#2115: the closed answer set — every
@@ -2309,6 +2403,23 @@ def _apply_fold_into_existing(
         if widened_value != current_value:
             _write_coordinate(widened_draft_meta, dimension, widened_value)
             coordinates_widened[dimension.name] = _json_safe_coordinate(widened_value)
+        if settled_without_human:
+            # Issue athenaeum#2514 AC4: withdraw HERE, per dimension, not
+            # after the fold completes. "Does this dimension still need a
+            # human?" is answered now and is independent of whether the
+            # fold goes on to apply — the end-of-function withdrawal only
+            # ever ran for a fold that applied, so a fold refused on a
+            # LATER dimension stranded this one's question indefinitely.
+            # Idempotent and best-effort (see the helper): a dimension with
+            # no open question is a no-op, and an ANSWERED question is left
+            # alone for the answer read-back to consume.
+            _withdraw_stale_widen_question(
+                wiki_root / "_pending_questions.md",
+                target_slug,
+                dimension.name,
+                widened_value,
+                pm.id,
+            )
 
     for dimension in registry:
         if not dimension.separates:
@@ -2566,18 +2677,15 @@ def _apply_fold_into_existing(
                 *commit_b_rel_paths,
             )
 
-    # Issue athenaeum#2071: now that the fold has actually succeeded, resolve
-    # any STALE `fold_widen_impossible` pending question a prior
-    # (pre-athenaeum#2071) ingest-answers tick raised against one of the
-    # dimensions this fold just resolved automatically — done here, after
-    # every refusal point above, so a fold that ends up refused for an
-    # UNRELATED reason never withdraws a question that is still live.
-    if identity_resolved_dimensions:
-        pending_path = wiki_root / "_pending_questions.md"
-        for dim_name, resolved_value in identity_resolved_dimensions.items():
-            _withdraw_stale_widen_question(
-                pending_path, target_slug, dim_name, resolved_value, pm.id
-            )
+    # Issue athenaeum#2071's post-success withdrawal of the IDENTITY-resolved
+    # dimensions' stale questions used to live here. Issue athenaeum#2514 AC4
+    # moved it into the widen loop itself, which runs strictly earlier and
+    # covers a superset of the same dimensions — its premise ("a fold that
+    # ends up refused for an UNRELATED reason never withdraws a question
+    # that is still live") was exactly backwards: a question on a dimension
+    # this fold has already settled is not live, and keeping it open was
+    # what stranded 12 of them for three weeks.
+    #
     # Issue athenaeum#2115 AC4: the fold applied, so EVERY still-open widen
     # question naming this proposal (any dimension) is moot — withdraw it as
     # superseded. Answered ones are left alone (their answer was consumed).
