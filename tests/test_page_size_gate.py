@@ -26,8 +26,12 @@ This suite covers:
   - the run-summary counters (``ProcessingResult.oversize_suppressed`` /
     ``oversize_split`` / ``oversize_log_demoted``, via
     ``athenaeum.librarian._apply_tier3_results``), proving the three
-    dispositions are counted disjointly;
-  - the read-only AC3 enumeration helper, ``enumerate_oversize_pages``.
+    dispositions are counted disjointly.
+
+The former read-only AC3 enumeration helper, ``enumerate_oversize_pages``,
+was removed (issue athenaeum#2436 -- 0 src callers; it duplicated
+:func:`athenaeum.oversize_split.find_split_candidates`'s walk). Its
+coverage moved to ``tests/test_oversize_split.py``.
 
 No LLM, no network.
 """
@@ -45,6 +49,7 @@ from athenaeum import pii
 from athenaeum import rules as rules_module
 from athenaeum import tiers as tiers_module
 from athenaeum.answers import ingest_answers
+from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 from athenaeum.librarian import _apply_tier3_results, process_one
 from athenaeum.models import (
     ClassifiedEntity,
@@ -58,13 +63,11 @@ from athenaeum.models import (
 )
 from athenaeum.tiers import (
     DEFAULT_OVERSIZE_PAGE_ACTION,
-    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
     OVERSIZE_ESCALATION_CONFLICT_TYPES,
     VALID_OVERSIZE_PAGE_ACTIONS,
     check_page_size_gate,
     collapse_oversize_escalation_duplicates,
     demote_oversize_pages,
-    enumerate_oversize_pages,
     resolve_oversize_page_action,
     resolve_page_size_threshold_chars,
     tier3_derive_actions,
@@ -196,56 +199,72 @@ class TestResolveOversizePageAction:
 class TestCheckPageSizeGate:
     def test_under_threshold_returns_none(self) -> None:
         action = _update_action()
-        assert check_page_size_gate(action, "short body", "sessions/x.md", None) is None
+        meta: dict = {}
+        assert (
+            check_page_size_gate(action, "short body", "sessions/x.md", None, existing_meta=meta)
+            is None
+        )
+        assert "needs_split" not in meta
 
     def test_exactly_at_threshold_returns_none(self) -> None:
         """The threshold is inclusive on the "still mergeable" side -- a
         page exactly AT the limit is not yet an anomaly."""
         action = _update_action()
         body = "x" * DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-        assert check_page_size_gate(action, body, "sessions/x.md", None) is None
+        meta: dict = {}
+        assert (
+            check_page_size_gate(action, body, "sessions/x.md", None, existing_meta=meta) is None
+        )
+        assert "needs_split" not in meta
 
-    def test_over_threshold_default_review_returns_escalation(self) -> None:
+    def test_over_threshold_default_review_flags_needs_split_and_allows_merge(self) -> None:
+        """Issue athenaeum#2078 AC1 (operator ruling): an over-threshold page
+        under the default ``review`` action is no longer suppressed -- the
+        merge is allowed to proceed and the page is flagged ``needs_split``
+        in place on the caller's own ``existing_meta`` dict."""
         action = _update_action(name="Big Page")
         body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
-        result = check_page_size_gate(action, body, "sessions/x.md", None)
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
-        assert result.entity_name == "Big Page"
-        assert result.raw_ref == "sessions/x.md"
-        assert "athenaeum#1182" in result.description
-        assert action.observations in result.description
+        meta: dict = {}
+        result = check_page_size_gate(action, body, "sessions/x.md", None, existing_meta=meta)
+        assert result is None
+        assert meta["needs_split"] is True
 
     def test_review_action_explicit_config_matches_default(self) -> None:
         action = _update_action()
         body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
         config = {"librarian": {"oversize_page_action": "review"}}
-        result = check_page_size_gate(action, body, "sessions/x.md", config)
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
+        meta: dict = {}
+        result = check_page_size_gate(action, body, "sessions/x.md", config, existing_meta=meta)
+        assert result is None
+        assert meta["needs_split"] is True
 
     @pytest.mark.parametrize("reserved_action", ["split", "log_demote"])
-    def test_reserved_actions_without_path_degrade_to_review(
+    def test_reserved_actions_without_path_degrade_to_flag_and_merge(
         self, reserved_action: str
     ) -> None:
-        """split/log_demote are now IMPLEMENTED (issue athenaeum#1248), but both
-        need existing_path/wiki_root to do anything -- a caller that omits
-        them (like the bare 4-positional-arg calls throughout this class)
-        gets exactly ``review``'s behaviour, unchanged from before athenaeum#1248:
-        no raise, ever."""
+        """split/log_demote (issue athenaeum#1248) need existing_path/
+        wiki_root to do anything -- a caller that omits them (like the bare
+        calls throughout this class) gets exactly the same athenaeum#2078
+        flag-and-allow-merge degraded behaviour as ``review``, never a
+        raise."""
         action = _update_action(name="Big Page")
         body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
         config = {"librarian": {"oversize_page_action": reserved_action}}
-        result = check_page_size_gate(action, body, "sessions/x.md", config)
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
+        meta: dict = {}
+        result = check_page_size_gate(action, body, "sessions/x.md", config, existing_meta=meta)
+        assert result is None
+        assert meta["needs_split"] is True
 
     def test_custom_threshold_via_config(self) -> None:
         action = _update_action()
         config = {"librarian": {"page_size_threshold_chars": 20}}
-        assert check_page_size_gate(action, "x" * 20, "ref", config) is None
-        result = check_page_size_gate(action, "x" * 21, "ref", config)
-        assert isinstance(result, EscalationItem)
+        assert (
+            check_page_size_gate(action, "x" * 20, "ref", config, existing_meta={}) is None
+        )
+        meta: dict = {}
+        result = check_page_size_gate(action, "x" * 21, "ref", config, existing_meta=meta)
+        assert result is None
+        assert meta["needs_split"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -407,88 +426,6 @@ class TestOversizeSuppressedCounter:
         )
 
         assert result.oversize_suppressed == 0
-
-
-# ---------------------------------------------------------------------------
-# AC3 — read-only enumeration
-# ---------------------------------------------------------------------------
-
-
-class TestEnumerateOversizePages:
-    def test_only_pages_over_threshold_are_returned(self, tmp_path: Path) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        (wiki / "small.md").write_text(
-            "---\nuid: aaaa1111\ntype: person\nname: Small\n---\n\nShort body.\n"
-        )
-        big_body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 50)
-        (wiki / "big.md").write_text(
-            f"---\nuid: bbbb2222\ntype: project\nname: Big\n---\n\n{big_body}\n"
-        )
-
-        results = enumerate_oversize_pages(wiki)
-
-        assert [p.path.name for p in results] == ["big.md"]
-        assert results[0].chars > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-        assert results[0].entity_type == "project"
-
-    def test_underscore_prefixed_files_are_skipped(self, tmp_path: Path) -> None:
-        """Mirrors EntityIndex._load and models.py's _-prefix exclusion —
-        explicitly kept unchanged by athenaeum#1182 (the genuinely huge
-        _-prefixed files are already correctly excluded from the entity
-        index and never merged into)."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        big_body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 50)
-        (wiki / "_pending_merges_archive.md").write_text(big_body)
-
-        results = enumerate_oversize_pages(wiki)
-
-        assert results == []
-
-    def test_missing_type_reports_empty_string(self, tmp_path: Path) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        big_body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 50)
-        (wiki / "no-type.md").write_text(
-            f"---\nuid: cccc3333\nname: No Type\n---\n\n{big_body}\n"
-        )
-
-        results = enumerate_oversize_pages(wiki)
-
-        assert len(results) == 1
-        assert results[0].entity_type == ""
-
-    def test_sorted_largest_first(self, tmp_path: Path) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        small_big = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 50)
-        large_big = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 5000)
-        (wiki / "a-small-big.md").write_text(
-            f"---\nuid: dddd4444\nname: A\n---\n\n{small_big}\n"
-        )
-        (wiki / "b-large-big.md").write_text(
-            f"---\nuid: eeee5555\nname: B\n---\n\n{large_big}\n"
-        )
-
-        results = enumerate_oversize_pages(wiki)
-
-        assert [p.path.name for p in results] == ["b-large-big.md", "a-small-big.md"]
-
-    def test_custom_threshold_overrides_config(self, tmp_path: Path) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        (wiki / "page.md").write_text(
-            "---\nuid: ffff6666\nname: Page\n---\n\n" + ("x" * 100) + "\n"
-        )
-
-        assert enumerate_oversize_pages(wiki, threshold=50) != []
-        assert enumerate_oversize_pages(wiki, threshold=1_000_000) == []
-
-    def test_empty_wiki_returns_empty_list(self, tmp_path: Path) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        assert enumerate_oversize_pages(wiki) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1226,6 +1163,27 @@ class TestOversizeLogDemoteContactRecordSettle:
 # ---------------------------------------------------------------------------
 
 
+def _oversize_page_item(entity_name: str, ref: str) -> EscalationItem:
+    """Build an ``oversize_page``-conflict :class:`EscalationItem` directly.
+
+    Since issue athenaeum#2078, ``check_page_size_gate`` itself never returns
+    this conflict type any more (every real caller passes ``existing_meta``,
+    so the gate always flags ``needs_split`` and lets the merge proceed
+    instead of escalating) -- this mirrors the construction
+    :class:`TestOversizeSuppressedCounter` already uses to exercise the
+    ``oversize_page`` FAMILY value (:data:`OVERSIZE_ESCALATION_CONFLICT_TYPES`)
+    still carried by :func:`tier4_escalate`'s dedup and by
+    :func:`collapse_oversize_escalation_duplicates`'s migration path, without
+    pretending the now-dead escalation path still fires.
+    """
+    return EscalationItem(
+        raw_ref=ref,
+        entity_name=entity_name,
+        conflict_type="oversize_page",
+        description=f"Page {entity_name!r} is over the page-size threshold (ref={ref}).",
+    )
+
+
 class TestOversizeEscalationDedup:
     """The "review" disposition (issue athenaeum#1182) used to write a brand-new
     ``oversize_page`` block into ``_pending_questions.md`` on EVERY suppressed
@@ -1234,31 +1192,34 @@ class TestOversizeEscalationDedup:
     oversize-page-family escalation (:data:`OVERSIZE_ESCALATION_CONFLICT_TYPES`)
     for an entity that already has one UNANSWERED, keyed on "currently
     unanswered" so an answered/archived block lets a fresh one through.
+
+    These tests build ``oversize_page`` items directly via
+    :func:`_oversize_page_item` rather than through ``check_page_size_gate``
+    (issue athenaeum#2078 retired that return path from the real gate --
+    see that helper's docstring); the dedup/collapse invariant under test
+    here is unchanged and still asserted end to end through the real
+    ``tier4_escalate``.
     """
 
     def test_second_suppressed_merge_does_not_duplicate_the_block(
         self, wiki_dir: Path
     ) -> None:
-        """AC2's counter-example, run for real through check_page_size_gate +
-        tier4_escalate: two separate suppressed merges against the same
-        over-threshold page leave exactly ONE unanswered oversize_page block,
-        not two -- an explicit BEFORE/AFTER block-count assertion."""
+        """AC2's counter-example: two separate suppressed merges against the
+        same over-threshold entity leave exactly ONE unanswered
+        oversize_page block, not two -- an explicit BEFORE/AFTER
+        block-count assertion."""
         pending = wiki_dir / "_pending_questions.md"
-        action = _update_action(name="Kromatic")
-        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
 
         # First suppressed merge -- creates the one durable block.
-        first = check_page_size_gate(action, body, "sessions/one.md", None)
-        assert isinstance(first, EscalationItem)
+        first = _oversize_page_item("Kromatic", "sessions/one.md")
         tier4_escalate([first], pending)
 
         before_count = pending.read_text().count("**Conflict type**: oversize_page")
         assert before_count == 1
 
-        # Second suppressed merge, same entity, same over-threshold page --
-        # this is the defect: pre-fix, this appended a SECOND block.
-        second = check_page_size_gate(action, body, "sessions/two.md", None)
-        assert isinstance(second, EscalationItem)
+        # Second suppressed merge, same entity -- this is the defect:
+        # pre-fix, this appended a SECOND block.
+        second = _oversize_page_item("Kromatic", "sessions/two.md")
         suppressed = tier4_escalate([second], pending)
 
         after_content = pending.read_text()
@@ -1275,11 +1236,8 @@ class TestOversizeEscalationDedup:
         """AC3: an entity with no existing unanswered escalation still gets
         one created exactly as before -- no regression to the happy path."""
         pending = wiki_dir / "_pending_questions.md"
-        action = _update_action(name="Fresh Entity")
-        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
 
-        item = check_page_size_gate(action, body, "sessions/x.md", None)
-        assert isinstance(item, EscalationItem)
+        item = _oversize_page_item("Fresh Entity", "sessions/x.md")
         suppressed = tier4_escalate([item], pending)
 
         assert suppressed == 0
@@ -1291,15 +1249,8 @@ class TestOversizeEscalationDedup:
         """Two DIFFERENT oversized entities must not collapse into one --
         dedup is per-entity, not global."""
         pending = wiki_dir / "_pending_questions.md"
-        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
-        item_a = check_page_size_gate(
-            _update_action(name="Entity A"), body, "sessions/a.md", None
-        )
-        item_b = check_page_size_gate(
-            _update_action(name="Entity B"), body, "sessions/b.md", None
-        )
-        assert isinstance(item_a, EscalationItem)
-        assert isinstance(item_b, EscalationItem)
+        item_a = _oversize_page_item("Entity A", "sessions/a.md")
+        item_b = _oversize_page_item("Entity B", "sessions/b.md")
         tier4_escalate([item_a, item_b], pending)
         content = pending.read_text()
         assert content.count("**Conflict type**: oversize_page") == 2
@@ -1312,11 +1263,8 @@ class TestOversizeEscalationDedup:
         merge against the same entity creates a fresh escalation again."""
         pending = wiki_dir / "_pending_questions.md"
         raw_root = wiki_dir.parent / "raw"
-        action = _update_action(name="Kromatic")
-        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
 
-        first = check_page_size_gate(action, body, "sessions/one.md", None)
-        assert isinstance(first, EscalationItem)
+        first = _oversize_page_item("Kromatic", "sessions/one.md")
         tier4_escalate([first], pending)
         assert pending.read_text().count("**Conflict type**: oversize_page") == 1
 
@@ -1337,8 +1285,7 @@ class TestOversizeEscalationDedup:
         assert "**Conflict type**: oversize_page" not in pending.read_text()
 
         # Next suppressed merge against the SAME entity creates a FRESH block.
-        second = check_page_size_gate(action, body, "sessions/two.md", None)
-        assert isinstance(second, EscalationItem)
+        second = _oversize_page_item("Kromatic", "sessions/two.md")
         suppressed = tier4_escalate([second], pending)
         assert suppressed == 0
         content = pending.read_text()
@@ -1357,13 +1304,7 @@ class TestOversizeEscalationDedup:
             "oversize_log_demote",
         }
         pending = wiki_dir / "_pending_questions.md"
-        first = check_page_size_gate(
-            _update_action(name="Kromatic"),
-            "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1),
-            "sessions/one.md",
-            None,
-        )
-        assert isinstance(first, EscalationItem)
+        first = _oversize_page_item("Kromatic", "sessions/one.md")
         tier4_escalate([first], pending)
 
         split_item = EscalationItem(
@@ -1385,15 +1326,8 @@ class TestOversizeEscalationDedup:
         ONE ``tier4_escalate`` call must still collapse to one block
         (in-batch collapse, not just cross-call)."""
         pending = wiki_dir / "_pending_questions.md"
-        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
-        item1 = check_page_size_gate(
-            _update_action(name="Kromatic"), body, "sessions/one.md", None
-        )
-        item2 = check_page_size_gate(
-            _update_action(name="Kromatic"), body, "sessions/two.md", None
-        )
-        assert isinstance(item1, EscalationItem)
-        assert isinstance(item2, EscalationItem)
+        item1 = _oversize_page_item("Kromatic", "sessions/one.md")
+        item2 = _oversize_page_item("Kromatic", "sessions/two.md")
         suppressed = tier4_escalate([item1, item2], pending)
         assert suppressed == 1
         content = pending.read_text()

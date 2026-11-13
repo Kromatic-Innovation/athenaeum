@@ -203,8 +203,6 @@ src/athenaeum/tiers.py::parse_merge_ops_response
 src/athenaeum/tiers.py::tier1_programmatic_match
 # turns a tier-3 answer into actions
 src/athenaeum/tiers.py::tier3_derive_actions
-# the write path a tier-3 answer takes
-src/athenaeum/tiers.py::tier3_write
 # gates which create-name classifications reach a model
 src/athenaeum/tiers.py::gate_create_name_classifications
 # partitions classifications before they are acted on

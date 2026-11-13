@@ -52,6 +52,7 @@ from athenaeum.batch import (
 )
 from athenaeum.cli import main
 from athenaeum.compile_routing import read_compile_routes
+from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 from athenaeum.intake import discover_raw_files
 from athenaeum.librarian import (
     EXIT_LIBRARIAN_REFUSAL,
@@ -64,7 +65,6 @@ from athenaeum.models import EntityIndex, TokenUsage, parse_frontmatter
 from athenaeum.schemas import KNOWN_TYPES
 from athenaeum.tiers import (
     DEFAULT_CLASSIFY_MODEL,
-    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
     tier1_programmatic_match,
 )
 
@@ -1898,8 +1898,8 @@ class TestBatchUsageAccounting:
     def test_execute_batch_threads_knob_to_every_result(self) -> None:
         """athenaeum#781: execute_batch's ``knob=`` kwarg tags the WHOLE batch (every
         request in one submit shares the same knob -- tier2_classify and
-        tier3_write batches are each submitted in their own execute_batch
-        call, see process_batch_run)."""
+        tier3_derive_actions batches are each submitted in their own
+        execute_batch call, see process_batch_run)."""
         client = _FakeClient(lambda params: "ok", allow_sync=False)
         usage = TokenUsage()
         execute_batch(

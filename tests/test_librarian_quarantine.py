@@ -513,9 +513,10 @@ def test_budget_looping_file_lands_partial_progress_and_is_quarantined_after_n_r
     assert entry["violations"] == 1
 
     # Run 2: the raw file is re-derived from scratch (LLM tiers are
-    # non-deterministic-by-design; see tier3_write's docstring on why a
-    # partially-completed file is retried whole, not resumed action-by-
-    # action) and crosses the threshold — quarantined. The partial progress
+    # non-deterministic-by-design; see tier3_derive_actions's docstring on
+    # why a partially-completed file is retried whole, not resumed
+    # action-by-action) and crosses the threshold — quarantined. The partial
+    # progress
     # from run 1 already landed on disk regardless of what happens to the
     # raw file afterwards.
     caplog.clear()
