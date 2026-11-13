@@ -13,8 +13,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
@@ -71,7 +70,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.reconcile import run_reconcile
 
-    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     if not knowledge_root.is_dir():
         print(f"Knowledge root not found: {knowledge_root}", file=sys.stderr)
         return 1

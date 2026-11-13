@@ -87,7 +87,12 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _positive_int
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _positive_int,
+    _resolve_knowledge_root,
+)
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config, resolve_cache_dir
 from athenaeum.memory_discovery import (
@@ -604,7 +609,7 @@ def run_import(
 def _cmd_import_memory(args: argparse.Namespace) -> int:
     from athenaeum.provider import resolve_provider
 
-    knowledge_root = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args)
     cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None))
     cache_dir.mkdir(parents=True, exist_ok=True)
     config = load_config(knowledge_root) if knowledge_root.is_dir() else None

@@ -218,6 +218,16 @@ def default_knowledge_root_under_lock(
     ``tests/test_push_metrics_cli.py`` already uses for a single module
     (``athenaeum._cmd_push_metrics.DEFAULT_KNOWLEDGE_ROOT``); this
     generalizes it to N modules sharing one held lock.
+
+    Issue athenaeum#2445 routed several ``_cmd_*.py`` modules' knowledge-root
+    fallback through :func:`athenaeum._cli_shared._resolve_knowledge_root`
+    instead of each resolving its own locally-imported
+    ``DEFAULT_KNOWLEDGE_ROOT`` inline -- ``_cmd_repair.py`` is one of them,
+    and no longer binds the name at all. For a module in that shape, the
+    actual fallback-when-omitted source of truth is
+    ``athenaeum._cli_shared``'s own bound ``DEFAULT_KNOWLEDGE_ROOT``, so
+    ``_redirect`` patches that instead of raising ``AttributeError`` on a
+    name the target module no longer has.
     """
     from athenaeum.runlock import RunLock
 
@@ -229,7 +239,12 @@ def default_knowledge_root_under_lock(
     def _redirect(*module_names: str) -> Path:
         for dotted in module_names:
             module = importlib.import_module(dotted)
-            monkeypatch.setattr(module, "DEFAULT_KNOWLEDGE_ROOT", fake_root)
+            if hasattr(module, "DEFAULT_KNOWLEDGE_ROOT"):
+                monkeypatch.setattr(module, "DEFAULT_KNOWLEDGE_ROOT", fake_root)
+            else:
+                import athenaeum._cli_shared as cli_shared_module
+
+                monkeypatch.setattr(cli_shared_module, "DEFAULT_KNOWLEDGE_ROOT", fake_root)
         return fake_root
 
     try:
