@@ -199,59 +199,75 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
-# Librarian-section yaml keys that USED TO resolve to real behavior and no
-# longer do -- a stale ``athenaeum.yaml`` left over from before the key's
-# removal must not silently change meaning (it can't anymore: nothing reads
-# it), and it must not silently look ignored either. Map each removed key to
-# the issue that removed it so a stale operator config gets a loud, specific
-# WARNING instead of quietly doing nothing. Mirrors the WARN-and-fall-back
+# Yaml keys that USED TO resolve to real behavior and no longer do -- a
+# stale ``athenaeum.yaml`` left over from before the key's removal must not
+# silently change meaning (it can't anymore: nothing reads it), and it must
+# not silently look ignored either. Map each removed key to the issue that
+# removed it so a stale operator config gets a loud, specific WARNING
+# instead of quietly doing nothing. Mirrors the WARN-and-fall-back
 # convention :func:`_env_number` established for malformed values -- same
 # "same typo/same stale-key, same visible outcome" goal, applied to keys
 # instead of values.
 #
-# A key containing a ``.`` (for example ``delta.enabled``) names a nested
-# key one level down -- ``section.subkey`` under ``librarian`` -- rather
-# than a top-level ``librarian`` key, for a removed switch that lived
-# alongside other subkeys of the same section that are still read (for
-# example ``librarian.delta.max_affected_clusters``).
-_REMOVED_LIBRARIAN_KEYS: dict[str, str] = {
-    "merge_worthiness_gate_enabled": (
+# Each key is the FULL dotted path from the yaml root: ``section.subkey``
+# for a top-level removed key (for example ``librarian.retention``,
+# ``resolve.model``), or ``section.subsection.subkey`` one level deeper
+# (for example ``librarian.delta.enabled``) for a removed switch that lived
+# alongside other subkeys of the same subsection that are still read (for
+# example ``librarian.delta.max_affected_clusters``). Originally scoped to
+# ``librarian.*`` alone (hence the plain, unprefixed keys of the first few
+# entries below); generalized in athenaeum#2463 to cover removed keys under
+# any top-level section, since not every removed key lives under
+# ``librarian``.
+_REMOVED_CONFIG_KEYS: dict[str, str] = {
+    "librarian.merge_worthiness_gate_enabled": (
         "removed in athenaeum#1582 per the athenaeum#1251 measurement decision "
         "(the containment gate suppressed 0 of 28,951 candidate pairs); this "
         "key is no longer read and has no effect on merge behavior"
     ),
-    "deprecated_cli_surfaces_enabled": (
+    "librarian.deprecated_cli_surfaces_enabled": (
         "removed in athenaeum#2457 together with the surfaces it announced "
         "(`athenaeum merges` and `athenaeum questions`, deleted in 0.24.0 per "
         "athenaeum#1992); it only ever toggled their stderr deprecation "
         "warning, so with no deprecated surface left it is no longer read and "
         "has no effect"
     ),
-    "relatedness_writer": (
+    "librarian.relatedness_writer": (
         "removed in athenaeum#2461; the compile-time related: edge writer is "
         "now always on and this key is no longer read"
     ),
-    "delta.enabled": (
+    "librarian.delta.enabled": (
         "removed in athenaeum#2461; delta compilation is now always on and "
         "this key is no longer read. Run `athenaeum compile --full` for a "
         "whole-corpus compile instead"
     ),
-    "delta.live_client": (
+    "librarian.delta.live_client": (
         "removed in athenaeum#2461; the delta live client is now always on "
         "and this key is no longer read"
     ),
-    "name_collision_scan": (
+    "librarian.name_collision_scan": (
         "removed in athenaeum#2461; the nightly name-collision scan is now "
         "always on and this key is no longer read"
     ),
-    "qualified_name_scan": (
+    "librarian.qualified_name_scan": (
         "removed in athenaeum#2461; the qualified-name scan is now always "
         "on and this key is no longer read"
     ),
-    "retention": (
+    "librarian.retention": (
         "removed in athenaeum#2462; the enforcement module it configured was "
         "unwired (no caller ever read it) and has been deleted -- this key "
         "never had any effect"
+    ),
+    "resolve.model": (
+        "removed in athenaeum#2463; `athenaeum.resolutions._get_model` reads "
+        "only `models.resolve` now -- set that key instead. This key is no "
+        "longer read and has no effect"
+    ),
+    "contradiction.resolved_similarity_threshold": (
+        "removed in athenaeum#2463; retire-on-move (athenaeum#261) and "
+        "footnote-targeted detection (athenaeum#262) made the knob moot, so "
+        "Tier-4 decision-log suppression always uses the code default (0.83) "
+        "now -- this key is no longer read and has no effect"
     ),
 }
 
@@ -291,22 +307,24 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
         else:
             result[key] = user_val
 
-    librarian_cfg = result.get("librarian")
-    if isinstance(librarian_cfg, dict):
-        for removed_key, reason in _REMOVED_LIBRARIAN_KEYS.items():
-            if "." in removed_key:
-                section, _, subkey = removed_key.partition(".")
-                section_cfg = librarian_cfg.get(section)
-                present = isinstance(section_cfg, dict) and subkey in section_cfg
-            else:
-                present = removed_key in librarian_cfg
-            if present:
-                logger.warning(
-                    "Ignoring removed config key librarian.%s in %s: %s.",
-                    removed_key,
-                    config_path,
-                    reason,
-                )
+    for removed_key, reason in _REMOVED_CONFIG_KEYS.items():
+        section, _, rest = removed_key.partition(".")
+        section_cfg = result.get(section)
+        if not isinstance(section_cfg, dict):
+            continue
+        if "." in rest:
+            subsection, _, subkey = rest.partition(".")
+            nested_cfg = section_cfg.get(subsection)
+            present = isinstance(nested_cfg, dict) and subkey in nested_cfg
+        else:
+            present = rest in section_cfg
+        if present:
+            logger.warning(
+                "Ignoring removed config key %s in %s: %s.",
+                removed_key,
+                config_path,
+                reason,
+            )
 
     return result
 
@@ -2007,8 +2025,8 @@ def resolve_name_similarity_threshold(config: dict[str, Any] | None) -> float:
     today (`NoMatch`).
 
     Deliberately its OWN key — issue athenaeum#1615 AC6 is explicit that no
-    code path may reuse `resolve_resolved_similarity_threshold`'s 0.83
-    (`athenaeum.fingerprint`), which was tuned for claim-pair resolution
+    code path may reuse `athenaeum.fingerprint._DEFAULT_RESOLVED_SIMILARITY_THRESHOLD`'s
+    0.83, which was tuned for claim-pair resolution
     (matching two DESCRIPTIONS of a fact), not short entity names. A wrong
     merge here welds two real people/companies/projects together and is
     hard to detect, so this ships HIGHER than the claim-pair value: 0.90.
@@ -4395,9 +4413,10 @@ def resolve_model(
     the operator actually set it — no seed in ``_DEFAULTS`` (issue athenaeum#231).
     Non-string or blank yaml values fall through to *default*. The
     contradiction-resolver model routes through here too, via
-    :func:`athenaeum.resolutions._get_model` (knob ``resolve``); that
-    wrapper threads the legacy ``resolve.model`` yaml key in as *default*
-    so it sits below ``models.resolve`` but above the code default.
+    :func:`athenaeum.resolutions._get_model` (knob ``resolve``), passing
+    :data:`athenaeum.resolutions.DEFAULT_RESOLVE_MODEL` straight through as
+    *default* -- the legacy ``resolve.model`` yaml key it used to thread in
+    below ``models.resolve`` was removed in athenaeum#2463.
     """
     env = os.environ.get(env_var)
     if env:
@@ -5260,9 +5279,7 @@ search_backend: vector
 #   (env: ATHENAEUM_CLASSIFY_MODEL).
 # write: Tier-3 writer (env: ATHENAEUM_WRITE_MODEL).
 # topic: recall query-topic extraction (env: ATHENAEUM_TOPIC_MODEL).
-# resolve: contradiction resolver (env: ATHENAEUM_RESOLVE_MODEL). The legacy
-#   ``resolve.model`` key below still works, but is checked only when
-#   ``models.resolve`` is unset. Prefer this block for all four knobs.
+# resolve: contradiction resolver (env: ATHENAEUM_RESOLVE_MODEL).
 # models:
 #   classify: claude-haiku-4-5-20251001
 #   write: claude-sonnet-5
@@ -5293,16 +5310,12 @@ search_backend: vector
 #   50 to 250 in issue athenaeum#187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
 # contradiction:
 #   resolve_max_per_run: 250  # raised from 50 in athenaeum#187
-#   resolved_similarity_threshold: 0.83  # cosine threshold, decision-log match (athenaeum#211)
 
 # Contradiction resolver (issue athenaeum#126). See docs/design/auto-resolve.md for the
-# full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
-# model: LEGACY key for the model used to propose a winner once Haiku flags a
-#   contradiction. Prefer ``models.resolve`` above; this key is read only when
-#   ``models.resolve`` is unset, and is kept working for pre-existing configs.
-#   Defaults to claude-opus-5. Env override: ATHENAEUM_RESOLVE_MODEL.
-# resolve:
-#   model: claude-opus-5
+# full knob set (auto_apply, auto_apply_threshold, full_body_token_cap). The
+# model used to propose a winner once Haiku flags a contradiction reads
+# ``models.resolve`` (see the model block above); env override:
+# ATHENAEUM_RESOLVE_MODEL.
 
 # Pluggable storage-surface layer (issue athenaeum#429). Maps each entity class (the
 # wiki frontmatter `type`) onto a STORAGE ADAPTER — a backing store + a corpus

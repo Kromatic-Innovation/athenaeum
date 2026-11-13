@@ -48,7 +48,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -303,87 +302,20 @@ def fingerprint_from_description(
 
 
 # ---------------------------------------------------------------------------
-# Deprecated suppression knobs (issue athenaeum#262, slice C of athenaeum#259)
+# Resolved-similarity threshold (issue athenaeum#211)
 # ---------------------------------------------------------------------------
 #
-# ``resolved_similarity_threshold`` (athenaeum#211) and ``not_a_conflict_ttl_days``
-# (athenaeum#251) exist ONLY to babysit the permanent-raw design: they suppress
-# re-detection of the same raw atoms (forever, or for a TTL window). With
-# retire-on-move (athenaeum#261) the raw atom is gone after a fact lands in the wiki,
-# and with footnote-targeting (athenaeum#262) re-detection compares NEW intake against
-# the wiki footnote — not the raw corpus — so the same atom is never re-swept.
-# Both knobs are therefore largely moot. They are DEPRECATED, not removed: a
-# config that still sets them keeps working (tolerate), but emits a one-time
-# warning so operators can drop them. Removal is tracked as a follow-up.
+# This knob existed ONLY to babysit the permanent-raw design: it suppressed
+# re-detection of the same raw atoms. With retire-on-move (athenaeum#261) the raw
+# atom is gone after a fact lands in the wiki, and with footnote-targeting
+# (athenaeum#262) re-detection compares NEW intake against the wiki footnote — not
+# the raw corpus — so the same atom is never re-swept. The knob was therefore
+# moot; it was deprecated (tolerated with a warning) in athenaeum#262 and the
+# ``contradiction.resolved_similarity_threshold`` yaml key plus the env-var
+# override were removed outright in athenaeum#2463. Tier-4 decision-log matching
+# (see :mod:`athenaeum.tiers`) now always uses this code default.
 
-# One warning per key per process — nightly resolves these repeatedly and we
-# do not want to flood the log. Tests clear this set to re-arm the warning.
-_DEPRECATED_CONFIG_WARNED: set[str] = set()
-
-
-def _warn_deprecated_suppression_knob(key: str, env_var: str) -> None:
-    """Emit a one-time deprecation warning for a moot suppression knob (athenaeum#262)."""
-    if key in _DEPRECATED_CONFIG_WARNED:
-        return
-    _DEPRECATED_CONFIG_WARNED.add(key)
-    log.warning(
-        "config: contradiction.%s (env %s) is DEPRECATED (issue athenaeum#262). With "
-        "retire-on-move (athenaeum#261) + footnote-targeted detection (athenaeum#262) the raw "
-        "atom it suppressed no longer re-enters the nightly sweep, so the knob "
-        "is moot. It is still honored for now; remove it from athenaeum.yaml "
-        "to silence this warning.",
-        key,
-        env_var,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Resolved-similarity threshold (issue athenaeum#211 — DEPRECATED by athenaeum#262)
-# ---------------------------------------------------------------------------
-
-_ENV_RESOLVED_SIMILARITY_THRESHOLD = "ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD"
 _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD = 0.83
-
-
-def resolve_resolved_similarity_threshold(
-    config: dict[str, Any] | None = None,
-) -> float:
-    """Resolve the cosine similarity threshold for decision-log matching.
-
-    Precedence: env var ``ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`` >
-    ``contradiction.resolved_similarity_threshold`` in config > default
-    (0.83).  Mirrors :func:`athenaeum.cross_scope.resolve_similarity_threshold`.
-
-    DEPRECATED (issue athenaeum#262): see :func:`_warn_deprecated_suppression_knob`. An
-    explicit env or config value still wins (tolerate) but logs a one-time
-    deprecation warning; the default path stays silent.
-    """
-    env_val = os.environ.get(_ENV_RESOLVED_SIMILARITY_THRESHOLD)
-    if env_val:
-        try:
-            value = float(env_val.strip())
-            _warn_deprecated_suppression_knob(
-                "resolved_similarity_threshold", _ENV_RESOLVED_SIMILARITY_THRESHOLD
-            )
-            return value
-        except ValueError:
-            pass
-    if config is not None:
-        contradiction_cfg = config.get("contradiction")
-        if not isinstance(contradiction_cfg, dict):
-            contradiction_cfg = {}
-        raw = contradiction_cfg.get("resolved_similarity_threshold")
-        try:
-            if raw is not None:
-                value = float(raw)
-                _warn_deprecated_suppression_knob(
-                    "resolved_similarity_threshold",
-                    _ENV_RESOLVED_SIMILARITY_THRESHOLD,
-                )
-                return value
-        except (TypeError, ValueError):
-            pass
-    return _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
 
 
 # ---------------------------------------------------------------------------

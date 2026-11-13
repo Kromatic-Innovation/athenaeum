@@ -102,6 +102,7 @@ from athenaeum.entity_resolution import (
     resolve_same_subject,
 )
 from athenaeum.fingerprint import (
+    _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
     _member_key_str,
     _pair_text_from_passages,
     extract_passages,
@@ -110,7 +111,6 @@ from athenaeum.fingerprint import (
     knowledge_root_from_pending,
     normalize_side,
     record_resolution,
-    resolve_resolved_similarity_threshold,
 )
 from athenaeum.intake import discover_auto_memory_files
 from athenaeum.json_utils import (
@@ -7650,10 +7650,13 @@ def tier4_escalate(
     knowledge_root = knowledge_root_from_pending(pending_path)
     suppressed_count = 0
 
-    # Issue athenaeum#211: threshold and embedder resolved once per call (not per item).
-    # The embedder is embed_texts from athenaeum.search; it memoizes the EF
-    # internally and returns None when chromadb is absent (graceful degradation).
-    _similarity_threshold = resolve_resolved_similarity_threshold(config)
+    # Issue athenaeum#211: embedder resolved once per call (not per item). The
+    # embedder is embed_texts from athenaeum.search; it memoizes the EF
+    # internally and returns None when chromadb is absent (graceful
+    # degradation). The threshold was config/env-overridable until
+    # athenaeum#2463 removed the (deprecated, athenaeum#262) override surface --
+    # it is now always the code default.
+    _similarity_threshold = _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
     _embedder = embed_texts
 
     # Late-import to avoid a hard module-load cycle with resolutions.py

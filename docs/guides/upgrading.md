@@ -191,6 +191,34 @@ This is unrelated to the live raw-intake retention reporting the librarian
 pipeline still runs (the size-threshold check that WARNs when a raw source
 tree crosses its configured bound) — that stays exactly as it was.
 
+## I want to know what's gone: two deprecated yaml keys
+
+Two yaml keys that were deprecated-but-tolerated are now removed outright:
+
+| Removed key | Replacement |
+|---|---|
+| `resolve.model` | `models.resolve` |
+| `contradiction.resolved_similarity_threshold` | nothing — the knob is gone; the contradiction resolver always uses its built-in default now |
+
+`resolve.model` was the original spelling of the resolver's model knob;
+`models.resolve` has been the preferred key for a long time and is the only
+one read now. If your `athenaeum.yaml` still sets `resolve.model`,
+move the same value to `models.resolve`.
+
+`contradiction.resolved_similarity_threshold` tuned the cosine-similarity
+threshold used to recognize a re-detected contradiction as one already
+settled in the decision log. With the raw atoms it protected against now
+retired on move into the wiki, the knob stopped doing anything useful and
+was deprecated with a warning; it is now ignored entirely, with no
+replacement to set — the resolver always uses its built-in default.
+
+A stale `athenaeum.yaml` still setting either key loads fine; each key is
+ignored and logged with the same warning every other removed key gets.
+
+The matching environment variable `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`
+is gone too; setting it now has no effect and produces no warning, the same
+as every other removed environment variable.
+
 ## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
 Each of these commands existed to repair data left behind by one specific,
