@@ -20,6 +20,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
+
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -496,3 +498,77 @@ class TestTier4MemberKeyHumanVerdictAutoApply:
         # key) is non-enacting → suppressed with no block.
         assert suppressed == 1
         assert not pending.exists() or "KrobarFounding2" not in pending.read_text()
+
+
+class TestResolvedSimilarityThresholdConfigRemoved:
+    """athenaeum#2463: ``contradiction.resolved_similarity_threshold`` no longer
+    influences Tier-4 cosine-similarity suppression.
+
+    The key was DEPRECATED-but-tolerated in athenaeum#262 (a config/env override
+    still won, with a one-time warning) and removed outright in athenaeum#2463:
+    ``tier4_escalate`` now always uses the code default
+    (:data:`athenaeum.fingerprint._DEFAULT_RESOLVED_SIMILARITY_THRESHOLD`,
+    0.83), regardless of what the config sets.
+
+    Regression test: on pre-athenaeum#2463 code, setting the config key to a
+    threshold ABOVE the borderline cosine score below would flip this pair
+    from suppressed to escalated. This test fails on that code and passes
+    once the config override is removed.
+    """
+
+    def test_config_threshold_override_no_longer_changes_suppression(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _knowledge_root(tmp_path)
+        pending = root / "wiki" / "_pending_questions.md"
+
+        stored_pair_text = _pair_text_from_passages(CLAIM_A, CLAIM_B)
+        fp_original = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
+        record_resolution(
+            root,
+            fingerprint=fp_original,
+            verdict="not_a_conflict",
+            resolved_by="human",
+            source_verdict_id="cfg-override-test",
+            pair_text=stored_pair_text,
+        )
+
+        new_pair_text = _pair_text_from_passages(CLAIM_A_DRIFTED, CLAIM_B_DRIFTED)
+        cosine = sum(
+            a * b for a, b in zip(_VEC_KROBAR_FOUNDING, _VEC_KROBAR_FOUNDING_DRIFTED)
+        )
+        # Precondition: cosine sits at/above the 0.83 code default but below
+        # the config override this test sets, so the two paths disagree
+        # unless the override is ignored.
+        assert 0.83 <= cosine < 0.99, f"precondition violated: cosine={cosine}"
+
+        embedder = _stub_embedder_factory(
+            {
+                new_pair_text: _VEC_KROBAR_FOUNDING_DRIFTED,
+                stored_pair_text: _VEC_KROBAR_FOUNDING,
+            }
+        )
+        monkeypatch.setattr("athenaeum.tiers.embed_texts", embedder)
+
+        # No "Members involved:" line and no `members=` -> strategy 2 (member
+        # key) is skipped, and the drifted text produces a different exact
+        # fingerprint -> strategy 1 misses too. Only strategy 3 (cosine) can
+        # suppress, so this isolates the threshold.
+        item = EscalationItem(
+            raw_ref="wiki/krobar.md",
+            entity_name="KrobarFoundingCfgOverride",
+            conflict_type="factual",
+            description=_desc(CLAIM_A_DRIFTED, CLAIM_B_DRIFTED),
+        )
+
+        cfg = {"contradiction": {"resolved_similarity_threshold": cosine + 0.01}}
+        suppressed = tier4_escalate([item], pending, config=cfg)
+
+        assert suppressed == 1, (
+            "contradiction.resolved_similarity_threshold must no longer "
+            "change Tier-4 suppression (athenaeum#2463)"
+        )
+        assert (
+            not pending.exists()
+            or "KrobarFoundingCfgOverride" not in pending.read_text()
+        )

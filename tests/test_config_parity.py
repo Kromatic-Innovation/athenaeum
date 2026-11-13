@@ -8,7 +8,8 @@ Covers:
   (``models.classify`` / ``models.write`` / ``models.topic``). Env wins over
   yaml per knob. The resolver model joined the same block as
   ``models.resolve`` in the athenaeum#232 follow-up (issue athenaeum#513); the pre-athenaeum#232
-  ``resolve.model`` key is still honored as a lower-precedence fallback.
+  ``resolve.model`` key was honored as a lower-precedence fallback until
+  athenaeum#2463 removed it outright.
 - Regression guard: none of the new keys are seeded into ``config._DEFAULTS``
   (the athenaeum#231 shadowing bug) — yaml is read only when the operator set it.
 
@@ -592,17 +593,19 @@ class TestModelPlumbingProductionPath:
         assert models == ["yaml-classify-model", "yaml-write-model"]
 
 # ---------------------------------------------------------------------------
-# Resolver model: env > models.resolve > resolve.model (legacy) > default
+# Resolver model: env > models.resolve > default
 # ---------------------------------------------------------------------------
 
 
 class TestResolverModelPrecedence:
     """The contradiction-resolver model reads ``models.resolve`` like every
-    other knob, with the pre-athenaeum#232 ``resolve.model`` key kept working as a
-    lower-precedence fallback (issue athenaeum#513).
+    other knob. The pre-athenaeum#232 ``resolve.model`` key was kept working as a
+    lower-precedence fallback per issue athenaeum#513, then removed outright in
+    athenaeum#2463 -- a config that still sets only ``resolve.model`` now falls
+    straight through to the code default.
 
     Ordering under test, highest first: ``ATHENAEUM_RESOLVE_MODEL`` env >
-    ``models.resolve`` > ``resolve.model`` > ``DEFAULT_RESOLVE_MODEL``.
+    ``models.resolve`` > ``DEFAULT_RESOLVE_MODEL``.
     """
 
     # A ``models:`` block that sets the OTHER three knobs but not ``resolve``.
@@ -623,15 +626,17 @@ class TestResolverModelPrecedence:
         cfg = {"models": {**self._MODELS_ONLY["models"], "resolve": "new-resolver"}}
         assert resolutions_mod._get_model(cfg) == "new-resolver"
 
-    def test_legacy_resolve_model_still_resolves(
+    def test_legacy_resolve_model_key_no_longer_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Backward compat: pre-athenaeum#232 configs keep working untouched."""
+        """athenaeum#2463: the pre-athenaeum#232 ``resolve.model`` key is removed --
+        a config setting only it now falls through to the code default.
+        Fails on pre-athenaeum#2463 code, which honored it as a fallback."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         cfg = {**self._MODELS_ONLY, "resolve": {"model": "my-resolver"}}
-        assert resolutions_mod._get_model(cfg) == "my-resolver"
+        assert resolutions_mod._get_model(cfg) == resolutions_mod.DEFAULT_RESOLVE_MODEL
 
-    def test_models_resolve_wins_over_legacy(
+    def test_models_resolve_wins_regardless_of_legacy_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
@@ -641,7 +646,7 @@ class TestResolverModelPrecedence:
         }
         assert resolutions_mod._get_model(cfg) == "new-resolver"
 
-    def test_env_wins_over_both_yaml_keys(
+    def test_env_wins_over_models_resolve(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ATHENAEUM_RESOLVE_MODEL", "env-resolver")
@@ -652,19 +657,24 @@ class TestResolverModelPrecedence:
         assert resolutions_mod._get_model(cfg) == "env-resolver"
 
     @pytest.mark.parametrize("bad", ["", "   ", 42, None, ["claude"], {"a": 1}])
-    def test_blank_or_non_string_models_resolve_falls_through_to_legacy(
+    def test_blank_or_non_string_models_resolve_falls_through_to_default(
         self, monkeypatch: pytest.MonkeyPatch, bad: Any
     ) -> None:
         """Matches the other three knobs: junk at the yaml layer falls through
-        rather than being passed to the SDK as a model id."""
+        rather than being passed to the SDK as a model id. The removed
+        ``resolve.model`` legacy key present alongside it must not be read
+        either (athenaeum#2463): the result is the code default, not the legacy
+        value."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         cfg = {"models": {"resolve": bad}, "resolve": {"model": "legacy-resolver"}}
-        assert resolutions_mod._get_model(cfg) == "legacy-resolver"
+        assert resolutions_mod._get_model(cfg) == resolutions_mod.DEFAULT_RESOLVE_MODEL
 
     @pytest.mark.parametrize("bad", ["", "   ", 42, None])
-    def test_blank_legacy_falls_through_to_default(
+    def test_legacy_key_any_value_falls_through_to_default(
         self, monkeypatch: pytest.MonkeyPatch, bad: Any
     ) -> None:
+        """athenaeum#2463: ``resolve.model`` is never read now, blank/non-string
+        or not -- every value lands on the code default."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         cfg = {"resolve": {"model": bad}}
         assert resolutions_mod._get_model(cfg) == resolutions_mod.DEFAULT_RESOLVE_MODEL

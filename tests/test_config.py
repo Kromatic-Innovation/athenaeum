@@ -1045,6 +1045,40 @@ class TestLoadConfig:
             for r in caplog.records
         ), caplog.text
 
+    def test_removed_resolve_model_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2463: ``resolve.model`` (the pre-athenaeum#232 legacy key) lives
+        under the top-level ``resolve:`` section, not ``librarian:`` -- this
+        is the generalized (non-librarian) removed-key case. A stale config
+        setting it loads fine and gets the same loud, specific WARNING."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "resolve:\n  model: claude-haiku-test\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["resolve"]["model"] == "claude-haiku-test"
+        assert any(
+            "resolve.model" in r.message and "athenaeum#2463" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_removed_contradiction_resolved_similarity_threshold_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2463: ``contradiction.resolved_similarity_threshold`` lives
+        under ``contradiction:``, the other non-librarian removed-key case."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "contradiction:\n  resolved_similarity_threshold: 0.9\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["contradiction"]["resolved_similarity_threshold"] == 0.9
+        assert any(
+            "resolved_similarity_threshold" in r.message and "athenaeum#2463" in r.message
+            for r in caplog.records
+        ), caplog.text
+
     def test_no_warning_for_live_delta_sibling_key(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1132,20 +1166,17 @@ class TestDefaultsDoNotShadowCodeDefaults:
         assert DEFAULT_RESOLVE_MAX_PER_RUN == 250
         assert resolve_max_per_run(cfg) == DEFAULT_RESOLVE_MAX_PER_RUN
 
-    def test_resolved_similarity_threshold_code_default_reachable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_resolved_similarity_threshold_key_removed(
+        self, tmp_path: Path
     ) -> None:
-        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
-        from athenaeum.fingerprint import (
-            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
-            resolve_resolved_similarity_threshold,
-        )
+        """athenaeum#2463: ``contradiction.resolved_similarity_threshold`` has no
+        override surface left at all -- ``_DEFAULT_RESOLVED_SIMILARITY_THRESHOLD``
+        is the only value Tier-4 suppression ever sees now."""
+        from athenaeum.fingerprint import _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
 
         cfg = load_config(tmp_path)
         assert "resolved_similarity_threshold" not in (cfg.get("contradiction") or {})
-        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
-            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
-        )
+        assert _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD == pytest.approx(0.83)
 
     def test_cluster_output_code_default_reachable(self, tmp_path: Path) -> None:
         from athenaeum.clusters import (
@@ -1177,21 +1208,17 @@ class TestDefaultsDoNotShadowCodeDefaults:
     ) -> None:
         """Explicit yaml values must survive load_config and beat code defaults."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
-        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
         from athenaeum.clusters import resolve_cluster_threshold
-        from athenaeum.fingerprint import resolve_resolved_similarity_threshold
         from athenaeum.resolutions import resolve_max_per_run
 
         (tmp_path / "athenaeum.yaml").write_text(
             "contradiction:\n"
             "  resolve_max_per_run: 7\n"
-            "  resolved_similarity_threshold: 0.9\n"
             "librarian:\n"
             "  cluster_threshold: 0.75\n"
         )
         cfg = load_config(tmp_path)
         assert resolve_max_per_run(cfg) == 7
-        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(0.9)
         assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(0.75)
 
     def test_unknown_top_level_sections_pass_through(
@@ -1199,15 +1226,17 @@ class TestDefaultsDoNotShadowCodeDefaults:
     ) -> None:
         """Sections absent from _DEFAULTS (e.g. ``resolve:``) must not be dropped."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
-        from athenaeum.resolutions import _get_model
+        from athenaeum.resolutions import DEFAULT_RESOLVE_MODEL, _get_model
 
         (tmp_path / "athenaeum.yaml").write_text(
             "resolve:\n  model: claude-haiku-test\n"
         )
         cfg = load_config(tmp_path)
+        # load_config still passes the unknown section through unchanged...
         assert cfg["resolve"]["model"] == "claude-haiku-test"
-        # End-to-end: the resolver must actually see the user-set model.
-        assert _get_model(cfg) == "claude-haiku-test"
+        # ...but athenaeum#2463 removed the legacy ``resolve.model`` fallback, so
+        # the resolver no longer reads it: it falls through to the code default.
+        assert _get_model(cfg) == DEFAULT_RESOLVE_MODEL
 
     def test_template_advertises_187_cap(self) -> None:
         from athenaeum.config import _DEFAULT_CONFIG_CONTENT
@@ -1215,15 +1244,18 @@ class TestDefaultsDoNotShadowCodeDefaults:
         assert "resolve_max_per_run: 250" in _DEFAULT_CONFIG_CONTENT
         assert "resolve_max_per_run: 50" not in _DEFAULT_CONFIG_CONTENT
 
-    def test_template_names_live_resolver_model_key(self) -> None:
-        """The template must advertise ``resolve.model`` (the key _get_model
-        reads), not the dead ``contradiction.resolve_model``.
+    def test_template_drops_removed_legacy_resolve_model_key(self) -> None:
+        """athenaeum#2463: the template no longer advertises the removed
+        ``resolve.model`` legacy key or its explanatory comment block --
+        ``models.resolve`` (seeded above, in the live models block) is the
+        only key _get_model reads now.
         """
         from athenaeum.config import _DEFAULT_CONFIG_CONTENT
 
         assert "resolve_model:" not in _DEFAULT_CONFIG_CONTENT
-        assert "# resolve:" in _DEFAULT_CONFIG_CONTENT
-        assert "#   model: claude-opus-5" in _DEFAULT_CONFIG_CONTENT
+        assert "# resolve:\n#   model: claude-opus-5" not in _DEFAULT_CONFIG_CONTENT
+        assert "LEGACY key" not in _DEFAULT_CONFIG_CONTENT
+        assert "resolved_similarity_threshold" not in _DEFAULT_CONFIG_CONTENT
 
 
 class TestNonDictSectionsDegradeGracefully:
@@ -1235,24 +1267,16 @@ class TestNonDictSectionsDegradeGracefully:
         "bad_value", ["oops", ["a", "b"], 3, 1.5], ids=["str", "list", "int", "float"]
     )
     def test_scalar_or_list_sections_fall_back_to_code_defaults(
-        self, bad_value: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, bad_value: object, tmp_path: Path
     ) -> None:
-        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
         from athenaeum.clusters import (
             DEFAULT_CLUSTER_OUTPUT,
             DEFAULT_CLUSTER_THRESHOLD,
             resolve_cluster_output_path,
             resolve_cluster_threshold,
         )
-        from athenaeum.fingerprint import (
-            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
-            resolve_resolved_similarity_threshold,
-        )
 
         cfg = {"contradiction": bad_value, "librarian": bad_value}
-        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
-            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
-        )
         assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(
             DEFAULT_CLUSTER_THRESHOLD
         )

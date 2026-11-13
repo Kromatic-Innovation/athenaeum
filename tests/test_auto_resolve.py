@@ -129,17 +129,29 @@ class TestResolveAutoApplyThreshold:
 class TestGetModelPrecedence:
     def test_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ATHENAEUM_RESOLVE_MODEL", "env-model")
-        cfg = {"resolve": {"model": "yaml-model"}}
+        cfg = {"models": {"resolve": "yaml-model"}}
         assert _get_model(cfg) == "env-model"
 
     def test_yaml_wins_over_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
-        cfg = {"resolve": {"model": "yaml-model"}}
+        cfg = {"models": {"resolve": "yaml-model"}}
         assert _get_model(cfg) == "yaml-model"
 
     def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         assert _get_model(None) == DEFAULT_RESOLVE_MODEL
+
+    def test_legacy_resolve_model_key_no_longer_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2463: the pre-athenaeum#232 ``resolve.model`` fallback is
+        removed -- a config that sets only this legacy key must fall through
+        to the code default, not the stale yaml value. Fails on pre-athenaeum#2463
+        code, which honored ``resolve.model`` as a fallback below
+        ``models.resolve``."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {"resolve": {"model": "legacy-yaml-model"}}
+        assert _get_model(cfg) == DEFAULT_RESOLVE_MODEL
 
 
 # ---------------------------------------------------------------------------

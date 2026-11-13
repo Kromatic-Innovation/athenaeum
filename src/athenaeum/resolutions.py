@@ -719,27 +719,18 @@ def _get_model(config: dict[str, Any] | None = None) -> str:
     Full precedence, highest first:
 
     1. ``ATHENAEUM_RESOLVE_MODEL`` env var
-    2. ``models.resolve`` yaml key (preferred)
-    3. ``resolve.model`` yaml key (legacy, pre-athenaeum#232 — still honored so
-       existing ``athenaeum.yaml`` files keep working unchanged)
-    4. :data:`DEFAULT_RESOLVE_MODEL`
+    2. ``models.resolve`` yaml key
+    3. :data:`DEFAULT_RESOLVE_MODEL`
 
-    The legacy key is threaded in as the *default* passed to the shared
-    helper, which is what places it below ``models.resolve`` but above the
-    code default. Non-string or blank values at either yaml layer fall
-    through, matching the other three knobs.
+    The legacy ``resolve.model`` yaml key (pre-athenaeum#232) was removed in
+    athenaeum#2463 -- a config that still sets it loads fine and gets a
+    removed-key notice from :func:`athenaeum.config.load_config`, but this
+    function no longer reads it.
     """
-    legacy = ""
-    if isinstance(config, dict):
-        resolve_cfg = config.get("resolve")
-        if isinstance(resolve_cfg, dict):
-            raw = resolve_cfg.get("model")
-            if isinstance(raw, str) and raw.strip():
-                legacy = raw.strip()
     return _resolve_model_knob(
         "resolve",
         "ATHENAEUM_RESOLVE_MODEL",
-        legacy or DEFAULT_RESOLVE_MODEL,
+        DEFAULT_RESOLVE_MODEL,
         config,
     )
 
