@@ -262,15 +262,21 @@ def _ancestor_uids(index: Mapping[str, Path], start_meta: Mapping[str, object]) 
     return chain
 
 
-def _is_relation_row(row: object, uid: str) -> bool:
-    """True iff *row* is a parent-side relation row (new or legacy shape)
-    naming *uid* as the child -- the exact set of rows :func:`set_relation`/
-    :func:`remove_relation` own and rebuild. A row naming the same uid under
-    a different, non-relation role is left untouched."""
-    return (
-        isinstance(row, dict)
-        and row.get("uid") == uid
-        and row.get("role") in (ROLE_CHILD, _LEGACY_ROLE_PARENT_NAMES_CHILD)
+def _is_child_relation_row(row: object) -> bool:
+    """True iff *row* is a parent-side relation row (new shape ``role:
+    "child"`` or legacy ``role: "split-into"``) naming ANY child -- the
+    exact set of rows :func:`set_relation`/:func:`remove_relation` own and
+    fully rebuild from :func:`read_relations`'s own ``children`` list on
+    every write, so filtering by uid here would under-strip: a row for a
+    DIFFERENT existing child is reconstructed via that rebuild too, and
+    keeping its OLD row here as well would duplicate it (issue athenaeum#2535,
+    found while adding a regression test: attaching a second child to an
+    already-populated parent produced two rows for the first child). A row
+    naming a child uid under a different, non-relation role is left
+    untouched -- this module only owns rows shaped like this one."""
+    return isinstance(row, dict) and row.get("role") in (
+        ROLE_CHILD,
+        _LEGACY_ROLE_PARENT_NAMES_CHILD,
     )
 
 
@@ -278,6 +284,38 @@ def _related_rows(meta: Mapping[str, object]) -> list[object]:
     """``meta["related"]`` narrowed to a list (``[]`` for anything else)."""
     raw = meta.get("related")
     return raw if isinstance(raw, list) else []
+
+
+def _clear_child_parent_pointer(meta: Mapping[str, object], parent_uid: str) -> dict[str, object]:
+    """Return a COPY of *meta* with this child's own reference to
+    *parent_uid* fully cleared -- both shapes (issue athenaeum#2535 review
+    finding: a prior version only popped the new-shape top-level
+    ``parent:`` key, leaving a legacy ``split-from`` row -- and therefore
+    the relation itself -- intact on a page that had never been touched
+    by this module before).
+
+    Clears the top-level ``parent:`` key (new shape) AND any ``related``
+    row with ``role: "split-from"`` naming *parent_uid* (legacy shape,
+    issue athenaeum#1248). Any OTHER ``related`` row is preserved
+    untouched."""
+    new_meta = dict(meta)
+    new_meta.pop("parent", None)
+    rows = _related_rows(meta)
+    if rows:
+        remaining = [
+            row
+            for row in rows
+            if not (
+                isinstance(row, dict)
+                and row.get("uid") == parent_uid
+                and row.get("role") == _LEGACY_ROLE_CHILD_NAMES_PARENT
+            )
+        ]
+        if remaining:
+            new_meta["related"] = remaining
+        else:
+            new_meta.pop("related", None)
+    return new_meta
 
 
 def _children_display_rows(
@@ -358,7 +396,14 @@ def apply_sub_pages_section(body: str, children: list[tuple[str, str, str]]) -> 
         return _SUBPAGES_BLOCK_RE.sub("", body)
     block = render_sub_pages_block(children)
     if _SUBPAGES_BLOCK_RE.search(body):
-        return _SUBPAGES_BLOCK_RE.sub(block, body)
+        # A callable replacement, not the raw string -- `re.sub` treats a
+        # STRING replacement as a template and interprets `\1`/`\g<...>`/a
+        # stray trailing backslash in it (issue athenaeum#2535 review
+        # finding): a child `name:`/`description:` containing a backslash
+        # (a Windows path, a LaTeX fragment) would raise `re.error` or
+        # silently mangle the render. A callable's return value is spliced
+        # in verbatim, with no escape processing at all.
+        return _SUBPAGES_BLOCK_RE.sub(lambda _match: block, body)
     sep = "" if body.endswith("\n\n") else "\n" if body.endswith("\n") else "\n\n"
     return body + sep + block
 
@@ -450,10 +495,15 @@ def set_relation(wiki_root: Path, *, child_uid: str, parent_uid: str, via: str) 
     # until _write_both_or_rollback, mirroring
     # tiers.py:_perform_oversize_page_split's "compute both pages fully
     # before any write" discipline.
-    new_child_meta = dict(child_meta)
+    #
+    # _clear_child_parent_pointer also drops a pre-existing legacy
+    # split-from row naming this same parent -- a child moving from the
+    # legacy shape to the new one (e.g. re-affirmed with via="manual")
+    # must not keep BOTH the old row and the new top-level key.
+    new_child_meta = _clear_child_parent_pointer(child_meta, parent_uid)
     new_child_meta["parent"] = parent_uid
 
-    other_rows = [row for row in _related_rows(parent_meta) if not _is_relation_row(row, child_uid)]
+    other_rows = [row for row in _related_rows(parent_meta) if not _is_child_relation_row(row)]
     children_after = [c for c in existing_parent_rel.children if c.uid != child_uid]
     children_after.append(ChildRef(uid=child_uid, via=via))
     children_after.sort(key=lambda c: c.uid)
@@ -497,8 +547,13 @@ def remove_relation(wiki_root: Path, *, child_uid: str) -> None:
         raise RelationError(f"{child_uid} has no parent to detach")
     parent_uid = rel.parent.uid
 
-    new_child_meta = dict(child_meta)
-    new_child_meta.pop("parent", None)
+    # _clear_child_parent_pointer drops BOTH the new-shape top-level
+    # `parent:` key and a legacy `split-from` row naming this parent --
+    # review finding: a prior version only popped the former, leaving a
+    # legacy pair half-detached (the child still linked to the parent via
+    # its own `related` row, read back by read_relations as still having
+    # a parent, even though the parent side was cleared).
+    new_child_meta = _clear_child_parent_pointer(child_meta, parent_uid)
     new_child_body = strip_breadcrumb(child_body)
     new_child_text = render_frontmatter(new_child_meta) + "\n" + new_child_body
 
@@ -510,7 +565,7 @@ def remove_relation(wiki_root: Path, *, child_uid: str) -> None:
     parent_meta = _read_meta(parent_path)
     parent_body = parse_frontmatter(parent_path.read_text(encoding="utf-8"))[1]
 
-    other_rows = [row for row in _related_rows(parent_meta) if not _is_relation_row(row, child_uid)]
+    other_rows = [row for row in _related_rows(parent_meta) if not _is_child_relation_row(row)]
     remaining = [c for c in read_relations(parent_meta).children if c.uid != child_uid]
     new_related = other_rows + [
         {"uid": c.uid, "role": ROLE_CHILD, "via": c.via} for c in remaining

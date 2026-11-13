@@ -108,6 +108,27 @@ class TestSetRelationShape:
         meta, _ = parse_frontmatter(parent_path.read_text(encoding="utf-8"))
         assert meta["related"] == [{"uid": "child001", "role": "child", "via": "attach"}]
 
+    def test_second_child_does_not_duplicate_the_first_childs_row(self, wiki: Path) -> None:
+        """Found while adding a regression test for a reviewed finding:
+        attaching a SECOND child to an already-populated parent used to
+        leave TWO rows for the first child (one surviving from the prior
+        write, one freshly rebuilt from read_relations) -- `other_rows`
+        only stripped the row matching the uid being set, not every
+        existing relation row, even though the fresh row list it was
+        concatenated with already covered every child."""
+        parent_path = _write(wiki, "parent01", "Acme Corp")
+        _write(wiki, "child001", "First Child")
+        _write(wiki, "child002", "Second Child")
+
+        set_relation(wiki, child_uid="child001", parent_uid="parent01", via="manual")
+        set_relation(wiki, child_uid="child002", parent_uid="parent01", via="manual")
+
+        meta, _ = parse_frontmatter(parent_path.read_text(encoding="utf-8"))
+        assert meta["related"] == [
+            {"uid": "child001", "role": "child", "via": "manual"},
+            {"uid": "child002", "role": "child", "via": "manual"},
+        ]
+
 
 class TestAtomicity:
     """AC2: one writer, one remover, each all-or-nothing across both pages."""
@@ -290,6 +311,38 @@ class TestLegacyReadCompat:
         assert "split-into" in (wiki / "hub00001-hub-page.md").read_text(encoding="utf-8")
         assert "split-from" in (wiki / "leaf00001-leaf-page.md").read_text(encoding="utf-8")
 
+    def test_detaching_a_legacy_pair_clears_both_sides(self, wiki: Path) -> None:
+        """Review finding (issue athenaeum#2535): a prior version of
+        remove_relation only popped the new-shape top-level ``parent:``
+        key, never the legacy ``split-from`` row -- so detaching a
+        LEGACY-shaped pair left the child still pointing at the parent
+        (a one-sided relation `athenaeum doctor` would then have to
+        report). Both sides must come out completely clean."""
+        hub_path = _write(
+            wiki,
+            "hub00002",
+            "Hub Page Two",
+            related=[{"uid": "leaf00002", "role": "split-into"}],
+        )
+        leaf_path = _write(
+            wiki,
+            "leaf00002",
+            "Leaf Page Two",
+            related=[{"uid": "hub00002", "role": "split-from"}],
+        )
+
+        remove_relation(wiki, child_uid="leaf00002")
+
+        hub_meta, _ = parse_frontmatter(hub_path.read_text(encoding="utf-8"))
+        leaf_meta, _ = parse_frontmatter(leaf_path.read_text(encoding="utf-8"))
+
+        assert not hub_meta.get("related")
+        assert not leaf_meta.get("related")
+        assert "parent" not in leaf_meta
+        leaf_rel = read_relations(leaf_meta)
+        assert leaf_rel.parent is None
+        assert count_one_sided_relations(wiki) == 0
+
 
 class TestIdempotentRendering:
     """AC5: a second write of the same relation is a byte-for-byte no-op;
@@ -347,6 +400,44 @@ class TestIdempotentRendering:
         assert "## Sub-pages" in parent_body
         assert "[[child001|Client Counts]]" in parent_body
         assert "How many clients Acme has." in parent_body
+
+    def test_backslash_in_child_description_renders_exactly_and_is_idempotent(
+        self, wiki: Path
+    ) -> None:
+        """Review finding (issue athenaeum#2535): ``apply_sub_pages_section``
+        used to replace the existing block with ``_SUBPAGES_BLOCK_RE.sub(block,
+        body)`` -- a STRING replacement, which makes `re.sub` interpret
+        `\\1`/`\\g<...>` inside *block* as backreferences. A child
+        description containing a backslash-digit sequence (a Windows path,
+        a LaTeX fragment) used to raise `re.error` here, since this
+        pattern has no capturing groups at all. The fix (a callable
+        replacement) must splice the text in verbatim."""
+        parent_path = _write(wiki, "parent01", "Acme Corp")
+        _write(wiki, "child001", "First Child", description="Plain, no backslashes.")
+        set_relation(wiki, child_uid="child001", parent_uid="parent01", via="manual")
+
+        # This second attach forces apply_sub_pages_section down the
+        # REPLACE path (an existing block is already present from the
+        # first attach above), which is exactly where the raw `block`
+        # string is handed to `re.sub` as the replacement.
+        _write(
+            wiki,
+            "child002",
+            "Second Child",
+            description=r"Counts stored at C:\1Users\2Data",
+        )
+        set_relation(wiki, child_uid="child002", parent_uid="parent01", via="manual")
+
+        _, parent_body = parse_frontmatter(parent_path.read_text(encoding="utf-8"))
+        assert r"Counts stored at C:\1Users\2Data" in parent_body
+        assert "[[child002|Second Child]]" in parent_body
+        assert "[[child001|First Child]]" in parent_body
+
+        after_first_write = parent_path.read_text(encoding="utf-8")
+        # Re-affirming the same relation must still be a byte-for-byte
+        # no-op even with the backslash-bearing description in play.
+        set_relation(wiki, child_uid="child002", parent_uid="parent01", via="manual")
+        assert parent_path.read_text(encoding="utf-8") == after_first_write
 
     def test_child_body_gets_first_line_breadcrumb(self, wiki: Path) -> None:
         _write(wiki, "parent01", "Acme Corp")
