@@ -2055,6 +2055,24 @@ class EscalationItem:
     # function). ``"coordinate"`` is the one other value in use today
     # (:func:`athenaeum.verdict_effects.queue_coordinate_batch`).
     decision_kind: str = "question"
+    # Issue athenaeum#2519: a durable copy of the conflicting claims and the
+    # path of the compiled wiki page they landed in, captured by the raise
+    # site at the moment a contradiction question is created. The
+    # librarian deletes a raw file (``raw_ref``) on its normal intake-
+    # consumption schedule regardless of whether a question is still open
+    # against it (unchanged by this issue — see its AC3); a contradiction
+    # whose write-back would otherwise depend on that raw file still
+    # existing stores this copy so the answer can be applied to the
+    # compiled page later, even once the raw file is gone.
+    # :func:`athenaeum.tiers.attach_contradiction_writeback_copy` is the
+    # sole writer, called once by ``athenaeum.librarian``'s entity-tier
+    # loop right after a ``tier3_merge`` escalation for an "update" action.
+    # Both default to ``""`` -- every other escalation constructor in this
+    # codebase leaves them unset, and :func:`athenaeum.tiers.tier4_escalate`
+    # only renders the corresponding block lines when non-empty, so no
+    # pre-athenaeum#2519 rendered block changes.
+    compiled_page: str = ""
+    conflicting_claims: str = ""
 
 
 # Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the

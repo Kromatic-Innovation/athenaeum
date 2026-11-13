@@ -39,6 +39,7 @@ import pytest
 
 import athenaeum.models as models_mod
 from athenaeum import batch_state, spend
+from athenaeum.answers import parse_pending_questions
 from athenaeum.batch import (
     BATCH_MAX_REQUESTS,
     BATCH_POLL_INTERVAL_SECONDS,
@@ -996,6 +997,76 @@ class TestBatchSyncEquivalence:
             assert "Original body line." in page
             assert "Merged note" not in page
             assert not list((root / "raw" / "sessions").glob("*.md"))
+
+    def test_escalate_through_batch_api_merge_ids_stores_writeback_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2519: the contradiction's durable write-back copy
+        (compiled page + conflicting claims) must be stamped on the
+        escalation that comes back through the BATCH API's own
+        ``st.merge_ids``/``t3_results`` collection loop in
+        ``process_batch_run`` -- a distinct call site from
+        ``st.sync_merges`` (covered by
+        ``test_escalate_protocol_through_batch_transport`` and by
+        ``tests/test_contradiction_writeback_2519.py``). A single merge
+        action against one page, with the default ``batch_write=True``, is
+        exactly the case ``process_batch_run`` routes to ``st.merge_ids``
+        (see that function's own triage: ``not batch_write or
+        merge_uid_counts.get(...) > 1`` is what sends an action to
+        ``st.sync_merges`` instead) -- this fixture deliberately stays in
+        that default shape so it cannot silently exercise the other loop.
+        """
+
+        def responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if "## Existing page content" in user_msg:
+                return "ESCALATE: principled conflict about Acme facts"
+            return _scripted_responder(params)
+
+        contents = ["Acme Corp conflicting update.\n"]
+        root_batch = _seed_root(tmp_path, "batch-writeback", contents, with_acme=True)
+        _clean_env(monkeypatch)
+
+        batch_client = _FakeClient(responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root_batch / "raw",
+                wiki_root=root_batch / "wiki",
+                knowledge_root=root_batch,
+                batch_mode=True,
+            )
+            == 0
+        )
+
+        pending = root_batch / "wiki" / "_pending_questions.md"
+        assert pending.exists(), "no escalation written for the batch-API merge"
+        text = pending.read_text(encoding="utf-8")
+        assert "principled conflict about Acme facts" in text
+
+        # The fix: the durable write-back copy landed in the rendered
+        # block, not just the escalation description.
+        assert "**Compiled page**: acme1234-acme-corp.md" in text
+        assert "**Conflicting claims**:" in text
+        assert "Acme Corp conflicting update." in text
+        assert "Original body line." in text
+
+        # And it round-trips back through the canonical parser.
+        pqs = parse_pending_questions(pending)
+        assert len(pqs) == 1
+        assert pqs[0].compiled_page == "acme1234-acme-corp.md"
+        assert "Acme Corp conflicting update." in pqs[0].conflicting_claims
+        assert "Original body line." in pqs[0].conflicting_claims
+
+        # The raw file was still consumed on the normal schedule (AC3,
+        # unaffected by this fix) and the page itself is untouched by the
+        # ESCALATE (no merge body to apply).
+        page = (root_batch / "wiki" / "acme1234-acme-corp.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Original body line." in page
+        assert not list((root_batch / "raw" / "sessions").glob("*.md"))
 
 
 # ---------------------------------------------------------------------------
