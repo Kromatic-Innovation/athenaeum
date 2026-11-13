@@ -4,8 +4,8 @@
 The eval in ``tests/evals/test_relatedness_writer_eval.py`` grades the writer's
 OUTPUT against issue athenaeum#1570's corpus. These tests pin the properties
 that corpus cannot see: the mutuality rule itself, what happens with no
-neighbours at all, the compile-time direction, the config knob, and the
-wiki-facing helpers.
+neighbours at all, the compile-time direction, the now-permanent on switch,
+and the wiki-facing helpers.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from athenaeum.config import resolve_relatedness_writer_enabled
 from athenaeum.relatedness import (
     DEFAULT_MAX_INDEX_PAGES,
     DEFAULT_MIN_INDEX_PAGES,
@@ -311,33 +310,12 @@ def test_run_index_is_built_once_per_wiki_root(tmp_path, monkeypatch):
     assert len(builds) == 1
 
 
-def test_run_index_returns_none_when_the_writer_is_disabled(tmp_path):
-    _write_page(tmp_path, "u-1", "Berth rota", "quayside harbour")
-    config = {"librarian": {"relatedness_writer": False}}
-    assert run_index(tmp_path, config=config) is None
-
-
-def test_writer_is_enabled_by_default():
-    assert resolve_relatedness_writer_enabled(None) is True
-    assert resolve_relatedness_writer_enabled({}) is True
-    assert resolve_relatedness_writer_enabled({"librarian": {}}) is True
-
-
-@pytest.mark.parametrize("value", [False, "false", "off", "no", "0"])
-def test_writer_knob_accepts_the_usual_false_spellings(value):
-    assert resolve_relatedness_writer_enabled({"librarian": {"relatedness_writer": value}}) is False
-
-
-def test_writer_knob_ignores_an_unrecognized_value():
-    """An unparseable value falls through to the default, never to False."""
-    assert (
-        resolve_relatedness_writer_enabled({"librarian": {"relatedness_writer": "maybe"}}) is True
-    )
-
-
-def test_env_overrides_yaml(monkeypatch):
+def test_removed_env_var_no_longer_disables_the_writer(tmp_path, monkeypatch):
+    """athenaeum#2461: ``ATHENAEUM_RELATEDNESS_WRITER`` is removed; setting it
+    must have no effect."""
     monkeypatch.setenv("ATHENAEUM_RELATEDNESS_WRITER", "0")
-    assert resolve_relatedness_writer_enabled({"librarian": {"relatedness_writer": True}}) is False
+    _write_page(tmp_path, "u-1", "Berth rota", "quayside harbour")
+    assert run_index(tmp_path) is not None
 
 
 def test_page_ceiling_default_is_not_accidentally_small():

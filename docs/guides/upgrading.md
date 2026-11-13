@@ -32,6 +32,14 @@ yaml key is ignored with a warning, like every other removed key. See
 [Answering pending decisions](decisions.md) for the full
 `athenaeum decisions` surface.
 
+## I want to know about the removed `rebuild-index` alias
+
+`athenaeum rebuild-index` is removed. It was an undocumented back-compat
+alias for `athenaeum reindex` — same command, same flags, same output —
+and never printed a deprecation warning, so there is no warning to watch
+for. If a cron job, wrapper script, or hook calls `athenaeum
+rebuild-index`, change it to call `athenaeum reindex` instead.
+
 `athenaeum run` doesn't just add to your knowledge base — once a
 non-contradictory cluster has been compiled into its canonical
 `wiki/auto-<topic>.md` entry, the move-then-retire pass **moves** each
@@ -128,6 +136,32 @@ librarian:
 The `--no-retire` CLI flag overrides the yaml toggle. When disabled, raw
 auto-memory is neither moved into the wiki nor `git rm`'d — it stays in
 the intake queue and is re-examined on every run.
+
+## I want to know what's gone: Tier-4 dedup and five default-on librarian switches
+
+Tier-4 pending-question dedup, the compile-time relatedness writer, delta
+compile, the delta live client, and the nightly name-collision and
+qualified-name scans were each on by default with an off switch. All six
+switches are removed; the on behaviour now runs unconditionally:
+
+| Removed switch | What it gated |
+|---|---|
+| `ATHENAEUM_TIER4_DEDUP` | Collapsing duplicate pending-question escalations by source-memory pair |
+| `librarian.relatedness_writer` / `ATHENAEUM_RELATEDNESS_WRITER` | The compile-time `related:` edge writer |
+| `librarian.delta.enabled` | Delta-scoped (vs. whole-corpus) compile on the deterministic path |
+| `librarian.delta.live_client` | Delta-scoped compile on the nightly LLM run |
+| `librarian.name_collision_scan` | The nightly exact-name-collision scan |
+| `librarian.qualified_name_scan` | The nightly `name (qualifier)` entity-split scan |
+
+A stale `athenaeum.yaml` still setting one of the four removed yaml keys
+above loads fine — the key is ignored and logged with the same warning
+every other removed key gets. Setting either removed environment variable
+now has no effect.
+
+If you previously set `librarian.delta.enabled: false` (or
+`librarian.delta.live_client: false`) to force a whole-corpus compile
+instead of a delta-scoped one, run `athenaeum run --full-compile` to get
+the same whole-corpus compile for that run.
 
 ## I want to know about seven one-shot repair commands that are gone in 0.24.0
 

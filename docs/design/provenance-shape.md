@@ -580,7 +580,7 @@ It is **read-only**: no resolver decision, no wiki mutation. Two surfaces:
   and honors `as_of` directly. A final temporal backstop re-checks each hit's
   fresh on-disk frontmatter against `as_of`, so the printed view is exact
   regardless of backend build state.
-- **`athenaeum rebuild-index --as-of YYYY-MM-DD --cache-dir <scratch>`.** Builds a
+- **`athenaeum reindex --as-of YYYY-MM-DD --cache-dir <scratch>`.** Builds a
   persistent as-of index in a scratch dir (`search.build_index(..., as_of=...)` on
   all backends; the `build_fts5_index` / `build_vector_index` convenience wrappers
   accept an ISO string). Point `--cache-dir` at a scratch path so the live index

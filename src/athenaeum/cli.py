@@ -73,8 +73,7 @@ from athenaeum._cli_shared import (
 
 # Subcommand name -> (owning module, its `add_*_subparser` loader function
 # name). Keys are every name `build_parser()` registers on the top-level
-# subparsers action, aliases included (`reindex`'s `rebuild-index` alias is
-# both a key here, same target). This is intentionally a literal table, not
+# subparsers action. This is intentionally a literal table, not
 # something extracted from each module at runtime — extracting it without
 # importing the module is exactly the thing we're avoiding. Kept honest by
 # `TestSubcommandLoaderRegistryStaysInSync` in `tests/test_cli.py`, which
@@ -166,7 +165,6 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "context": ("athenaeum._cmd_context", "add_context_subparser"),
     "convergence": ("athenaeum._cmd_convergence", "add_convergence_subparser"),
     "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
-    "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
     "compile": ("athenaeum._cmd_index", "add_index_subparsers"),
     "registry": ("athenaeum._cmd_index", "add_index_subparsers"),
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
@@ -331,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_subject_population_subparser(subparsers)  # subject-population (issue athenaeum#1944)
     add_index_subparsers(
         subparsers
-    )  # reindex/rebuild-index, compile, registry, ingest, session-end
+    )  # reindex, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
     # attribution show|place|ack-observe-report (issue athenaeum#2212)

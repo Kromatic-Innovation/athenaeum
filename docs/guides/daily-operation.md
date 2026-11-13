@@ -27,8 +27,7 @@ athenaeum reindex             # --incremental hash-diff delta
 `ingest --incremental` tracks a content-hash stamp
 (`~/.cache/athenaeum/ingest-manifest.json`), so it's a fast no-op when
 nothing has changed. Pre-structured intake compiles with no LLM cost.
-`reindex` is the canonical name; `rebuild-index` is a back-compat alias for
-the exact same command. Both also take `--full` (recompile/rebuild from
+Both also take `--full` (recompile/rebuild from
 scratch) and `--session <id>` (scope to one session) — see the
 [CLI reference](../reference/cli.md#athenaeum-ingest) for every flag.
 

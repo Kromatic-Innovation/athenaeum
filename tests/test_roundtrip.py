@@ -65,9 +65,9 @@ def test_init_remember_rebuild_recall(
         "Acme Corp is an enterprise fintech client under quarterly review.\n"
     )
 
-    # 4. rebuild-index — build the FTS5 index into the explicit cache dir
+    # 4. reindex — build the FTS5 index into the explicit cache dir
     rc = main([
-        "rebuild-index",
+        "reindex",
         "--path", str(knowledge),
         "--cache-dir", str(cache),
         "--backend", "fts5",

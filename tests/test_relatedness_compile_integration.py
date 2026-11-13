@@ -110,12 +110,16 @@ def test_compilation_writes_a_related_edge(tmp_path):
     assert all(row["uid"].startswith("rel") for row in related), related
 
 
-def test_compilation_writes_nothing_when_the_knob_is_off(tmp_path):
+def test_removed_knob_no_longer_suppresses_compilation(tmp_path):
+    """athenaeum#2461: ``librarian.relatedness_writer`` is removed; a stale
+    config still setting it to ``false`` must have no effect — the writer
+    still fires."""
     _seed_wiki(tmp_path / "wiki", related_pages=2, filler_pages=DEFAULT_MIN_INDEX_PAGES)
     text = _compile_one(tmp_path, _entity(), config={"librarian": {"relatedness_writer": False}})
 
     meta, _body = parse_frontmatter(text)
-    assert not (meta.get("related") or [])
+    related = meta.get("related") or []
+    assert related, f"compilation wrote no related: block\n{text}"
 
 
 def test_compilation_writes_nothing_on_a_wiki_below_the_index_floor(tmp_path):

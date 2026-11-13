@@ -36,7 +36,7 @@ def knowledge_with_wiki(tmp_path: Path) -> Path:
     return knowledge
 
 
-class TestRebuildIndex:
+class TestReindex:
     def test_builds_fts5_index(
         self,
         knowledge_with_wiki: Path,
@@ -46,7 +46,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -72,7 +72,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -91,7 +91,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -118,7 +118,7 @@ class TestRebuildIndex:
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -134,7 +134,7 @@ class TestRebuildIndex:
         nonexistent = tmp_path / "does-not-exist"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(nonexistent),
                 "--cache-dir",
@@ -158,7 +158,7 @@ class TestRebuildIndex:
         )
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -167,6 +167,29 @@ class TestRebuildIndex:
         )
         assert rc == 1
         assert "Unknown search backend" in capsys.readouterr().err
+
+    def test_rebuild_index_alias_is_not_registered(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#2459: the `rebuild-index` back-compat alias for
+        `reindex` is removed with no deprecation period. argparse must treat
+        it exactly like any other unknown command — exit 2, "invalid
+        choice" on stderr — not dispatch to the `reindex` handler."""
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        assert "rebuild-index" not in top.choices
+        assert "reindex" in top.choices
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["rebuild-index", "--path", "/nonexistent"])
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid choice" in err
+        assert "rebuild-index" in err  # argparse echoes the bad token
 
 
 class TestServe:
@@ -362,7 +385,7 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("fts5", tmp_path)
         err = capsys.readouterr().err
         assert "search_backend=fts5" in err
-        assert "rebuild-index" in err
+        assert "reindex" in err
 
     def test_fts5_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -381,7 +404,7 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("vector", tmp_path)
         err = capsys.readouterr().err
         assert "search_backend=vector" in err
-        assert "rebuild-index" in err
+        assert "reindex" in err
 
     def test_vector_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -659,14 +682,14 @@ class TestRecall:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Recall with fts5 must use the on-disk cache the user built with
-        ``athenaeum rebuild-index``. Regression guard: if the handler
+        ``athenaeum reindex``. Regression guard: if the handler
         silently falls back to keyword when the fts5 index is missing,
         validation harnesses reading `athenaeum.yaml: vector` would see
         wrong results."""
         cache = tmp_path / "cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -676,7 +699,7 @@ class TestRecall:
             ]
         )
         assert rc == 0
-        capsys.readouterr()  # drain rebuild-index output
+        capsys.readouterr()  # drain reindex output
 
         rc = main(
             [
@@ -1458,7 +1481,7 @@ class TestAsOfView:
             )
         assert "invalid ISO date" in capsys.readouterr().err
 
-    def test_rebuild_index_as_of_note(
+    def test_reindex_as_of_note(
         self,
         temporal_knowledge: Path,
         tmp_path: Path,
@@ -1467,7 +1490,7 @@ class TestAsOfView:
         cache = tmp_path / "asof-cache"
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(temporal_knowledge),
                 "--cache-dir",

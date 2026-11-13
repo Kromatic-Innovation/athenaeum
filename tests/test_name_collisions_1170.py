@@ -35,7 +35,11 @@ from unittest.mock import patch
 import pytest
 
 from athenaeum.decisions import list_pending_decisions
-from athenaeum.librarian import _run_name_collision_phase, _run_wiki_dedup_phase
+from athenaeum.librarian import (
+    _run_name_collision_phase,
+    _run_qualified_name_phase,
+    _run_wiki_dedup_phase,
+)
 from athenaeum.models import EntityIndex, is_tombstone, parse_frontmatter, tombstone_target
 from athenaeum.name_collisions import (
     CollisionPage,
@@ -388,15 +392,22 @@ class TestRunNameCollisionPhase:
         _run_name_collision_phase(ctx)
         assert ctx.run_profile == []
 
-    def test_disabled_via_config_records_disabled_reason(self, tmp_path: Path) -> None:
+    def test_removed_config_key_no_longer_disables_the_scan(self, tmp_path: Path) -> None:
+        """athenaeum#2461: the ``name_collision_scan`` off switch is removed.
+
+        A stale config that still sets ``librarian.name_collision_scan:
+        false`` must have no effect — the scan always runs now.
+        """
         wiki = tmp_path / "wiki"
-        wiki.mkdir()
+        _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company", body="Real content."
+        )
+        _write_page(wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body="")
         ctx = _make_ctx(tmp_path, wiki_root=wiki, dry_run=True)
         ctx.config = {"librarian": {"name_collision_scan": False}}
-        with patch("athenaeum.name_collisions.resolve_name_collisions") as mock_resolve:
-            _run_name_collision_phase(ctx)
-        mock_resolve.assert_not_called()
-        assert ctx.run_profile[0][2] == {"reason": "disabled"}
+        _run_name_collision_phase(ctx)
+        assert ctx.run_profile[0][2]["reason"] == "completed"
+        assert ctx.run_profile[0][2]["collisions"] == 1
 
     def test_failure_is_swallowed_and_still_profiled(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
@@ -471,6 +482,29 @@ class TestRunNameCollisionPhase:
         record = build_run_summary_ledger_record(ctx.run_profile)
         assert "name-collisions" in record["phases"]
         assert record["phases"]["name-collisions"]["collisions"] == 1
+
+
+class TestRunQualifiedNamePhaseRemovedSwitch:
+    """athenaeum#2461: the ``qualified_name_scan`` off switch is removed."""
+
+    def test_removed_config_key_no_longer_disables_the_scan(self, tmp_path: Path) -> None:
+        """A stale config that still sets ``librarian.qualified_name_scan:
+        false`` must have no effect — the scan always runs now."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "widget.md", uid="u1", name="Widget", type_="concept", body="A body.")
+        _write_page(
+            wiki,
+            "widget-variant.md",
+            uid="u2",
+            name="Widget (Variant)",
+            type_="concept",
+            body="A variant body.",
+        )
+        ctx = _make_ctx(tmp_path, wiki_root=wiki, dry_run=True)
+        ctx.config = {"librarian": {"qualified_name_scan": False}}
+        _run_qualified_name_phase(ctx)
+        assert ctx.run_profile[0][2]["reason"] == "completed"
+        assert ctx.run_profile[0][2]["splits"] == 1
 
 
 # ---------------------------------------------------------------------------
