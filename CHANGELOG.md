@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inference_blocks.py` after the detector's retirement
   (athenaeum#1256). No user-visible behaviour changes (athenaeum#2435).
 
+- Removed the unwired field-constraints scanner and its docs
+  (athenaeum#2471). The write-boundary guard that still refuses a
+  violating Tier-3 write is unaffected.
+
 ## [0.23.5] - 2026-11-12
 
 **Summary.** 0.23.5 is a roll-up of three workstreams built on `develop` since

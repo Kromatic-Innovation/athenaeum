@@ -22,13 +22,10 @@ value `body`, which checks the page's rendered body text instead — the
 only way a Tier-3 write is checked at all, since a Tier-3 create or merge
 only ever emits body text, never a new frontmatter key.
 
-Two consumers use this module: a write-boundary guard
+One consumer uses this module: a write-boundary guard
 (`guard_entity_field_constraints`), called from
 [librarian](librarian.md)'s Tier-3 write path for both a new-entity create
-and a merge into an existing page, and a standalone detector
-(`scan_field_constraint_violations`) that walks the whole corpus once and
-reports every violation of a currently-declared constraint, cheaply
-enough to run on a routine schedule.
+and a merge into an existing page.
 
 ## What it reads
 
@@ -36,8 +33,8 @@ enough to run on a routine schedule.
   Absent, unreadable, or carrying no valid data row all resolve to "no
   constraints," identically.
 - The page under check: its frontmatter dict and rendered body text,
-  always re-derived from the exact bytes about to be written (or, for the
-  detector, the exact bytes on disk) rather than a caller-supplied copy.
+  always re-derived from the exact bytes about to be written rather than
+  a caller-supplied copy.
 
 ## What it writes
 
