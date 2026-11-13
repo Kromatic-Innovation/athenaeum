@@ -38,14 +38,24 @@ proposal the queue-hygiene sweep
 respect -- before this, a sweep that archived 17 stale proposals was
 followed by a night that re-proposed every one of them, and 16 had to be
 archived again the next day. It decays on EVIDENCE rather than on a clock:
-the sweep records a content digest
+the archive writer records a content digest
 (:func:`athenaeum.pending_merges.source_content_digest`) over the source
 pages, and the archive stops binding the moment that digest no longer
 matches what is on disk -- i.e. exactly when one of the source pages has
-changed since the archive. A block archived before that digest line existed
-records no digest, so no change can be proven and the archive keeps binding
-(the conservative direction: a proposal nobody has touched is not a new
-question).
+changed since the archive.
+
+This branch is reached for a block from ANY archive writer, not only the
+queue-hygiene sweep, because :func:`athenaeum.pending_merges._parse_block`
+reads ``**Retired**:`` and ``**Archived**:`` generically. Every one of those
+writers therefore stamps the digest -- they all go through
+:func:`athenaeum.pending_merges._archive_trailer`, which exists to make that
+impossible to forget. A writer that skipped it would mint a ruling nothing
+could ever prove stale, suppressing that source set permanently.
+
+The ONE remaining no-digest population is blocks archived before the digest
+line existed. For those no change can be proven, so the archive keeps
+binding -- the conservative direction (a proposal nobody has touched is not
+a new question), and a bounded, shrinking set rather than a growing one.
 """
 
 from __future__ import annotations
@@ -137,14 +147,14 @@ def load_prior_rulings(wiki_root: Path) -> list[PriorRuling]:
             if not pm.sources:
                 continue
             if not pm.decision and pm.archived_at:
-                # Issue athenaeum#2514 AC2: no human decision, but the
-                # queue-hygiene sweep moved this block to the archive. That
-                # IS a ruling -- "this proposal is not worth a human's
-                # time" -- and the proposers must respect it until one of
-                # its source pages actually changes. An archived block that
-                # records no digest (written before this issue) can never
-                # prove a change, so `sources_changed` stays False and the
-                # archive keeps binding.
+                # Issue athenaeum#2514 AC2: no human decision, but one of
+                # the archive writers moved this block out of the live
+                # sidecar. That IS a ruling -- "this proposal is not worth
+                # a human's time" -- and the proposers must respect it
+                # until one of its source pages actually changes. Only a
+                # block written before this issue records no digest; it can
+                # never prove a change, so `sources_changed` stays False
+                # and the archive keeps binding.
                 rulings.append(
                     PriorRuling(
                         merge_id=pm.id,

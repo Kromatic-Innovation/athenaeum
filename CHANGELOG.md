@@ -91,9 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revalidate --apply` archived as stale, are no longer re-proposed the next
   night. The nightly name-collision scan was the one proposer of three that
   never consulted prior rulings, and nothing recorded "archived as stale" as
-  a ruling at all; the sweep now stamps a content digest of a proposal's
-  source pages on the archived block, and the archive binds every proposer
-  until one of those pages actually changes (athenaeum#2514).
+  a ruling at all; every archive writer now stamps a content digest of a
+  proposal's source pages on the archived block, and the archive binds every
+  proposer until one of those pages actually changes (athenaeum#2514).
 
 - A human-approved fold into a canonical page that has no frontmatter — or
   an empty `{}` block — now backfills that page's separator coordinates from

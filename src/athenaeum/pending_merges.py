@@ -800,6 +800,43 @@ def source_content_digest(
     return hashlib.sha256(b"\x00".join(parts)).hexdigest()
 
 
+def _archive_trailer(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    disposition: Literal["Retired", "Archived"],
+    ts: str,
+    detail: str,
+) -> str:
+    """The trailer EVERY archive writer appends to a block it moves out of
+    the live sidecar: a source digest, then the disposition line.
+
+    One renderer rather than four f-strings (issue athenaeum#2514 review).
+    The digest is a property of the ARCHIVE FORMAT, not of one writer:
+    :func:`_parse_block` reads ``**Retired**:`` and ``**Archived**:``
+    generically into :attr:`PendingMerge.archived_at`, so
+    :func:`athenaeum.prior_rulings.load_prior_rulings` mints an ``archived``
+    ruling for a block from ANY of these writers. A writer that skipped the
+    digest would therefore mint a ruling nothing can ever prove stale —
+    permanent suppression of that source set, with no recovery even after a
+    source page changes. Routing all four through here is what makes
+    "an archive binds until a source page changes" true of every archive
+    this code writes, rather than only of the queue-hygiene sweep.
+
+    NOT used by :func:`ingest_resolved_merges`, which archives blocks a
+    HUMAN resolved. Those carry a ``**Decision**:`` line, so
+    ``load_prior_rulings`` reads them as the human ruling they are and never
+    reaches the archived-ruling branch at all; a digest there would be
+    inert bytes.
+
+    *detail* is the caller's own reason text (``gate: ...``,
+    ``satisfied: ...``, a retirement reason) and may be empty.
+    """
+    digest = source_content_digest(sources, wiki_root=wiki_root)
+    tail = f" — {detail}" if detail else ""
+    return f"{SOURCE_DIGEST_LINE_PREFIX} {digest}\n**{disposition}**: {ts}{tail}\n"
+
+
 def _parse_block(block_text: str) -> PendingMerge | None:
     lines = block_text.splitlines()
     if not lines:
@@ -2749,7 +2786,22 @@ def _archive_stale_merge_block(
     untouched) rather than re-deriving them here.
     """
     ts = now_iso(now)
-    archived_block = f"{block_text}\n\n**Retired**: {ts} — {reason}\n"
+    # Issue athenaeum#2514 review: this writer stamps the same source digest
+    # the queue-hygiene sweep does. Without it this archive would bind the
+    # proposers forever (see `_archive_trailer`). A tombstoned source is a
+    # permanent refusal TODAY, but "permanent" is a fact about the pages,
+    # not about this block: un-tombstoning a source changes its bytes, the
+    # digest stops matching, and the pair becomes askable again. Encoding
+    # the permanence in an unprovable archive instead would make it
+    # irreversible, which is a stronger claim than the refusal supports.
+    archived_pm = _parse_block(block_text)
+    archived_block = block_text + "\n\n" + _archive_trailer(
+        archived_pm.sources if archived_pm is not None else [],
+        wiki_root=merges_path.parent,
+        disposition="Retired",
+        ts=ts,
+        detail=reason,
+    )
 
     primary_parts = ["# Pending Merges", *remaining_blocks]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
@@ -2757,7 +2809,7 @@ def _archive_stale_merge_block(
 
     _withdraw_widen_questions_for_proposals(
         merges_path.parent / "_pending_questions.md",
-        [pm.id for pm in [_parse_block(block_text)] if pm is not None],
+        [archived_pm.id] if archived_pm is not None else [],
         "was archived",
     )
 
@@ -3845,12 +3897,18 @@ def revalidate_pending_merges(
                             )
                         )
                         satisfied_blocks.append(
-                            f"{block_text}\n\n"
-                            f"{SOURCE_DIGEST_LINE_PREFIX} "
-                            f"{source_content_digest(pm.sources, wiki_root=wiki_root)}\n"
-                            f"**Archived**: {ts} — satisfied: "
-                            f"all sources already folded into "
-                            f"{own_target_path.stem!r}\n"
+                            block_text
+                            + "\n\n"
+                            + _archive_trailer(
+                                pm.sources,
+                                wiki_root=wiki_root,
+                                disposition="Archived",
+                                ts=ts,
+                                detail=(
+                                    "satisfied: all sources already folded "
+                                    f"into {own_target_path.stem!r}"
+                                ),
+                            )
                         )
                         continue
 
@@ -3876,10 +3934,15 @@ def revalidate_pending_merges(
         # it -- which is exactly why a sweep that archived 17 proposals was
         # followed by a night that re-proposed every one of them.
         retired_blocks.append(
-            f"{block_text}\n\n"
-            f"{SOURCE_DIGEST_LINE_PREFIX} "
-            f"{source_content_digest(pm.sources, wiki_root=wiki_root)}\n"
-            f"**Retired**: {ts} — gate: {reason}\n"
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=wiki_root,
+                disposition="Retired",
+                ts=ts,
+                detail=f"gate: {reason}",
+            )
         )
 
     result.kept = len(remaining)
@@ -4034,7 +4097,24 @@ def withdraw_pending_merges_for_retired_pages(
                 id=pm.id, merge_target_name=pm.merge_target_name, reason=full_reason
             )
         )
-        withdrawn_blocks.append(f"{block_text}\n\n**Retired**: {ts} — {full_reason}\n")
+        # Issue athenaeum#2514 review: digest-stamped like every other
+        # archive writer. A retired page is usually gone for good, so the
+        # digest will keep matching and this archive will keep binding --
+        # which is the right outcome. But "usually" is not "always": a page
+        # restored from the retirement is a genuine source change, and that
+        # should make the proposal askable again rather than leave it
+        # suppressed by an archive nobody can disprove.
+        withdrawn_blocks.append(
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=merges_path.parent,
+                disposition="Retired",
+                ts=ts,
+                detail=full_reason,
+            )
+        )
 
     result.kept = len(remaining)
 

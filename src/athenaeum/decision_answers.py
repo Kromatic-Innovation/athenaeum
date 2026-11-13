@@ -1951,6 +1951,38 @@ def _raised_at_for(
     return ""
 
 
+def _answer_order_key(path: Path, answer: "DecisionAnswer | None") -> tuple[str, int]:
+    """Oldest-first ordering key for two files under ``raw/answers/``
+    (issue athenaeum#2514, Seer review finding).
+
+    A raw filename sort gets the SAME-SECOND case exactly backwards.
+    :func:`write_decision_answer` names a file
+    ``{ISO-TS}-{type}-{id}.md`` and retries a second-level collision as
+    ``{ISO-TS}-{type}-{id}-1.md``, ``-2``, ... In ASCII ``-`` (0x2D) sorts
+    before ``.`` (0x2E), so ``sorted()`` puts the SUFFIXED file first and
+    the unsuffixed one -- the one written FIRST, i.e. the OLDER -- last.
+    Under a "last in the walk is newest" rule that inverts the answer: two
+    answers given in the same wall-clock second would resolve to the older
+    verdict, which is the precise failure athenaeum#2514 AC5 exists to stop.
+
+    The collision index is located via the ``-{type}-{id}`` infix the writer
+    mints, NEVER a trailing-``-digits`` regex: a decision id is 12 hex
+    characters and can be all digits, which such a regex would silently read
+    as a collision index. A file that does not follow the convention at all
+    (hand-authored, or a future scheme) simply sorts at index 0 on its own
+    name, which is the pre-existing behaviour.
+    """
+    stem = path.stem
+    if answer is not None:
+        marker = f"-{answer.decision_type}-{answer.decision_id}"
+        head, found, tail = stem.rpartition(marker)
+        if found and tail.startswith("-") and tail[1:].isdigit():
+            return (head + marker, int(tail[1:]))
+        if found and not tail:
+            return (stem, 0)
+    return (stem, 0)
+
+
 def apply_decision_answers(
     wiki_root: Path,
     raw_root: Path,
@@ -1996,13 +2028,18 @@ def apply_decision_answers(
     2026-11-12 human approval of the same merge on every nightly tick until
     the old file was moved out of the walk by hand.
 
-    "Newest" is the walk's own order: filename, whose ISO-timestamp prefix
-    :func:`write_decision_answer` mints from the clock (with a numeric
-    suffix for two answers written in the same second, which sorts after the
-    unsuffixed one). Deliberately NOT the ``resolved_at`` frontmatter, even
-    though it comes from that same clock — this function's chronology has
-    always been the filename, and having two sources of truth for "which is
-    newer" is how an answer file becomes un-orderable.
+    "Newest" is the walk's own order: the filename, whose ISO-timestamp
+    prefix :func:`write_decision_answer` mints from the clock. Deliberately
+    NOT the ``resolved_at`` frontmatter, even though it comes from that same
+    clock — this function's chronology has always been the filename, and
+    having two sources of truth for "which is newer" is how an answer file
+    becomes un-orderable. (``resolved_at`` could not break the same-second
+    tie below anyway: both files carry the same value.)
+
+    That order is :func:`_answer_order_key`, not raw ``sorted()``, because
+    raw filename sort inverts exactly the same-second case — see that
+    function. Two answers to one decision given in the same wall-clock
+    second would otherwise resolve to the OLDER verdict.
 
     A superseded file is never deleted — like every other skip here, it
     stays as its own audit trail. Note the fail-closed corner: if the newest
@@ -2055,7 +2092,6 @@ def apply_decision_answers(
     # already happened once per file either way, so this costs nothing but
     # the batch held in memory — which the loop below already implied.
     loaded: list[tuple[Path, DecisionAnswer | None, MalformedDecisionAnswer | None]] = []
-    newest_answer_for: dict[str, Path] = {}
     for path in sorted(answers_dir.glob("*.md")):
         try:
             parsed = _load_decision_answer(path)
@@ -2063,6 +2099,13 @@ def apply_decision_answers(
             loaded.append((path, None, exc))
             continue
         loaded.append((path, parsed, None))
+    # Re-sort on the real chronology now that each file's decision type and
+    # id are known: a raw filename sort inverts a same-second collision
+    # pair. See `_answer_order_key`. Dispatch order is this order too, so
+    # "oldest-first" in this function's contract is now actually true.
+    loaded.sort(key=lambda entry: _answer_order_key(entry[0], entry[1]))
+    newest_answer_for: dict[str, Path] = {}
+    for path, parsed, _load_exc in loaded:
         if parsed is not None:
             # The walk is oldest-first, so the last writer wins.
             newest_answer_for[parsed.decision_id] = path

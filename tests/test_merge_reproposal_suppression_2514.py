@@ -290,6 +290,37 @@ class TestArchivedProposalsAreNotReproposed:
         assert ruling.sources_changed is False
         assert _scan(wiki)["ruled_out"] == 1
 
+    def test_every_archive_writer_stamps_a_digest(self, colliding_wiki: Path) -> None:
+        """Review finding: `_parse_block` reads ``**Retired**:`` from ANY
+        writer, so an archive written without a digest would mint a ruling
+        nothing can prove stale -- permanent suppression with no recovery.
+        Covers the OTHER retirement path (`withdraw_pending_merges_for_
+        retired_pages`); the sweep's two dispositions are covered above."""
+        from athenaeum.pending_merges import withdraw_pending_merges_for_retired_pages
+
+        wiki = colliding_wiki
+        assert _scan(wiki)["queued"] == 1
+        sources = _unresolved(wiki)[0].sources
+
+        result = withdraw_pending_merges_for_retired_pages(
+            wiki / "_pending_merges.md",
+            [wiki / "orca-2.md"],
+            reason="operator retirement",
+            apply=True,
+        )
+        assert len(result.withdrawn) == 1
+
+        (archived,) = parse_pending_merges(wiki / "_pending_merges_archive.md")
+        assert archived.source_digest == source_content_digest(sources, wiki_root=wiki)
+        (ruling,) = load_prior_rulings(wiki)
+        assert ruling.decision == "archived"
+        assert ruling.sources_changed is False
+        # ...and it stays RECOVERABLE: restoring the page is a source change,
+        # so the pair becomes askable again rather than being suppressed by
+        # an archive nobody can disprove.
+        _page(wiki, "orca-2.md", name="ORCA", body="Restored, with new facts.\n")
+        assert load_prior_rulings(wiki)[0].sources_changed is True
+
     def test_match_rulings_reports_a_lapsed_archive_as_expired(
         self, colliding_wiki: Path
     ) -> None:
