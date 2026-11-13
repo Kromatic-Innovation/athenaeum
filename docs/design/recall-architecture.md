@@ -89,6 +89,37 @@ withheld tally run entirely in SQL/awk — no Python interpreter is spawned
 to do it, exactly as the relevance floor above already does not apply
 there.
 
+**One resolver per setting, no per-surface defaults (issue athenaeum#2458).**
+Both of this section's configured values resolve in exactly one place, and
+every read surface calls it rather than carrying a default of its own:
+
+| Setting | Resolver | Precedence |
+|---|---|---|
+| which backend answers | `athenaeum.config.resolve_search_backend` | yaml `search_backend` > shipped default (`vector`) |
+| the push-path ceiling | `athenaeum.config.resolve_recall_cap_ceiling` | `ATHENAEUM_RECALL_CAP_CEILING` env > `recall.cap.ceiling` yaml > `RECALL_CAP_CEILING_DEFAULT` |
+
+The surfaces are the `recall` CLI, the MCP `recall` tool and its `serve`
+wiring, `athenaeum context`, `athenaeum codex-context` and the Codex Tier-2
+adapter, the Claude Code `UserPromptSubmit` adapter, `reindex`/`session-end`,
+`doctor`, and `examples/claude-code/session-start-recall.sh`. Each used to
+answer with a local default — `fts5` on the sidecar and Codex paths, an inline
+`.get("search_backend", "fts5")` on about ten others whose fallback fired for
+any config dict that had not come from `load_config`, and the bare ceiling
+constant in the Codex adapter — so one query could be ranked three different
+ways depending on who asked. A grep for `get("search_backend"` in `src/` now
+finds only `resolve_search_backend`'s own body, which is the invariant that
+keeps it that way.
+
+Two details that look like exceptions and are not. First, an explicit
+`--backend` (or an explicit `n`/`--n`) still wins over the resolved value: the
+resolvers answer "what is configured", not "what this call must use". Second,
+`session-start-recall.sh` caches the resolved values into `config.env` under
+the hook-local names `SEARCH_BACKEND` and `RECALL_CAP_CEILING`, and caches the
+**yaml** ceiling only — `ATHENAEUM_RECALL_CAP_CEILING` is dropped from that
+subprocess before the resolver runs, so a runtime override is never baked into
+a session-long cache. The per-turn adapter applies the override instead, by
+handing the cached line back to the same resolver in the yaml position.
+
 **The packaged adapter carries it too, from one Python renderer (issue
 athenaeum#1905).** The paragraph above described two implementations of one
 rule: a Python one behind `recall`, and an awk one inside
