@@ -222,6 +222,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`athenaeum.reasoning_screens`); callers that supply none (e.g. the
   ATTRIBUTION tier) are unaffected (athenaeum#2521).
 
+- `decisions revalidate` (`athenaeum.pending_merges.revalidate_pending_merges`)
+  no longer reports a source that was folded into another page the same
+  way as a source that is genuinely gone — both used to collapse into one
+  `source page missing: N of M` reason. A folded source is now reported as
+  `source folded into <target>: N of M`, and a proposal whose sources are
+  ALL folded into its OWN target is archived as satisfied
+  (`**Archived**:`) rather than stale (`**Retired**:`) — a wrong-target
+  fold or a partial fold still reports as stale (athenaeum#2522).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
