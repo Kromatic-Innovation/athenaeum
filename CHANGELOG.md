@@ -242,6 +242,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`**Archived**:`) rather than stale (`**Retired**:`) — a wrong-target
   fold or a partial fold still reports as stale (athenaeum#2522).
 
+- A merge approved or rejected from a human answer no longer records
+  `decided_by: pipeline:merge-<decision>` in the verdict ledger, indistinguishable
+  from an automated decision. The MCP `resolve_merge` tool and the
+  `decisions answer` CLI command — the only two surfaces that can answer a
+  merge decision today — now stamp a `human:<actor>` decided_by instead
+  (`human:unattributed` until athenaeum#2489's attributable-answer field
+  exists to supply a real actor); an answer with no human signal keeps the
+  pre-existing `pipeline:merge-<decision>` stamp unchanged (athenaeum#2523).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
