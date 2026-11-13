@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `athenaeum doctor` now ends its report with a short note when one or more
+  checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
+  install until setup is complete and pointing back at the per-FAIL `fix:`
+  lines above it. Not printed when every check is OK or SKIP; exit codes
+  are unchanged (athenaeum#2450).
+
 - `schema migrate` and `description backfill` now take the run lock and exit
   75 while another run holds it (athenaeum#2453). User-visible: both
   commands' `--apply` mode can now return exit code 75 (`EXIT_LOCK_HELD`)
