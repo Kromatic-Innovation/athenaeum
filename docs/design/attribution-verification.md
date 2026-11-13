@@ -323,11 +323,11 @@ of three signals is used:
    discrimination clears the bar (§12.3: AUROC at least 0.75 on held-out
    cases).
 2. **Agreement over K = 3 calls**, with the candidate order permuted between
-   calls. The newer models reject sampling parameters
-   (`models._SAMPLING_PARAMS_REJECTED_PREFIXES`), so a temperature cannot be
-   set, and the permutation is what makes the three calls independent. The
-   score is the share of calls agreeing with the majority verdict. Used if
-   signal 1 fails the bar and this one passes it.
+   calls. The newer models reject sampling parameters outright (HTTP 400 on
+   `temperature`/`top_p`/`top_k` for the 4.7+/5-family request surface), so a
+   temperature cannot be set, and the permutation is what makes the three
+   calls independent. The score is the share of calls agreeing with the
+   majority verdict. Used if signal 1 fails the bar and this one passes it.
 3. **Class-level.** The score is a constant, so the threshold degenerates to
    "this class auto-files or it does not". The class auto-files only if its
    accuracy, at the lower confidence bound, clears the target (§12.3).
