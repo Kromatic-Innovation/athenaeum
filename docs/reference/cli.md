@@ -44,6 +44,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions migrate`](#athenaeum-decisions-migrate) (command) — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
+- [`athenaeum decisions pending-answers`](#athenaeum-decisions-pending-answers) (command) — Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
 - [`athenaeum decisions propose-fold`](#athenaeum-decisions-propose-fold) (command) — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - [`athenaeum decisions provenance`](#athenaeum-decisions-provenance) (command) — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
@@ -473,6 +474,7 @@ Subcommands:
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions migrate` — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
+- `athenaeum decisions pending-answers` — Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
 - `athenaeum decisions propose-fold` — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - `athenaeum decisions provenance` — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
@@ -491,6 +493,7 @@ Answer one queue item with a JSON object, validated against that item's publishe
 | `--id` | — | — | The decision id being answered. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--refuse-on-pending-conflict` | off (flag absent) | — | By default, an unapplied answer file already on disk for this id (or, for a merge, for another proposal whose sources overlap) is reported as a warning and the new answer is still written. Pass this to refuse instead — nothing is written. |
 | `--type` | — | — | The item's decision type, as reported by `athenaeum decisions list` — it selects the response schema the answer is checked against. |
 
 ## `athenaeum decisions budget`
@@ -555,6 +558,17 @@ Show the oldest pending decision (single block).
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |
+
+## `athenaeum decisions pending-answers`
+
+Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--id` | — | — | A decision id — list unapplied answer files for this id. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--page` | — | — | A wiki page id (comparator id) — list unapplied coordinate/merge answer files naming this page. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decisions propose-fold`
 
