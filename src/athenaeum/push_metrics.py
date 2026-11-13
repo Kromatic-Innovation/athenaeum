@@ -513,43 +513,15 @@ def push_records_path(cache_dir: Path | None = None) -> Path:
     return resolve_cache_dir(cache_dir) / PUSH_RECORDS_FILENAME
 
 
-def _has_migrated_content(path: Path) -> bool:
-    """``True`` only when *path* exists AND carries at least one byte.
-
-    Issue athenaeum#1512 defect 2: the prior check was bare ``path.exists()``,
-    which treats a stray ``touch``, a partially-written file from a crashed
-    run, or an empty file some other process created as proof of a completed
-    migration — permanently repointing every subsequent read/write away from
-    a populated legacy ledger with no rows actually moved. Requiring content
-    means creating an empty ``<wiki_root>/_push_records.jsonl`` can never by
-    itself flip resolution.
-
-    Since issue athenaeum#1591 this no longer gates resolution at all — the
-    ledger always resolves to the cache dir — and it survives as the
-    "is there a real, non-empty ledger stranded here?" predicate behind
-    :func:`durable_push_records_path`'s operator warning. ``is_file()`` (not
-    ``exists()``) so a *directory* at the path, which ``stat().st_size``
-    reports as non-zero on most filesystems, is not mistaken for rows.
-    """
-    try:
-        return path.is_file() and path.stat().st_size > 0
-    except OSError:
-        return False
-
-
-#: ``<wiki_root>/_push_records.jsonl`` paths already warned about, so the
-#: stranded-ledger warning in :func:`durable_push_records_path` fires once per
-#: path per process rather than once per recall push.
-_MISROUTED_WARNED: set[str] = set()
-
-
 def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
     """Always ``<cache_dir>/_push_records.jsonl`` — NEVER ``<wiki_root>/``.
 
-    *wiki_root* is retained (every caller passes it) but is **never a write
-    target**: it is read only to detect a ledger stranded at the withdrawn
-    location and warn about it. Passing it can no longer route a push record
-    into the corpus.
+    *wiki_root* is retained (every caller passes it) but is unused here: it
+    is no longer a write target, and — since issue athenaeum#2467 removed
+    the one-time stranded-ledger warning this function used to emit — it is
+    no longer read either. A ``_push_records.jsonl`` left over at the
+    withdrawn wiki-root location from before issue athenaeum#1591 moved
+    this ledger is now simply ignored.
 
     **Issue athenaeum#1591 ruling — which of the two contracts governs.**
     This module's header forbade the wiki corpus while this function resolved
@@ -601,23 +573,8 @@ def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None)
     function is no longer the only thing standing between a scratch run and
     the live store.
     """
-    legacy_path = push_records_path(cache_dir)
-    misrouted = Path(wiki_root) / PUSH_RECORDS_FILENAME
-    if _has_migrated_content(misrouted) and str(misrouted) not in _MISROUTED_WARNED:
-        _MISROUTED_WARNED.add(str(misrouted))
-        log.warning(
-            "push-records ledger found at the withdrawn wiki-root location %s "
-            "(issue athenaeum#1591: that location is no longer written or read). "
-            "Its rows are stranded — they are NOT counted in push precision, and "
-            "they sit inside the corpus the athenaeum#749 acceptance excludes. "
-            "Merge them into %s (deduplicated, re-sorted by 'ts'), then move the "
-            "file out of the knowledge root and commit its removal. Nothing is "
-            "migrated automatically: this is operator-decided, one-way data "
-            "movement over a git-tracked corpus.",
-            misrouted,
-            legacy_path,
-        )
-    return legacy_path
+    canonical_path = push_records_path(cache_dir)
+    return canonical_path
 
 
 def reference_records_path(cache_dir: Path | None = None) -> Path:
@@ -904,7 +861,8 @@ def record_push(
     *wiki_root*, when supplied, routes through
     :func:`durable_push_records_path`. Since issue athenaeum#1591 that
     resolves to the cache dir either way — both branches below now yield the
-    same path, and *wiki_root* only enables the stranded-ledger warning.
+    same path, and *wiki_root* is otherwise unused (issue athenaeum#2467
+    removed the stranded-ledger warning it used to enable).
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled

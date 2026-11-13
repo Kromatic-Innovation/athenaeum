@@ -41,6 +41,21 @@ on by default. If you upgrade an existing install and run without reading
 this section, raw auto-memory files will start disappearing from the
 working tree — recoverable, but only from git history.
 
+## I want to know about the removed stranded-ledger warnings
+
+Earlier releases moved the spend ledger (`spend.jsonl`), the LLM-schema
+observation ledger (`_llm_schema_observations.jsonl`), and the push-records
+ledger (`_push_records.jsonl`) out of the knowledge root and into your
+cache directory, and for a while athenaeum logged a one-time warning per
+process if it found a leftover copy of one of these files still sitting at
+its old knowledge-root location.
+
+Those warnings are gone. If a leftover ledger from before that move is
+still sitting at the old location, athenaeum now simply ignores it — it is
+never read and never written. Nothing is deleted or migrated automatically;
+if you want those old rows, merge the leftover file into the corresponding
+file in your cache directory yourself, then remove the old copy.
+
 ## I want to know what gets moved vs. what's held back
 
 Only non-contradictory clusters are retired. A cluster is **held** in the
