@@ -590,7 +590,7 @@ ingest — deterministically, with **no LLM call, ever**. Dispatch per
 | `decision_type` | Applier | Effect |
 |---|---|---|
 | `question` | `athenaeum.answers.resolve_by_id` | flips the checkbox; the legacy `ingest_answers` pass immediately after completes the write-back + archival |
-| `merge` | `athenaeum.pending_merges.resolve_merge` | the full approve/reject apply (wiki write, wikilink rewrite, source deletes, provenance) |
+| `merge` | `athenaeum.pending_merges.resolve_merge` | the full approve/reject apply (wiki write, wikilink rewrite, source tombstones, provenance) |
 | `audit` | `athenaeum.calibration.record_audit_review` | appends the review record to the calibration ledger |
 | `proposed-rule` | `athenaeum.rule_proposals.approve_rule_proposal` / `reject_rule_proposal` | `verdict: approve` writes the stored, already-drafted rule YAML into `<knowledge_root>/rules/` in **observe mode** and appends an `approve` record; `verdict: reject` appends a `reject` record, permanently suppressing that shape (issue athenaeum#905). `knowledge_root` is derived as `wiki_root.parent`. An unknown or already-resolved proposal id is caught and skipped, same fail-soft contract as every other type (issue athenaeum#921). |
 
