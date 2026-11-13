@@ -750,7 +750,12 @@ def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def source_content_digest(sources: Iterable[str], *, wiki_root: Path) -> str:
+def source_content_digest(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    page_digests: dict[Path, str] | None = None,
+) -> str:
     """A stable fingerprint of what every page in *sources* CONTAINS.
 
     Order-independent (sources fold in basename order) and
@@ -765,20 +770,32 @@ def source_content_digest(sources: Iterable[str], *, wiki_root: Path) -> str:
     rewrites a file byte-identically, so it answers "was this file touched",
     not "did this page change". The second question is the one the archived
     ruling asks.
+
+    *page_digests* is an optional caller-owned memo of per-page digests,
+    keyed by resolved path. :func:`athenaeum.prior_rulings.load_prior_rulings`
+    passes one because the same page recurs across archived blocks by
+    construction -- the driving case is a single pair re-proposed and
+    re-archived on 19 consecutive nights. Pass ``None`` (the default) for a
+    one-shot call; a caller that reuses a memo across two different instants
+    would be comparing one instant's bytes against another's, so the memo is
+    deliberately the caller's to scope rather than module state.
     """
     parts: list[bytes] = []
     for source in sorted(set(sources), key=lambda s: Path(s).name):
         path = resolve_source_path(source, wiki_root=wiki_root)
-        data = b""
-        if path is not None:
-            try:
-                data = path.read_bytes()
-            except OSError:  # pragma: no cover - raced deletion
-                data = b""
+        digest = page_digests.get(path) if page_digests is not None and path else None
+        if digest is None:
+            data = b""
+            if path is not None:
+                try:
+                    data = path.read_bytes()
+                except OSError:  # pragma: no cover - raced deletion
+                    data = b""
+            digest = hashlib.sha256(data).hexdigest()
+            if page_digests is not None and path is not None:
+                page_digests[path] = digest
         parts.append(
-            Path(source).name.encode("utf-8")
-            + b"\x00"
-            + hashlib.sha256(data).hexdigest().encode("ascii")
+            Path(source).name.encode("utf-8") + b"\x00" + digest.encode("ascii")
         )
     return hashlib.sha256(b"\x00".join(parts)).hexdigest()
 

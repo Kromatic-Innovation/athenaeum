@@ -128,6 +128,10 @@ def load_prior_rulings(wiki_root: Path) -> list[PriorRuling]:
     from athenaeum.pending_merges import parse_pending_merges, source_content_digest
 
     rulings: list[PriorRuling] = []
+    # One memo for this whole load, so a page named by twenty archived
+    # blocks is read once. Scoped to the call: every digest below is then
+    # taken at the same instant.
+    page_digests: dict[Path, str] = {}
     for filename in (PENDING_FILENAME, ARCHIVE_FILENAME):
         for pm in parse_pending_merges(wiki_root / filename):
             if not pm.sources:
@@ -151,7 +155,11 @@ def load_prior_rulings(wiki_root: Path) -> list[PriorRuling]:
                         note=pm.archive_reason,
                         sources_changed=bool(pm.source_digest)
                         and pm.source_digest
-                        != source_content_digest(pm.sources, wiki_root=wiki_root),
+                        != source_content_digest(
+                            pm.sources,
+                            wiki_root=wiki_root,
+                            page_digests=page_digests,
+                        ),
                     )
                 )
                 continue
