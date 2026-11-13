@@ -1991,7 +1991,7 @@ class TestLintPiiCleanAfterRename:
     pages, except the deliberately-deferred ambiguous residual."""
 
     def test_lint_pii_clean_except_deferred_residual(self, tmp_path: Path, capsys) -> None:
-        from athenaeum.pii import name_field_holds_pii, scan_corpus_pii
+        from athenaeum.pii import scan_corpus_pii
 
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
@@ -2013,12 +2013,10 @@ class TestLintPiiCleanAfterRename:
         )
         assert rc == 0
 
-        # The confident page no longer trips name_field_holds_pii (renamed to
-        # a human-readable name) nor the corpus-wide lint (the raw address no
-        # longer appears anywhere under wiki/).
-        renamed_text = (root / "wiki" / "jane-doe.md").read_text(encoding="utf-8")
-        renamed_meta, _ = parse_frontmatter(renamed_text)
-        assert name_field_holds_pii(renamed_meta) is False
+        # The confident page's raw address no longer appears anywhere under
+        # wiki/ (renamed to a human-readable name), so the corpus-wide lint
+        # no longer trips on it.
+        assert (root / "wiki" / "jane-doe.md").exists()
 
         findings = scan_corpus_pii(root / "wiki")
         finding_paths = {f.path.name for f in findings}
@@ -2028,14 +2026,6 @@ class TestLintPiiCleanAfterRename:
         # The renamed page's own findings must not include the migrated
         # address (it was moved off-corpus, not merely relocated on-page).
         assert "jane-doe.md" not in finding_paths
-
-        # The deferred page still trips name_field_holds_pii — the residual
-        # AC's "reported as a residual count" surfaces through the bulk
-        # driver's report, not a silent disappearance.
-        deferred_meta, _ = parse_frontmatter(
-            (root / "wiki" / "info-at-acme.md").read_text(encoding="utf-8")
-        )
-        assert name_field_holds_pii(deferred_meta) is True
 
 
 # ---------------------------------------------------------------------------

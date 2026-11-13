@@ -288,10 +288,10 @@ def _field_values(meta: dict[str, Any], body: str, field: str) -> list[str]:
 
     ``field == "body"`` (:data:`BODY_PSEUDO_FIELD`) checks the page's
     rendered body text as a single value. Every other *field* name is
-    looked up in *meta*, mirroring
-    :func:`athenaeum.pii._frontmatter_contact_values`'s scalar-or-list
-    normalisation: a frontmatter field is stored either as a bare scalar
-    or as a list; both shapes are treated identically here.
+    looked up in *meta*, using the same scalar-or-list normalisation this
+    repo uses for frontmatter fields generally: a frontmatter field is
+    stored either as a bare scalar or as a list; both shapes are treated
+    identically here.
     """
     if field == BODY_PSEUDO_FIELD:
         return [body] if body.strip() else []

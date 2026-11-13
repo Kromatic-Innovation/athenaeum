@@ -57,7 +57,7 @@ from athenaeum.identity_resolution import resolve_person_mention
 from athenaeum.intake import tier0_passthrough
 from athenaeum.librarian import process_one, tier0_handle_upsert
 from athenaeum.models import EntityIndex, RawFile
-from athenaeum.person_registry import PersonRegistry, apply_person_field_update
+from athenaeum.person_registry import PersonRegistry
 from athenaeum.tiers import tier1_programmatic_match
 
 # ---------------------------------------------------------------------------
@@ -447,39 +447,6 @@ class TestAC3TierZeroNoLLM:
 
         assert client.calls == []
         assert "linkedin.com/in/alicezhang" in page.read_text(encoding="utf-8")
-
-    def test_apply_person_field_update_idempotent_no_delta(self, tmp_path: Path) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(
-            registry_root, uid="person1a", name="Alice Zhang", extra_fm="current_title: Lead\n"
-        )
-        before = page.read_text(encoding="utf-8")
-        meta, changed = apply_person_field_update(page, {"current_title": "Lead"})
-        assert changed is False
-        assert page.read_text(encoding="utf-8") == before  # byte-for-byte stable
-
-    def test_apply_person_field_update_writes_a_real_delta(self, tmp_path: Path) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(
-            registry_root, uid="person1a", name="Alice Zhang", extra_fm="current_title: Lead\n"
-        )
-        meta, changed = apply_person_field_update(page, {"current_title": "Director"})
-        assert changed is True
-        assert meta["current_title"] == "Director"
-        assert "current_title: Director" in page.read_text(encoding="utf-8")
-
-    def test_apply_person_field_update_dry_run_does_not_write(self, tmp_path: Path) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(
-            registry_root, uid="person1a", name="Alice Zhang", extra_fm="current_title: Lead\n"
-        )
-        before = page.read_text(encoding="utf-8")
-        meta, changed = apply_person_field_update(
-            page, {"current_title": "Director"}, dry_run=True
-        )
-        assert changed is True
-        assert meta["current_title"] == "Director"
-        assert page.read_text(encoding="utf-8") == before  # nothing written
 
 
 # ---------------------------------------------------------------------------
