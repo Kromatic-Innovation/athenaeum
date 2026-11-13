@@ -3385,6 +3385,37 @@ class TestParentSubPagesRankingUnchanged:
         assert _ranked_hits(without_relation) != []
 
     @staticmethod
+    def _ordered_uids(result: str) -> list[str]:
+        """The ``**Uid:**`` value off each hit, in RENDER order -- a plain
+        ``list[str]``, so a test comparing two of these with ``==`` would
+        actually fail on a reorder (a ``set`` comparison would not)."""
+        return [
+            line.removeprefix("**Uid:** ").strip()
+            for line in result.splitlines()
+            if line.startswith("**Uid:**")
+        ]
+
+    def test_ordered_uid_sequence_is_identical_with_and_without_relation(
+        self, tmp_path: Path
+    ) -> None:
+        """AC5, stated as the exact discriminator the issue names: "the
+        ordered hit list for a fixture query is identical before and
+        after." Asserted on the ordered uid LIST (would fail under a
+        reorder), never a set (which would not)."""
+        without_relation = recall_search(
+            self._build(tmp_path / "a", with_relation=False), "retainer client"
+        )
+        with_relation = recall_search(
+            self._build(tmp_path / "b", with_relation=True), "retainer client"
+        )
+        without_uids = self._ordered_uids(without_relation)
+        with_uids = self._ordered_uids(with_relation)
+        # Sanity: a real, non-trivial 3-hit ordering exists to compare (not
+        # a degenerate single-hit fixture that would pass trivially).
+        assert without_uids == ["company-other", "company-acme", "company-acme-finance"]
+        assert without_uids == with_uids
+
+    @staticmethod
     def _without_relation_lines(text: str) -> str:
         return "\n".join(
             line
