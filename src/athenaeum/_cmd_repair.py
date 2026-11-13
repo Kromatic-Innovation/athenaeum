@@ -445,6 +445,7 @@ def _cmd_repair_fold_targets(args: argparse.Namespace) -> int:
         print(f"  dangling:      {report.dangling}")
         print(f"  repaired:      {report.repaired if args.apply else 0}")
         print(f"  ambiguous:     {len(report.ambiguous)}")
+        print(f"  ledger_slugs:  {report.ledger_records_updated}")
         if report.changes and not args.apply:
             for path, old, new in report.changes[:20]:
                 print(f"    {path.name}: {old!r} -> {new!r}")
