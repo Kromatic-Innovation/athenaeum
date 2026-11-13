@@ -163,6 +163,19 @@ If you previously set `librarian.delta.enabled: false` (or
 instead of a delta-scoped one, run `athenaeum run --full-compile` to get
 the same whole-corpus compile for that run.
 
+## I want to know what's gone: the retention module and key
+
+The retention-policy enforcement module and its `librarian.retention` yaml
+key are removed. Neither ever shipped a caller — no CLI command, no MCP
+tool, and no hook in the librarian pipeline read it — so there is no
+behaviour change to anything that was actually running. A stale
+`athenaeum.yaml` still setting `librarian.retention` loads fine; the key is
+ignored and logged with the same warning every other removed key gets.
+
+This is unrelated to the live raw-intake retention reporting the librarian
+pipeline still runs (the size-threshold check that WARNs when a raw source
+tree crosses its configured bound) — that stays exactly as it was.
+
 ## I want to know about the other destructive-by-design command
 
 `athenaeum auto-memory prune --apply` is a second opt-in command that
