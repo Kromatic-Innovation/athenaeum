@@ -169,15 +169,54 @@ _RAISED_BY_AGENT = "agent"
 _OBSERVATION_PREFIX = "**Observation**:"
 
 
+def _render_fenced_field(prefix: str, text: str) -> str:
+    """Render *text* as a fenced ``<prefix>`` field (no trailing newline).
+
+    Shared by :func:`render_observation_field` and
+    :func:`render_conflicting_claims_field` (issue athenaeum#2519) — same
+    fence-width-picking logic, different field prefix. The fence is one
+    backtick longer than the longest backtick run in the text, so no line
+    of the field's content can close it early.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{prefix}\n{fence}text\n{text.strip(chr(10))}\n{fence}"
+
+
 def render_observation_field(text: str) -> str:
     """Render *text* as a fenced ``**Observation**:`` field (no trailing newline).
 
     The fence is one backtick longer than the longest backtick run in the
     text, so no line of the observation can close it early.
     """
-    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"{_OBSERVATION_PREFIX}\n{fence}text\n{text.strip(chr(10))}\n{fence}"
+    return _render_fenced_field(_OBSERVATION_PREFIX, text)
+
+
+# Issue athenaeum#2519: a fenced field carrying the durable copy of the
+# conflicting claims a contradiction question was raised over — the new
+# raw claim plus the compiled page's conflicting content — captured by the
+# raise site at the moment the question is created. Mirrors
+# ``**Observation**:``'s fencing exactly (see that field's docstring for
+# why a fence, not a plain multi-line value): a human's free-text answer
+# can legitimately contain blank lines, ``---`` or ``## `` text, and this
+# field is written BEFORE that answer exists, so it must not be mistaken
+# for block-delimiting content either.
+_CONFLICTING_CLAIMS_PREFIX = "**Conflicting claims**:"
+
+# Issue athenaeum#2519: single-line metadata naming the compiled wiki page
+# this contradiction's raw claim would have merged into, captured at raise
+# time. A plain ``**Key**: value`` line (like ``**Fingerprint**:``) rather
+# than a fenced field — a repo-relative path never spans multiple lines.
+_COMPILED_PAGE_PREFIX = "**Compiled page**:"
+
+
+def render_conflicting_claims_field(text: str) -> str:
+    """Render *text* as a fenced ``**Conflicting claims**:`` field (issue athenaeum#2519).
+
+    No trailing newline — mirrors :func:`render_observation_field`'s shape
+    exactly, just a different prefix.
+    """
+    return _render_fenced_field(_CONFLICTING_CLAIMS_PREFIX, text)
 
 # Issue athenaeum#1990: the moment ``resolve_by_id`` flips a block's checkbox
 # to ``[x]`` — the decision-time metric's paired counterpart to the header's
@@ -289,6 +328,18 @@ class PendingQuestion:
     # fenced ``**Observation**:`` field. Empty on every block that predates
     # the field -- see :attr:`recovered_observation` for the legacy fallback.
     observation: str = ""
+    # Issue athenaeum#2519: durable copy of the conflicting claims, recovered
+    # off the fenced ``**Conflicting claims**:`` field. Empty on every block
+    # that predates this change, and on every escalation that is not this
+    # kind of contradiction (there is no field to recover).
+    conflicting_claims: str = ""
+    # Issue athenaeum#2519: the compiled wiki page this contradiction's raw
+    # claim would have merged into, recovered off the ``**Compiled page**:``
+    # line. Empty ("") means either a pre-athenaeum#2519 block (no field was
+    # ever written) or a non-contradiction escalation — both fall back to
+    # resolving the write-back against ``source`` the way every block did
+    # before this change (see :func:`_block_source_refs`).
+    compiled_page: str = ""
 
     @property
     def recovered_observation(self) -> str:
@@ -501,6 +552,12 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     observation_lines: list[str] = []
     observation_fence = 0  # open fence's backtick length, 0 when none
     observation_pending = False  # saw the key, awaiting the fence opener
+    # Issue athenaeum#2519: fenced ``**Conflicting claims**:`` field state —
+    # same fence-tracking shape as the observation field above.
+    conflicting_claims_lines: list[str] = []
+    conflicting_claims_fence = 0
+    conflicting_claims_pending = False
+    compiled_page = ""
 
     def _match_confirmation_key(stripped_line: str) -> bool:
         """Recognize a `**<Confirmation key>**:` line; record it if found.
@@ -549,6 +606,35 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                 observation_lines.append(inline)
             else:
                 observation_pending = True
+            continue
+        if conflicting_claims_fence:
+            close = FENCE_CLOSE_RE.match(stripped)
+            if close and len(close.group("fence")) == conflicting_claims_fence:
+                conflicting_claims_fence = 0
+            else:
+                conflicting_claims_lines.append(raw_line)
+            continue
+        if conflicting_claims_pending:
+            conflicting_claims_pending = False
+            open_match = GENERIC_FENCE_OPEN_RE.match(stripped)
+            if open_match:
+                conflicting_claims_fence = len(open_match.group("fence"))
+                continue
+        if stripped.startswith(_CONFLICTING_CLAIMS_PREFIX):
+            # Issue athenaeum#2519: durable copy of the conflicting claims —
+            # metadata, must not leak into answer_lines as a phantom answer.
+            in_description = False
+            inline = stripped.removeprefix(_CONFLICTING_CLAIMS_PREFIX).strip()
+            if inline:
+                conflicting_claims_lines.append(inline)
+            else:
+                conflicting_claims_pending = True
+            continue
+        if stripped.startswith(_COMPILED_PAGE_PREFIX):
+            # Issue athenaeum#2519: compiled-page path — metadata, must not
+            # leak into answer_lines as a phantom answer.
+            in_description = False
+            compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
             continue
         if stripped.startswith("**Conflict type**:"):
             in_description = False
@@ -621,6 +707,9 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                 if stripped.startswith(_ANSWERED_AT_PREFIX):
                     answered_at = stripped.removeprefix(_ANSWERED_AT_PREFIX).strip()
                     continue
+                if stripped.startswith(_COMPILED_PAGE_PREFIX):
+                    compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
+                    continue
                 if _match_confirmation_key(stripped):
                     continue
                 # Unknown **Key**: — treat as answer body.
@@ -662,6 +751,8 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         alternative=confirmation_fields.get("alternative", ""),
         raised_at=confirmation_fields.get("raised_at", ""),
         observation="\n".join(observation_lines).strip("\n"),
+        conflicting_claims="\n".join(conflicting_claims_lines).strip("\n"),
+        compiled_page=compiled_page,
     )
 
 
@@ -961,7 +1052,20 @@ def _block_source_refs(pq: PendingQuestion) -> list[str]:
     additional members the block involves (also-affects), side b onward;
     ``Members involved:`` (issue athenaeum#210 follow-up) covers the
     auto-memory-contradiction detector's own attribution line.
+
+    Issue athenaeum#2519: when ``pq.compiled_page`` is set (a contradiction
+    question that stored its own durable copy of the conflicting claims and
+    the compiled page they landed in), that page IS the write-back target —
+    returned alone, in place of ``pq.source``. ``pq.source`` names the raw
+    file this kind of contradiction was raised against, which the librarian
+    deletes on its normal intake-consumption schedule regardless of whether
+    the question is still open; resolving against it would make the
+    write-back depend on timing it will usually lose. A block raised before
+    this change has ``compiled_page == ""`` and falls straight through to
+    the pre-existing order below, unchanged.
     """
+    if pq.compiled_page:
+        return [pq.compiled_page]
     return [
         pq.source,
         *_extract_member_path_refs(pq.raw_block),
@@ -1070,6 +1174,20 @@ def _writeback_source(
         member_paths = _resolve_source_files(refs, roots)
         if not member_paths:
             return 0
+
+        # Issue athenaeum#2519: a contradiction question with a stored
+        # compiled-page target writes back DIRECTLY to that page. It names
+        # exactly one file, not an a/b member PAIR, so none of the
+        # pair-oriented machinery below applies — an enacting verdict like
+        # `forget_a` would otherwise sail past the `len(member_paths) <=
+        # idx` guard at index 0 and DELETE the compiled page itself, and
+        # `archive`/`supersede` would mark a live wiki entity `deprecated`
+        # over a free-text answer. Routed to its own small helper instead,
+        # which only ever proposes an edit or annotates — never enacts.
+        if pq.compiled_page:
+            return _writeback_compiled_page(
+                pq, member_paths[0], answer_body, client=client, config=config, usage=usage
+            )
 
         verdict, remainder = _parse_verdict(answer_body)
 
@@ -1187,6 +1305,97 @@ def _writeback_source(
     except Exception:
         log.exception("answers: source write-back failed for entity=%s", pq.entity)
         return 0
+
+
+def _writeback_compiled_page(
+    pq: PendingQuestion,
+    page_path: Path,
+    answer_body: str,
+    *,
+    client: "LLMBackend | None",
+    config: "dict | None",
+    usage: "TokenUsage | None",
+) -> int:
+    """Apply ``pq``'s ratified answer directly to its stored compiled page.
+
+    Issue athenaeum#2519: a contradiction question whose source ref names a
+    raw file (a session transcript or assistant note) stores its own
+    durable copy of the conflicting claims and the compiled page they
+    landed in, at raise time — because the librarian deletes that raw file
+    on its normal intake-consumption schedule regardless of whether the
+    question is still open. This is where the stored copy gets used: the
+    write-back targets *page_path* directly, never attempting to resolve
+    the (likely already-deleted) raw source.
+
+    Unlike :func:`_writeback_source`'s member-pair machinery, there is
+    exactly ONE target file and no a/b orientation here, so this never
+    calls :func:`athenaeum.resolutions.enact_resolution` (an enacting
+    verdict deletes or marks one side of a PAIR; there is no pair) and
+    never marks the page ``deprecated`` for an ``archive``/``supersede``
+    token. It always either (a) proposes a concrete edit via the LLM
+    free-text proposer — using ``pq.conflicting_claims`` as context in
+    place of a raw source's body when the description carries no ``Passage
+    N:`` lines of its own — or (b) falls back to a non-destructive
+    annotation, mirroring :func:`_writeback_source`'s own free-text branch.
+    Never raises — a write-back failure must not block the provenance/
+    archive path; returns 0 on any failure.
+    """
+    from athenaeum.models import parse_frontmatter, render_frontmatter
+    from athenaeum.resolutions import _annotate_body
+
+    try:
+        text = page_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        log.warning("answers: compiled page missing/unreadable: %s", page_path)
+        return 0
+    meta, body = parse_frontmatter(text)
+
+    passages = extract_passages(pq.description)
+    if not passages and pq.conflicting_claims:
+        passages = [pq.conflicting_claims]
+
+    if client is not None:
+        from athenaeum.resolutions import propose_freetext_source_edits
+
+        # athenaeum#248: one attempt per proposer call, counted before the
+        # call so an API failure still counts as an attempt — mirrors
+        # _writeback_source's own convention.
+        if usage is not None:
+            usage.api_calls += 1
+        proposed = propose_freetext_source_edits(
+            answer_body, [(page_path, body)], passages, client, config, usage=usage
+        )
+        new_body = proposed.get(page_path)
+        if new_body is not None and new_body != body:
+            if meta:
+                atomic_write_text(page_path, render_frontmatter(meta) + "\n" + new_body)
+            else:
+                atomic_write_text(page_path, new_body)
+            log.info(
+                "answers: freetext proposer edited compiled page %s for entity=%s",
+                page_path,
+                pq.entity,
+            )
+            return 1
+        # Proposer returned nothing — fall through to annotation.
+
+    # Non-destructive annotation fallback. Strip a leading verdict token
+    # (e.g. "not_a_conflict: ...") the same way _writeback_source's own
+    # non-enacting branch does, purely for a clean annotation note — no
+    # verdict here ever dispatches to enact/historical machinery.
+    _verdict, remainder = _parse_verdict(answer_body)
+    note = remainder if _verdict is not None else answer_body
+    note = (note or answer_body).strip()
+    if not note:
+        return 0
+    new_body = _annotate_body(body, note)
+    if new_body == body:
+        return 0
+    if meta:
+        atomic_write_text(page_path, render_frontmatter(meta) + "\n" + new_body)
+    else:
+        atomic_write_text(page_path, new_body)
+    return 1
 
 
 # ---------------------------------------------------------------------------
