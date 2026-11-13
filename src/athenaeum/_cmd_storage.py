@@ -36,12 +36,6 @@ Two sub-commands:
   :mod:`athenaeum.sensitivity_lint`, which holds all the check logic; exits
   non-zero only on a completeness finding (a D4 policy-mismatch finding is
   advisory and never fails the gate on its own).
-- ``audit-h1-redaction`` — read-only audit (issue athenaeum#1461) for pages whose
-  H1 heading line carries :data:`~athenaeum.storage_migrate.INLINE_REDACTION_MARKER`,
-  classified via :mod:`athenaeum.pii_h1_audit` into a defect population
-  (marker consumed the whole heading subject) and a non-defect population
-  (marker replaced one inline token inside an otherwise-intact title). Never
-  writes; see that module's docstring for the classification rule.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -56,16 +50,11 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from athenaeum.runlock import RunLock
+from typing import Any
 
 from athenaeum import pii_attribution
 from athenaeum._cli_shared import (
     EXIT_PII_FOUND,
-    _acquire_or_exit,
-    _add_lock_args,
     _resolve_knowledge_root,
 )
 from athenaeum.atomic_io import atomic_write_text
@@ -91,8 +80,6 @@ from athenaeum.pii import (
     scan_corpus_pii,
     scan_excluded_by_name,
 )
-from athenaeum.pii_h1_audit import MARKER_LEADING, find_h1_marker_pages
-from athenaeum.pii_h1_audit import render_report as render_h1_audit_report
 from athenaeum.pii_hazard_classifier import (
     MODE_PREFILTER,
     RECOGNIZER_EMAIL,
@@ -108,11 +95,6 @@ from athenaeum.pii_verdicts import (
     ledger_scan_exclusions,
     load_is_pii_values,
     load_not_pii_allowlist,
-)
-from athenaeum.rules import (
-    DispositionPruneMismatchError,
-    default_shape_rule_dispositions_path,
-    prune_shape_rule_dispositions_to_positive,
 )
 from athenaeum.sensitivity_lint import (
     SensitivityMappingLintResult,
@@ -348,57 +330,6 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text.",
     )
 
-    audit_h1_p = s_sub.add_parser(
-        "audit-h1-redaction",
-        help=(
-            "Read-only audit (issue athenaeum#1461): report pages whose H1 heading "
-            "line carries the inline-redaction marker, classified into a "
-            "defect population (marker consumed the whole heading subject) "
-            "and a non-defect population (marker replaced one inline token "
-            "inside an otherwise-intact title). Never writes."
-        ),
-    )
-    audit_h1_p.add_argument(
-        "--path",
-        type=Path,
-        default=DEFAULT_KNOWLEDGE_ROOT,
-        help="Knowledge root (default: ~/knowledge).",
-    )
-    audit_h1_p.add_argument(
-        "--wiki-root",
-        type=Path,
-        default=None,
-        help="Wiki directory to scan (default: <knowledge-root>/wiki).",
-    )
-
-    prune_p = s_sub.add_parser(
-        "prune-dispositions",
-        help=(
-            "One-time prune of wiki/_shape_rule_dispositions.jsonl to its "
-            "positive-disposition records only (issue athenaeum#1274 AC3/AC4). "
-            "Dry-run by default: reports the disposition histogram and "
-            "projected size. --apply writes."
-        ),
-    )
-    prune_p.add_argument(
-        "--path",
-        type=Path,
-        default=DEFAULT_KNOWLEDGE_ROOT,
-        help="Knowledge root (default: ~/knowledge).",
-    )
-    prune_p.add_argument(
-        "--apply",
-        action="store_true",
-        help=(
-            "Write the pruned ledger (atomic replace). Without this flag the "
-            "command is a dry-run that prints the histogram and projected "
-            "size and writes nothing. Refuses to write (exit 1, nothing "
-            "written) if a re-parse of the constructed output does not "
-            "carry exactly the positive-row count the scan pass promised."
-        ),
-    )
-    _add_lock_args(prune_p)
-
 
 def cmd_storage(args: argparse.Namespace) -> int:
     sub = getattr(args, "storage_target", None)
@@ -408,42 +339,11 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_lint_pii(args)
     if sub == "lint-mapping":
         return _cmd_storage_lint_mapping(args)
-    if sub == "audit-h1-redaction":
-        return _cmd_storage_audit_h1_redaction(args)
-    if sub == "prune-dispositions":
-        return _cmd_storage_prune_dispositions(args)
     print(
-        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,"
-        "audit-h1-redaction,prune-dispositions} [...]",
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping} [...]",
         file=sys.stderr,
     )
     return 2
-
-
-def _cmd_storage_audit_h1_redaction(args: argparse.Namespace) -> int:
-    """``athenaeum storage audit-h1-redaction`` — read-only, never writes.
-
-    Exit codes mirror :data:`EXIT_PII_FOUND`'s convention: 0 on a clean scan
-    (no H1 heading carries the marker), :data:`EXIT_PII_FOUND` when the
-    DEFECT population (:data:`~athenaeum.pii_h1_audit.MARKER_LEADING`) is
-    non-empty. A non-defect (marker-mid-heading) finding alone does not
-    trigger the non-zero exit — it is reported, not gated on, since it is
-    documented, intended behaviour (issue athenaeum#1461).
-    """
-    knowledge_root = _resolve_knowledge_root(args)
-    wiki_root = (
-        args.wiki_root.expanduser().resolve()
-        if args.wiki_root
-        else knowledge_root / "wiki"
-    )
-    if not wiki_root.is_dir():
-        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
-        return 1
-    findings = find_h1_marker_pages(wiki_root)
-    print(render_h1_audit_report(findings))
-    if any(f.classification == MARKER_LEADING for f in findings):
-        return EXIT_PII_FOUND
-    return 0
 
 
 def _apply_plan(
@@ -1458,116 +1358,3 @@ def _cmd_storage_lint_mapping(args: argparse.Namespace) -> int:
             print(f"  [{f.kind}] {f.detail}")
 
     return 0 if result.is_clean else EXIT_MAPPING_ISSUES
-
-
-def _human_bytes(n: int) -> str:
-    """Render *n* bytes as a short human-readable size (binary units).
-
-    Local, tiny, and deliberately not shared with any other module — this
-    command's report is the only caller, and pulling in a general-purpose
-    formatter for one call site would be more machinery than the job needs.
-    """
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{n} B"
-        size /= 1024
-    return f"{n} B"  # pragma: no cover - unreachable, loop always returns
-
-
-def _cmd_storage_prune_dispositions(args: argparse.Namespace) -> int:
-    """``athenaeum storage prune-dispositions`` (issue athenaeum#1274 AC3/AC4).
-
-    Dry-run by default: reports the disposition histogram, positive-record
-    count, and projected post-prune size with no write. ``--apply`` writes
-    atomically via :func:`athenaeum.rules.prune_shape_rule_dispositions_to_positive`,
-    guarded by the single-machine run lock (issue athenaeum#309) — the same
-    guard every other mutating ``storage``/librarian command acquires, so a
-    prune can never race the nightly's own concurrent appends to this same
-    file (the exact hazard athenaeum#1274's own proposal names).
-
-    Exit codes:
-        0 - dry-run report printed, or ``--apply`` succeeded (including the
-            no-op case where there was nothing to prune).
-        1 - ledger missing, or the prune's own count-mismatch guard fired
-            (:class:`athenaeum.rules.DispositionPruneMismatchError` —
-            nothing was written).
-        75 - the run lock is held by another process (``--apply`` only;
-            :data:`athenaeum._cli_shared.EXIT_LOCK_HELD`).
-    """
-    knowledge_root = _resolve_knowledge_root(args)
-    wiki_root = knowledge_root / "wiki"
-    path = default_shape_rule_dispositions_path(wiki_root)
-    if not path.is_file():
-        print(f"no disposition ledger found at {path}; nothing to prune.")
-        return 0
-
-    mode = "APPLY" if args.apply else "DRY RUN"
-    lock: "RunLock | None" = None
-    if args.apply:
-        cfg = load_config(knowledge_root)
-        acquired = _acquire_or_exit(knowledge_root, args, cfg)
-        if isinstance(acquired, int):
-            return acquired
-        lock = acquired
-    try:
-        try:
-            report = prune_shape_rule_dispositions_to_positive(
-                wiki_root, apply=args.apply
-            )
-        except DispositionPruneMismatchError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-        print(f"=== disposition prune ({mode}) ===")
-        print(f"  ledger:            {path}")
-        print(f"  total records:     {report.total_records}")
-        print(
-            f"  no-match:          {report.no_match_count} "
-            f"({_pct(report.no_match_count, report.total_records)})"
-        )
-        print(
-            f"  positive records:  {report.positive_count} "
-            f"({_pct(report.positive_count, report.total_records)})"
-        )
-        for disposition in sorted(report.histogram):
-            print(f"    {disposition}: {report.histogram[disposition]}")
-        if report.malformed_lines:
-            print(f"    <malformed, kept>: {report.malformed_lines}")
-        print(
-            f"  current size:      {report.current_bytes} B "
-            f"({_human_bytes(report.current_bytes)})"
-        )
-        size_label = ("new size" if report.applied else "projected size") + ":"
-        print(
-            f"  {size_label.ljust(19)}{report.projected_bytes} B "
-            f"({_human_bytes(report.projected_bytes)})"
-        )
-        print(f"  rows dropped:      {report.rows_dropped}")
-
-        if not args.apply:
-            if report.rows_dropped:
-                print(
-                    f"\n  [DRY RUN] would drop {report.rows_dropped} no-match row(s)."
-                )
-                print("  Re-run with --apply to write.")
-            else:
-                print("\n  [DRY RUN] nothing to prune.")
-            return 0
-
-        if report.applied:
-            print(
-                f"\n  pruned {report.rows_dropped} no-match row(s); ledger rewritten."
-            )
-        else:
-            print("\n  nothing to prune; ledger left unchanged.")
-        return 0
-    finally:
-        if lock is not None:
-            lock.release()
-
-
-def _pct(part: int, whole: int) -> str:
-    if whole == 0:
-        return "0.0%"
-    return f"{100.0 * part / whole:.1f}%"

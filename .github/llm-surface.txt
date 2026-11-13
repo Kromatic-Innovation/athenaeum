@@ -62,8 +62,6 @@ src/athenaeum/decay_bucket.py::classify_decay_bucket
 src/athenaeum/memory_class_backfill.py::classify_residual
 src/athenaeum/name_collisions.py::resolve_name_collisions
 src/athenaeum/page_description.py::describe_pages
-src/athenaeum/paste_cleanup.py::propose_page
-src/athenaeum/paste_cleanup.py::verify_page
 src/athenaeum/pii_attribution.py::judge_contact_attribution
 src/athenaeum/provider.py::_AnthropicMessagesBoundary.create
 src/athenaeum/query_topics.py::extract_topics

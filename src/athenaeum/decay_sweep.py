@@ -24,7 +24,7 @@ call. ``tests/test_decay_sweep.py::TestNoLLMCalls`` asserts this via
 module picks git-rm removal, for three reasons:
 
 1. It is the EXISTING precedent this codebase already uses for exactly this
-   shape of removal (:func:`athenaeum.auto_memory_prune.apply_prune`,
+   shape of removal (:func:`athenaeum.retire`'s move-then-retire pass,
    :func:`athenaeum.corrections.retire_batch`, and the freshest example,
    :func:`athenaeum.pending_merges._apply_fold_into_existing`, brought up to
    the two-commit convention in athenaeum#947). Following it here, rather than
@@ -47,7 +47,7 @@ Commit A snapshots the kill-list's CURRENT on-disk content (in case a page
 was written/edited since its last commit) before anything is touched; Commit
 B is the ``git rm`` + removal commit. :func:`apply_sweep` refuses outright —
 never degrades to a bare ``Path.unlink()`` — when ``knowledge_root`` is not a
-git repository, exactly like :func:`athenaeum.auto_memory_prune.apply_prune`.
+git repository, exactly like :func:`athenaeum.pending_merges._apply_fold_into_existing`.
 
 **Sweep ledger (issue athenaeum#969, reconciling athenaeum#904 with the memory
 model).** The two-commit pattern above is *recoverability*, not a ledger —
@@ -696,8 +696,9 @@ def apply_sweep(
     Commit A (provenance snapshot) / Commit B (``git rm`` + removal) shape —
     see the module docstring for why this convention rather than a new one.
     Refuses to act (never degrades to a bare ``unlink``, exactly like
-    :func:`athenaeum.auto_memory_prune.apply_prune`) when *knowledge_root* is
-    not a git repository. A no-op (no commit) when the kill-list is empty.
+    :func:`athenaeum.pending_merges._apply_fold_into_existing`) when
+    *knowledge_root* is not a git repository. A no-op (no commit) when the
+    kill-list is empty.
     Mutates and returns *report*.
 
     Issue athenaeum#969 AC1: between Commit A and Commit B, this function

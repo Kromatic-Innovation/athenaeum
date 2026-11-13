@@ -25,8 +25,8 @@ athenaeum#1914 established that neither sanctioned ingress can carry a
 
 So this module is a deterministic, dry-run-default, single-page maintenance
 pass in the shape the librarian already uses for
-:mod:`athenaeum.paste_cleanup` and :mod:`athenaeum.retire_pages`: read, build
-a report, and only under ``--apply`` write through
+:mod:`athenaeum.retire_pages`: read, build a report, and only under
+``--apply`` write through
 :func:`athenaeum.atomic_io.atomic_write_text`. It is athenaeum code acting AS
 the librarian under the run lock, not a source writing the store, so the
 one-way-in ingress invariant holds. **It makes no LLM call**: by default every

@@ -2,7 +2,7 @@
 """``athenaeum decompose-page`` — redistribute one aggregate page's facts
 (issue athenaeum#1914).
 
-Dry-run by default, exactly like ``paste-cleanup`` and ``retire-pages``: the
+Dry-run by default, exactly like ``retire-pages``: the
 bare command classifies every bullet on the named page and writes a JSON
 report to ``--report``; ``--apply`` attaches the ruled-and-resolved facts to
 the pages they concern and rewrites the source page. The domain logic — and

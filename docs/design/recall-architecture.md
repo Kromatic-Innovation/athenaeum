@@ -404,8 +404,8 @@ content.
 The wiki itself never grows an in-tree "archived" marker page for this —
 `athenaeum decay-sweep` (`athenaeum.decay_sweep`) periodically `git rm`s an
 expired `bucket: daily` page from the live tree (never `weekly`/`durable`/
-unbucketed), leaving it recoverable from git history. Dry-run by default,
-same shape as `athenaeum auto-memory prune`. Every archived page also gets a
+unbucketed), leaving it recoverable from git history. Dry-run by default. Every
+archived page also gets a
 durable sweep-ledger record (`_decay_sweep_records.jsonl`, cache dir, never
 the wiki corpus) — which page, why, when, and the recovering commit SHA —
 and the sweep refuses to archive at all if that ledger write fails (issue
