@@ -372,15 +372,6 @@ class LLMContentBlock(Protocol):
 
 
 @runtime_checkable
-class LLMTextBlock(Protocol):
-    """One TEXT content block — the block :func:`response_text` returns after
-    narrowing a :class:`LLMContentBlock` sequence to the first ``type ==
-    "text"`` entry (issue athenaeum#578)."""
-
-    text: str
-
-
-@runtime_checkable
 class LLMResponse(Protocol):
     """The response surface the four ``messages.create`` call sites consume.
 
@@ -393,11 +384,12 @@ class LLMResponse(Protocol):
     which is exactly the "must ACTUALLY satisfy" guarantee issue athenaeum#572 requires.
 
     ``content`` is a sequence of :class:`LLMContentBlock` — the real
-    ``anthropic`` union's shared ``.type`` discriminator, NOT ``LLMTextBlock``
-    (issue athenaeum#835 corrected this: most of the union's members, e.g.
-    ``ThinkingBlock``/``ToolUseBlock``, have no ``.text``). Callers read the
-    text answer via :func:`response_text`, which narrows to the first ``type
-    == "text"`` block before touching ``.text``, skipping any leading thinking
+    ``anthropic`` union's shared ``.type`` discriminator, NOT a narrower
+    text-only-block type (issue athenaeum#835 corrected this: most of the
+    union's members, e.g. ``ThinkingBlock``/``ToolUseBlock``, have no
+    ``.text``). Callers read the text answer via :func:`response_text`,
+    which narrows to the first ``type == "text"`` block before touching
+    ``.text``, skipping any leading thinking
     blocks (issue athenaeum#578); ``stop_reason`` is the terminal reason
     (``"max_tokens"``, ``"end_turn"``, ...) or ``None`` when a backend cannot
     report it; ``usage`` carries the four normalized token counters.
@@ -672,36 +664,6 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
     if provider == "claude-cli":
         return _CLI_CAPABILITIES
     return _API_CAPABILITIES
-
-
-def knob_provider_override_source(
-    config: dict[str, Any] | None, knob: str
-) -> str | None:
-    """Detect (without resolving) an explicit per-knob provider override.
-
-    Returns the source description (``"env ATHENAEUM_<KNOB>_LLM_PROVIDER"`` or
-    ``"yaml llm.providers.<knob>"``) if *knob* has an explicit override set,
-    else ``None``. Does not validate the value or apply precedence — it only
-    answers "did the operator set something for this knob". Originally added
-    (issue athenaeum#786) to power the librarian's now-removed
-    inert-override warning (every knob it names is genuinely routed as of
-    issue athenaeum#841); kept as a general-purpose diagnostic primitive —
-    "is this knob's provider operator-overridden, and from where" is useful
-    independent of that warning's removal.
-    """
-    env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
-    raw = os.environ.get(env_var)
-    if raw is not None and raw.strip():
-        return f"env {env_var}"
-    if isinstance(config, dict):
-        llm_cfg = config.get("llm")
-        if isinstance(llm_cfg, dict):
-            providers_cfg = llm_cfg.get("providers")
-            if isinstance(providers_cfg, dict):
-                candidate = providers_cfg.get(knob)
-                if isinstance(candidate, str) and candidate.strip():
-                    return f"yaml llm.providers.{knob}"
-    return None
 
 
 def capabilities_for_knob(
@@ -1722,9 +1684,10 @@ if TYPE_CHECKING:
     # ``anthropic.types.Message`` — a ``ThinkingBlock`` PRECEDING a
     # ``TextBlock``, and ``Usage`` with both cache_* fields ``None`` (no
     # cache breakpoints in the request) — to an ``LLMResponse``-annotated
-    # name is what makes mypy do the real work: pre-athenaeum#835, ``content:
-    # Sequence[LLMTextBlock]`` rejected the ``ThinkingBlock`` (no ``.text``
-    # attribute), and the two cache fields being plain ``int`` rejected
+    # name is what makes mypy do the real work: pre-athenaeum#835, the
+    # then-declared ``content`` type (a text-only-block sequence) rejected
+    # ``ThinkingBlock`` (no ``.text`` attribute), and the two cache fields
+    # being plain ``int`` rejected
     # ``Usage``'s ``Optional[int]`` fields — either mismatch alone fails this
     # assignment (verified against this exact object shape with the
     # pre-fix declarations restored). Never executed — a type-checker

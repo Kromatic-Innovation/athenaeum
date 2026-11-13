@@ -105,13 +105,11 @@ from athenaeum.models import (
 from athenaeum.person_registry import PersonRegistry
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.recall_overflow import (
-    OVERFLOW_TEMPLATE_NAME,
-    load_overflow_template,
     render_access_withheld_line,
     render_overflow_line,
 )
 from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
-from athenaeum.search import score_keyword_page, tokenize_keyword_query
+from athenaeum.search import tokenize_keyword_query
 from athenaeum.serve_auth import ServeAuth
 from athenaeum.storage import (
     is_excluded,
@@ -564,12 +562,6 @@ def _default_inferred_extras(
 # Recall helpers
 # ---------------------------------------------------------------------------
 
-# Back-compat re-exports. The keyword scorer now lives in ``athenaeum.search``
-# as a first-class backend alongside FTS5 and vector; these shims keep
-# pre-0.2.1 direct callers working without an import churn.
-_tokenize_query = tokenize_keyword_query
-_score_page = score_keyword_page
-
 
 def _snippet(body: str, tokens: list[str], max_chars: int = 400) -> str:
     """Extract a relevant snippet from body around the first token match."""
@@ -611,22 +603,6 @@ _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
 # `top_k` itself already bounds the floor for very small explicit `top_k`
 # calls (`max(top_k, ...)` below).
 _HYBRID_CANDIDATE_POOL = 15
-
-#: Issue athenaeum#1783: the overflow-breadcrumb prompt file's name.
-#: Issue athenaeum#1905 moved the loader and the renderer into
-#: :mod:`athenaeum.recall_overflow` so the per-turn push path
-#: (:mod:`athenaeum.context`, which cannot afford to import this module)
-#: renders the SAME line from the SAME template; this alias is kept so
-#: nothing that already reads it has to learn a new name.
-_RECALL_OVERFLOW_TEMPLATE_NAME = OVERFLOW_TEMPLATE_NAME
-
-
-def _load_recall_overflow_template() -> str:
-    """Thin alias for :func:`athenaeum.recall_overflow.load_overflow_template`
-    (issue athenaeum#1905) -- see that module's docstring for why the body
-    moved out of this one."""
-    return load_overflow_template()
-
 
 def _render_recall_overflow_line(withheld_by_type: dict[str, int], *, at_least: bool) -> str:
     """Thin alias for :func:`athenaeum.recall_overflow.render_overflow_line`
@@ -2639,7 +2615,7 @@ def _refresh_extra_root_index(
     ``remember`` write (issue athenaeum#2313, AC2).
 
     FTS5/vector only scan ``recall.extra_intake_roots`` at ``build_index``
-    time (:func:`athenaeum.search._scan_all_entries`), never inside
+    time (:func:`athenaeum.search._scan_indexed_records`), never inside
     ``query()`` — so without this, a note `remember`'d and then `recall`'d in
     the SAME session would be invisible until the next explicit reindex or
     compile, which is exactly the confusion this issue exists to fix for a
@@ -3637,7 +3613,7 @@ def create_server(
             "Need every entity of a type matching criteria — not a ranked search "
             "over a phrase? Use `enumerate_entities(entity_type=..., predicates=...)` "
             "instead of `recall`: it takes no query text and never ranks (issue "
-            "athenaeum#965) — the generalized primitive behind `athenaeum people`. "
+            "athenaeum#965). "
             "Use `list_pending_questions` / `resolve_question` to triage "
             "detector-flagged contradictions, and "
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "

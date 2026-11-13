@@ -10,12 +10,11 @@ import pytest
 
 from athenaeum.mcp_server import (
     _recall_metadata_lines,
-    _score_page,
     _snippet,
-    _tokenize_query,
     recall_search,
     remember_write,
 )
+from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
 # ---------------------------------------------------------------------------
 # Tokenizer
@@ -24,19 +23,19 @@ from athenaeum.mcp_server import (
 
 class TestTokenizeQuery:
     def test_basic_split(self) -> None:
-        assert _tokenize_query("hello world") == ["hello", "world"]
+        assert tokenize_keyword_query("hello world") == ["hello", "world"]
 
     def test_filters_short_tokens(self) -> None:
-        assert _tokenize_query("a is the go") == ["is", "the", "go"]
+        assert tokenize_keyword_query("a is the go") == ["is", "the", "go"]
 
     def test_lowercases(self) -> None:
-        assert _tokenize_query("Acme Corp") == ["acme", "corp"]
+        assert tokenize_keyword_query("Acme Corp") == ["acme", "corp"]
 
     def test_splits_on_punctuation(self) -> None:
-        assert _tokenize_query("foo-bar/baz") == ["foo", "bar", "baz"]
+        assert tokenize_keyword_query("foo-bar/baz") == ["foo", "bar", "baz"]
 
     def test_empty_string(self) -> None:
-        assert _tokenize_query("") == []
+        assert tokenize_keyword_query("") == []
 
 
 # ---------------------------------------------------------------------------
@@ -46,28 +45,28 @@ class TestTokenizeQuery:
 
 class TestScorePage:
     def test_frontmatter_match_weighted(self) -> None:
-        score = _score_page(
+        score = score_keyword_page(
             ["acme"], {"name": "Acme Corp", "tags": ["fintech"]}, "Some body text"
         )
         assert score >= 3.0  # frontmatter hit
 
     def test_body_only_match(self) -> None:
-        score = _score_page(["pipeline"], {}, "The pipeline processes raw files")
+        score = score_keyword_page(["pipeline"], {}, "The pipeline processes raw files")
         assert score == 1.0
 
     def test_both_match(self) -> None:
-        score = _score_page(["acme"], {"name": "Acme Corp"}, "Acme is a company")
+        score = score_keyword_page(["acme"], {"name": "Acme Corp"}, "Acme is a company")
         assert score == 4.0  # 3 (frontmatter) + 1 (body)
 
     def test_no_match(self) -> None:
-        score = _score_page(["xyz"], {"name": "Acme"}, "No match here")
+        score = score_keyword_page(["xyz"], {"name": "Acme"}, "No match here")
         assert score == 0.0
 
     def test_empty_tokens(self) -> None:
-        assert _score_page([], {"name": "Acme"}, "body") == 0.0
+        assert score_keyword_page([], {"name": "Acme"}, "body") == 0.0
 
     def test_list_tags_scored(self) -> None:
-        score = _score_page(["fintech"], {"tags": ["fintech", "client"]}, "body")
+        score = score_keyword_page(["fintech"], {"tags": ["fintech", "client"]}, "body")
         assert score >= 3.0
 
 
@@ -834,7 +833,7 @@ class TestRecallTierAndPushBudget:
 
         actual_block = self._extract_single_block(admitted)
         block_tokens = estimate_tokens(actual_block)
-        snippet_only_tokens = estimate_tokens(_snippet(body, _tokenize_query(query)))
+        snippet_only_tokens = estimate_tokens(_snippet(body, tokenize_keyword_query(query)))
 
         # The header overhead this page carries (tags/scope/source/tier)
         # must dwarf the snippet alone -- if this assertion ever fails, the

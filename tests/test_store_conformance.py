@@ -314,12 +314,15 @@ class TestNowIso:
         # Allow the second-precision truncation on either side of the call.
         assert before - timedelta(seconds=1) <= parsed <= after + timedelta(seconds=1)
 
-    def test_matches_fingerprint_resolved_at_format(self) -> None:
-        """The rendering must stay parseable by
-        :data:`athenaeum.fingerprint._RESOLVED_AT_FORMAT` — the whole point
-        of pinning second precision here (issue athenaeum#1348)."""
-        from athenaeum.fingerprint import _RESOLVED_AT_FORMAT
-
+    def test_matches_second_precision_strptime_format(self) -> None:
+        """The rendering must stay parseable by the plain
+        ``%Y-%m-%dT%H:%M:%SZ`` format — the whole point of pinning second
+        precision here (issue athenaeum#1348). This used to cross-check
+        against :data:`athenaeum.fingerprint._RESOLVED_AT_FORMAT`, fingerprint's
+        own copy of the same literal, but issue athenaeum#2435 deleted that
+        constant along with its sole consumer (``is_stale_auto_suppression``,
+        dead code since the C4 detector's retirement), so the format is
+        asserted directly here instead."""
         rendered = now_iso(datetime(2026, 9, 3, 19, 12, 33, tzinfo=timezone.utc))
         # Must not raise.
-        datetime.strptime(rendered, _RESOLVED_AT_FORMAT)
+        datetime.strptime(rendered, "%Y-%m-%dT%H:%M:%SZ")

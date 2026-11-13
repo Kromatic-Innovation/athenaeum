@@ -71,11 +71,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from athenaeum.authority import is_pointer_stub
-from athenaeum.config import (
-    RECALL_HYBRID_FTS5_WEIGHT_DEFAULT,
-    RECALL_HYBRID_GUARD_RANK_DEFAULT,
-    RECALL_HYBRID_K_DEFAULT,
-)
+from athenaeum.config import RECALL_HYBRID_K_DEFAULT
 from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
@@ -520,50 +516,6 @@ def _iter_wiki_entries(wiki_root: Path) -> Iterable[tuple[str, Path]]:
         yield fname, wiki_root / fname
 
 
-def _iter_extra_root_entries(
-    extra_roots: Iterable[Path] | None,
-) -> Iterable[tuple[str, Path]]:
-    """Yield ``(indexed_filename, full_path)`` for extra intake roots.
-
-    Each extra root is scanned recursively. ``indexed_filename`` is
-    ``<root_name>/<relpath_posix>`` so wiki entries (bare name) and extra-
-    root entries never collide and remain distinguishable to the recall
-    formatter. Non-``.md`` files and ``MEMORY.md`` are excluded; the
-    ``_unscoped/`` subdirectory is included (its files are first-class
-    memories, not metadata). Missing roots are silently skipped — this
-    is intake code and shouldn't crash on an unconfigured knowledge base.
-    """
-    if not extra_roots:
-        return
-    for root in extra_roots:
-        if not root.is_dir():
-            continue
-        root_name = root.name
-        for path in sorted(root.rglob("*.md")):
-            if path.name in _INTAKE_SKIP_NAMES:
-                continue
-            try:
-                rel = path.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            yield f"{root_name}/{rel}", path
-
-
-def _scan_all_entries(
-    wiki_root: Path,
-    extra_roots: Iterable[Path] | None,
-) -> Iterable[tuple[str, Path]]:
-    """Yield every indexable ``(filename, full_path)`` pair.
-
-    Wiki entries come first (bare filename) followed by extra-root
-    entries (``<root_name>/<relpath>``). Callers ingest whatever order
-    this yields — ordering within each source is alphabetical so index
-    rebuilds are deterministic for test assertions.
-    """
-    yield from _iter_wiki_entries(wiki_root)
-    yield from _iter_extra_root_entries(extra_roots)
-
-
 # ---------------------------------------------------------------------------
 # Incremental indexing helpers (issue athenaeum#348)
 # ---------------------------------------------------------------------------
@@ -785,11 +737,10 @@ def _scan_indexed_records(
     convention). No caller-visible signature change: this remains an internal
     helper over filesystem ``Path``s, matching S1's "no callers migrated"
     scoping — the store is an implementation detail of THIS scan, not exposed
-    outward. (``_scan_all_entries`` / ``_iter_wiki_entries`` /
-    ``_iter_extra_root_entries`` above are left untouched: they also serve
-    ``athenaeum.recurring_claims`` and direct test callers that want a plain
-    ``Path`` enumeration rather than the store abstraction, so the "which
-    files count" rule is necessarily re-expressed here rather than shared.)
+    outward. (``_iter_wiki_entries`` above is left untouched: it also serves
+    ``athenaeum.recurring_claims``, which wants a plain ``Path`` enumeration
+    rather than the store abstraction, so the "which files count" rule is
+    necessarily re-expressed here rather than shared.)
 
     ``content_hash`` is the sha256 of the whole file (frontmatter + body).
     ``text`` is the full decoded file (callers truncate as needed for the
@@ -2871,74 +2822,6 @@ class VectorBackend:
             return 0
         return len(id_list)
 
-    def query_neighbors(
-        self,
-        embedding: Sequence[float],
-        cache_dir: Path,
-        *,
-        k: int = 200,
-        exclude_ids: Iterable[str] | None = None,
-    ) -> list[tuple[str, float]]:
-        """Return ``[(id, distance)]`` for the ``k`` nearest stored neighbors.
-
-        Issue athenaeum#370 (delta compile): a by-VECTOR nearest-neighbor accessor for
-        the delta-scoped cluster pass. Unlike :meth:`query` (which embeds a
-        query *string*), this queries by an already-resolved embedding vector,
-        so the collection is opened with ``embedding_function=None`` — this is
-        a pure read that never constructs the ONNX embedder.
-
-        The caller OVER-FETCHES (large ``k``) because chromadb's default HNSW
-        space is L2, which only approximates cosine ranking; the delta closure
-        re-confirms every returned candidate with an exact cosine check before
-        treating it as a true single-linkage edge, so ANN ranking noise cannot
-        introduce a spurious edge. Returns fewer than ``k`` when the collection
-        is smaller. ``exclude_ids`` drops the query file itself (and any known
-        non-candidates) via a chromadb ``where`` filter. Returns ``[]`` when the
-        collection does not exist or is empty.
-        """
-        chromadb = self._get_chromadb()
-        vector_dir = cache_dir / _VECTOR_DIR
-        if not vector_dir.is_dir():
-            return []
-
-        client = chromadb.PersistentClient(path=str(vector_dir))
-        try:
-            collection = client.get_collection(
-                _VECTOR_COLLECTION, embedding_function=None
-            )
-        except Exception:  # noqa: BLE001 — missing/corrupt collection: no neighbors
-            return []
-
-        count = collection.count()
-        if count == 0:
-            return []
-
-        where: dict[str, Any] | None = None
-        excluded = [e for e in (exclude_ids or [])]
-        if len(excluded) == 1:
-            where = {"filename": {"$ne": excluded[0]}}
-        elif len(excluded) > 1:
-            where = {"filename": {"$nin": excluded}}
-
-        try:
-            results = collection.query(
-                query_embeddings=[list(embedding)],
-                n_results=min(k, count),
-                where=where,
-            )
-        except Exception:  # noqa: BLE001 — chromadb query failure: no neighbors
-            return []
-
-        out: list[tuple[str, float]] = []
-        ids = results.get("ids") or []
-        if ids and ids[0]:
-            distances = results.get("distances") or [[]]
-            dist_row = distances[0] if distances else []
-            for i, doc_id in enumerate(ids[0]):
-                dist = float(dist_row[i]) if i < len(dist_row) else 0.0
-                out.append((doc_id, dist))
-        return out
-
 
 # ---------------------------------------------------------------------------
 # Keyword backend (in-memory, scan-on-query)
@@ -3372,12 +3255,11 @@ def fts5_index_available(cache_dir: Path) -> bool:
 #: run via ``tests/evals/test_recall_covers_grep_real_embedder.py``'s own
 #: correctly-gated fixture): this knob stays at ``1.0`` because no value in
 #: the issue's swept grid (``{0.5, 0.75, 1.0, 1.5, 2.0, 3.0}``) changed the
-#: real-model failure count once :data:`_DEFAULT_HYBRID_GUARD_RANK` was at
-#: its own winning value -- see that sweep table for the full grid. The
-#: VALUE lives in :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`
-#: so the config resolver (a lower layer) never imports this module; this
-#: alias keeps the search-side name the sweep notes above refer to.
-_DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
+#: real-model failure count once
+#: :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` was at its own
+#: winning value -- see that sweep table for the full grid. The VALUE lives
+#: in :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT` (the config
+#: resolver, a lower layer, never imports this module).
 
 #: Default own-list-rank threshold (1-indexed, inclusive) below which a
 #: SINGLE-list hit is protected from being crowded out of the fused top-k
@@ -3385,9 +3267,10 @@ _DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 #: / athenaeum#1789 cross-lane regression). See that function's docstring
 #: for the mechanism.
 #:
-#: ``1`` (issue athenaeum#1800) -- see :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s
-#: comment for why the PRE-athenaeum#1800 measurement notes this constant
-#: used to carry are superseded. Re-swept directly on the real embedder:
+#: ``1`` (issue athenaeum#1800) -- see
+#: :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`'s comment for
+#: why the PRE-athenaeum#1800 measurement notes this constant used to carry
+#: are superseded. Re-swept directly on the real embedder:
 #: ``guard_rank=1`` strictly reduces the real-model failure count (6 -> 5,
 #: clearing ``medium/portal_design_reviewer`` -- a coverage crowd-out where
 #: protecting the expected page's own strong single-list rank was exactly
@@ -3413,16 +3296,15 @@ _DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 #: model. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for the
 #: full table. Value lives in
 #: :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (layering).
-_DEFAULT_HYBRID_GUARD_RANK = RECALL_HYBRID_GUARD_RANK_DEFAULT
 
 #: RRF ``k`` the vector-backend hybrid dispatch actually uses (issue
 #: athenaeum#1800 / athenaeum#1789), distinct from :data:`_DEFAULT_RRF_K`
 #: (``60``, kept as :func:`reciprocal_rank_fusion`'s own default so any
 #: OTHER direct caller/test stays byte-identical).
 #:
-#: See :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s comment for why the
-#: PRE-athenaeum#1800 measurement notes this constant used to carry are
-#: superseded. Re-swept directly on the real embedder, at the now-shipped
+#: See :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`'s comment
+#: for why the PRE-athenaeum#1800 measurement notes this constant used to
+#: carry are superseded. Re-swept directly on the real embedder, at the now-shipped
 #: ``guard_rank=1``: every ``k`` in the issue's grid
 #: (``{10, 20, 30, 60}``) produced the SAME real-model failure count --
 #: kept at the RRF-standard ``60`` (this issue's winner-rule tie-break
@@ -3467,16 +3349,17 @@ def reciprocal_rank_fusion(
     ``secondary_weight`` (default ``1.0``, a no-op) down-weights the
     ``secondary`` list's contribution relative to ``primary``'s full
     ``1.0`` weight -- an independent lever, off by default; see
-    :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s comment for why a uniform
-    down-weight is NOT this function's fix for the crowding problem below
-    (it breaks far more than it fixes).
+    :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`'s comment for
+    why a uniform down-weight is NOT this function's fix for the crowding
+    problem below (it breaks far more than it fixes).
 
     ``guard_rank`` (issue athenaeum#1800 / athenaeum#1789's cross-lane
     regression; default ``0``, meaning OFF -- pass
-    :data:`_DEFAULT_HYBRID_GUARD_RANK` to enable, which the vector-backend
-    hybrid dispatch does) is RANK-GUARDED FUSION: a hit present in ONLY ONE
-    input list, ranked at or better than ``guard_rank`` (1-indexed) WITHIN
-    THAT LIST, is placed ahead of every hit present in BOTH lists,
+    :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` to enable,
+    which the vector-backend hybrid dispatch does) is RANK-GUARDED FUSION: a
+    hit present in ONLY ONE input list, ranked at or better than
+    ``guard_rank`` (1-indexed) WITHIN THAT LIST, is placed ahead of every
+    hit present in BOTH lists,
     regardless of raw fused score -- equivalently, "a both-list hit may
     only outrank a single-list hit when that single-list hit's own rank is
     worse than ``guard_rank``". Guarded hits are ordered among themselves

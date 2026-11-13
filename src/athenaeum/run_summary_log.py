@@ -1033,49 +1033,6 @@ def starvation_priority(history: "list[dict[str, Any]]") -> list[str]:
     return sorted(previous, key=lambda source: (-streaks[source], source))
 
 
-def previous_starved_sources(history: "list[dict[str, Any]]") -> list[str]:
-    """The most recent entity run's zero-slot sources, sorted by name.
-
-    Records with no entity phase (merge-only / cluster-only runs, early
-    deadline trips) are skipped rather than read as "nobody was starved" --
-    they scheduled nothing, so they are no evidence either way, the same
-    distinction :func:`starved_sources_in_record` draws for the streak
-    counter. :func:`starvation_priority` is the scheduling-order form of
-    this; use that one to drive the scheduler.
-    """
-    for record in reversed(history):
-        starved = starved_sources_in_record(record)
-        if starved is not None:
-            return sorted(starved)
-    return []
-
-
-def read_starvation_priority(
-    *,
-    cache_dir: Path | None = None,
-    ledger_path: Path | None = None,
-) -> list[str]:
-    """:func:`starvation_priority` against the durable ledger. Best-effort.
-
-    Reuses the athenaeum#1102 run-summary ledger the entity phase already
-    writes, so the fair-scheduling rotation introduces no second piece of
-    persisted state. Fail-open like every other read in this module: a
-    missing or corrupt ledger reads as "no history" (``[]``, i.e. plain
-    discovery-order turns), and nothing here may raise into the run it is
-    only observing.
-    """
-    try:
-        target = (
-            ledger_path
-            if ledger_path is not None
-            else default_run_summary_ledger_path(cache_dir)
-        )
-        return starvation_priority(read_run_summary_ledger(target))
-    except Exception as exc:  # noqa: BLE001 — observability must never raise
-        log.debug("run-summary: starvation priority read skipped: %s", exc)
-        return []
-
-
 # ---------------------------------------------------------------------------
 # Zero-progress-refusal streak (issue athenaeum#1283)
 # ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@
 Proves that the delta-scoped compile (cluster + merge only the changed files and
 their affected clusters) produces BYTE-IDENTICAL output to the whole-corpus
 compile, on the deterministic ``client=None`` path. Built on a REAL chromadb
-index so ``fetch_embeddings`` / ``query_neighbors`` run the production embedding
-path (real MiniLM vectors), not the hashing-trick fallback.
+index so ``fetch_embeddings`` runs the production embedding path (real MiniLM
+vectors), not the hashing-trick fallback.
 
 For each scenario S ∈ {new-cluster, join-existing, bridge-two, leave-cluster,
 cascade-that-trips-fallback}:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for merge-engine type integration (issue athenaeum#433).
 
-Covers the three athenaeum#433 deliverables:
+Covers two of the original three athenaeum#433 deliverables:
 
 1. Type-compatibility precheck (:mod:`athenaeum.merge_type_gate`) — a
    cross-class cluster is rejected at proposal time with a machine-readable
@@ -10,9 +10,11 @@ Covers the three athenaeum#433 deliverables:
 2. Merge-vs-cite routing — a rejected cross-class cluster produces a cite
    proposal instead (never a destructive merge), exercised end to end
    through :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`.
-3. Inference-block retraction (:func:`athenaeum.inference_blocks.retract_inference_block`)
-   — round-trip parse -> retract -> parse preserves the fact core and any
-   other blocks byte-for-byte, removing only the targeted block.
+
+The third deliverable, inference-block retraction
+(``athenaeum.inference_blocks.retract_inference_block``), was removed by
+issue athenaeum#2435: it never had a production caller, so its round-trip
+coverage was removed from this file along with it.
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.inference_blocks import parse_inference_blocks, retract_inference_block
 from athenaeum.merge_type_gate import (
     CROSS_CLASS_REJECTED,
     build_cite_proposal,
@@ -417,114 +418,3 @@ class TestRejectionLogging:
             "cross-class pair skipped" in record.message for record in caplog.records
         )
 
-
-# ---------------------------------------------------------------------------
-# AC: inference-block retraction round-trip — fact core + other blocks
-# byte-identical, only the targeted block gone.
-# ---------------------------------------------------------------------------
-
-_FACT_PAGE_WITH_INFERENCES = """---
-name: acme-headcount
-type: concept
-memory_class: fact
----
-Acme has 40 employees, per the Q2 filing.
-
-## Inference
-**Basis**: [[acme-headcount]]
-**Confidence**: 0.8
-Acme is probably still hiring given headcount growth.
-
-## Summary
-Just a summary section, not an inference block.
-
-## Inference
-**Basis**: [[acme-headcount]]
-**Confidence**: 0.6
-A second, distinct inference block that must survive retraction of the first.
-"""
-
-
-class TestRetractInferenceBlock:
-    def test_round_trip_removes_only_targeted_block(self) -> None:
-        blocks = parse_inference_blocks(_FACT_PAGE_WITH_INFERENCES)
-        assert len(blocks) == 2
-        target_id = blocks[0].id
-        other_id = blocks[1].id
-
-        retracted_text = retract_inference_block(
-            _FACT_PAGE_WITH_INFERENCES, target_id
-        )
-
-        # Fact core (frontmatter + intro sentence) preserved byte-for-byte.
-        assert "memory_class: fact" in retracted_text
-        assert "Acme has 40 employees, per the Q2 filing." in retracted_text
-        # The ## Summary section survives untouched.
-        assert "Just a summary section, not an inference block." in retracted_text
-        # The retracted block's own body is gone.
-        assert "Acme is probably still hiring" not in retracted_text
-
-        # Re-parsing sees exactly the surviving block, with the SAME id
-        # (byte-identical raw block for the surviving unit).
-        remaining = parse_inference_blocks(retracted_text)
-        assert len(remaining) == 1
-        assert remaining[0].id == other_id
-        assert (
-            remaining[0].body
-            == "A second, distinct inference block that must survive "
-            "retraction of the first."
-        )
-
-    def test_fact_core_byte_identical_outside_removed_block(self) -> None:
-        """Stronger byte-identity check: everything before the retracted
-        block's header and everything from the next block onward is
-        UNCHANGED, character for character."""
-        text = _FACT_PAGE_WITH_INFERENCES
-        blocks = parse_inference_blocks(text)
-        target_id = blocks[0].id
-
-        retracted_text = retract_inference_block(text, target_id)
-
-        header_idx = text.index("## Inference")
-        prefix = text[:header_idx]
-        assert retracted_text.startswith(prefix)
-
-        summary_idx = text.index("## Summary")
-        suffix = text[summary_idx:]
-        assert retracted_text.endswith(suffix)
-
-    def test_retract_second_block_preserves_first(self) -> None:
-        blocks = parse_inference_blocks(_FACT_PAGE_WITH_INFERENCES)
-        first_id = blocks[0].id
-        second_id = blocks[1].id
-
-        retracted_text = retract_inference_block(
-            _FACT_PAGE_WITH_INFERENCES, second_id
-        )
-        remaining = parse_inference_blocks(retracted_text)
-        assert len(remaining) == 1
-        assert remaining[0].id == first_id
-        assert "second, distinct inference block" not in retracted_text
-
-    def test_unknown_id_raises(self) -> None:
-        with pytest.raises(ValueError, match="no ## Inference block"):
-            retract_inference_block(_FACT_PAGE_WITH_INFERENCES, "deadbeef0000")
-
-    def test_retract_only_block_leaves_valid_page(self) -> None:
-        single_block_text = """---
-name: solo-fact
-memory_class: fact
----
-The core fact statement.
-
-## Inference
-**Basis**: [[solo-fact]]
-**Confidence**: 0.5
-The only inference on this page.
-"""
-        blocks = parse_inference_blocks(single_block_text)
-        assert len(blocks) == 1
-        retracted = retract_inference_block(single_block_text, blocks[0].id)
-        assert "The core fact statement." in retracted
-        assert "The only inference on this page." not in retracted
-        assert parse_inference_blocks(retracted) == []

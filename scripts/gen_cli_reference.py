@@ -191,7 +191,24 @@ def _render_leaf_flags(parser: argparse.ArgumentParser) -> list[str]:
         lines.append("|---|---|---|---|")
         for a in sorted(options, key=lambda a: a.option_strings[0]):
             flags = ", ".join(f"`{s}`" for s in a.option_strings)
-            default = _format_default(a.default)
+            if isinstance(a, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+                # A boolean flag's `.default` is argparse construction
+                # boilerplate (``_StoreTrueAction`` always defaults to
+                # ``False``, ``_StoreFalseAction`` always defaults to
+                # ``True``, whether or not the call site passed its own
+                # ``default=``), NOT the resolved runtime default of the
+                # shared ``dest``. For a mutually-exclusive pair sharing one
+                # dest (e.g. ``ingest``'s ``--incremental``/``--full``,
+                # dest=incremental), argparse resolves the actual default
+                # from the FIRST action registered for that dest — printing
+                # this action's own ``.default`` instead renders an inverted
+                # value (``--full``'s default rendered as `True`, i.e. "full
+                # mode is on by default", when the real default is
+                # incremental). Render presence/absence instead, which is
+                # true of every such flag regardless of dest sharing.
+                default = "off (flag absent)"
+            else:
+                default = _format_default(a.default)
             choices = ", ".join(str(c) for c in a.choices) if a.choices else "—"
             help_text = _sanitize(a.help).replace("|", "\\|") or "—"
             lines.append(f"| {flags} | {default} | {choices} | {help_text} |")
@@ -269,16 +286,22 @@ def generate() -> str:
     lines.append("python scripts/gen_cli_reference.py")
     lines.append("```")
     lines.append("")
+    # Derived from the parsed tree, not hand-maintained: a top-level node
+    # counts as a "group" here iff it has children (nested sub-subcommands).
+    # Hand-listing these names is exactly the staleness this generator
+    # exists to prevent — a removed command (`subject`, athenaeum#1656)
+    # lingered in a hardcoded version of this list long after its subparser
+    # was deleted, and newer groups (`receipts`, `schema`, `triage`,
+    # `attribution`, `schedule`) were simply never added to it.
+    athenaeum_groups = sorted(n.path[0] for n in athenaeum_nodes if n.children)
+    group_list = ", ".join(f"`{name}`" for name in athenaeum_groups)
     lines.append(
         "`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE "
         "console scripts with two separate `argparse` trees, documented together "
         "on this one page. Every `athenaeum` subcommand is registered top-level "
         "on one `parser.add_subparsers()` in `cli.py` — there is no `query` "
-        "group. A handful of commands (`dedupe`, `auto-memory`, `questions`, "
-        "`merges`, `decisions`, `authority`, `axiom`, `calibration`, `storage`, "
-        "`push-metrics`, `measure`, `memory-class`, `description`, `verdicts`, "
-        "`dimensions`, `subject`) have their own nested sub-subcommands, listed "
-        "under their own section below."
+        f"group. The following top-level commands ({group_list}) have their "
+        "own nested sub-subcommands, listed under their own section below."
     )
     lines.append("")
     lines.extend(_render_command_index(athenaeum_nodes, heading="## Command index"))
