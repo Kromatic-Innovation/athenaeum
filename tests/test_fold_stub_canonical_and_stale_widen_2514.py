@@ -268,6 +268,52 @@ class TestStaleWidenQuestionWithdrawal:
         # The dimension that genuinely still needs a human is untouched.
         assert by_dimension["memory-class"].answered is False
 
+    def test_withdrawal_happens_on_a_real_ingest_answers_tick(
+        self, tmp_path: Path
+    ) -> None:
+        """The AC names the tick, so drive the whole tick: an approve answer
+        file under ``raw/answers/`` -> ``apply_decision_answers`` ->
+        ``resolve_merge``. The fold is still refused on `memory-class`, and
+        `subject`'s question is withdrawn anyway."""
+        from athenaeum.decision_answers import (
+            apply_decision_answers,
+            write_decision_answer,
+        )
+
+        wiki = tmp_path / "wiki"
+        _, pm_id = self._stalled(wiki)
+        raw_root = tmp_path / "raw"
+        pending = wiki / "_pending_questions.md"
+        raise_pending_question(
+            pending,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'subject' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context=f"Human-approved fold (proposal {pm_id}) into 'canonical' x.",
+            entity="canonical",
+            source=str(wiki / "canonical.md"),
+        )
+        write_decision_answer(
+            raw_root,
+            decision_id=pm_id,
+            decision_type="merge",
+            verdict="approve",
+            wiki_root=wiki,
+        )
+
+        report = apply_decision_answers(wiki, raw_root)
+
+        # The merge answer could not be applied -- the fold refused.
+        (outcome,) = report.outcomes
+        assert outcome.applied is False
+        assert outcome.error_code == "fold_widen_impossible"
+        assert outcome.dimension_name == "memory-class"
+        subject_q = next(
+            q for q in parse_pending_questions(pending) if "'subject'" in q.question
+        )
+        assert subject_q.answered is True
+
     def test_a_question_for_another_proposal_is_left_alone(
         self, tmp_path: Path
     ) -> None:
