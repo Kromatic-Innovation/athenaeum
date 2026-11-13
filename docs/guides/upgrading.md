@@ -32,6 +32,14 @@ yaml key is ignored with a warning, like every other removed key. See
 [Answering pending decisions](decisions.md) for the full
 `athenaeum decisions` surface.
 
+## I want to know about the removed `rebuild-index` alias
+
+`athenaeum rebuild-index` is removed. It was an undocumented back-compat
+alias for `athenaeum reindex` — same command, same flags, same output —
+and never printed a deprecation warning, so there is no warning to watch
+for. If a cron job, wrapper script, or hook calls `athenaeum
+rebuild-index`, change it to call `athenaeum reindex` instead.
+
 `athenaeum run` doesn't just add to your knowledge base — once a
 non-contradictory cluster has been compiled into its canonical
 `wiki/auto-<topic>.md` entry, the move-then-retire pass **moves** each

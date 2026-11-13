@@ -1429,15 +1429,17 @@ class TestReindexCLI:
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["mode"] == "full"
 
-    def test_rebuild_index_alias_still_works(
+    def test_reindex_reports_its_own_command_name(
         self,
         knowledge_with_wiki: Path,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """Issue athenaeum#2459: the `rebuild-index` alias (and the dual-name
+        reporting it needed) is gone; `reindex` always reports itself."""
         rc = main(
             [
-                "rebuild-index",
+                "reindex",
                 "--path",
                 str(knowledge_with_wiki),
                 "--cache-dir",
@@ -1448,6 +1450,6 @@ class TestReindexCLI:
         )
         assert rc == 0
         out = capsys.readouterr().out
-        assert "FTS5 index rebuilt" in out  # legacy human line preserved
+        assert "FTS5 index rebuilt" in out
         payload = json.loads(out.strip().splitlines()[-1])
-        assert payload["command"] == "rebuild-index"
+        assert payload["command"] == "reindex"
