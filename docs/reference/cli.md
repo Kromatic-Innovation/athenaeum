@@ -102,7 +102,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum quarantine`](#athenaeum-quarantine) (command) — Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
 - [`athenaeum query-topics`](#athenaeum-query-topics) (command) — Extract substantive search topics from a prompt (Haiku). Used by the UserPromptSubmit hook to rewrite queries before FTS5/vector search. Prints one topic per line to stdout; empty output means fall back to the caller's built-in extractor.
 - [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
-- [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
 - [`athenaeum receipts`](#athenaeum-receipts) (group) — Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock; `attest-readout` reports witnessed hits and every provenance miss as an incident, read-only. Output is partitions, line ranges, counts and enum labels only, never receipt content.
 - [`athenaeum receipts anchor`](#athenaeum-receipts-anchor) (command) — Anchor every receipt partition that changed since its own last anchor and the witness chain head, upgrade pending OpenTimestamps proofs, and mirror the anchor records into wiki/_witness_anchors/ so they leave the machine with the pushed knowledge repo. Takes the run lock; needs no signing key. The nightly run does this itself at the end of its run.
@@ -1328,19 +1327,6 @@ Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets
 | `--reason` | — | — | Free-text reason recorded in the sentinel, for `--status` and for the log line `ingest --if-triggered` emits when it finds an active quiesce. Required (together with --for) unless --release or --status is given. |
 | `--release` | off (flag absent) | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Refuses (exit 1) when an ACTIVE sentinel belongs to a different --holder, unless --force is given. Mutually exclusive with --status and with --for/--reason; --holder and --force ARE allowed alongside it. |
 | `--status` | off (flag absent) | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason/--holder/--force. |
-
-## `athenaeum rebuild-index`
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--as-of` | — | — | : build an as-of index reflecting the wiki as it stood on this date (pages outside their [valid_from, valid_until] window then are excluded). Always a full build; point --cache-dir at a scratch directory so the live index is not overwritten, then `recall --cache-dir <that>`. Unset = today (the normal live index). |
-| `--backend` | — | fts5, vector | Override configured backend (default: read from athenaeum.yaml) |
-| `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | off (flag absent) | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
-| `--incremental` | off (flag absent) | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum recall`
 

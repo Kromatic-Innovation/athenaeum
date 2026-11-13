@@ -585,7 +585,7 @@ def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
     The keyword backend has no cache. FTS5 expects ``wiki-index.db``;
     vector expects ``wiki-vectors/``. When either is missing, recall
     silently returns empty — the warning tells the user to run
-    ``athenaeum rebuild-index``.
+    ``athenaeum reindex``.
     """
     if backend == "keyword":
         return
@@ -594,7 +594,7 @@ def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
             print(
                 f"[warn] search_backend=fts5 but no index at "
                 f"{cache_dir / 'wiki-index.db'}.\n"
-                f"       Run `athenaeum rebuild-index --path <knowledge>` "
+                f"       Run `athenaeum reindex --path <knowledge>` "
                 f"before relying on recall.",
                 file=sys.stderr,
             )
@@ -604,7 +604,7 @@ def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
             print(
                 f"[warn] search_backend=vector but no index at "
                 f"{cache_dir / 'wiki-vectors'}.\n"
-                f"       Run `athenaeum rebuild-index --path <knowledge>` "
+                f"       Run `athenaeum reindex --path <knowledge>` "
                 f"before relying on recall.",
                 file=sys.stderr,
             )
