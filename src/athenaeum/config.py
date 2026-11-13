@@ -2758,6 +2758,14 @@ def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
     is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
     never a block. See :func:`_resolve_positive_int_knob` for the coercion
     contract.
+
+    DEPRECATED (issue athenaeum#2536), removed in ``0.25.0``: the byte
+    vocabulary disagrees with the split machinery, which measures BODY
+    chars against ``librarian.page_size_threshold_chars`` /
+    ``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+    Read ``athenaeum status``'s chars-based page-recompile backlog block
+    (``page_recompile`` in ``--json``) instead; this knob and its
+    ``Oversized pages (warn/flag)`` status line go away in that release.
     """
     return _resolve_positive_int_knob(config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192)
 
@@ -2770,6 +2778,14 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     ``athenaeum run``) as one that should be broken into linked sub-entities.
     Kept comfortably below the tier-3 merge body cap so flagging precedes any
     hard merge-budget pressure. See :func:`_resolve_positive_int_knob`.
+
+    DEPRECATED (issue athenaeum#2536), removed in ``0.25.0``: the byte
+    vocabulary disagrees with the split machinery, which measures BODY
+    chars against ``librarian.page_size_threshold_chars`` /
+    ``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+    Read ``athenaeum status``'s chars-based page-recompile backlog block
+    (``page_recompile`` in ``--json``) instead; this knob and its
+    ``Oversized pages (warn/flag)`` status line go away in that release.
     """
     return _resolve_positive_int_knob(config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384)
 
@@ -5279,16 +5295,19 @@ search_backend: vector
 #   cosine is below it is archived (`below_confidence_floor` in the dedupe
 #   attribution snapshot) instead of queued. 0 disables. env
 #   ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE > this key > default.
-# page_warn_bytes: soft byte threshold above which a wiki entity page is
-#   reported as a WARN-level oversized page in `athenaeum status` (athenaeum#310).
-#   Warn-only -- nothing is blocked or modified. Precedence:
-#   ATHENAEUM_PAGE_WARN_BYTES env, then this key, then 8192. A long page
-#   usually means poorly-factored knowledge to split into linked entities.
-# page_flag_bytes: louder byte threshold above which a page is FLAGGED for
-#   splitting -- surfaced in `status` and logged as a non-fatal WARNING
-#   during `athenaeum run` (athenaeum#310). Still warn-only (the tier-3 merge body
-#   cap is separate and unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES
-#   env, then this key, then 16384. Keep comfortably below the merge cap.
+# page_warn_bytes: DEPRECATED (athenaeum#2536), removed in 0.25.0. Soft byte
+#   threshold above which a wiki entity page is reported as a WARN-level
+#   oversized page in `athenaeum status` (athenaeum#310). Warn-only -- nothing is
+#   blocked or modified. Precedence: ATHENAEUM_PAGE_WARN_BYTES env, then this
+#   key, then 8192. Superseded by page_size_threshold_chars, which the split
+#   machinery itself acts on; read the page-recompile backlog block in
+#   `athenaeum status` instead.
+# page_flag_bytes: DEPRECATED (athenaeum#2536), removed in 0.25.0. Louder byte
+#   threshold above which a page is FLAGGED for splitting -- surfaced in
+#   `status` and logged as a non-fatal WARNING during `athenaeum run`
+#   (athenaeum#310). Still warn-only (the tier-3 merge body cap is separate and
+#   unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES env, then this key, then
+#   16384. Superseded by oversize_hard_ceiling_chars; see page_warn_bytes.
 # drain_warn_days: backlog-drain ETA threshold in days (issue athenaeum#470). At the
 #   end of any run that leaves raw intake undrained (and in `athenaeum
 #   status`), the advisor projects time-to-drain from OBSERVED throughput

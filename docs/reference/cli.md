@@ -1711,7 +1711,9 @@ Show knowledge base status
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the kill-switch state (default: ~/.cache/athenaeum). Only affects the kill-switch line. |
+| `--json` | off (flag absent) | — | Emit the whole status snapshot as JSON on stdout instead of the human-readable report (the kill-switch line is suppressed so the output is parseable). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--verbose` | off (flag absent) | — | Also list the page names behind the page-recompile backlog counts. Without it the backlog block is counts only. |
 
 ## `athenaeum stopwords`
 
