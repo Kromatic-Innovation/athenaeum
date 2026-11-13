@@ -1,6 +1,32 @@
-**Reference:** [retention](../modules/retention.md) · [librarian](../modules/librarian.md)
+**Reference:** [retention](../modules/retention.md) · [librarian](../modules/librarian.md) · [decisions](decisions.md)
 
 # Upgrading and data lifecycle
+
+## I want to know what's going away in 0.24.0
+
+`athenaeum merges` and `athenaeum questions` are removed in 0.24.0. Every
+command either surface offers has a direct `athenaeum decisions`
+replacement — same flags, output and exit codes, just under the unified
+queue's name:
+
+| Removed command | Replacement |
+|---|---|
+| `athenaeum merges list` | `athenaeum decisions list` |
+| `athenaeum merges next` | `athenaeum decisions next` |
+| `athenaeum merges count` | `athenaeum decisions count` |
+| `athenaeum merges revalidate` | `athenaeum decisions revalidate` |
+| `athenaeum merges recompare` | `athenaeum decisions recompare` |
+| `athenaeum merges scrub-pii` | `athenaeum decisions scrub-pii` |
+| `athenaeum merges propose-fold` | `athenaeum decisions propose-fold` |
+| `athenaeum merges provenance` | `athenaeum decisions provenance` |
+| `athenaeum questions list` | `athenaeum decisions list` |
+| `athenaeum questions next` | `athenaeum decisions next` |
+| `athenaeum questions count` | `athenaeum decisions count` |
+
+Until 0.24.0 ships, the left column keeps working exactly as before — each
+prints a one-line deprecation warning to stderr naming its own replacement
+from the table above, nothing else changes. See [Answering pending
+decisions](decisions.md) for the full `athenaeum decisions` surface.
 
 `athenaeum run` doesn't just add to your knowledge base — once a
 non-contradictory cluster has been compiled into its canonical

@@ -477,12 +477,12 @@ ingests and consolidates, and an end-to-end quick start — lives in
 When the librarian flags a contradiction or ambiguity, it lands in
 `~/knowledge/wiki/_pending_questions.md` as a `- [ ]` checkbox block.
 The `pending-questions-surface.sh` SessionStart hook calls
-`athenaeum questions count --json` and prints a one-block prompt like:
+`athenaeum decisions count --json` and prints a one-block prompt like:
 
 ```
 [Pending memory questions] 3 unresolved (oldest: 2026-04-20).
 Resolve interactively now, defer to tomorrow, or skip?
-Available via: `athenaeum questions next --with-proposal` or the resolve-questions skill.
+Available via: `athenaeum decisions next --with-proposal` or the resolve-questions skill.
 ```
 
 To resolve interactively, invoke the `resolve-questions` skill (shipped in
@@ -494,9 +494,9 @@ hook stays silent until that ISO-8601 timestamp passes.
 CLI reference:
 
 ```bash
-athenaeum questions count --json                    # {"count": N, "oldest": "..."}
-athenaeum questions next --with-proposal            # show oldest entry + proposal
-athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
+athenaeum decisions count --json                    # {"count": N, "oldest": "..."}
+athenaeum decisions next --with-proposal            # show oldest entry + proposal
+athenaeum decisions list --with-proposal --limit 5  # all unresolved (capped)
 ```
 
 ## Repeated permission prompts
