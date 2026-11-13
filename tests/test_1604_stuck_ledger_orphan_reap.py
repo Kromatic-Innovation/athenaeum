@@ -42,9 +42,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from athenaeum.librarian import STUCK_MANIFEST_NAME, _stuck_content_hash, run
+from athenaeum.librarian import _stuck_content_hash, run
 from athenaeum.models import RawFile
-from athenaeum.stuck_ledger import load_stuck_ledger, reap_orphaned_entries
+from athenaeum.stuck_ledger import (
+    STUCK_MANIFEST_NAME,
+    load_stuck_ledger,
+    reap_orphaned_entries,
+)
 
 
 def _seed(tmp_path: Path, *, workable_names: list[str]) -> Path:
