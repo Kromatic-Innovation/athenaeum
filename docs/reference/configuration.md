@@ -2104,6 +2104,14 @@ yaml > ``16384``. A page over this is flagged more loudly (and logged during
 Kept comfortably below the tier-3 merge body cap so flagging precedes any
 hard merge-budget pressure. See `_resolve_positive_int_knob`.
 
+DEPRECATED, removed in ``0.25.0``: the byte
+vocabulary disagrees with the split machinery, which measures BODY
+chars against ``librarian.page_size_threshold_chars`` /
+``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+Read ``athenaeum status``'s chars-based page-recompile backlog block
+(``page_recompile`` in ``--json``) instead; this knob and its
+``Oversized pages (warn/flag)`` status line go away in that release.
+
 ### `resolve_page_size_threshold_chars`
 
 - **YAML path:** `librarian.page_size_threshold_chars`
@@ -2135,6 +2143,14 @@ yaml > ``8192``. A page whose UTF-8 size (frontmatter + body) exceeds this
 is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
 never a block. See `_resolve_positive_int_knob` for the coercion
 contract.
+
+DEPRECATED, removed in ``0.25.0``: the byte
+vocabulary disagrees with the split machinery, which measures BODY
+chars against ``librarian.page_size_threshold_chars`` /
+``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+Read ``athenaeum status``'s chars-based page-recompile backlog block
+(``page_recompile`` in ``--json``) instead; this knob and its
+``Oversized pages (warn/flag)`` status line go away in that release.
 
 ### `resolve_policy_pack_edit_proposals_enabled`
 
