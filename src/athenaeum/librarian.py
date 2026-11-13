@@ -1277,8 +1277,10 @@ def tier0_bounce_verdict_mark(
     (:data:`athenaeum.bounce_join.WIKI_BOUNCED_FIELD`) is written by "a
     producer outside athenaeum" and athenaeum only ever reads it, via
     :func:`athenaeum.bounce_join.wiki_bounced_value`, reached from
-    :func:`athenaeum.bounce_divergence.compute_divergence` (and via this
-    module's own frontmatter reads, below). That held because
+    :func:`athenaeum.bounce_divergence.compute_divergence`, from the public
+    :func:`athenaeum.deliverability_for_page` consumer API
+    (:mod:`athenaeum.bounce_join`, issue athenaeum#2470) and via this
+    module's own frontmatter reads, below. That held because
     every non-RFC verdict already had SOME producer. It no longer holds for
     one narrow class: voltaire's historical bounce-bio backfill normalizes
     the verifalia verdicts it recognizes into RFC 3463-conforming notes

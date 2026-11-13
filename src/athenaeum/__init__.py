@@ -38,6 +38,21 @@ into this always-imported package root would make ``pytest`` a hard runtime
 dependency of every ``athenaeum`` import; import it directly
 (``from athenaeum.store_conformance import StoreConformanceTests``) instead.
 
+``athenaeum.bounce_join`` (issue athenaeum#2470) is promoted here only in
+PART, same pattern as ``athenaeum.store`` above:
+:func:`~athenaeum.bounce_join.deliverability_for_page`,
+:func:`~athenaeum.bounce_join.join_identifier` and
+:class:`~athenaeum.bounce_join.Deliverability` are the three symbols the
+authorized-reader contract (``docs/extending/authorized-reader-contract.md``
+§6) names, so those are below. :class:`~athenaeum.bounce_join.BounceJoin` —
+``join_identifier``'s own return type — and the private ``_uid_of`` helper
+stay internal: the issue that promoted this trio named exactly these three,
+and a narrower public surface is a smaller stability promise than promoting
+every type the reader API happens to touch. ``BounceJoin`` remains reachable
+the same way any non-promoted type is, via
+``athenaeum.bounce_join.BounceJoin`` directly — it is simply not re-exported
+at the package root.
+
 Import cost: every name above is re-exported **lazily** (PEP 562 module
 ``__getattr__``), and so is ``__version__``. This is load-bearing, not a
 micro-optimisation. Eagerly importing :mod:`athenaeum.librarian` here pulled the
@@ -71,10 +86,10 @@ module-scope ``from athenaeum.librarian import run`` to this file, or to
 
 Layering: sits above L5 by necessity (it imports the CLI-adjacent
 :mod:`athenaeum.librarian` pipeline entry points as well as the L1
-:mod:`athenaeum.models` hub, L1 :mod:`athenaeum.init`, and L1
-:mod:`athenaeum.store` contract types) — this file is the one place layering
-is deliberately collapsed, since a package root must expose the whole stack's
-public surface in one namespace.
+:mod:`athenaeum.models` hub, L1 :mod:`athenaeum.init`, L1 :mod:`athenaeum.store`
+contract types, and the L4 :mod:`athenaeum.bounce_join` reader trio) — this
+file is the one place layering is deliberately collapsed, since a package
+root must expose the whole stack's public surface in one namespace.
 """
 
 from __future__ import annotations
@@ -98,6 +113,11 @@ if TYPE_CHECKING:
     # Re-stated for type checkers and IDEs only: these names resolve at runtime
     # through ``__getattr__`` below, but a static reader cannot follow that, and
     # mypy checks this block as if the imports were real.
+    from athenaeum.bounce_join import (
+        Deliverability,
+        deliverability_for_page,
+        join_identifier,
+    )
     from athenaeum.init import init_knowledge_dir
     from athenaeum.librarian import (
         IngestResult,
@@ -139,6 +159,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ClassifiedEntity",
+    "Deliverability",
     "EntityAction",
     "EntityIndex",
     "EscalationItem",
@@ -158,10 +179,12 @@ __all__ = [
     "StoreKeyError",
     "UnknownSurfaceError",
     "WikiEntity",
+    "deliverability_for_page",
     "discover_raw_files",
     "generate_uid",
     "ingest",
     "init_knowledge_dir",
+    "join_identifier",
     "parse_frontmatter",
     "process_one",
     "rebuild_index",
@@ -176,6 +199,10 @@ __all__ = [
 # attribute access and then cached into ``globals()``, so the second access is
 # an ordinary dict lookup and the module is imported at most once.
 _LAZY_EXPORTS: dict[str, str] = {
+    # athenaeum.bounce_join
+    "Deliverability": "athenaeum.bounce_join",
+    "deliverability_for_page": "athenaeum.bounce_join",
+    "join_identifier": "athenaeum.bounce_join",
     # athenaeum.init
     "init_knowledge_dir": "athenaeum.init",
     # athenaeum.librarian
