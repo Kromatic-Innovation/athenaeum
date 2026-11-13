@@ -353,3 +353,57 @@ class TestCli:
         )
         assert "description" not in path.read_text()
         assert "dry run" in capsys.readouterr().out
+
+    def test_apply_refuses_when_the_run_lock_is_held(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``backfill --apply`` WRITES, so it takes the run lock the way
+        every other writing ``_cmd_*`` module does (issue athenaeum#2453)."""
+        from athenaeum._cli_shared import EXIT_LOCK_HELD
+        from athenaeum.runlock import RunLock
+
+        path = _page(wiki, "a.md", "uid: a\nname: A", "# A\n\nA is a page.\n")
+        before = path.read_text(encoding="utf-8")
+
+        knowledge_root = wiki.parent
+        lock = RunLock(knowledge_root, wait=0)
+        lock.acquire()
+        try:
+            rc = main(
+                [
+                    "description",
+                    "backfill",
+                    "--path",
+                    str(knowledge_root),
+                    "--mechanical",
+                    "--apply",
+                ]
+            )
+        finally:
+            lock.release()
+
+        assert rc == EXIT_LOCK_HELD
+        assert "holds the lock" in capsys.readouterr().err
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_apply_succeeds_when_the_run_lock_is_free(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Existing successful --apply behaviour is unchanged when the lock
+        is free (issue athenaeum#2453)."""
+        path = _page(wiki, "a.md", "uid: a\nname: A", "# A\n\nA is a page.\n")
+        rc = main(
+            [
+                "description",
+                "backfill",
+                "--path",
+                str(wiki.parent),
+                "--mechanical",
+                "--apply",
+                "--json",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["applied"] is True and payload["files_changed"] == 1
+        assert 'description: "A is a page."' in path.read_text()
