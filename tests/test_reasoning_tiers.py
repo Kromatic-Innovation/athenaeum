@@ -30,7 +30,9 @@ from athenaeum.reasoning_tiers import (
     DEFAULT_T2_MODEL,
     REASONING_TIER_VERDICTS,
     REJECT_REASON_CROSS_MEMORY_CLASS,
+    REJECT_REASON_DIFFERENT_ENTITIES,
     REJECT_REASON_LIVE_SOURCE_DUPLICATE,
+    REJECT_REASON_OTHER,
     BoundedSourceView,
     ReasoningProposal,
     ReasoningTierDecision,
@@ -572,7 +574,8 @@ class TestT1RejectBins:
         src_a = _write_source(tmp_path, "a.md", name="Apples")
         src_b = _write_source(tmp_path, "b.md", name="Rockets")
         client = _mock_client(
-            '{"verdict": "reject", "reason": "different entities: apples vs rockets"}'
+            '{"verdict": "reject", "reason": "different entities: apples vs rockets", '
+            '"reason_code": "different_entities"}'
         )
         proposal = ReasoningProposal(
             proposal_id="p1", merge_target_name="m", sources=(str(src_a), str(src_b))
@@ -601,6 +604,83 @@ class TestT1RejectBins:
         )
         decision = run_t1_tier(proposal, client=client)
         assert decision.verdict == "pass_up"
+
+
+class TestT1ReasonCodeAgreesWithReason:
+    """Issue athenaeum#2521: before this fix, every model-path T1 reject was
+    stamped ``reason_code=REJECT_REASON_DIFFERENT_ENTITIES`` unconditionally
+    (a hardcoded default), regardless of what the model's own free-text
+    ``reason`` said. Live data showed 1893/1893 reason_code-bearing rows in
+    the tier decision ledger carried that one value, including 1609 whose
+    ``reason`` called the pages a "duplicate"/"same entity" — the exact
+    contradiction this issue reports. The fix asks the model for its own
+    ``reason_code`` (:class:`T1VerdictResponse`) instead of defaulting one
+    in; these tests pin that AC1 ("a fixture pair T1 judges duplicate never
+    comes back different_entities") directly.
+    """
+
+    def test_duplicate_reject_via_model_call_is_not_stamped_different_entities(
+        self, tmp_path: Path
+    ) -> None:
+        src_a = _write_source(tmp_path, "a.md", name="Dijkstra Skill Page")
+        src_b = _write_source(tmp_path, "b.md", name="Dijkstra Skill Page (copy)")
+        client = _mock_client(
+            '{"verdict": "reject", "reason": "both sources describe the same '
+            'entity; this is a duplicate that should be consolidated, not '
+            'merged as distinct entities", "reason_code": "other"}'
+        )
+        proposal = ReasoningProposal(
+            proposal_id="p1", merge_target_name="m", sources=(str(src_a), str(src_b))
+        )
+        decision = run_t1_tier(proposal, client=client)
+        assert decision.verdict == "reject"
+        assert decision.reason_code != REJECT_REASON_DIFFERENT_ENTITIES
+        assert decision.reason_code == REJECT_REASON_OTHER
+
+    def test_different_entities_reject_keeps_its_own_code(self, tmp_path: Path) -> None:
+        # A genuine different-entities judgment still gets that exact code —
+        # the fix removes the hardcoded DEFAULT, it does not remove the
+        # value's legitimate use.
+        src_a = _write_source(tmp_path, "a.md", name="Apples")
+        src_b = _write_source(tmp_path, "b.md", name="Rockets")
+        client = _mock_client(
+            '{"verdict": "reject", "reason": "apples and rockets are different '
+            'entities", "reason_code": "different_entities"}'
+        )
+        proposal = ReasoningProposal(
+            proposal_id="p1", merge_target_name="m", sources=(str(src_a), str(src_b))
+        )
+        decision = run_t1_tier(proposal, client=client)
+        assert decision.verdict == "reject"
+        assert decision.reason_code == REJECT_REASON_DIFFERENT_ENTITIES
+
+    def test_reject_with_no_reason_code_degrades_to_pass_up(self, tmp_path: Path) -> None:
+        # The pre-fix contract (reject + no reason_code) is now malformed —
+        # degrading to pass_up (never a reject with a GUESSED code) is the
+        # same safe-set discipline every other T1 schema mismatch already
+        # gets (tests/test_reasoning_tiers_m17_retrofit.py).
+        src_a = _write_source(tmp_path, "a.md", name="A")
+        src_b = _write_source(tmp_path, "b.md", name="B")
+        client = _mock_client('{"verdict": "reject", "reason": "no code given"}')
+        proposal = ReasoningProposal(
+            proposal_id="p1", merge_target_name="m", sources=(str(src_a), str(src_b))
+        )
+        decision = run_t1_tier(proposal, client=client)
+        assert decision.verdict == "pass_up"
+
+    def test_pass_up_with_a_reason_code_degrades_to_pass_up(self, tmp_path: Path) -> None:
+        src_a = _write_source(tmp_path, "a.md", name="A")
+        src_b = _write_source(tmp_path, "b.md", name="B")
+        client = _mock_client(
+            '{"verdict": "pass_up", "reason": "unsure", '
+            '"reason_code": "different_entities"}'
+        )
+        proposal = ReasoningProposal(
+            proposal_id="p1", merge_target_name="m", sources=(str(src_a), str(src_b))
+        )
+        decision = run_t1_tier(proposal, client=client)
+        assert decision.verdict == "pass_up"
+        assert decision.reason_code is None
 
 
 class TestInertModelKnobWarning:
