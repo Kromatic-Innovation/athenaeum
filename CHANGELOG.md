@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
+  ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
+  and source object produced a compiled page, or says plainly that none was
+  recorded; `--json` emits the same rows as JSON. Read-only: no run lock,
+  no writes. Of the five observability ledgers the cleanup audit reviewed
+  (athenaeum#2447), this is the one kept and, by this command, exposed for
+  the first time — see "Removed" below for the other four (athenaeum#2468).
+
 - Merge-queue maintenance commands (`revalidate`, `recompare`, `scrub-pii`,
   `propose-fold`, `provenance`) are now available under `athenaeum
   decisions`; `recompare --apply` exits 75 when the run lock is held
@@ -95,6 +103,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/guides/upgrading.md` for the command-by-command mapping. A stale
   `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
   warning.
+
+- Added a read command for adapter provenance (see "Added" above); stopped
+  writing the compile-routes, schema-observation, wiki-dedupe attribution
+  and never-ingest refusal ledgers, which nothing outside their own tests
+  read: `compile_routing.record_compile_route`/`read_compile_routes`,
+  `llm_schemas.record_observation`/`read_observations`/
+  `aggregate_observations` and its `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED`
+  switch, `wiki_dedupe_attribution.write_attribution_report` and its module
+  (deleted outright), and `never_ingest.record_refusal`/`read_refusals`.
+  Each underlying BEHAVIOUR is unchanged — `classify_route`'s routing guard
+  still admits/prevents/logs writes, the wiki-dedupe pass still proposes
+  merges, and a never-ingest match is still refused — only the durable
+  per-observation record is gone. An existing on-disk ledger from before
+  this change (`_compile_route_records.jsonl` and
+  `_llm_schema_observations.jsonl` under the cache dir,
+  `_wiki_dedupe_attribution*.jsonl` under `wiki_root`, and
+  `_never_ingest_refusals.jsonl` under the cache dir) is left alone —
+  ignored, not read, not deleted; see `docs/guides/upgrading.md`
+  (athenaeum#2468).
 
 ### Changed
 
