@@ -28,7 +28,6 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`../design/auto-resolve.md`](../design/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | No | Per-side body cap for the resolver's full-body context, ~4 chars/token (default: `1500`; must be positive) |
-| `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | No | Cosine threshold for matching new detections against the resolved-decision log (default: `0.83`) |
 | `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model. Precedence: env > `models.topic` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `JEV_API_KEY` | No | API key for the optional Jev decision provider. Supplied the same ways as `ANTHROPIC_API_KEY` (see "Credentials" below) |

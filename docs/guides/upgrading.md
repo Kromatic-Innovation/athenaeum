@@ -215,6 +215,10 @@ replacement to set — the resolver always uses its built-in default.
 A stale `athenaeum.yaml` still setting either key loads fine; each key is
 ignored and logged with the same warning every other removed key gets.
 
+The matching environment variable `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`
+is gone too; setting it now has no effect and produces no warning, the same
+as every other removed environment variable.
+
 ## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
 Each of these commands existed to repair data left behind by one specific,
