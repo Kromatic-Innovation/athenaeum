@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or removes it by hand (exits 75 under a held run lock); `athenaeum
   doctor` reports the count of one-sided pairs (athenaeum#2535).
 
+- Merge decisions have a third verdict, `attach-as-subpage`, beside
+  `approve`/`reject`: it attaches the proposal's other source page under
+  the target as a sub-page (via `page_relations.set_relation`, stamped
+  `via: fold`) instead of folding either page away, and is refused — with
+  a reason, the item left pending — on the same relation invariants
+  `athenaeum relate` already enforces. A pair resolved this way is not
+  re-proposed by the qualified-name scan or wiki dedupe, matching an
+  approve/reject's suppression. Available through `resolve_merge` and the
+  unified decision-answer path (athenaeum#2539).
+
 ### Fixed
 
 - `split-oversize` and the `librarian.oversize_page_action: split`

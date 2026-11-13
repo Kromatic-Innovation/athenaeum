@@ -586,6 +586,102 @@ class TestApplyMerge:
         assert {outcome.value_a, outcome.value_b} == {"fact", "guideline"}
 
 
+class TestApplyMergeAttachAsSubpage:
+    """Issue athenaeum#2539 AC1: the ``attach-as-subpage`` verdict is accepted
+    through the UNIFIED answer path (``preflight_merge`` -> ``write_decision_
+    answer`` -> ``apply_decision_answers``) — not merely through
+    ``resolve_merge`` called directly (covered separately in
+    ``tests/test_pending_merges_resolve.py::TestResolveMergeAttachAsSubpage``,
+    which also carries this verdict's AC2/AC3/AC7 tests)."""
+
+    @staticmethod
+    def _write_attach_candidates(wiki_root: Path) -> tuple[Path, Path, Path]:
+        merges_path = wiki_root / "_pending_merges.md"
+        target = wiki_root / "widget.md"
+        child = wiki_root / "gizmo.md"
+        target.write_text(
+            "---\nuid: widget-uid\nname: Widget\ntype: reference\n---\nbody\n",
+            encoding="utf-8",
+        )
+        child.write_text(
+            "---\nuid: gizmo-uid\nname: Gizmo\ntype: reference\n---\nbody\n",
+            encoding="utf-8",
+        )
+        return merges_path, target, child
+
+    def test_preflight_accepts_the_verdict(self, wiki_root: Path) -> None:
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+
+        ok, error_code, message = preflight_merge(merges_path, mid, "attach-as-subpage")
+
+        assert ok, (error_code, message)
+
+    def test_apply_attach_as_subpage_sets_the_relation(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """A full round trip through the real tier-0 apply path — the one
+        ``athenaeum ingest-answers`` drives in production — sets the
+        relation exactly as a direct ``resolve_merge`` call would."""
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="attach-as-subpage"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        child_meta, _ = parse_frontmatter(child.read_text(encoding="utf-8"))
+        assert child_meta.get("parent") == "widget-uid"
+        text = merges_path.read_text(encoding="utf-8")
+        assert "**Decision**: attach-as-subpage" in text
+
+    def test_invalid_old_vocabulary_check_still_rejects_bogus_verdicts(
+        self, wiki_root: Path
+    ) -> None:
+        """Widening ``preflight_merge``'s vocabulary to three tokens must not
+        accidentally widen it to anything -- a genuinely unknown verdict is
+        still refused."""
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+
+        ok, error_code, _ = preflight_merge(merges_path, mid, "maybe")
+
+        assert not ok
+        assert error_code == "invalid_decision"
+
+
 # ---------------------------------------------------------------------------
 # TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.
 #

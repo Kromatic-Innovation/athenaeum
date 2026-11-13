@@ -54,9 +54,12 @@ def _rule(
         confidence=0.5,
     )
     pm = list_pending_merges(merges)[-1]
-    if decision == "approve":
-        # Resolve without enacting the fold: the fixture only needs the
-        # recorded decision, so rewrite the block rather than run the fold.
+    if decision in ("approve", "attach-as-subpage"):
+        # Resolve without enacting the fold/attach: the fixture only needs
+        # the recorded decision (what the suppression mechanism reads), so
+        # rewrite the block rather than run the real write-kind dispatch —
+        # same posture "approve" already took here before issue athenaeum#2539
+        # added this third verdict.
         from athenaeum.pending_merges import _rewrite_block_resolved, _split_blocks
 
         text = merges.read_text(encoding="utf-8")
@@ -65,7 +68,7 @@ def _rule(
         for b in blocks:
             if f'Merge: "{bare.stem}"' in b:
                 b = _rewrite_block_resolved(
-                    b, "approve", "ok", auto_applied=auto_applied, answered_at=answered_at
+                    b, decision, "ok", auto_applied=auto_applied, answered_at=answered_at
                 )
             out.append(b)
         merges.write_text("# Pending Merges\n\n" + "\n\n---\n\n".join(out) + "\n", encoding="utf-8")
@@ -122,6 +125,19 @@ class TestRejectedPairNotReproposed:
     def test_baseline_without_ruling_is_queued(self, wiki: Path) -> None:
         counts = propose_qualified_name_merges(wiki)
         assert counts["queued"] == 1 and counts["ruled_out"] == 0
+
+    def test_proposal_rationale_names_attach_as_subpage_as_an_option(
+        self, wiki: Path
+    ) -> None:
+        """Issue athenaeum#2539 AC5: a proposal name_structure raises says,
+        in its context, that attaching is an option -- not only merge/reject."""
+        propose_qualified_name_merges(wiki)
+        (rationale,) = [
+            m["rationale"]
+            for m in list_pending_merges(wiki / "_pending_merges.md")
+            if not m.get("resolved")
+        ]
+        assert "attach-as-subpage" in rationale
 
     def test_archived_human_rejection_suppresses_forever_by_default(self, wiki: Path) -> None:
         _rule(wiki, wiki / "orca.md", wiki / "orca-coaching.md", "reject", answered_at=OLD)
@@ -228,6 +244,60 @@ class TestApprovedPairNotReproposed:
         cfg = {"librarian": {"rejected_merge_cooldown_days": 1}}
         counts = propose_qualified_name_merges(wiki, config=cfg)
         assert counts["queued"] == 0 and counts["ruled_out"] == 1
+
+
+class TestAttachAsSubpageNotReproposed:
+    """Issue athenaeum#2539 AC6: a pair resolved ``attach-as-subpage`` is not
+    proposed again by the qualified-name scan or by wiki dedupe, matching
+    how an approve/reject is already honoured by both proposers."""
+
+    def test_second_name_structure_scan_raises_no_new_proposal(self, wiki: Path) -> None:
+        _rule(
+            wiki,
+            wiki / "orca.md",
+            wiki / "orca-coaching.md",
+            "attach-as-subpage",
+            answered_at=OLD,
+        )
+        # Issue athenaeum#2539: like an approve, an attach never decays --
+        # a short cooldown must not resurrect the pair either.
+        cfg = {"librarian": {"rejected_merge_cooldown_days": 1}}
+        counts = propose_qualified_name_merges(wiki, config=cfg)
+        assert counts["queued"] == 0 and counts["ruled_out"] == 1
+        assert _open_ids(wiki) == []
+
+    def test_wiki_dedupe_also_skips_before_any_comparison(self, tmp_path: Path) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from tests.test_wiki_dedupe import (
+            _BODY_A,
+            _BODY_B,
+            _COMPARATOR_CONFIG,
+            _content_payload,
+            _fake_embed,
+            _fake_llm_client,
+            _write_page,
+        )
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        a = _write_page(wiki, "venture-a.md", body=_BODY_A)
+        b = _write_page(wiki, "venture-b.md", body=_BODY_B)
+        _rule(wiki, a, b, "attach-as-subpage", answered_at=RECENT, base_name="venture-a")
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(root)
+        with lock:
+            results = propose_wiki_page_merges(
+                root,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert results == []
+        client.messages.create.assert_not_called()
 
 
 class TestBasePageVariant:

@@ -4795,7 +4795,16 @@ def create_server(
                 (issue athenaeum#715 — never ``refines:``, which is reserved for
                 a genuine specialization verdict) into the first source
                 memory so the detector's declared-pair short-circuit
-                suppresses the pair on future runs.
+                suppresses the pair on future runs. ``"attach-as-subpage"``
+                (issue athenaeum#2539) folds nothing and tombstones nothing:
+                it attaches the proposal's other source page under the
+                target as a sub-page via the first-class parent/child
+                relation (:mod:`athenaeum.page_relations`), flips the
+                checkbox, and records a provenance entry. Refused — the
+                checkbox left unflipped — when the target does not exist,
+                the proposal does not have exactly one other source, or the
+                relation's own invariants (a second parent, a cycle, a
+                third nesting level, an inactive target) are broken.
             note: Optional human note attached to the decision block.
 
         Returns:

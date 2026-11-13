@@ -411,11 +411,14 @@ def preflight_merge(
 
     Returns ``(ok, error_code, message)``. Never mutates.
     """
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return (
             False,
             "invalid_decision",
-            f"decision must be 'approve' or 'reject', got {decision!r}",
+            (
+                "decision must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {decision!r}"
+            ),
         )
 
     from athenaeum.pending_merges import parse_pending_merges
@@ -875,14 +878,17 @@ def _apply_merge_answer(
     from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 
     decision = answer.verdict.strip().lower()
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return DecisionAnswerOutcome(
             path=answer.path,
             decision_id=answer.decision_id,
             decision_type=answer.decision_type,
             applied=False,
             error_code="invalid_decision",
-            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+            message=(
+                "verdict must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {answer.verdict!r}"
+            ),
         )
 
     cfg = config or {}

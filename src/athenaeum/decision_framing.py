@@ -285,6 +285,35 @@ def _approve_reject_schema(*, description: str) -> dict[str, Any]:
     }
 
 
+def _merge_verdict_schema(*, description: str) -> dict[str, Any]:
+    """The ``merge`` decision type's three-token answer schema.
+
+    Issue athenaeum#2539: a fold decision's third outcome besides merge and
+    reject — ``attach-as-subpage`` folds nothing and tombstones nothing; it
+    sets the first-class parent/child relation (:mod:`athenaeum.page_relations`)
+    between the proposal's target and its other source instead. Shaped like
+    :func:`_approve_reject_schema` (same two required properties, same
+    ``additionalProperties: False``) with one more enum token — deliberately
+    NOT a three-value variant of :func:`_approve_rename_reject_schema`,
+    which conditionally REQUIRES an extra ``name`` property for one of its
+    tokens; ``attach-as-subpage`` needs no such extra property, so the
+    simpler two-property shape still fits.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["approve", "attach-as-subpage", "reject"],
+                "description": description,
+            },
+            "note": _NOTE_PROPERTY,
+        },
+        "required": ["verdict"],
+        "additionalProperties": False,
+    }
+
+
 def _approve_rename_reject_schema(*, description: str) -> dict[str, Any]:
     """A three-token ``approve``/``rename``/``reject`` answer schema.
 
@@ -385,9 +414,10 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
         # a tombstone, so the inverse (unfold) exists but costs work.
         "reversibility": REVERSIBILITY_REVERSIBLE_WITH_WORK,
         "routing": ROUTING_COMPETENCE,
-        "schema": _approve_reject_schema(
-            description="approve = fold these sources together; reject = keep "
-            "them separate.",
+        "schema": _merge_verdict_schema(
+            description="approve = fold these sources together; "
+            "attach-as-subpage = attach the other source under the target as "
+            "a sub-page, folding nothing; reject = keep them separate.",
         ),
         "default_action": "reject (keep the pages separate)",
         "default_consequences": (

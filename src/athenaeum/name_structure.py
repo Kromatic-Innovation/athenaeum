@@ -628,7 +628,10 @@ def propose_qualified_name_merges(
             "qualifier may mark a synonym/expansion (one entity, twice) or a "
             "scope/phase (a genuinely narrower thing); this scan cannot tell "
             "those apart, so a human decides. The draft below concatenates both "
-            "bodies verbatim — nothing was summarised."
+            "bodies verbatim — nothing was summarised. If the qualifier is a "
+            "genuinely narrower thing rather than a synonym, 'attach-as-subpage' "
+            "(athenaeum#2539) is also available: it attaches the qualified page "
+            f"under {split.bare_name!r} as a sub-page instead of folding it away."
         )
         if expired is not None:
             # Issue athenaeum#2077: the cooldown lapsed, so this is a fresh

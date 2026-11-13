@@ -19,6 +19,10 @@ exactly the way every other consumer reads it:
   no decision and is never counted.
 * an ``approve`` (human or auto-applied) folded the sources together, so the
   pair is settled: it is never re-proposed, and the cooldown does not apply.
+* an ``attach-as-subpage`` (issue athenaeum#2539) folds nothing -- it sets a
+  parent/child relation between the two pages instead -- but it is just as
+  settling as an approve: the pair is never re-proposed, and the cooldown
+  does not apply either.
 
 A source set is keyed by the page FILENAMES (``Path.name``): the block header
 itself only ever renders basenames, and the wiki is flat, so the key is stable
@@ -47,7 +51,7 @@ class PriorRuling:
     """One resolved merge block, reduced to what a proposer needs."""
 
     merge_id: str
-    decision: str  # "reject" (human) | "approve"
+    decision: str  # "reject" (human) | "approve" | "attach-as-subpage"
     sources: frozenset[str]  # page filenames
     base_name: str  # display name, else merge target name
     ruled_at: datetime | None  # None when no timestamp could be recovered
@@ -56,7 +60,15 @@ class PriorRuling:
     def describe(self) -> str:
         """Short phrase for a proposal rationale or log line."""
         when = self.ruled_at.date().isoformat() if self.ruled_at else "an unknown date"
-        verb = "rejected" if self.decision == "reject" else "approved"
+        if self.decision == "reject":
+            verb = "rejected"
+        elif self.decision == "attach-as-subpage":
+            # Issue athenaeum#2539: distinct from "approved" -- an attach
+            # folds nothing, so describing it as an approval would misname
+            # what actually happened on disk.
+            verb = "resolved (attach-as-subpage)"
+        else:
+            verb = "approved"
         tail = f" (note: {self.note})" if self.note else ""
         return f"previously {verb} by a human on {when}{tail}"
 
@@ -91,6 +103,11 @@ def load_prior_rulings(wiki_root: Path) -> list[PriorRuling]:
                 decision = "reject"
             elif pm.decision == "approve":
                 decision = "approve"
+            elif pm.decision == "attach-as-subpage":
+                # Issue athenaeum#2539: an attach, like an approve, settles
+                # the pair -- never re-proposed, cooldown does not apply
+                # (see ruling_in_force: only "reject" ever decays).
+                decision = "attach-as-subpage"
             else:
                 continue
             rulings.append(
