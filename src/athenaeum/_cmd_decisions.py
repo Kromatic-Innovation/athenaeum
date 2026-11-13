@@ -670,6 +670,14 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             # dimension name. Absent for every other type/verdict (validate_answer
             # above already refused a "name" the schema does not declare).
             name=str(parsed.get("name", "")),
+            # Issue athenaeum#2523: this CLI command is a human-operator
+            # surface, so every answer it writes is human-originated — but
+            # no surface yet carries a real per-user identity (issue
+            # athenaeum#2489, still open), so the placeholder stands in
+            # until that lands. Only consumed today by a ``merge`` answer's
+            # decided_by stamp (:func:`athenaeum.decision_answers.
+            # _apply_merge_answer`); harmless metadata for every other type.
+            actor="unattributed",
             config=config,
             wiki_root=wiki_root,
         )
