@@ -4600,6 +4600,108 @@ def resolve_oversize_hard_ceiling_chars(config: dict[str, Any] | None = None) ->
     return DEFAULT_OVERSIZE_HARD_CEILING_CHARS
 
 
+#: Issue athenaeum#2540 AC3: the recompile applier refuses a structure-only
+#: plan that would leave the parent page's own prose (its cited summary plus
+#: every ``parent``-disposed unit, BEFORE the generated Sub-pages link list)
+#: under this many characters — a parent reduced to "nothing but links" is
+#: exactly the link-hub degradation athenaeum#2525's operator ruling forbids.
+#: 200 chars is roughly one short paragraph: enough to require genuine prose
+#: beyond a bare list of ``- [[uid|name]]`` rows, small enough that a
+#: legitimately thin parent (a short cited summary, no ``parent`` units left)
+#: still clears it.
+DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS = 200
+
+
+def resolve_page_recompile_min_parent_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.min_parent_chars`` (issue athenaeum#2540 AC3).
+
+    Only a yaml layer (no ``ATHENAEUM_*`` env override) — this is a per-corpus
+    editorial judgement call, not a cost/behavior toggle an operator needs to
+    flip from a shell one-off. Must be a non-negative, non-bool int; anything
+    else (missing key/section, wrong type, negative) falls back to
+    :data:`DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("min_parent_chars")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                    return raw
+    return DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS
+
+
+#: Issue athenaeum#2540 AC11: default ON — the applier merges near-duplicate
+#: sections it validates (every citation and footnote from the merged
+#: originals carried forward, each original reachable via the apply's own
+#: snapshot commit per AC9) rather than keeping every originally-proposed
+#: group separate.
+DEFAULT_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES = True
+
+
+def resolve_page_recompile_merge_near_duplicates(config: dict[str, Any] | None = None) -> bool:
+    """Resolve ``librarian.page_recompile.merge_near_duplicates`` (issue athenaeum#2540 AC11).
+
+    Default ``True``. With this ``False``, the applier re-plans away any
+    ``merge`` group a plan carries (each merge group's units fall back to
+    separate ``child`` placement) rather than writing the merged text — a
+    kill switch for the merge guarantee, mirroring
+    :func:`resolve_section_scoped_merge_enabled`'s own "behavioral change
+    needs an off switch" shape.
+
+    Env ``ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`` (``1``/``true``/
+    ``yes``/``on``, case-insensitive) > yaml
+    ``librarian.page_recompile.merge_near_duplicates`` > default ``True``.
+    Non-bool yaml values and unrecognized env strings fall through to on.
+    """
+    env = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("merge_near_duplicates")
+                if isinstance(raw, bool):
+                    return raw
+    return DEFAULT_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES
+
+
+#: Issue athenaeum#2540 AC12: the fraction of ``page_size_threshold_chars``
+#: above which ``name_structure`` must NOT propose folding a split-created
+#: sub-page back into its parent. 0.5 -- a sub-page that, combined with its
+#: parent, would already spend half the page-size budget is clearly not the
+#: "one entity written down twice" shape ``name_structure``'s qualified-name
+#: scan exists to catch; proposing that merge would just have the oversize
+#: gate split it right back apart (the same oscillation
+#: :func:`athenaeum.name_structure.merged_body_within_page_size_threshold`'s
+#: own docstring already names as the thing to avoid).
+DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION = 0.5
+
+
+def resolve_page_recompile_rejoin_fraction(config: dict[str, Any] | None = None) -> float:
+    """Resolve ``librarian.page_recompile.rejoin_fraction`` (issue athenaeum#2540 AC12).
+
+    Only a yaml layer, same rationale as
+    :func:`resolve_page_recompile_min_parent_chars`. Must be a positive,
+    non-bool number ``<= 1.0``; anything else falls back to
+    :data:`DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("rejoin_fraction")
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                    value = float(raw)
+                    if 0.0 < value <= 1.0:
+                        return value
+    return DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION
+
+
 def resolve_model_rates(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[float, float]]:
