@@ -142,6 +142,16 @@ def _unescape_entity(raw: str) -> str:
 # (:data:`_HEADER_RE`) recovers a boundary swallowed by an unclosed fence.
 _ANY_H2_RE = re.compile(r"^## ")
 
+# Issue athenaeum#2516: one-shot-per-distinct-block WARNING dedup for
+# `_parse_block`'s malformed-header message — module-level so it persists
+# across every parse within one process (mirrors the warn-once convention in
+# `wiki_dedupe._WIKI_FALLBACK_WARNED` / `search._EMBED_TEXTS_NONE_WARNED`,
+# generalized here to a *set* of content hashes rather than a single bool
+# flag, since each distinct malformed block must still warn once on its own).
+# Tests reset it the same way those siblings do: `monkeypatch.setattr(
+# answers, "_MALFORMED_BLOCK_WARNED", set())`.
+_MALFORMED_BLOCK_WARNED: set[str] = set()
+
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
@@ -552,7 +562,9 @@ def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
     return [lines[0], f"- [ ] {question}", *lines[1:]]
 
 
-def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | None:
+def _parse_block(
+    block_text: str, *, quiet: bool = False, block_index: int | None = None
+) -> PendingQuestion | None:
     """Parse one block. Returns ``None`` on malformed input.
 
     Args:
@@ -566,6 +578,13 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
             ``caplog``-style capture even under ``--quiet``. Keyword-only;
             defaults to ``False`` so every existing caller (including
             ``resolve_by_id`` and ``parse_pending_questions``) is unaffected.
+        block_index: Issue athenaeum#2516 — the 1-based position of this
+            block within the file it came from (as split by
+            :func:`_split_blocks`), so the malformed-header warning below
+            can name where the block sits. ``None`` (the default) when a
+            caller parses a bare block with no file position available —
+            the warning then falls back to naming the block by its header
+            text alone.
     """
     lines = block_text.splitlines()
     if not lines:
@@ -573,13 +592,30 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
 
     header_match = _HEADER_RE.match(lines[0])
     if not header_match:
-        log.warning("Skipping block with malformed header: %r", lines[0][:80])
-        if not quiet:
-            print(
-                f"[warn] skipping pending-question block with malformed header: "
-                f"{lines[0][:80]!r}",
-                file=sys.stderr,
+        # Issue athenaeum#2516: the pending-questions file is parsed many
+        # times over the life of one process (e.g. a long-lived MCP server
+        # answering repeated `decisions count`/`decisions list` calls) — one
+        # malformed block otherwise re-prints this warning once per parse,
+        # drowning out the real signal within thousands of identical lines.
+        # Dedupe on a content hash of the block itself (not its file
+        # position, which can drift between parses as earlier blocks are
+        # fixed/archived) so the SAME malformed block warns at most once per
+        # process, while two genuinely different malformed blocks — distinct
+        # content, distinct hash — each still get their own warning.
+        block_key = hashlib.sha1(block_text.encode("utf-8")).hexdigest()[:12]
+        already_warned = block_key in _MALFORMED_BLOCK_WARNED
+        _MALFORMED_BLOCK_WARNED.add(block_key)
+        location = f"block #{block_index}" if block_index is not None else "block"
+        if not already_warned:
+            log.warning(
+                "Skipping %s with malformed header: %r", location, lines[0][:80]
             )
+            if not quiet:
+                print(
+                    f"[warn] skipping pending-question {location} with malformed "
+                    f"header: {lines[0][:80]!r}",
+                    file=sys.stderr,
+                )
         return None
 
     # Find the checkbox line — first non-blank line after the header.
@@ -882,7 +918,11 @@ def parse_pending_questions(pending_path: Path) -> list[PendingQuestion]:
     if not pending_path.exists():
         return []
     text = pending_path.read_text(encoding="utf-8")
-    return [pq for b in _split_blocks(text) if (pq := _parse_block(b)) is not None]
+    return [
+        pq
+        for idx, b in enumerate(_split_blocks(text), start=1)
+        if (pq := _parse_block(b, block_index=idx)) is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1816,8 +1856,8 @@ def ingest_answers(
     iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
-    for block_text in blocks:
-        pq = _parse_block(block_text, quiet=quiet)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, quiet=quiet, block_index=block_index)
         if pq is None:
             # Malformed — preserve as-is in the primary file so the human
             # can see + fix it. Do not archive. Left as an unconditional
@@ -2740,8 +2780,8 @@ def resolve_by_id(
     new_block_text: str | None = None
     rewritten_blocks: list[str] = []
 
-    for block_text in blocks:
-        pq = _parse_block(block_text)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, block_index=block_index)
         if pq is None:
             rewritten_blocks.append(block_text)
             continue
