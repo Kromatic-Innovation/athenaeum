@@ -524,9 +524,9 @@ def _plan_index_sweep(
     Returns ``{index_path: (new_text, dropped_targets)}`` for every affected
     scope whose sibling index actually loses a pointer. Only pointers to members
     THIS pass retired are swept (conservative — a pre-existing dangling pointer
-    from an earlier run is left for the ``prune-index`` backfill so a nightly
-    retire commit stays scoped to its own deletions). Scopes with no index, an
-    unreadable index, or nothing to drop are omitted.
+    from an earlier run is left alone so a nightly retire commit stays scoped
+    to its own deletions). Scopes with no index, an unreadable index, or
+    nothing to drop are omitted.
 
     Fail-closed on ``require_absent`` (issue athenaeum#682). ``MEMORY.md`` is loaded into
     **every** Claude Code session and is written in place (a scope's raw index
@@ -540,8 +540,9 @@ def _plan_index_sweep(
     dropped ONLY when its target was retired this pass **and** the sibling file
     is genuinely gone from disk. If the file is present — for any reason — the
     pointer is kept. A false negative (a truly dangling pointer survives one
-    pass) is trivially recoverable by the ``prune-index`` backfill; a false
-    positive silently removes a memory. Callers MUST pass ``require_absent=True``
+    pass) is a harmless residual stale line, correctable by hand if it ever
+    matters; a false positive silently removes a memory. Callers MUST pass
+    ``require_absent=True``
     *after* the ``git rm`` so on-disk absence reflects the deletion. The dry-run
     reporter passes ``require_absent=False`` to *predict* what a real run would
     sweep (nothing is deleted on a dry run, so absence cannot yet be observed).

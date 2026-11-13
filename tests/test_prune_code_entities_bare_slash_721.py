@@ -13,25 +13,17 @@ This pins the fix: a slash no longer contributes to the classification at all
 table is retained, while the genuine extension-matched artifacts are still
 killed. The AC4 no-extension path case (``src/athenaeum``) is decided
 explicitly: retained — see :class:`TestExtensionlessPathDecision`.
+
+The former AC5 class here exercised the one-shot ``prune-code-entities``
+sweep (``athenaeum.filename_entity_prune``) directly; that sweep was removed
+once the backlog it existed to clear was gone (athenaeum#2466), leaving this
+file to pin only the shared ``classify_code_artifact_name``/
+``is_code_artifact_name`` predicate the write-side creation gate still uses.
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
-from athenaeum.filename_entity_prune import (
-    build_filename_entity_report,
-    kill_rule_counts,
-)
 from athenaeum.tiers import classify_code_artifact_name, is_code_artifact_name
-
-
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
-    )
-
 
 # ---------------------------------------------------------------------------
 # AC1 + AC2 — every entry in athenaeum#721's kill-list table is retained
@@ -129,47 +121,3 @@ class TestExtensionlessPathDecision:
             assert classify_code_artifact_name(name) is None, name
             assert not is_code_artifact_name(name), name
 
-
-# ---------------------------------------------------------------------------
-# AC5 — the dry-run report kills only extension pages, prints the rule split
-# ---------------------------------------------------------------------------
-
-
-class TestReportRetainsRealEntities:
-    def _page(self, wiki: Path, slug: str, name: str) -> None:
-        (wiki / slug).write_text(f"---\nname: {name}\n---\nbody\n", encoding="utf-8")
-
-    def test_report_retains_slash_entities_and_kills_only_extensions(
-        self, tmp_path: Path
-    ) -> None:
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        # Real entities that carry a slash — must all be retained.
-        self._page(wiki, "p1-suzie.md", "Suzie Prince (she/her)")
-        self._page(wiki, "p2-tanstack.md", "@tanstack/react-query")
-        self._page(wiki, "p3-branch.md", "feature/408-gateway-split-write")
-        self._page(wiki, "p4-srcpath.md", "src/athenaeum")  # AC4: retained
-        # Genuine code artifacts — must be killed.
-        self._page(wiki, "p5-deploy.md", "deploy-guard.sh")
-        self._page(wiki, "p6-dedupe.md", "wiki_dedupe.py")
-
-        report = build_filename_entity_report(wiki)
-        killed = sorted(c.path.name for c in report.kill)
-        retained = sorted(p.name for p, _ in report.retained)
-
-        assert killed == ["p5-deploy.md", "p6-dedupe.md"]
-        assert retained == ["p1-suzie.md", "p2-tanstack.md", "p3-branch.md", "p4-srcpath.md"]
-        # Every kill is by the `extension` rule; the split is auditable.
-        assert kill_rule_counts(report) == {"extension": 2}
-        assert all(c.rule == "extension" for c in report.kill)
-
-    def test_a_person_page_with_a_slash_name_is_not_git_rmed(self, tmp_path: Path) -> None:
-        # The severity athenaeum#721 names: --apply git-rms the kill-list. A person page
-        # must never reach it. Build a real git repo, confirm the empty kill-list
-        # is a no-op that leaves the page on disk.
-        kr = tmp_path / "knowledge"
-        (kr / "wiki").mkdir(parents=True)
-        self._page(kr / "wiki", "person-alex.md", "Alexander Ketelaar / Maykers")
-        report = build_filename_entity_report(kr / "wiki")
-        assert report.kill == []
-        assert (kr / "wiki" / "person-alex.md").exists()

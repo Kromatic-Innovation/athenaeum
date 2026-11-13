@@ -1087,8 +1087,9 @@ class TestRetireIndexSweep:
         """Conservative: retire only sweeps pointers to members IT retired.
 
         A pointer already orphaned by an earlier run is NOT swept by the
-        nightly pass — that is the ``prune-index`` backfill's job, kept out so
-        the retire commit stays scoped to its own deletions.
+        nightly pass — left alone so the retire commit stays scoped to its
+        own deletions (a harmless stale line otherwise, per athenaeum#2466
+        removing the standalone one-shot backfill this used to defer to).
         """
         from athenaeum.merge import merge_clusters_to_wiki
         from athenaeum.retire import run_retire_pass
