@@ -192,7 +192,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         _make_id,
         classify_write_kind,
         filename_slug_by_uid,
-        find_identity_pages,
+        find_fold_target_collisions,
         identity_slug,
         write_pending_merge,
     )
@@ -302,16 +302,16 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # uid-prefixed file exist for the same name, or two uid-prefixed pages
     # share a name. Only one file can be the fold target for this slug, so a
     # second candidate makes the target genuinely ambiguous: name both
-    # colliding pages rather than silently picking one.
-    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
-    # Issue athenaeum#2118: the ``--source`` pages are being folded away, so
-    # they cannot make their own target ambiguous and are excluded.
-    source_resolved = {p.resolve() for p in source_paths}
-    colliding = [
-        fpath.name
-        for fpath in find_identity_pages(merge_target_name, wiki_root)
-        if fpath.resolve() != into_path and fpath.resolve() not in source_resolved
-    ]
+    # colliding pages rather than silently picking one. Issue athenaeum#2118:
+    # the ``--source`` pages are being folded away, so they cannot make
+    # their own target ambiguous and are excluded. Issue athenaeum#2518
+    # factored the detection itself out to
+    # :func:`athenaeum.pending_merges.find_fold_target_collisions` so the
+    # fold-QUESTION answer path (``_cmd_pending._resolve_fold_question``)
+    # gets the identical guard instead of a second hand-rolled copy.
+    colliding = find_fold_target_collisions(
+        merge_target_name, wiki_root, canonical_path=into_path, other_paths=source_paths
+    )
     if colliding:
         others = ", ".join(colliding)
         # Issue athenaeum#2118: a canonical named by its exact `<uid>-<slug>.md`

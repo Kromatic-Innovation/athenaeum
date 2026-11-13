@@ -21,8 +21,13 @@ never a silent no-op (see "No silent no-ops" below).
   artifact (:func:`build_fold_evidence` / :func:`write_fold_evidence`) — the
   overlapping passages side by side, a deterministically-chosen canonical
   side, and a coordinate-match table — for a HUMAN to adjudicate. Applying
-  the fold (writing the actual merged page) is out of scope: a separate,
-  future child of the memory-model v6 epic (athenaeum#709).
+  the fold (writing the actual merged page) is out of scope FOR THIS
+  MODULE: issue athenaeum#2518 wires the apply into the answer-ingestion path
+  instead (``_cmd_pending._resolve_fold_question``, reusing
+  :mod:`athenaeum.pending_merges`'s normal merge machinery end to end) —
+  approving the question this module queues below folds the pair
+  immediately, in the same ``ingest-answers`` pass; this module's own job
+  stays evidence + queue only, never a page write.
 - **D3 (`reject` wrote a false `refines:`).** A fabricated directional claim
   — the resolver's ``reject`` action wrote ``refines:`` on a pair that was
   never adjudicated as general/specific. In this module ``refines:`` is
@@ -34,7 +39,9 @@ never a silent no-op (see "No silent no-ops" below).
 **Branch summary** (see each function's docstring for the full rationale):
 
 - ``duplicate`` -> :func:`write_fold_evidence` (evidence, not a merged body)
-  + queue the fold proposal for human approval.
+  + queue the fold proposal for human approval. Approving folds the pair
+  immediately via the normal merge path (issue athenaeum#2518) — see
+  ``_cmd_pending._resolve_fold_question``.
 - ``specialization`` -> :func:`write_refines_declaration` on the SPECIFIC
   side, naming the general one. ``specific_side is None`` (or its file path
   is unknown) queues instead of guessing.
@@ -625,10 +632,11 @@ def _apply_duplicate(
     canonical_id = page_a.id if side == "a" else page_b.id
     title_a, title_b = _title(page_a), _title(page_b)
     description = (
-        f'Approve folding "{title_a}" and "{title_b}" into one page? See the '
-        f"structural overlap evidence at {evidence_path} -- no page body was "
-        f"synthesized; a human writes the actual fold. Proposed canonical "
-        f"side: {side} ({canonical_id})."
+        f'Approve folding "{title_a}" and "{title_b}" into one page? Approving '
+        f"folds the two pages immediately (issue athenaeum#2518), through the "
+        f"normal merge path and its existing safety checks -- no page body is "
+        f"synthesized here first; see the structural overlap evidence at "
+        f"{evidence_path}. Proposed canonical side: {side} ({canonical_id})."
     )
     if earlier_ruling:
         # Issue athenaeum#2101: the reviewer sees the earlier human answer.

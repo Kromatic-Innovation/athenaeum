@@ -442,6 +442,43 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     return found
 
 
+def find_fold_target_collisions(
+    merge_target_name: str,
+    wiki_root: Path,
+    *,
+    canonical_path: Path,
+    other_paths: list[Path],
+) -> list[str]:
+    """Live page NAMES (other than *canonical_path*/*other_paths*) that also
+    identity-resolve to *merge_target_name*'s slug.
+
+    Issue athenaeum#1635/#2118 ambiguity guard, factored out of ``merges
+    propose-fold`` (:func:`athenaeum._cmd_merges._cmd_propose_fold`) so a
+    second caller gets the IDENTICAL detection rather than a hand-rolled
+    copy — issue athenaeum#2518 added that second caller
+    (``_cmd_pending._resolve_fold_question``, the fold-QUESTION answer
+    path), which was found to have skipped this guard entirely: without it,
+    :func:`resolve_target_page` / :func:`resolve_merge` silently take the
+    first of :func:`find_identity_pages`' candidates (an arbitrary, but
+    identical-on-both-sides, tie-break — see that function's own docstring)
+    instead of refusing, which can target and tombstone a DIFFERENT live
+    page than the one actually proposed as canonical.
+
+    *other_paths* excludes itself from the collision set — a page being
+    folded AWAY cannot make its own target ambiguous (issue athenaeum#2118).
+    Empty list means unambiguous; non-empty means the caller must refuse
+    (or, like ``propose-fold``, attempt its own narrower recovery) rather
+    than let :func:`resolve_target_page` guess.
+    """
+    other_resolved = {p.resolve() for p in other_paths}
+    canonical_resolved = canonical_path.resolve()
+    return [
+        fpath.name
+        for fpath in find_identity_pages(merge_target_name, wiki_root)
+        if fpath.resolve() != canonical_resolved and fpath.resolve() not in other_resolved
+    ]
+
+
 def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
     """The single page a merge into *merge_target_name* folds INTO, or ``None``.
 

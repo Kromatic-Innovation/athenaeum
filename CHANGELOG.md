@@ -118,6 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecar block that fails to parse at all — athenaeum#2455's unresolved-only
   filter dropped both, so their raw members became retirable while the
   system still needed them (athenaeum#2497).
+- Fold questions (`Approve folding X and Y?`, raised with a `comparator:`
+  source ref that never resolves to a file) no longer land in the
+  athenaeum#1804 held write-back state no matter the answer: approving one now
+  hands the pair to the normal merge machinery (`athenaeum.pending_merges`)
+  and folds it immediately, in the same `ingest-answers` pass, with every
+  safety check any other merge is subject to; rejecting records the
+  decision without folding. Neither outcome ever ends `**Write-back**: held`
+  (athenaeum#2518).
 
 - The `resolve_merge` MCP tool's docstring and `docs/design/contradiction-detection.md`
   said approving a `fold-into-existing` merge "deletes the old source wiki
