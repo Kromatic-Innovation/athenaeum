@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `athenaeum doctor` now ends its report with a short note when one or more
+  checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
+  install until setup is complete and pointing back at the per-FAIL `fix:`
+  lines above it. Not printed when every check is OK or SKIP; exit codes
+  are unchanged (athenaeum#2450).
+
 - `athenaeum run` now honours the compile kill switch: `athenaeum disable`
   (scope `all` or `--compile`) and `ATHENAEUM_DISABLED` all make `run` exit 0
   with a no-op, without taking the run lock or touching the librarian
