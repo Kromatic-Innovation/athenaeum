@@ -278,6 +278,22 @@ class TestWriteGuards:
         assert result.get("error_code") == "forbidden"
 
     @pytest.mark.parametrize("name", sorted(_WRITE_TOOLS))
+    def test_restricted_caller_response_has_no_legacy_keys(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # athenaeum#2460: the forbidden-refusal shape (``_forbidden_result``)
+        # used to carry legacy ``block`` / ``error`` / ``resolved_block``
+        # aliases alongside ``message`` — removed for every mutator it backs.
+        server = _server(tmp_path, caller_audience=RESTRICTED)
+        result = _call(server, name, _WRITE_TOOLS[name])
+        assert result["ok"] is False
+        assert result["error_code"] == "forbidden"
+        assert result.get("message")
+        assert "block" not in result
+        assert "error" not in result
+        assert "resolved_block" not in result
+
+    @pytest.mark.parametrize("name", sorted(_WRITE_TOOLS))
     def test_owner_reaches_normal_path(self, tmp_path: Path, name: str) -> None:
         # Owner is NOT forbidden — it reaches the real handler, which returns a
         # not-found/normal error for the bogus id (never error_code forbidden).

@@ -188,6 +188,28 @@ dry-run by default, so you can check first whether it finds anything to do.
 Once you upgrade, the command itself is gone; its one-time job cannot be run
 again from a newer release.
 
+## I want to know what changed in the MCP decision-queue tool responses
+
+The `resolve_question`, `resolve_merge`, `review_audit_item`, and
+`raise_decision` MCP tool responses (and the matching `athenaeum` Python
+helpers, `answers.resolve_by_id` and `answers.raise_pending_question`) no
+longer carry a handful of legacy keys that duplicated other fields:
+
+- **`error`** is gone everywhere it appeared. Read **`message`** instead —
+  `error` was always an exact copy of it (or `None` on success).
+- **`block`** is gone from `resolve_question` and `resolve_merge`. Read
+  **`resolved_block`** instead — on these two tools it was, and still is,
+  always `None`: both defer the actual question/merge rewrite to the next
+  `ingest-answers` tick, so neither ever rewrites anything synchronously.
+- **`block`** is gone from `raise_decision` (and the underlying
+  `answers.raise_pending_question`). Read **`raw_block`** instead — `block`
+  was always an exact copy of it (the newly rendered queue block on
+  success, `None` on failure).
+
+Nothing else changed: `ok`, `error_code`, `message`, `deferred`,
+`answer_file`, `decision_id`, `raw_block`, and `resolved_block` (where it
+already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
+
 ## See also
 
 - Guides — [Daily operation](daily-operation.md) · [Troubleshooting](troubleshooting.md)

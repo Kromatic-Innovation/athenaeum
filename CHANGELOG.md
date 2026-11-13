@@ -91,6 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
   warning.
 
+- MCP responses no longer include the legacy `block`, `error` and
+  `resolved_block` keys on `resolve_question`, `resolve_merge`,
+  `review_audit_item`, `raise_decision`, and the kill-switch/forbidden
+  refusals they share; read `message` (and `resolved_block` / `raw_block`
+  where those already carried real data) instead — see
+  `docs/guides/upgrading.md` (athenaeum#2460).
+
 - Removed seven one-shot repair commands whose defects are fixed:
   `auto-memory prune`, `prune-index`, `prune-code-entities`,
   `dedup-oversize-escalations`, `storage prune-dispositions`, `storage
