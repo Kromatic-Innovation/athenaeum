@@ -40,6 +40,7 @@ from athenaeum.models import (
     parse_frontmatter,
     resolve_page_type,
 )
+from athenaeum.page_relations import is_hidden_split_child
 from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS
 from athenaeum.schemas import KNOWN_TYPES
 
@@ -97,6 +98,7 @@ def resolve_entity_classes(
     wiki_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    include_split: bool = False,
 ) -> tuple[EntityClassInfo, ...]:
     """Return every entity class this deployment declares and/or observes.
 
@@ -114,6 +116,16 @@ def resolve_entity_classes(
     :func:`~athenaeum.models.is_page_authorized` predicate every other read
     tool applies, so a restricted caller's class list cannot leak the
     existence of pages it cannot read.
+
+    ``include_split`` (issue athenaeum#2538 AC7): a page whose relation is
+    ``via: split`` (:func:`athenaeum.page_relations.is_hidden_split_child`)
+    is excluded from both the count and the field-key union by default --
+    the same default :func:`athenaeum.enumeration.enumerate_entities`
+    applies, so this class's reported ``count`` and ``entity_schema``'s
+    page counts agree with what a default-settings ``enumerate_entities``
+    call actually returns. Pages attached via ``attach``/``fold``/
+    ``manual`` are always counted. Pass ``True`` to count split sub-pages
+    too.
 
     Result is sorted by class name for a deterministic, diff-friendly return
     shape (this backs both the ``recall`` tool schema and the schema-query
@@ -135,6 +147,8 @@ def resolve_entity_classes(
             if not meta:
                 continue
             if not is_page_authorized(meta, caller_audience):
+                continue
+            if not include_split and is_hidden_split_child(meta):
                 continue
             cls = resolve_page_type(meta)
             if not cls:
@@ -167,14 +181,20 @@ def resolve_entity_classes(
 #: pages through the fail-closed :func:`~athenaeum.models.is_page_authorized`
 #: predicate (issues athenaeum#312/#538), so its result is audience-specific.
 #: A memo shared across audiences would hand a restricted caller the owner's
-#: class list — the exact disclosure those issues exist to prevent.
-_RESOLVED_CACHE: dict[tuple[str, frozenset[str] | None], tuple[EntityClassInfo, ...]] = {}
+#: class list — the exact disclosure those issues exist to prevent. The
+#: ``include_split`` half (issue athenaeum#2538) is load-bearing for the same
+#: reason the audience half is: the two flag values are different, cacheable
+#: RESULTS, not a performance-only variant of the same answer.
+_RESOLVED_CACHE: dict[
+    tuple[str, frozenset[str] | None, bool], tuple[EntityClassInfo, ...]
+] = {}
 
 
 def resolve_entity_classes_cached(
     wiki_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    include_split: bool = False,
 ) -> tuple[EntityClassInfo, ...]:
     """Memoized :func:`resolve_entity_classes`, for long-lived processes.
 
@@ -198,10 +218,13 @@ def resolve_entity_classes_cached(
     key = (
         str(wiki_root.resolve() if wiki_root.is_absolute() else wiki_root),
         frozenset(caller_audience) if caller_audience is not None else None,
+        include_split,
     )
     cached = _RESOLVED_CACHE.get(key)
     if cached is None:
-        cached = resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+        cached = resolve_entity_classes(
+            wiki_root, caller_audience=caller_audience, include_split=include_split
+        )
         _RESOLVED_CACHE[key] = cached
     return cached
 

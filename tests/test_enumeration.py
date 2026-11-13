@@ -481,3 +481,96 @@ class TestEnumerationResultShape:
         result = enumerate_entities(enum_wiki, _cache(tmp_path), entity_type="person")
         assert isinstance(result, EnumerationResult)
         assert result.known_classes == ()
+
+
+class TestSplitChildrenHiddenByDefault:
+    """Issue athenaeum#2538 AC7: a page whose relation is ``via: split`` is
+    excluded from enumeration by default; a flag includes it. Only the
+    ``split`` via is hidden -- attach/fold/manual stay listed."""
+
+    @pytest.fixture
+    def split_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| company |\n")
+        _write_page(wiki, "parent.md", uid="company-acme", page_type="company", name="Acme")
+        # Real shape `tiers.py:_build_split_child_pages` writes: only the
+        # legacy `split-from` row, no top-level `parent:` key.
+        _write_page(
+            wiki,
+            "split-child.md",
+            uid="company-acme-split",
+            page_type="company",
+            name="Acme Split",
+            extra_lines=[
+                "related:",
+                "  - uid: company-acme",
+                "    role: split-from",
+            ],
+        )
+        _write_page(
+            wiki,
+            "attach-child.md",
+            uid="company-acme-attach",
+            page_type="company",
+            name="Acme Attach",
+            extra_lines=["parent: company-acme"],
+        )
+        _write_page(
+            wiki,
+            "fold-child.md",
+            uid="company-acme-fold",
+            page_type="company",
+            name="Acme Fold",
+            extra_lines=[
+                "related:",
+                "  - uid: company-acme",
+                "    role: child",
+                "    via: fold",
+            ],
+        )
+        _write_page(
+            wiki,
+            "manual-child.md",
+            uid="company-acme-manual",
+            page_type="company",
+            name="Acme Manual",
+            extra_lines=[
+                "related:",
+                "  - uid: company-acme",
+                "    role: child",
+                "    via: manual",
+            ],
+        )
+        return wiki
+
+    def test_split_child_excluded_by_default(
+        self, split_wiki: Path, tmp_path: Path
+    ) -> None:
+        result = enumerate_entities(
+            split_wiki, _cache(tmp_path), entity_type="company", limit=0
+        )
+        uids = {h["uid"] for h in result.hits}
+        assert "company-acme-split" not in uids
+        # attach/fold/manual are ALWAYS listed, regardless of the default.
+        assert uids == {
+            "company-acme",
+            "company-acme-attach",
+            "company-acme-fold",
+            "company-acme-manual",
+        }
+
+    def test_include_split_flag_includes_it(
+        self, split_wiki: Path, tmp_path: Path
+    ) -> None:
+        result = enumerate_entities(
+            split_wiki,
+            _cache(tmp_path),
+            entity_type="company",
+            limit=0,
+            include_split=True,
+        )
+        uids = {h["uid"] for h in result.hits}
+        assert "company-acme-split" in uids
+        assert len(uids) == 5

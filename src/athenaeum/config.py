@@ -3343,6 +3343,32 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     return 1200
 
 
+def resolve_recall_sub_pages_cap(config: dict[str, Any] | None) -> int:
+    """Resolve how many of a parent hit's sub-pages ``recall`` names on its
+    ``**Sub-pages:**`` line before folding the rest into a remainder count
+    (issue athenaeum#2538).
+
+    Precedence: ``ATHENAEUM_RECALL_SUB_PAGES_CAP`` env > ``recall.sub_pages_cap``
+    yaml > ``5``. A malformed env value WARNs and falls through (see
+    :func:`_env_number`); a non-int / ``<= 0`` yaml value falls through to
+    the default. No seed in ``_DEFAULTS`` (issue athenaeum#231). The cap is
+    applied AFTER the same audience/policy filter the hit itself passed
+    through (:func:`athenaeum.mcp_server._render_relation_lines`) — a
+    sub-page the caller may not see is excluded before this cap, and
+    therefore before the remainder count, ever sees it.
+    """
+    value = _env_number("ATHENAEUM_RECALL_SUB_PAGES_CAP", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("recall")
+        if isinstance(cfg, dict):
+            raw = cfg.get("sub_pages_cap")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return 5
+
+
 # Issue athenaeum#1783: the push-path relevance-bounded cap's hard CEILING --
 # the most hits the UserPromptSubmit hook emits after the configured
 # relevance floor has already narrowed the candidates (``resolve_recall_

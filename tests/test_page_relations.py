@@ -34,8 +34,10 @@ from athenaeum.page_relations import (
     ParentRef,
     RelationError,
     count_one_sided_relations,
+    is_hidden_split_child,
     read_relations,
     remove_relation,
+    resolve_page_meta_by_uid,
     set_relation,
 )
 
@@ -487,3 +489,65 @@ class TestFrontmatterValidation:
             {"uid": "lonely01", "type": "reference", "name": "Lonely"}
         )
         assert model.parent is None
+
+
+class TestResolvePageMetaByUid:
+    """``resolve_page_meta_by_uid`` (issue athenaeum#2538, recall/listing
+    read side): a targeted, cheap uid->frontmatter lookup, reused by both
+    the recall relation-line renderer and the per-turn hook's parent-name
+    resolver."""
+
+    def test_exact_stem_match(self, wiki: Path) -> None:
+        _write(wiki, "parent01", "Acme Corp")
+        meta = resolve_page_meta_by_uid(wiki, "parent01")
+        assert meta is not None
+        assert meta["name"] == "Acme Corp"
+
+    def test_prefix_slug_match_verified_by_own_uid(self, wiki: Path) -> None:
+        _write(wiki, "c1d2", "Carol Vance")
+        meta = resolve_page_meta_by_uid(wiki, "c1d2")
+        assert meta is not None
+        assert meta["name"] == "Carol Vance"
+
+    def test_prefix_candidate_with_a_different_uid_is_rejected(self, wiki: Path) -> None:
+        # "person-dara" prefixes "person-dara-holt.md", a DIFFERENT entity
+        # (uid person-dara-holt) -- the page's own uid settles it.
+        _write(wiki, "person-dara-holt", "Dara Holt")
+        assert resolve_page_meta_by_uid(wiki, "person-dara") is None
+
+    def test_unresolvable_uid_returns_none(self, wiki: Path) -> None:
+        assert resolve_page_meta_by_uid(wiki, "no-such-uid") is None
+
+    def test_empty_uid_returns_none(self, wiki: Path) -> None:
+        assert resolve_page_meta_by_uid(wiki, "") is None
+
+    def test_non_directory_wiki_root_returns_none(self, tmp_path: Path) -> None:
+        assert resolve_page_meta_by_uid(tmp_path / "does-not-exist", "parent01") is None
+
+
+class TestIsHiddenSplitChild:
+    """``is_hidden_split_child`` (issue athenaeum#2538 AC7): only a
+    ``via: split`` relation is hidden -- attach/fold/manual stay visible,
+    and a page with no parent at all is never hidden."""
+
+    def test_legacy_split_from_row_is_hidden(self) -> None:
+        # The REAL shape `tiers.py:_build_split_child_pages` writes: only
+        # the legacy `split-from` row, no top-level `parent:` key.
+        meta, _body = parse_frontmatter(
+            _page(
+                uid="child-split",
+                name="Split Child",
+                related=[{"uid": "parent01", "role": "split-from"}],
+            )
+        )
+        assert is_hidden_split_child(meta) is True
+
+    def test_manual_attach_is_not_hidden(self) -> None:
+        meta, _body = parse_frontmatter(
+            _page(uid="child-attach", name="Attach Child", parent="parent01")
+        )
+        assert is_hidden_split_child(meta) is False
+
+    def test_no_parent_is_not_hidden(self) -> None:
+        meta, _body = parse_frontmatter(_page(uid="orphan", name="Orphan"))
+        assert is_hidden_split_child(meta) is False

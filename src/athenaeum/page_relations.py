@@ -621,3 +621,61 @@ def count_one_sided_relations(wiki_root: Path) -> int:
         if child_says_parent != parent_says_child:
             one_sided += 1
     return one_sided
+
+
+# ---------------------------------------------------------------------------
+# Recall/listing read-side helpers (issue athenaeum#2538, slice R2).
+# ---------------------------------------------------------------------------
+
+
+def resolve_page_meta_by_uid(wiki_root: Path, uid: str) -> dict[str, object] | None:
+    """Best-effort lookup of one page's frontmatter by its ``uid:`` field.
+
+    A single targeted glob (``<uid>*.md``), never a corpus-wide index build
+    (:func:`_index_pages_by_uid` reads EVERY page -- fine for a one-shot
+    ``count_one_sided_relations`` sweep, too heavy for a per-hit relation-
+    line resolution called from a hot path). Tries both filename shapes a
+    wiki page can take -- an exact ``<uid>.md`` stem, or the real writer's
+    ``<uid>-<slug>.md`` convention (:meth:`athenaeum.models.WikiEntity.filename`)
+    -- and verifies the candidate's OWN ``uid:`` before accepting a prefix
+    match (an exact stem match is accepted by construction, mirroring
+    :class:`athenaeum.mcp_server._LinkNameIndex`'s identical rule for
+    outbound-link targets).
+
+    Returns ``None`` when *wiki_root* is not a directory, *uid* is empty, or
+    no candidate resolves -- a dangling relation target (a parent/child uid
+    naming a page no longer on disk) renders exactly like an unresolved
+    outbound wikilink elsewhere in this codebase: never an error.
+    """
+    if not uid or not wiki_root.is_dir():
+        return None
+    try:
+        candidates = sorted(wiki_root.glob(f"{uid}*.md"))
+    except OSError:
+        return None
+    for path in candidates:
+        if path.stem != uid and not path.stem.startswith(f"{uid}-"):
+            continue
+        meta = _read_meta(path)
+        if path.stem == uid or str(meta.get("uid") or "") == uid:
+            return meta
+    return None
+
+
+def is_hidden_split_child(meta: Mapping[str, object]) -> bool:
+    """True iff *meta* is a split-created sub-page, hidden from entity
+    listings/enumeration by default (issue athenaeum#2538 AC7).
+
+    Reads *meta*'s OWN relation via :func:`read_relations` -- the one
+    reader -- and checks only ``via == "split"``. Deliberately narrower
+    than "has a parent": a page attached under a parent via ``attach``,
+    ``fold``, or ``manual`` is -- per the operator ruling this issue
+    implements -- "a real entity of its own type" and stays listed; only a
+    split-created sub-page (the corpus's oversize-page-split machinery,
+    :func:`athenaeum.tiers._build_split_child_pages`, which writes the
+    LEGACY ``split-from`` row :func:`read_relations` normalizes to
+    ``via="split"`` directly off the child's own frontmatter -- no second
+    read needed) is hidden.
+    """
+    rel = read_relations(meta)
+    return rel.parent is not None and rel.parent.via == "split"

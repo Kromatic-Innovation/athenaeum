@@ -74,6 +74,7 @@ from athenaeum.config import (
     resolve_recall_hybrid_guard_rank,
     resolve_recall_hybrid_k,
     resolve_recall_relevance_floor,
+    resolve_recall_sub_pages_cap,
     resolve_scope_aware_recall_enabled,
 )
 from athenaeum.entity_index_cache import entity_index_for_uid
@@ -102,6 +103,7 @@ from athenaeum.models import (
     valid_until_expired,
     validity_bound_str,
 )
+from athenaeum.page_relations import read_relations
 from athenaeum.person_registry import PersonRegistry
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.recall_overflow import (
@@ -1150,6 +1152,14 @@ class _LinkNameIndex:
         self._wiki_root = wiki_root
         self._stems: dict[str, Path] | None = None
         self._names: dict[str, str | None] = {}
+        #: Full-frontmatter memo (issue athenaeum#2538), keyed and resolved the
+        #: SAME lazy way :meth:`name_for` always has -- :meth:`meta_for` is
+        #: what the Parent/Sub-pages relation lines use (they need the
+        #: target's `audience`/`type` for the audience/policy filter, not
+        #: just its `name`), and :meth:`name_for` is now a thin projection of
+        #: it so a uid both call sites touch is read from disk once, not
+        #: twice.
+        self._metas: dict[str, dict[str, object] | None] = {}
 
     def _stem_paths(self) -> dict[str, Path]:
         """``{filename stem: path}`` for the wiki root, listed ONCE per call.
@@ -1182,16 +1192,17 @@ class _LinkNameIndex:
         prefix = f"{uid}-"
         return [path for stem, path in stems.items() if stem.startswith(prefix)]
 
-    def name_for(self, uid: str) -> str | None:
-        """The target page's frontmatter ``name:``, or ``None`` if unresolved.
+    def meta_for(self, uid: str) -> dict[str, object] | None:
+        """The target page's full frontmatter dict, or ``None`` if unresolved.
 
         Memoized per uid for the life of the call, including the negative
-        result -- a corpus where the same dangling link appears on several
-        hits pays for one lookup, not one per hit.
+        result -- a corpus where the same dangling link/relation target
+        appears on several hits pays for one lookup, not one per hit (issue
+        athenaeum#2538: the SAME laziness :meth:`name_for` has always had).
         """
-        if uid in self._names:
-            return self._names[uid]
-        resolved: str | None = None
+        if uid in self._metas:
+            return self._metas[uid]
+        resolved: dict[str, object] | None = None
         for path in self._candidates(uid):
             try:
                 meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -1204,10 +1215,25 @@ class _LinkNameIndex:
             # accepted whatever its frontmatter says.
             if path.stem != uid and str(meta.get("uid") or "") != uid:
                 continue
+            resolved = meta
+            break
+        self._metas[uid] = resolved
+        return resolved
+
+    def name_for(self, uid: str) -> str | None:
+        """The target page's frontmatter ``name:``, or ``None`` if unresolved.
+
+        A thin projection of :meth:`meta_for` -- memoized there, so this
+        adds no second read for a uid :meth:`meta_for` already resolved.
+        """
+        if uid in self._names:
+            return self._names[uid]
+        meta = self.meta_for(uid)
+        resolved: str | None = None
+        if meta is not None:
             name = meta.get("name")
             if isinstance(name, str) and name.strip():
                 resolved = name.strip()
-            break
         self._names[uid] = resolved
         return resolved
 
@@ -1226,6 +1252,110 @@ def _render_outbound_links(uids: list[str], names: "_LinkNameIndex") -> str:
         name = names.name_for(uid)
         rendered.append(f"{uid} \u2014 {name}" if name else uid)
     return f"**Links:** {', '.join(rendered)}\n"
+
+
+def _relation_target_visible(
+    meta: dict[str, object] | None,
+    *,
+    caller_audience: set[str] | None,
+    enforce_recallable: bool,
+    config: dict[str, object] | None,
+) -> bool:
+    """True iff a relation target (a hit's parent, or one of its children)
+    passes the SAME audience and policy filter the hit itself passed
+    through (issue athenaeum#2538 AC3) -- an unresolved target (``None``)
+    is never visible. Deliberately the exact two checks the main hit loop
+    in :func:`_recall_via_backend` applies, in the same order, so a sub-page
+    the caller may not see is neither named nor counted: this predicate is
+    called BEFORE the Sub-pages line's remainder count is computed, never
+    after, which is what keeps the count from leaking a restricted page's
+    existence.
+    """
+    if meta is None:
+        return False
+    if caller_audience is not None and not is_page_authorized(meta, caller_audience):
+        return False
+    if enforce_recallable:
+        page_type = str(meta.get("type") or "")
+        if not is_recallable(page_type, config):
+            return False
+    return True
+
+
+def _render_relation_lines(
+    fm: dict[str, object],
+    *,
+    names: "_LinkNameIndex",
+    caller_audience: set[str] | None,
+    enforce_recallable: bool,
+    config: dict[str, object] | None,
+    sub_pages_cap: int,
+) -> tuple[str, set[str]]:
+    """Render a hit's ``**Parent:**``/``**Sub-pages:**`` lines (issue
+    athenaeum#2538 AC1/AC2), and the set of uids they named -- so the caller
+    can drop those same uids from the ``**Links:**`` line (AC4).
+
+    Reads the relation ONLY through :func:`athenaeum.page_relations.read_relations`,
+    applied to *fm* -- the hit's OWN already-in-memory frontmatter, so a hit
+    with no ``parent:`` key and no ``related`` child rows returns immediately
+    with zero extra file reads (AC6: matching :class:`_LinkNameIndex`'s own
+    laziness -- a call whose hits carry no relation never touches *names* at
+    all). A hit that DOES carry a relation resolves each target via
+    *names* (:meth:`_LinkNameIndex.meta_for`), the SAME per-call lazy index
+    the ``**Links:**`` line already uses and already memoizes, then applies
+    :func:`_relation_target_visible` -- the hit's own audience/policy filter
+    -- before the target is named OR counted (AC3).
+
+    Ranking and the hit set are untouched -- this function only renders two
+    additional lines next to an already-selected, already-ordered hit (AC5).
+    """
+    rel = read_relations(fm)
+    if rel.parent is None and not rel.children:
+        return "", set()
+
+    rendered_uids: set[str] = set()
+    lines: list[str] = []
+
+    if rel.parent is not None:
+        parent_meta = names.meta_for(rel.parent.uid)
+        if _relation_target_visible(
+            parent_meta,
+            caller_audience=caller_audience,
+            enforce_recallable=enforce_recallable,
+            config=config,
+        ):
+            assert parent_meta is not None  # narrowed by _relation_target_visible
+            parent_name = str(parent_meta.get("name") or rel.parent.uid)
+            lines.append(f"**Parent:** {rel.parent.uid} \u2014 {parent_name}\n")
+            rendered_uids.add(rel.parent.uid)
+
+    if rel.children:
+        visible_children: list[tuple[str, str]] = []
+        for child in rel.children:
+            child_meta = names.meta_for(child.uid)
+            if _relation_target_visible(
+                child_meta,
+                caller_audience=caller_audience,
+                enforce_recallable=enforce_recallable,
+                config=config,
+            ):
+                assert child_meta is not None  # narrowed by _relation_target_visible
+                child_name = str(child_meta.get("name") or child.uid)
+                visible_children.append((child.uid, child_name))
+        if visible_children:
+            # The cap -- and therefore the remainder count -- is applied
+            # AFTER visibility filtering (AC3): a restricted caller whose
+            # one visible child is also within the cap sees that one name
+            # and a remainder of 0 (no "+N more" suffix at all), never a
+            # count that includes the sub-page it was just denied.
+            shown = visible_children[:sub_pages_cap]
+            remainder = len(visible_children) - len(shown)
+            rendered = ", ".join(f"{uid} \u2014 {name}" for uid, name in shown)
+            suffix = f" (+{remainder} more)" if remainder > 0 else ""
+            lines.append(f"**Sub-pages:** {rendered}{suffix}\n")
+            rendered_uids.update(uid for uid, _name in shown)
+
+    return "".join(lines), rendered_uids
 
 
 def _cited_marker_labels(snippet: str) -> list[str]:
@@ -2179,6 +2309,12 @@ def _recall_via_backend(
     # for unreadable/stale hits) for any base with no ``storage:`` config.
     enforce_recallable = storage_policy_configured(config)
 
+    # Issue athenaeum#2538 (AC2): how many of a parent hit's sub-pages the
+    # Sub-pages line names before folding the rest into a remainder count.
+    # Resolved once per call, not per hit -- it is a deployment-wide dial,
+    # not a per-page property.
+    _sub_pages_cap = resolve_recall_sub_pages_cap(config)
+
     # Render each hit, applying Layer C (issue athenaeum#312): re-check the FRESH
     # on-disk frontmatter for a restricted caller so a stale index (a page
     # whose audience changed since the last rebuild) cannot leak a forbidden
@@ -2303,6 +2439,20 @@ def _recall_via_backend(
         # "go dig further" is the whole point of the field.
         uid = str(fm.get("uid") or "—")
         page_type = resolve_page_type(fm) or "—"
+        # Issue athenaeum#2538 (AC1/AC2): a hit on a child names its parent;
+        # a hit on a parent names its sub-pages (capped, with a remainder
+        # count). Reads the relation only through `fm` (already in memory)
+        # -- zero extra file reads for a hit with no relation at all (AC6).
+        # Both lines pass through the SAME audience/policy filter the hit
+        # itself just passed (AC3).
+        relation_block, _relation_uids = _render_relation_lines(
+            fm,
+            names=link_names,
+            caller_audience=caller_audience,
+            enforce_recallable=enforce_recallable,
+            config=config,
+            sub_pages_cap=_sub_pages_cap,
+        )
         # Outbound `[[wikilink]]` targets (issue athenaeum#964) — the cheap,
         # deterministic half of "return related records" the issue scopes in
         # (inbound backlinks need a new index and are explicitly out of
@@ -2314,9 +2464,12 @@ def _recall_via_backend(
         # from an opaque uid. An unresolvable target keeps rendering as the
         # bare uid. Which targets are rendered, and in what order, is
         # unchanged -- this is spelling, not selection.
-        links_line = _render_outbound_links(
-            _extract_outbound_links(body) if body else [], link_names
-        )
+        # Issue athenaeum#2538 (AC4): a uid already named on the Parent/
+        # Sub-pages lines is dropped from Links so it is never repeated.
+        _outbound_uids = _extract_outbound_links(body) if body else []
+        if _relation_uids:
+            _outbound_uids = [u for u in _outbound_uids if u not in _relation_uids]
+        links_line = _render_outbound_links(_outbound_uids, link_names)
         # Issue athenaeum#1730: resolve the footnote markers the SNIPPET
         # actually cites against the page's own footnote definitions, so a
         # caller reaching a sentence in a recall hit reaches that sentence's
@@ -2358,7 +2511,8 @@ def _recall_via_backend(
             f"**Tags:** {tags}\n"
             f"**Uid:** {uid}\n"
             f"**Type:** {page_type}\n"
-            f"{meta_block}{scope_block}{links_line}{footnotes_block}{excluded_block}\n"
+            f"{meta_block}{scope_block}{relation_block}{links_line}"
+            f"{footnotes_block}{excluded_block}\n"
             f"{snip}\n"
         )
         # Issue athenaeum#718: meter the FULLY RENDERED block --
@@ -3024,6 +3178,22 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
         ``uid — Name``: when part of the question is still unanswered and
         one of those names plausibly covers it, read that page (``read_entity``
         by its uid, or another ``recall``) before answering "not found".
+
+        A hit on a child page also renders a ``**Parent:** uid — Name``
+        line; a hit on a parent page renders a ``**Sub-pages:** uid — Name,
+        ...`` line, capped at a configurable number with a count of the
+        remainder (issue athenaeum#2538). Both lines pass through the same
+        audience and policy filter as the hit itself — a sub-page you are
+        not authorized to see is named on neither line and never counted in
+        the remainder. A uid already named on one of these two lines is not
+        repeated on ``**Links:**``. Neither line changes which pages are
+        returned or their order — a sub-page is never pulled into the
+        result set on its own. Sub-pages created by a split
+        (``via: split``) are hidden from `enumerate_entities` and
+        `entity_schema`'s page counts by default (see those tools'
+        descriptions) but are NOT hidden here — a split sub-page that
+        itself matches your query is still a normal hit; only its
+        appearance in an unrelated listing/enumeration is suppressed.
 
         Args:
             query: Search query string (keywords, names, topics — or natural
@@ -3849,6 +4019,11 @@ def create_server(
         (this issue does not implement hot reload — see
         docs/design/recall-architecture.md).
 
+        Each class's `count` (and its `fields` union) excludes split-created
+        sub-pages (`via: split`) by default (issue athenaeum#2538) — the
+        same default `enumerate_entities` applies. A page attached under a
+        parent via `attach`/`fold`/`manual` is always counted.
+
         Returns:
             A dict with:
 
@@ -3886,6 +4061,7 @@ def create_server(
         cursor: str | None = None,
         fields: list[str] | None = None,
         with_pii: bool = False,
+        include_split: bool = False,
     ) -> dict:
         try:
             parsed_predicates = [_predicate_from_dict(p) for p in (predicates or [])]
@@ -3932,6 +4108,7 @@ def create_server(
                 extra_roots=extra_roots,
                 config=config,
                 known_classes=_enumerate_known_classes(),
+                include_split=include_split,
             )
         except ValueError as exc:
             return {
@@ -4008,6 +4185,14 @@ def create_server(
                 `False`. `do_not_email` (and its `_reason`/`_date`
                 companions) do NOT require this flag (athenaeum#1122) —
                 they are plain frontmatter fields, not PII-gated.
+            include_split: A page whose relation is `via: split` (created
+                by the oversize-page-split machinery) is EXCLUDED by
+                default — it inherits its parent's type, so without this a
+                listing of every company would include every company's
+                split-created sub-pages. Pages attached via
+                `attach`/`fold`/`manual` are real entities of their own
+                type and are ALWAYS listed, regardless of this flag.
+                Default `False`.
 
         Returns:
             A dict with `hits` (each carrying `uid`, `type`, `name`, plus

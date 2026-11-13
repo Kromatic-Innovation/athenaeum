@@ -306,10 +306,26 @@ class Candidate:
     #: same convention :func:`athenaeum.search.apply_relevance_cap` and the
     #: shell hook's awk tally both use.
     page_type: str = ""
+    #: Issue athenaeum#2538 (AC8): this candidate's parent page's display
+    #: name, resolved by :func:`_resolve_parent_names` -- ``""`` (the
+    #: default) for a candidate with no parent, or when no *wiki_root* was
+    #: supplied to :func:`build_context` (the pre-existing "no I/O beyond
+    #: the index" contract for any caller that does not opt in). Deliberately
+    #: absent from :meth:`to_dict` for the SAME reason ``page_type`` is: it
+    #: is an input to the rendered bullet, not a new published candidate
+    #: attribute, and the envelope schema is versioned separately.
+    parent_name: str = ""
 
     @property
     def bullet(self) -> str:
-        return f"{self.name} — {self.description}" if self.description else self.name
+        # Issue athenaeum#2538 (AC8): a child candidate's bullet names its
+        # parent, UNLESS the candidate's own name already contains it (e.g.
+        # "Acme Finance" under parent "Acme" -- naming "Acme" again would
+        # be pure noise). Case-insensitive containment check.
+        name = self.name
+        if self.parent_name and self.parent_name.lower() not in name.lower():
+            name = f"{name} (under {self.parent_name})"
+        return f"{name} — {self.description}" if self.description else name
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -675,6 +691,57 @@ PREAMBLE = (
     "(use `recall` MCP tool for full details):"
 )
 
+
+def _resolve_parent_names(candidates: list[Candidate], wiki_root: Path | None) -> None:
+    """Fill in each candidate's :attr:`Candidate.parent_name`, in place
+    (issue athenaeum#2538 AC8).
+
+    A no-op -- zero file reads, including of a candidate's own page --
+    when *wiki_root* is ``None`` (the default): this preserves the module
+    docstring's "no I/O beyond the FTS5/vector index" contract for every
+    caller that does not opt in by passing one. ``athenaeum.page_relations``
+    and ``athenaeum.models`` are imported LAZILY, here, rather than at this
+    module's top level, for the same reason every other optional leg in
+    this file defers its heavier imports (see the module docstring's
+    import-weight contract) -- a caller that never passes *wiki_root* never
+    pays for either import.
+
+    Bounded by ``len(candidates)`` (at most :data:`CANDIDATE_WINDOW`, the
+    same small ceiling the FTS5/vector fetch already widens to): one read
+    of the candidate's own page (to learn whether it has a ``parent:``) and,
+    only when it does, one more read of the parent's page (to learn its
+    ``name:``) -- memoized per parent uid within this one call, so several
+    siblings sharing a parent pay for that second read once.
+    """
+    if wiki_root is None or not candidates:
+        return
+    from athenaeum.models import parse_frontmatter
+    from athenaeum.page_relations import read_relations, resolve_page_meta_by_uid
+
+    parent_name_cache: dict[str, str | None] = {}
+    for c in candidates:
+        page_path = wiki_root / c.filename
+        try:
+            text = page_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        meta, _body = parse_frontmatter(text)
+        if not meta:
+            continue
+        rel = read_relations(meta)
+        if rel.parent is None:
+            continue
+        parent_uid = rel.parent.uid
+        if parent_uid not in parent_name_cache:
+            parent_meta = resolve_page_meta_by_uid(wiki_root, parent_uid)
+            name = parent_meta.get("name") if parent_meta else None
+            parent_name_cache[parent_uid] = (
+                name.strip() if isinstance(name, str) and name.strip() else None
+            )
+        resolved = parent_name_cache[parent_uid]
+        if resolved:
+            c.parent_name = resolved
+
 #: Issue athenaeum#1905: how far past the cap each backend fetches, so the
 #: cap has real withheld candidates to count. Same width as
 #: ``athenaeum.mcp_server._HYBRID_CANDIDATE_POOL`` and the shell hook's own
@@ -698,6 +765,7 @@ def build_context(
     use_llm: bool = True,
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
+    wiki_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -710,6 +778,15 @@ def build_context(
     seam. A Tier-1 (per-turn push) caller that wants those side effects
     without reimplementing them should call :func:`build_context_for_turn`
     instead of this function directly — see that function's docstring.
+
+    ``wiki_root`` (issue athenaeum#2538 AC8): optional, and ``None`` by
+    default -- preserving this function's own "no I/O beyond the FTS5/
+    vector index" contract for a caller that does not pass it. When
+    supplied, each final candidate's bullet names its parent page (unless
+    the candidate's own name already contains it) via
+    :func:`_resolve_parent_names`, called BEFORE the relevance cap and
+    budget pack below so the metered :attr:`Candidate.token_cost` reflects
+    the bullet actually rendered (never a shorter, pre-resolution estimate).
 
     ``search_backend=None`` (the default, issue athenaeum#2458) means
     "whatever the deployment configured": it is resolved from ``config``
@@ -811,6 +888,11 @@ def build_context(
     # changes neither: it fetches FURTHER down the same relevance order and
     # throws the extra rows away after counting them.
     merged = _dedupe([*fts_candidates, *vector_candidates])
+
+    # Issue athenaeum#2538 (AC8): resolve parent names BEFORE the cap/budget
+    # below -- a no-op when `wiki_root` is unset (see that parameter's own
+    # docstring note above).
+    _resolve_parent_names(merged, wiki_root)
 
     # Issue athenaeum#1905: cap and budget both feed ONE withheld tally, and
     # the count is a LOWER BOUND ("at least N") when the widened fetch was
@@ -1054,6 +1136,7 @@ def build_context_for_turn(
     use_llm: bool = True,
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
+    wiki_root: Path | None = None,
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1083,6 +1166,10 @@ def build_context_for_turn(
     ``search_backend=None`` is forwarded as-is and resolved inside
     :func:`build_context` (issue athenaeum#2458) — see that function's
     docstring for the one resolution rule.
+
+    ``wiki_root`` is forwarded as-is to :func:`build_context` (issue
+    athenaeum#2538 AC8) — ``None`` by default, so a caller that does not
+    pass it sees no behavior change at all.
     """
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)
@@ -1098,6 +1185,7 @@ def build_context_for_turn(
         use_llm=use_llm,
         llm_timeout=llm_timeout,
         config=config,
+        wiki_root=wiki_root,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 

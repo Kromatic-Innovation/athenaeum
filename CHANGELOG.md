@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or removes it by hand (exits 75 under a held run lock); `athenaeum
   doctor` reports the count of one-sided pairs (athenaeum#2535).
 
+- Recall and entity listings are now aware of the parent/child page
+  relation: a `recall` hit on a child renders a `**Parent:** <uid> —
+  <Name>` line, a hit on a parent renders a `**Sub-pages:** <uid> —
+  <Name>, ...` line (capped at `recall.sub_pages_cap` /
+  `ATHENAEUM_RECALL_SUB_PAGES_CAP`, default 5, with a count of the
+  remainder), and a uid named on either line is dropped from the same
+  hit's `**Links:**` line. Both lines pass through the hit's own
+  audience/policy filter, applied before the remainder count. Sub-pages
+  created by a split (`via: split`) are now hidden from
+  `enumerate_entities` and `entity_schema`'s page counts by default — a
+  page attached via `attach`/`fold`/`manual` stays listed; pass
+  `include_split=True` (`--include-split` on the CLI) to include them.
+  The per-turn hook bullet for a child whose own name doesn't already
+  contain its parent's reads `<Name> (under <Parent name>) —
+  <description>` (athenaeum#2538).
+
 ### Fixed
 
 - `split-oversize` and the `librarian.oversize_page_action: split`
