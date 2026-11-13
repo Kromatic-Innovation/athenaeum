@@ -7,12 +7,20 @@ Covers:
   empty default, and malformed-shape errors.
 - ``AutoMemoryFile`` populates the new fields with empty-list defaults
   and exposes :meth:`supersedes_names`.
-- Conflict-detector short-circuit in :mod:`athenaeum.merge`: a pair that
-  declares its relationship via ``refines`` / ``supersedes`` does NOT
-  reach the Haiku detector.
 - Resolver auto-prefer: ``propose_resolution`` returns a synthetic
   ``keep_<superseder>`` proposal (confidence 1.0) for a declared
   supersession WITHOUT calling the Anthropic client.
+
+The former "Conflict-detector short-circuit in :mod:`athenaeum.merge`"
+coverage (``merge._declared_relationship`` / ``merge._filter_declared_pairs``)
+was removed by issue athenaeum#2435: both were dead code left behind by the
+C4 detector's retirement (issue athenaeum#1256), with zero ``src/`` callers.
+The live declared-relationship primitive those two adapted
+(:func:`athenaeum.declared_relationships.declared_relationship`) is used
+directly below where a test still needs to drive it (see
+:class:`TestDeclaredWinnerEdgeCases`), and is otherwise exercised through
+:mod:`athenaeum.comparator`'s Gate 1 (``tests/test_comparator.py``'s
+``TestDeclaredRelationshipGate1``).
 
 These tests do NOT make network calls; the Anthropic client is a
 ``unittest.mock.MagicMock`` so any unexpected resolver invocation is
@@ -26,7 +34,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum.contradictions import ContradictionResult
-from athenaeum.merge import _declared_relationship, _filter_declared_pairs
+from athenaeum.declared_relationships import DeclaredRelationshipFacts, declared_relationship
 from athenaeum.models import (
     AutoMemoryFile,
     parse_merge_rejected_with,
@@ -80,6 +88,18 @@ def _write_am(
         refines=list(refines or []),
         supersedes=list(supersedes or []),
         merge_rejected_with=list(merge_rejected_with or []),
+    )
+
+
+def _facts(am: AutoMemoryFile) -> DeclaredRelationshipFacts:
+    """Adapt an :class:`AutoMemoryFile` to the live declared-relationship
+    primitive -- the same unpacking ``merge._declared_relationship`` did
+    before issue athenaeum#2435 deleted that dead adapter."""
+    return DeclaredRelationshipFacts(
+        name=am.name,
+        refines=am.refines,
+        supersedes_names=am.supersedes_names(),
+        merge_rejected_with=am.merge_rejected_with,
     )
 
 
@@ -221,210 +241,6 @@ def test_supersedes_names_filters_malformed(tmp_path: Path) -> None:
         ],
     )
     assert am.supersedes_names() == ["old-a"]
-
-
-# ---------------------------------------------------------------------------
-# Conflict-detector skip (acceptance #2 + #5)
-# ---------------------------------------------------------------------------
-
-
-class TestDetectorSkip:
-    def test_undeclared_pair_reaches_detector(self, tmp_path: Path) -> None:
-        """Two conflicting memories with NO declaration → detector sees them."""
-        a = _write_am(tmp_path / "s", "feedback_a.md", "always X", name="memory-a")
-        b = _write_am(tmp_path / "s", "feedback_b.md", "never X", name="memory-b")
-        assert _declared_relationship(a, b) is None
-        filtered, declared = _filter_declared_pairs([a, b])
-        assert declared is None
-        assert filtered == [a, b]
-
-    def test_declared_supersedes_skips_detector(self, tmp_path: Path) -> None:
-        """``a`` supersedes ``b`` → short-circuit verdict."""
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "new guidance",
-            name="memory-a",
-            supersedes=[
-                {"name": "memory-b", "as_of": "2026-05-01", "reason": "renamed"}
-            ],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "old guidance", name="memory-b")
-        assert _declared_relationship(a, b) == "declared-supersession"
-        filtered, declared = _filter_declared_pairs([a, b])
-        assert declared == "declared-supersession"
-        assert filtered == []
-
-    def test_declared_refines_skips_detector(self, tmp_path: Path) -> None:
-        """``a`` refines ``b`` → short-circuit verdict."""
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "narrowed",
-            name="memory-a",
-            refines=["memory-b"],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "general", name="memory-b")
-        assert _declared_relationship(a, b) == "declared-refinement"
-        filtered, declared = _filter_declared_pairs([a, b])
-        assert declared == "declared-refinement"
-        assert filtered == []
-
-    def test_reverse_direction_also_skips(self, tmp_path: Path) -> None:
-        """Declaration on EITHER side suppresses — direction doesn't matter."""
-        a = _write_am(tmp_path / "s", "feedback_a.md", "general", name="memory-a")
-        b = _write_am(
-            tmp_path / "s",
-            "feedback_b.md",
-            "narrowed",
-            name="memory-b",
-            refines=["memory-a"],
-        )
-        assert _declared_relationship(a, b) == "declared-refinement"
-
-    def test_partial_declaration_in_three_member_cluster(self, tmp_path: Path) -> None:
-        """If one pair in the chunk is undeclared, the whole chunk must run."""
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "new",
-            name="memory-a",
-            supersedes=[{"name": "memory-b"}],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "old", name="memory-b")
-        c = _write_am(tmp_path / "s", "feedback_c.md", "other", name="memory-c")
-        filtered, declared = _filter_declared_pairs([a, b, c])
-        assert declared is None
-        # `a` participates in an undeclared pair (a,c) so it survives.
-        assert filtered == [a, b, c]
-
-    def test_two_declared_one_undeclared_prunes_fully_declared_member(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue athenaeum#172: a 3-member chunk with 2 declared pairs + 1 undeclared
-        pair should prune the fully-covered member before the detector
-        sees it. ``a`` declares both ``b`` and ``c``; only the (b, c)
-        pair is undeclared. The Haiku detector should NEVER see ``a``.
-        """
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "new",
-            name="memory-a",
-            supersedes=[{"name": "memory-b"}, {"name": "memory-c"}],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "old", name="memory-b")
-        c = _write_am(tmp_path / "s", "feedback_c.md", "other", name="memory-c")
-        filtered, declared = _filter_declared_pairs([a, b, c])
-        # Not fully declared → no short-circuit rationale.
-        assert declared is None
-        # `a` had no undeclared partners → pruned. Only (b, c) remains.
-        assert filtered == [b, c]
-        assert a not in filtered
-
-    def test_declared_merge_rejection_skips_detector(self, tmp_path: Path) -> None:
-        """Issue athenaeum#715: ``a`` rejected a merge against ``b`` → short-circuit
-        with the distinct ``"declared-merge-rejection"`` rationale — never
-        ``"declared-refinement"``, since a rejection is a different fact
-        (not the same claim) than a refinement (a narrower claim)."""
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "claim a",
-            name="memory-a",
-            merge_rejected_with=["memory-b"],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "claim b", name="memory-b")
-        assert _declared_relationship(a, b) == "declared-merge-rejection"
-        filtered, declared = _filter_declared_pairs([a, b])
-        assert declared == "declared-merge-rejection"
-        assert filtered == []
-
-    def test_declared_merge_rejection_reverse_direction_also_skips(
-        self, tmp_path: Path
-    ) -> None:
-        """Declaration on EITHER side suppresses — same as refines/supersedes."""
-        a = _write_am(tmp_path / "s", "feedback_a.md", "claim a", name="memory-a")
-        b = _write_am(
-            tmp_path / "s",
-            "feedback_b.md",
-            "claim b",
-            name="memory-b",
-            merge_rejected_with=["memory-a"],
-        )
-        assert _declared_relationship(a, b) == "declared-merge-rejection"
-
-    def test_refinement_supersession_and_rejection_stay_distinct(
-        self, tmp_path: Path
-    ) -> None:
-        """The three declared-relationship slugs must never collapse into
-        each other — a caller branching on the rationale string needs to
-        tell a genuine refinement, a genuine supersession, and an honest
-        "these are not the same claim" rejection apart."""
-        refines_a = _write_am(
-            tmp_path / "s1",
-            "feedback_a.md",
-            "narrowed",
-            name="refines-a",
-            refines=["refines-b"],
-        )
-        refines_b = _write_am(
-            tmp_path / "s1", "feedback_b.md", "general", name="refines-b"
-        )
-        supersedes_a = _write_am(
-            tmp_path / "s2",
-            "feedback_a.md",
-            "new",
-            name="supersedes-a",
-            supersedes=[{"name": "supersedes-b"}],
-        )
-        supersedes_b = _write_am(
-            tmp_path / "s2", "feedback_b.md", "old", name="supersedes-b"
-        )
-        rejected_a = _write_am(
-            tmp_path / "s3",
-            "feedback_a.md",
-            "claim a",
-            name="rejected-a",
-            merge_rejected_with=["rejected-b"],
-        )
-        rejected_b = _write_am(
-            tmp_path / "s3", "feedback_b.md", "claim b", name="rejected-b"
-        )
-        assert _declared_relationship(refines_a, refines_b) == "declared-refinement"
-        assert (
-            _declared_relationship(supersedes_a, supersedes_b)
-            == "declared-supersession"
-        )
-        assert (
-            _declared_relationship(rejected_a, rejected_b)
-            == "declared-merge-rejection"
-        )
-        slugs = {
-            _declared_relationship(refines_a, refines_b),
-            _declared_relationship(supersedes_a, supersedes_b),
-            _declared_relationship(rejected_a, rejected_b),
-        }
-        assert len(slugs) == 3, slugs
-
-    def test_fully_rejected_chunk_prunes_without_supersession_or_refinement(
-        self, tmp_path: Path
-    ) -> None:
-        """A chunk whose only declaration is a merge-rejection must short-
-        circuit with ``"declared-merge-rejection"``, not silently fall
-        into the refinement bucket (the historical two-slug ``else``
-        branch would have miscounted this)."""
-        a = _write_am(
-            tmp_path / "s",
-            "feedback_a.md",
-            "claim a",
-            name="memory-a",
-            merge_rejected_with=["memory-b"],
-        )
-        b = _write_am(tmp_path / "s", "feedback_b.md", "claim b", name="memory-b")
-        filtered, declared = _filter_declared_pairs([a, b])
-        assert filtered == []
-        assert declared == "declared-merge-rejection"
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +453,11 @@ class TestDeclaredWinnerEdgeCases:
     def test_mutual_supersedes_in_merge_returns_none(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """MUST #3 merge.py side: mutual supersedes → no declared verdict."""
+        """MUST #3, declared-relationship-primitive side: mutual supersedes
+        → no declared verdict. (Ported from ``merge._declared_relationship``,
+        deleted as dead code by issue athenaeum#2435; the logger is now
+        ``athenaeum.declared_relationships``, the module that owns the
+        live primitive.)"""
         a = _write_am(
             tmp_path / "s",
             "feedback_a.md",
@@ -652,8 +472,8 @@ class TestDeclaredWinnerEdgeCases:
             name="memory-b",
             supersedes=[{"name": "memory-a"}],
         )
-        with caplog.at_level("WARNING", logger="athenaeum.merge"):
-            verdict = _declared_relationship(a, b)
+        with caplog.at_level("WARNING", logger="athenaeum.declared_relationships"):
+            verdict = declared_relationship(_facts(a), _facts(b))
         assert verdict is None
         assert any(
             "mutual supersedes" in rec.getMessage().lower() for rec in caplog.records
@@ -701,8 +521,8 @@ class TestDeclaredWinnerEdgeCases:
             name="memory-b",
             refines=["Memory-A"],
         )
-        # merge.py side
-        assert _declared_relationship(a, b) == "declared-refinement"
+        # declared-relationship-primitive side
+        assert declared_relationship(_facts(a), _facts(b)) == "declared-refinement"
         # resolutions.py side
         client = MagicMock()
         result = ContradictionResult(
