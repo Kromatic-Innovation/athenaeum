@@ -500,7 +500,7 @@ def test_low_cohesion_proposal_suppression_set_unchanged_by_dead_arm_removal(
 
 
 # ---------------------------------------------------------------------------
-# Seer finding on PR #2565, verified against the live corpus (24 of 367 real
+# Review-bot finding, verified against the live corpus (24 of 367 real
 # `status: folded` tombstones carry a bare-slug `folded_into` with no uid
 # prefix): a pre-athenaeum#2545 fold stamped a tombstone's `folded_into` with
 # the bare slug even when its target was ALREADY uid-prefixed. Comparing
