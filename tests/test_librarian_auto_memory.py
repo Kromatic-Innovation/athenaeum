@@ -1877,6 +1877,138 @@ class TestRetirePendingQueueCrosscheck:
         assert report.committed is True
 
 
+class TestRetireHeldWriteBackAndMalformedBlock:
+    """athenaeum#2497: "in flight" also covers a held write-back and a malformed block.
+
+    athenaeum#2455's ``pq.answered is False`` filter is correct for a genuinely
+    resolved question, but it also drops two cases that are still in flight:
+    an ANSWERED question whose write-back is HELD (athenaeum#1804), and a
+    block that fails to parse at all. See :func:`athenaeum.retire._write_back_is_held`
+    and :func:`athenaeum.retire._unaccounted_sidecar_text`.
+    """
+
+    def test_member_in_held_write_back_question_is_held(
+        self, retire_root: Path
+    ) -> None:
+        """(a) answered + write-back held -> held."""
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        pending = retire_root / "wiki" / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            '## [2026-01-01] Entity: "Berlin address" (from wiki/auto-home.md)\n'
+            "- [x] Is this still accurate?\n"
+            "**Conflict type**: contradiction\n"
+            "Members involved: "
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n"
+            "**Answer**: yes, confirmed.\n"
+            "\n"
+            "**Write-back**: held — no source ref resolved "
+            "(-Users-tristankromer-Code-home/user_tristan_berlin_address.md) "
+            'as of 2026-01-01T00:00:00Z; restore the source or change "held" '
+            'to "waived" to archive without a write\n',
+            encoding="utf-8",
+        )
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        # The write-back this answer authorizes hasn't happened yet -- the
+        # member it still needs must not be retired out from under it.
+        assert _raw_file(retire_root).exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert any(
+            d.disposition == HOLD and "pending" in d.reason for d in report.dispositions
+        )
+
+    def test_member_in_completed_write_back_question_is_not_held(
+        self, retire_root: Path
+    ) -> None:
+        """(b) answered + write-back done (not "held") -> not held.
+
+        Must not regress athenaeum#2455's behaviour: an answered question whose
+        write-back is anything other than ``held`` (here, ``waived`` -- a
+        human explicitly chose to archive without a write) is not in flight.
+        """
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.retire import MOVE, run_retire_pass
+
+        member = _raw_file(retire_root)
+        pending = retire_root / "wiki" / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            '## [2026-01-01] Entity: "Berlin address" (from wiki/auto-home.md)\n'
+            "- [x] Is this still accurate?\n"
+            "**Conflict type**: contradiction\n"
+            "Members involved: "
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n"
+            "**Answer**: yes, confirmed.\n"
+            "\n"
+            "**Write-back**: waived — human waived the write-back; archiving "
+            "without a write\n",
+            encoding="utf-8",
+        )
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        assert not member.exists()
+        assert len(report.moved) == 1
+        assert report.committed is True
+        assert any(d.disposition == MOVE for d in report.dispositions)
+        wiki = retire_root / "wiki"
+        assert next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")).exists()
+
+    def test_member_in_unparseable_question_block_is_held(
+        self, retire_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """(c) a block that fails to parse, naming a member -> held, and logged.
+
+        ``_HEADER_RE`` requires the canonical ``## [DATE] Entity: "..." (from
+        ...)`` shape; this header has neither, so
+        :func:`athenaeum.answers.parse_pending_questions` drops the whole
+        block (logged, not raised) and returns ``[]`` for this file. The old
+        pre-athenaeum#2455 substring reader still held any member named anywhere
+        in the raw file, including here; the sanctioned-parser cutover must
+        not silently unhold it.
+        """
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        pending = retire_root / "wiki" / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            "## Malformed entry with no proper header at all\n"
+            "- [ ] Something a human needs to look at\n"
+            "**Conflict type**: contradiction\n"
+            "Members involved: "
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING", logger="athenaeum.retire"):
+            entries = merge_clusters_to_wiki(retire_root)
+            report = run_retire_pass(entries, retire_root)
+
+        assert _raw_file(retire_root).exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert any(
+            d.disposition == HOLD and "pending" in d.reason for d in report.dispositions
+        )
+        # The malformed sidecar must be visible, not silently dropped.
+        retire_warnings = [
+            r for r in caplog.records if r.name == "athenaeum.retire"
+        ]
+        assert any(
+            "_pending_questions.md" in r.getMessage()
+            and "malformed" in r.getMessage().lower()
+            for r in retire_warnings
+        )
+
+
 class TestRetireDroppedSection:
     """Quine S2: only git rm a member whose fact actually landed in the body."""
 
