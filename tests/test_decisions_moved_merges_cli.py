@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum decisions {revalidate,recompare,scrub-pii,propose-fold,provenance}``
-(issue athenaeum#2456) — these five verbs moved wholesale from ``athenaeum merges``
-to ``athenaeum decisions`` with the SAME flags, output and exit codes (they
-delegate to the exact same handler functions in
-:mod:`athenaeum._cmd_merges`; see that module's ``_add_*_subparser`` /
-``_cmd_*`` functions and ``_cmd_decisions.cmd_decisions``'s dispatch).
+(issue athenaeum#2456) — these five verbs moved wholesale from the
+since-removed ``athenaeum merges`` (issue athenaeum#2457) to ``athenaeum
+decisions`` with the SAME flags, output and exit codes (they delegate to the
+exact same handler functions in :mod:`athenaeum._cmd_merges`; see that
+module's ``_add_*_subparser`` / ``_cmd_*`` functions and
+``_cmd_decisions.cmd_decisions``'s dispatch).
 
 Each class below reuses the fixtures/scenarios an existing ``merges`` test
 already established (cited per class) and re-runs them through the
-``decisions`` spelling, so a divergence between the two surfaces fails here
-rather than only showing up live. ``TestRecompareLockFix`` additionally
+``decisions`` spelling, so a divergence from the behaviour the moved verbs
+shipped with fails here rather than only showing up live. ``TestRecompareLockFix`` additionally
 covers the lock-held/lock-free split the issue requires: a held run lock
 must exit 75 with the standard message and write nothing, never a traceback.
 """
@@ -87,6 +88,66 @@ class TestDecisionsRevalidate:
         assert payload["applied"] is False
         assert len(payload["retired"]) == 1
         assert payload["retired"][0]["merge_target_name"] == "over-cap-cluster"
+
+    def _mixed_seed(self, tmp_path: Path) -> Path:
+        """One over-cap (7-source) block plus one legal (2-source) block.
+
+        Carried over from the removed ``tests/test_merges_cli.py`` (issue
+        athenaeum#2457) so the only scenario that proves revalidate is
+        SELECTIVE — a legal proposal survives the same sweep that archives
+        a stale one — still runs under the surviving spelling.
+        """
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        over_cap = render_block(
+            merge_target_name="merge-workflow-pattern",
+            sources=[f"/k/src-{i}.md" for i in range(7)],
+            rationale="chained",
+            draft_merged_body="draft",
+            confidence=0.33,
+            created_at="2026-06-20",
+        )
+        # The legal block's sources must really exist: athenaeum#2072 made a
+        # proposal with a missing source page stale in its own right.
+        for stem in ("a", "b"):
+            (wiki / f"{stem}.md").write_text(
+                "---\nname: acme-corp\ntype: concept\n---\nbody\n", encoding="utf-8"
+            )
+        legal = render_block(
+            merge_target_name="acme-corp",
+            sources=[str(wiki / "a.md"), str(wiki / "b.md")],
+            rationale="tight",
+            draft_merged_body="draft",
+            confidence=0.9,
+            created_at="2026-07-05",
+        )
+        (wiki / "_pending_merges.md").write_text(
+            "# Pending Merges\n\n" + over_cap + "\n\n---\n\n" + legal + "\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_apply_json_archives_only_the_stale_proposal(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = self._mixed_seed(tmp_path)
+
+        rc = main(["decisions", "revalidate", "--path", str(root), "--apply", "--json"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["applied"] is True
+        assert [r["merge_target_name"] for r in payload["retired"]] == [
+            "merge-workflow-pattern"
+        ]
+        assert payload["retired"][0]["n_sources"] == 7
+        assert "over-cluster" in payload["retired"][0]["reason"]
+        primary = (root / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
+        assert "acme-corp" in primary
+        assert "merge-workflow-pattern" not in primary
+        archive = (root / "wiki" / "_pending_merges_archive.md").read_text(encoding="utf-8")
+        assert "merge-workflow-pattern" in archive
 
 
 class TestDecisionsScrubPii:
@@ -210,9 +271,9 @@ class TestRecompareLockFix:
     contended lock propagated as an uncaught exception out of ``main()``
     (an interpreter-level traceback + exit 1 at the shell), rather than the
     standard EXIT_LOCK_HELD contract every other mutating command honors.
-    Both ``decisions recompare`` and the legacy ``merges recompare``
-    spelling share the fixed implementation, so the second test below pins
-    the old spelling too.
+    (The legacy ``merges recompare`` spelling shared the same fixed
+    implementation; issue athenaeum#2457 removed that spelling in 0.24.0 —
+    see ``TestRemovedSurfaces`` in ``tests/test_cli.py``.)
     """
 
     def _knowledge_root(self, tmp_path: Path) -> Path:
@@ -256,29 +317,6 @@ class TestRecompareLockFix:
         # ledger directory was ever created.
         assert merges_path.read_text(encoding="utf-8") == before
         assert not (root / "wiki" / "_verdicts").exists()
-
-    def test_legacy_merges_spelling_shares_the_same_fix(
-        self,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("ATHENAEUM_COMPARATOR_ENABLED", "1")
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        root = self._knowledge_root(tmp_path)
-
-        holder = RunLock(root)
-        holder.acquire()
-        try:
-            rc = main(["merges", "recompare", "--path", str(root), "--apply"])
-        finally:
-            holder.release()
-
-        captured = capsys.readouterr()
-        assert rc == 75
-        assert "Traceback" not in captured.err
-        # The deprecation warning names the exact decisions replacement verb.
-        assert "athenaeum decisions recompare" in captured.err
 
     def test_apply_succeeds_when_lock_is_free(
         self,

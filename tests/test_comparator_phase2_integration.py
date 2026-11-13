@@ -210,7 +210,7 @@ class TestPhase2StaysDark:
     duplicate-detection algorithm this issue REPLACES outright (not run
     beside it — see that module's docstring). Every module below is still
     reachable ONLY from the comparator subsystem itself, the explicit opt-in
-    ``athenaeum merges recompare`` command, or that one authorized wiring —
+    ``athenaeum decisions recompare`` command, or that one authorized wiring —
     a future edit that wires one into any OTHER pipeline entry point without
     doing the same real replacement must break this test rather than quietly
     double the night's work.
@@ -408,7 +408,7 @@ class TestCoordinateAnswerLoopIsANarrowAuthorizedException:
 
     def test_comparator_gate_callers_are_recompare_and_the_wiki_dedupe_cutover(self) -> None:
         """``resolve_comparator_enabled`` has exactly SIX callers in ``src/``
-        post-athenaeum#1333: the pre-existing ``athenaeum merges recompare``
+        post-athenaeum#1333: the pre-existing ``athenaeum decisions recompare``
         command, the three call sites the wiki-dedup cut-over added --
         ``librarian.py`` and ``_cmd_curate.py`` (each decides whether to even
         build an LLM client / refuses to run) and ``wiki_dedupe.py`` (the

@@ -2578,7 +2578,7 @@ def resolve_merge(
             markers: a ``**Auto-applied**: true`` line in the resolved block
             (human-readable, in the wiki sidecar itself) and
             ``auto_applied: true`` on the provenance ledger record (queryable
-            via ``athenaeum merges provenance``). Ignored (has no effect) on
+            via ``athenaeum decisions provenance``). Ignored (has no effect) on
             ``decision="reject"`` — there is no such thing as an
             "auto-applied reject". Defaults to ``False`` so every existing
             caller (the human MCP/CLI approve path) is byte-identical to
@@ -3005,7 +3005,7 @@ def resolve_merge(
         # `resolve_merge` does not hold, and this module has no ledger
         # integration at all today. Writing a `distinct` verdict from this
         # path is a materially larger change than this fix and properly
-        # belongs to the comparator's own `athenaeum merges recompare`
+        # belongs to the comparator's own `athenaeum decisions recompare`
         # command, which already exists — do not re-derive this boundary
         # in a future pass without re-reading this comment.
         #

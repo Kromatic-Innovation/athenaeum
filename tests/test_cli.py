@@ -1853,3 +1853,112 @@ class TestCorrectionsTrustDryrun:
         assert "1 verdict(s) would change:" in out
         assert "today:      deferred-lower-precedence" in out
         assert "if enabled: applied" in out
+
+
+class TestRemovedSurfaces:
+    """``athenaeum merges`` and ``athenaeum questions`` are gone (issue
+    athenaeum#2457), as the athenaeum#1992 deprecation promised for 0.24.0.
+
+    Both are removed outright, not aliased: a caller gets argparse's normal
+    unknown-command error, and the replacement spelling under ``decisions``
+    is asserted in the same test so a pass can never mean "the whole
+    parser stopped registering anything".
+    """
+
+    REMOVED_INVOCATIONS = [
+        ["merges", "list"],
+        ["merges", "next"],
+        ["merges", "count"],
+        ["merges", "revalidate"],
+        ["merges", "recompare"],
+        ["merges", "scrub-pii"],
+        ["merges", "propose-fold"],
+        ["merges", "provenance"],
+        ["questions", "list"],
+        ["questions", "next"],
+        ["questions", "count"],
+    ]
+
+    def _top_level_choices(self) -> set[str]:
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        return set(top.choices)
+
+    def test_neither_noun_is_registered(self) -> None:
+        choices = self._top_level_choices()
+        assert "merges" not in choices
+        assert "questions" not in choices
+        # Positive control: the replacement surface IS registered, so this
+        # test cannot pass on an empty/broken parser.
+        assert "decisions" in choices
+
+    def test_not_in_the_lazy_dispatch_registry(self) -> None:
+        from athenaeum.cli import _SUBCOMMAND_LOADERS
+
+        assert "merges" not in _SUBCOMMAND_LOADERS
+        assert "questions" not in _SUBCOMMAND_LOADERS
+        assert "decisions" in _SUBCOMMAND_LOADERS
+
+    @pytest.mark.parametrize("argv", REMOVED_INVOCATIONS, ids=lambda a: " ".join(a))
+    def test_invoking_a_removed_command_is_an_unknown_command_error(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert f"invalid choice: '{argv[0]}'" in err
+
+    @pytest.mark.parametrize(
+        "verb",
+        [
+            "list",
+            "next",
+            "count",
+            "revalidate",
+            "recompare",
+            "scrub-pii",
+            "propose-fold",
+            "provenance",
+        ],
+    )
+    def test_the_decisions_replacement_verb_is_registered(self, verb: str) -> None:
+        """Every removed ``merges`` verb has a live ``decisions`` spelling —
+        the mapping ``docs/guides/upgrading.md`` publishes."""
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        decisions = top.choices["decisions"]
+        sub = next(
+            action
+            for action in decisions._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        assert verb in sub.choices
+
+    def test_the_handler_module_is_deleted(self) -> None:
+        import importlib.util
+
+        assert importlib.util.find_spec("athenaeum._cmd_questions") is None
+
+    def test_the_deprecated_cli_switch_is_gone(self) -> None:
+        """The switch existed only to announce these two surfaces, so it goes
+        with them: no resolver, no message tables, no removal-version
+        constant."""
+        import athenaeum.config as config
+
+        for name in (
+            "resolve_deprecated_cli_surfaces_enabled",
+            "deprecated_cli_surface_message",
+            "DEPRECATED_CLI_SURFACE_MESSAGES",
+            "DEPRECATED_CLI_SURFACE_VERB_MESSAGES",
+            "DEPRECATED_CLI_SURFACE_REMOVAL_VERSION",
+        ):
+            assert not hasattr(config, name), name

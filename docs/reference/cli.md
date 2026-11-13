@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `merges`, `push-metrics`, `questions`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -87,15 +87,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum measure shadow-parity`](#athenaeum-measure-shadow-parity) (command) — Run the C4 detector and the cluster comparator over the SAME corpus and report their verdict agreement matrix + call multiplier (; the live-corpus route is).
 - [`athenaeum memory-class`](#athenaeum-memory-class) (group) — Memory-taxonomy class maintenance: backfill the memory_class: frontmatter axis across the wiki.
 - [`athenaeum memory-class backfill`](#athenaeum-memory-class-backfill) (command) — Assign memory_class: to pages that lack it — deterministic type-rule map, plus an optional classifier pass over the residual. Dry-run unless --apply. Never overwrites an existing value and never mints 'axiom'.
-- [`athenaeum merges`](#athenaeum-merges) (group) — Inspect unresolved resolver merge proposals in `wiki/_pending_merges.md`. Three modes: list, next, count. The merges half of `athenaeum decisions`.
-- [`athenaeum merges count`](#athenaeum-merges-count) (command) — Print `N unresolved (oldest: <iso-date>)`.
-- [`athenaeum merges list`](#athenaeum-merges-list) (command) — List all unresolved merge proposals.
-- [`athenaeum merges next`](#athenaeum-merges-next) (command) — Show the oldest unresolved merge (single block).
-- [`athenaeum merges propose-fold`](#athenaeum-merges-propose-fold) (command) — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
-- [`athenaeum merges provenance`](#athenaeum-merges-provenance) (command) — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
-- [`athenaeum merges recompare`](#athenaeum-merges-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
-- [`athenaeum merges revalidate`](#athenaeum-merges-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
-- [`athenaeum merges scrub-pii`](#athenaeum-merges-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
 - [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
@@ -110,10 +101,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum push-metrics tail`](#athenaeum-push-metrics-tail) (command) — Stream NDJSON — one object per push record and per reference-determination record, newest-last. Read-only; never mutates the ledgers. See docs/reference/configuration.md ('push-metrics tail — the public NDJSON contract') for the documented --json record shape, schema version, and compatibility note.
 - [`athenaeum quarantine`](#athenaeum-quarantine) (command) — Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
 - [`athenaeum query-topics`](#athenaeum-query-topics) (command) — Extract substantive search topics from a prompt (Haiku). Used by the UserPromptSubmit hook to rewrite queries before FTS5/vector search. Prints one topic per line to stdout; empty output means fall back to the caller's built-in extractor.
-- [`athenaeum questions`](#athenaeum-questions) (group) — Inspect unresolved entries in `_pending_questions.md`. Three modes: list, next, count. Used by the example SessionStart hook and the resolve-questions skill.
-- [`athenaeum questions count`](#athenaeum-questions-count) (command) — Print `N unresolved (oldest: <iso-date>)`.
-- [`athenaeum questions list`](#athenaeum-questions-list) (command) — List all unresolved questions.
-- [`athenaeum questions next`](#athenaeum-questions-next) (command) — Show the oldest unresolved question (single block).
 - [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
 - [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
@@ -1128,106 +1115,6 @@ Assign memory_class: to pages that lack it — deterministic type-rule map, plus
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
-## `athenaeum merges`
-
-Inspect unresolved resolver merge proposals in `wiki/_pending_merges.md`. Three modes: list, next, count. The merges half of `athenaeum decisions`.
-
-Subcommands:
-
-- `athenaeum merges count` — Print `N unresolved (oldest: <iso-date>)`.
-- `athenaeum merges list` — List all unresolved merge proposals.
-- `athenaeum merges next` — Show the oldest unresolved merge (single block).
-- `athenaeum merges propose-fold` — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
-- `athenaeum merges provenance` — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
-- `athenaeum merges recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
-- `athenaeum merges revalidate` — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
-- `athenaeum merges scrub-pii` — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
-
-## `athenaeum merges count`
-
-Print `N unresolved (oldest: <iso-date>)`.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges list`
-
-List all unresolved merge proposals.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges next`
-
-Show the oldest unresolved merge (single block).
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges propose-fold`
-
-Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
-| `--draft-file` | — | — | Override the merged draft PAGE TEXT (frontmatter + body) with this file's contents, for a genuine content merge. A file that starts with a `---` frontmatter block is stored verbatim and must carry the canonical page's own `uid:`, or it is refused. A file with no frontmatter block is a body-only override and inherits the canonical page's current frontmatter verbatim. Default: the canonical page's current text VERBATIM. |
-| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename identity-resolves to its `name:` slug: either `<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's own `uid:` frontmatter. When other live pages share that slug, a `<uid>-<slug>.md` canonical is keyed on its filename stem instead of being refused (as the nightly name-collision path does). |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--rationale` | — | — | Optional human rationale recorded on the proposal. |
-| `--source` | `[]` | — | A source page to fold away (repeatable). Each must be an existing wiki page and must not equal --into. |
-
-## `athenaeum merges provenance`
-
-List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--canonical-slug` | — | — | Filter to records for this canonical target slug. |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--merge-id` | — | — | Filter to the record for this merge id. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges recompare`
-
-Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Append the computed verdicts to the verdict ledger. Default: dry-run — compare and report, write nothing. |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--limit` | `0` | — | Only re-run the first N unresolved proposals (default: 0 = all). |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges revalidate`
-
-Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum merges scrub-pii`
-
-Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--allowlist` | — | — | Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`). A value with a reasoned entry there is not PII and is left untouched; an anchored regex `pattern` entry is honoured the same way. |
-| `--apply` | off (flag absent) | — | Redact the detected values in place. Default: dry-run — report only, write nothing. |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
 ## `athenaeum outbound-lint`
 
 Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
@@ -1427,46 +1314,6 @@ Extract substantive search topics from a prompt (Haiku). Used by the UserPromptS
 |---|---|---|---|
 | `--knowledge-root`, `--path` | — | — | Knowledge directory whose athenaeum.yaml supplies models.topic (default: ~/knowledge). --path is an alias, matching init/status/serve. |
 | `--timeout` | `3.0` | — | Seconds to wait for the LLM before giving up (default: 3.0) |
-
-## `athenaeum questions`
-
-Inspect unresolved entries in `_pending_questions.md`. Three modes: list, next, count. Used by the example SessionStart hook and the resolve-questions skill.
-
-Subcommands:
-
-- `athenaeum questions count` — Print `N unresolved (oldest: <iso-date>)`.
-- `athenaeum questions list` — List all unresolved questions.
-- `athenaeum questions next` — Show the oldest unresolved question (single block).
-
-## `athenaeum questions count`
-
-Print `N unresolved (oldest: <iso-date>)`.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum questions list`
-
-List all unresolved questions.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
-
-## `athenaeum questions next`
-
-Show the oldest unresolved question (single block).
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
 
 ## `athenaeum quiesce`
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum authority {lint,convert}`` — authority manifest CLI (issue athenaeum#426).
 
-Mirrors ``athenaeum merges`` / ``athenaeum questions`` in shape: a thin CLI
+Mirrors ``athenaeum decisions`` in shape: a thin CLI
 dispatcher over library functions in :mod:`athenaeum.authority`, no logic of
 its own.
 

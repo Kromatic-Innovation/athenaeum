@@ -943,6 +943,26 @@ class TestLoadConfig:
             for r in caplog.records
         ), caplog.text
 
+    def test_removed_deprecated_cli_surfaces_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2457: ``librarian.deprecated_cli_surfaces_enabled`` only
+        ever toggled the stderr deprecation warning on ``athenaeum merges`` /
+        ``athenaeum questions``. Both surfaces were removed in 0.24.0, so the
+        key is inert — but a stale ``athenaeum.yaml`` carrying it must get the
+        same loud, specific WARNING every other removed librarian key gets
+        instead of quietly doing nothing."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  deprecated_cli_surfaces_enabled: false\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["deprecated_cli_surfaces_enabled"] is False
+        assert any(
+            "deprecated_cli_surfaces_enabled" in r.message and "athenaeum#2457" in r.message
+            for r in caplog.records
+        ), caplog.text
+
     def test_no_warning_when_removed_key_absent(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -115,8 +115,8 @@ sanctioned reader; `athenaeum decisions
 {list,next,count,revalidate,recompare,scrub-pii,propose-fold,provenance}`
 (source: `src/athenaeum/_cmd_merges.py`, registered under `decisions` by
 `src/athenaeum/_cmd_decisions.py`) is the sanctioned CLI surface built on it.
-The old `athenaeum merges` spellings still work (deprecated, scheduled for
-removal) but `decisions` is the one to reach for and the one to document.
+The old `athenaeum merges` / `athenaeum questions` spellings were removed in
+0.24.0 (athenaeum#2457); `decisions` is the only surface.
 Full flag reference: [README.md § One unified "decisions
 needed" list](README.md#one-unified-decisions-needed-list).
 

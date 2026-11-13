@@ -15,7 +15,7 @@ This module closes that hole from both ends:
   ``migrate-pii --apply`` hands it exactly the tokens it just moved off the
   page, and they are redacted from every proposal that embedded them.
 * :func:`scrub_pending_merges` with ``values=None`` — the standalone,
-  **zero-LLM** sweep behind ``athenaeum merges scrub-pii``. It detects
+  **zero-LLM** sweep behind ``athenaeum decisions scrub-pii``. It detects
   contact data with the same detectors ``lint-pii`` gates on
   (:func:`~athenaeum.pii.find_inline_emails` /
   :func:`~athenaeum.pii.find_inline_phones`), so clearing a backlog here

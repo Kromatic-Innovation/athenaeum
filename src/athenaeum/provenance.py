@@ -487,7 +487,7 @@ def build_merge_provenance_record(
     write from a human-approved one — always present (default ``False``) so
     every pre-athenaeum#602 and human-approved record reads unambiguously as "a human
     approved this" and every T2 auto-finalize reads unambiguously as "nobody
-    reviewed this write". See ``athenaeum merges provenance`` (:mod:`athenaeum
+    reviewed this write". See ``athenaeum decisions provenance`` (:mod:`athenaeum
     ._cmd_merges`) for the human-facing surface that renders this field.
 
     The five ``folded_sources``/``aliases_added``/``links_rewritten``/

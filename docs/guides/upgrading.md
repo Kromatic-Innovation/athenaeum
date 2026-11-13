@@ -2,10 +2,10 @@
 
 # Upgrading and data lifecycle
 
-## I want to know what's going away in 0.24.0
+## I want to know what's gone in 0.24.0
 
 `athenaeum merges` and `athenaeum questions` are removed in 0.24.0. Every
-command either surface offers has a direct `athenaeum decisions`
+command either surface offered has a direct `athenaeum decisions`
 replacement — same flags, output and exit codes, just under the unified
 queue's name:
 
@@ -23,10 +23,14 @@ queue's name:
 | `athenaeum questions next` | `athenaeum decisions next` |
 | `athenaeum questions count` | `athenaeum decisions count` |
 
-Until 0.24.0 ships, the left column keeps working exactly as before — each
-prints a one-line deprecation warning to stderr naming its own replacement
-from the table above, nothing else changes. See [Answering pending
-decisions](decisions.md) for the full `athenaeum decisions` surface.
+On 0.23.x the left column still works and prints a one-line deprecation
+warning to stderr naming its own replacement from the table above; on 0.24.0
+each one is an unknown command. The switch that silenced those warnings
+(`librarian.deprecated_cli_surfaces_enabled` and
+`ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`) is removed with them; a stale
+yaml key is ignored with a warning, like every other removed key. See
+[Answering pending decisions](decisions.md) for the full
+`athenaeum decisions` surface.
 
 `athenaeum run` doesn't just add to your knowledge base — once a
 non-contradictory cluster has been compiled into its canonical

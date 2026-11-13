@@ -350,7 +350,7 @@ def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
     athenaeum#715's cut-over this command's own OLD confidence/suppression-gate
     algorithm no longer exists, so it refuses to run (rather than silently
     doing nothing) when the comparator subsystem is disabled — the same
-    posture ``athenaeum merges recompare`` already takes.
+    posture ``athenaeum decisions recompare`` already takes.
     """
     from athenaeum.config import load_config, resolve_comparator_enabled
     from athenaeum.wiki_dedupe import propose_wiki_page_merges

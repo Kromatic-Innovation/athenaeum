@@ -971,7 +971,7 @@ operator-ruled non-blocker of athenaeum#1256 — so `athenaeum.retire` holds
 multi-member clusters conservatively until that lands, rather than either
 path running in parallel. The other live reader of the new (page-level)
 path (besides `athenaeum.wiki_dedupe` above) is the explicit, opt-in
-`athenaeum merges recompare` command, which re-runs the comparator over the
+`athenaeum decisions recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.
 
