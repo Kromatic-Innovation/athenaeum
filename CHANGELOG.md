@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `split-oversize` and the `librarian.oversize_page_action: split`
+  disposition no longer split a compiled page at its lone top-level `#
+  <Name>` title heading (moving the whole body into one child renamed
+  `<Name>: <Name>`); the split now moves to the next heading depth down
+  when the shallowest heading is a single title, and a split that would
+  still yield exactly one child is refused and degrades to `review` like
+  the existing no-heading case (athenaeum#2524).
+
 - `athenaeum doctor` now ends its report with a short note when one or more
   checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
   install until setup is complete and pointing back at the per-FAIL `fix:`
