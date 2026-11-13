@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.config import resolve_structured_upsert
+from athenaeum.config import resolve_page_type_field_groups, resolve_structured_upsert
 from athenaeum.librarian import process_one, tier0_structured_upsert
 from athenaeum.models import EntityIndex, RawFile, parse_frontmatter
 
@@ -975,3 +975,66 @@ def test_declared_group_for_a_different_page_type_does_not_apply_here(
     )
     assert out is not None and out.status == "applied"
     assert out.field_group_misfits == ()
+
+
+class TestResolvePageTypeFieldGroupsDirect:
+    """Direct coverage of ``athenaeum.config.resolve_page_type_field_groups``
+    (issue athenaeum#2197), standing in for
+    ``tests/test_config_resolver_parity_generic.py``'s generic yaml-key-read
+    check, which excludes this resolver as a
+    ``_STRUCTURED_CONTAINER_VALUE`` (see that module's docstring): the real
+    shape is THREE levels deep (``librarian.field_groups.<page_type>.
+    <group_name>`` -> a list of field names), which no sentinel in its
+    generic battery can reach. This class proves the yaml key is actually
+    read, the same property the generic check guards for every other
+    resolver.
+    """
+
+    def test_missing_or_non_dict_config_returns_empty(self) -> None:
+        assert resolve_page_type_field_groups(None) == {}
+        assert resolve_page_type_field_groups({}) == {}
+        assert resolve_page_type_field_groups({"librarian": {}}) == {}
+
+    def test_real_declaration_is_read(self) -> None:
+        config = {
+            "librarian": {
+                "field_groups": {
+                    "person": {"deal": ["crm_deal_name", "crm_deal_amount"]},
+                }
+            }
+        }
+        assert resolve_page_type_field_groups(config) == {
+            "person": {"deal": ("crm_deal_name", "crm_deal_amount")}
+        }
+
+    def test_malformed_entries_are_dropped_not_half_applied(self) -> None:
+        config = {
+            "librarian": {
+                "field_groups": {
+                    # non-dict groups value -- dropped.
+                    "company": "not-a-dict",
+                    # non-string/empty group name -- dropped.
+                    "person": {"": ["crm_deal_name"], 7: ["x"]},
+                    # non-list / empty field list -- dropped.
+                    "project": {"deal": "crm_deal_name"},
+                }
+            }
+        }
+        assert resolve_page_type_field_groups(config) == {}
+
+    def test_multiple_page_types_and_groups_all_read(self) -> None:
+        config = {
+            "librarian": {
+                "field_groups": {
+                    "person": {
+                        "deal": ["crm_deal_name", "crm_deal_amount"],
+                        "role": ["crm_title"],
+                    },
+                    "company": {"deal": ["crm_deal_name"]},
+                }
+            }
+        }
+        result = resolve_page_type_field_groups(config)
+        assert result["person"]["deal"] == ("crm_deal_name", "crm_deal_amount")
+        assert result["person"]["role"] == ("crm_title",)
+        assert result["company"]["deal"] == ("crm_deal_name",)
