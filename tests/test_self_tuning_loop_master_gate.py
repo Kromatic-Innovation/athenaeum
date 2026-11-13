@@ -79,6 +79,16 @@ _EXCLUDED_PROPOSAL_MODULES: dict[str, str] = {
         "different epic (athenaeum#1063), own master key "
         "(resolve_rule_proposals_enabled), not part of athenaeum#719's loop"
     ),
+    # Issue athenaeum#2197: has no detector at all -- its ONE caller
+    # (tier0_structured_upsert's REASON_FIELD_GROUP_MISFIT refusal) raises a
+    # proposal SYNCHRONOUSLY, inline in the write path, the moment a misfit
+    # occurs. There is no signal to mine on a schedule and nothing a nightly
+    # pass would find that the write path did not already record.
+    "schema_amendment_proposals": (
+        "raised synchronously from the structured-upsert misfit path "
+        "(athenaeum.structured_upsert's REASON_FIELD_GROUP_MISFIT), not "
+        "mined nightly from a signal ledger; there is no detector to gate"
+    ),
 }
 
 

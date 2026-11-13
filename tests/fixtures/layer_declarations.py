@@ -274,6 +274,10 @@ MODULE_LAYER: dict[str, int] = {
     # proposal drafters, same deterministic L4 peer shape as dimension_proposals.py.
     "tier_movement_proposals": 4,
     "policy_pack_edit_proposals": 4,
+    # Issue athenaeum#2197: schema-amendment proposal ledger -- same
+    # deterministic L4 peer shape as tier_movement_proposals.py (imports
+    # store.py, L3; imported by the L4 librarian/batch and decisions.py).
+    "schema_amendment_proposals": 4,
     # Issue athenaeum#719: shape mining over the verdict ledger (L2) and the
     # dimension coordinate readers (L1/L2 upper bound) -- the self-tuning
     # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it
