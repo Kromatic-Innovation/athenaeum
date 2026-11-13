@@ -262,6 +262,7 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
     STARVATION_FIELD,
     STARVATION_STREAK_THRESHOLD,
     build_economics_and_alerts,
+    build_page_recompile_entry,
     read_combined_starvation_priority,
     read_stall_streaks,
     read_starvation_streaks,
@@ -5760,6 +5761,20 @@ class RunContext:
     # log line. See ``run_summary_log.REFUSAL_FIELD`` for the durable form.
     librarian_refusal: bool | None = None
 
+    # Issue athenaeum#2536: the oversized-page backlog block
+    # (``status.build_page_recompile_backlog``) measured by the athenaeum#310
+    # page-size guardrail near the end of ``run()`` — the SAME single wiki
+    # walk, so surfacing the backlog in the run summary costs no extra read
+    # (``status.scan_page_backlog`` produces the byte buckets that guardrail
+    # warns on AND the chars-based candidate scan in one pass). Stashed here
+    # rather than recomputed in ``emit_run_summary`` for exactly that
+    # reason. ``None`` means "never measured on this run" — true of every
+    # early-exit path that emits a summary before the guardrail runs
+    # (``stop_on_deadline``, the cluster-only/merge-only exits) — and omits
+    # the ledger key entirely rather than writing a falsely-healthy zero;
+    # see ``run_summary_log.build_page_recompile_entry``.
+    page_recompile_backlog: dict[str, Any] | None = None
+
     # Issue athenaeum#1184: cost/matches-per-file regression instrumentation.
     # ``total_matched`` sums ``ProcessingResult.matched`` (Tier-1 fan-out) across
     # every file the SYNCHRONOUS entity loop processed to completion.
@@ -6267,6 +6282,13 @@ class RunContext:
                 economics=economics,
                 alerts=econ_alerts,
                 refusal=refusal,
+                # Issue athenaeum#2536 AC6: the oversized-page backlog this
+                # run measured (see `page_recompile_backlog`'s own comment
+                # for why it is read, not recomputed, here). The builder
+                # returns None for an unmeasured run, which omits the key.
+                page_recompile=build_page_recompile_entry(
+                    self.page_recompile_backlog
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: durable ledger write skipped: %s", exc)
@@ -11388,13 +11410,38 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # want splitting into linked sub-entities. Never fatal, never mutating —
     # any failure here degrades to a single non-fatal note. The split-proposal
     # workflow is explicitly out of scope (issue athenaeum#310, moscow:could).
+    #
+    # Issue athenaeum#2536: the SAME walk now also produces the chars-based
+    # page-recompile candidate scan, stashed on `ctx` for the run summary
+    # (`RunContext.page_recompile_backlog`). One wiki read serves both the
+    # byte-based WARNING below and the backlog entry — `scan_page_backlog`
+    # exists precisely so neither surface pays for a second traversal.
     try:
-        from athenaeum.config import resolve_page_flag_bytes, resolve_page_warn_bytes
-        from athenaeum.status import scan_page_sizes
+        from athenaeum.config import (
+            resolve_oversize_hard_ceiling_chars,
+            resolve_page_flag_bytes,
+            resolve_page_size_threshold_chars,
+            resolve_page_warn_bytes,
+        )
+        from athenaeum.status import build_page_recompile_backlog, scan_page_backlog
 
         _pw_bytes = resolve_page_warn_bytes(ctx.config)
         _pf_bytes = resolve_page_flag_bytes(ctx.config)
-        _, _pages_flag = scan_page_sizes(ctx.wiki_root, _pw_bytes, _pf_bytes)
+        _threshold_chars = resolve_page_size_threshold_chars(ctx.config)
+        _ceiling_chars = resolve_oversize_hard_ceiling_chars(ctx.config)
+        _page_walk = scan_page_backlog(
+            ctx.wiki_root,
+            warn_bytes=_pw_bytes,
+            flag_bytes=_pf_bytes,
+            threshold_chars=_threshold_chars,
+            ceiling_chars=_ceiling_chars,
+        )
+        _pages_flag = _page_walk.pages_flag
+        ctx.page_recompile_backlog = build_page_recompile_backlog(
+            _page_walk.recompile,
+            threshold_chars=_threshold_chars,
+            ceiling_chars=_ceiling_chars,
+        )
         # Issue athenaeum#490 (slice A) / athenaeum#310: aggregate into ONE health-signal count
         # line rather than one WARNING per page — a corpus with ~35 oversized
         # pages previously buried the rest of the nightly log under 35 near-
