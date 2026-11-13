@@ -253,6 +253,38 @@ class TestOneWalkNotTwo:
         assert scan.recompile.candidates
         assert scan.pages_warn == [] and scan.pages_flag == []
 
+    def test_status_calls_the_combined_walk_once_and_the_old_scan_never(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The attribution the read-count above cannot give on its own:
+        ``status()`` reaches the page-size walk exactly ONCE, and never also
+        calls the superseded ``scan_page_sizes`` (which would be the second
+        walk AC3 forbids). ``status`` does read each page again for the
+        athenaeum#1730 uncited-sentence scan -- a different measurement, out
+        of this AC's scope -- so the claim is pinned at the page-size seam
+        rather than over raw file reads of a whole ``status()`` call.
+        """
+        from athenaeum import status as status_mod
+
+        calls = {"walk": 0, "legacy": 0}
+        real_walk = status_mod.scan_page_backlog
+        real_legacy = status_mod.scan_page_sizes
+
+        def counting_walk(*args: object, **kwargs: object) -> object:
+            calls["walk"] += 1
+            return real_walk(*args, **kwargs)  # type: ignore[arg-type]
+
+        def counting_legacy(*args: object, **kwargs: object) -> object:
+            calls["legacy"] += 1
+            return real_legacy(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(status_mod, "scan_page_backlog", counting_walk)
+        monkeypatch.setattr(status_mod, "scan_page_sizes", counting_legacy)
+
+        status_mod.status(_seed(tmp_path))
+
+        assert calls == {"walk": 1, "legacy": 0}
+
     def test_the_byte_based_line_is_marked_deprecated(self, tmp_path: Path) -> None:
         """AC3's other half: the superseded ``Oversized pages (warn/flag)``
         line says so in the OUTPUT, and names the removing release."""

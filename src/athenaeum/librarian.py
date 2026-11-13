@@ -53,7 +53,8 @@ are NOT librarian<->sibling cycle back-edges and stay deferred:
   propose_wiki_page_merges`` and ``from athenaeum.batch import
   process_batch_run`` — neither module imports librarian back; deferred for
   best-effort/optional-branch isolation, not cycle-breaking.
-- run loop: local ``from athenaeum.status import scan_page_sizes``.
+- run loop: local ``from athenaeum.status import build_page_recompile_backlog,
+  scan_page_backlog`` (issue athenaeum#2536; ``scan_page_sizes`` until then).
   ``status.py`` no longer imports librarian (it gets ``discover_raw_files``
   from ``intake`` now); this is a one-way edge kept deferred for best-effort
   page-size guardrail isolation.
