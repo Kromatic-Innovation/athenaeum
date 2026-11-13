@@ -51,8 +51,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum import pii, pii_attribution
+from athenaeum.compile_routing import CORRESPONDENT_EMAIL_KEY
 from athenaeum.corrections import resolve_target
-from athenaeum.librarian import CORRESPONDENT_EMAIL_KEY, process_one
+from athenaeum.librarian import process_one
 from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}

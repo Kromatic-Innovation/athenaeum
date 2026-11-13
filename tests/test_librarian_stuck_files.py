@@ -37,7 +37,6 @@ import pytest
 from athenaeum.librarian import (
     DEFAULT_STUCK_FILE_THRESHOLD,
     STUCK_FILE_PREFIX,
-    STUCK_MANIFEST_NAME,
     _load_stuck_ledger,
     _record_stuck_failure,
     _write_stuck_ledger,
@@ -45,6 +44,7 @@ from athenaeum.librarian import (
     run,
 )
 from athenaeum.models import EntityAction, RawFile
+from athenaeum.stuck_ledger import STUCK_MANIFEST_NAME
 from athenaeum.tiers import tier3_derive_actions
 
 # Reuse the deadline suite's run harness — the stuck-file loop lives in the same
