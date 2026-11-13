@@ -193,6 +193,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now also warns on stderr if it ever finds two pending items sharing one
   id (athenaeum#2517).
 
+- T1's `reason_code` on a model-path reject no longer defaults to
+  `different_entities` unconditionally; the model is now asked for its own
+  `reason_code` (`different_entities` or `other`) alongside its verdict and
+  reason, and a reject with a missing/mismatched `reason_code` degrades to
+  `pass_up` like any other schema violation. Before the fix, every
+  model-path T1 reject was stamped `different_entities` regardless of what
+  the free-text reason said — on a live store, 1893/1893 reason_code-bearing
+  T1 decisions carried that one value, including 1609 whose reason called
+  the pages a "duplicate"/"same entity". On the 158 human-reviewed
+  calibration samples the mislabeling concentrates where review disagreement
+  also concentrates: a deterministic replay of the fixed classification
+  over those samples' stored reasons found the subgroup the fix
+  reclassifies away from `different_entities` was overturned at roughly 3x
+  the rate (53% vs. 17%) of the subgroup whose label was already accurate;
+  the overall overturn rate (76/158, 48%) is unchanged by this fix alone,
+  since it corrects the label only, not T1's reject-vs-pass_up verdict
+  (athenaeum#2521).
+
+- The calibration audit sampler (`sample_tier_decision`) now stratifies by
+  `cluster_id`: once one near-duplicate-page burst's `cluster_id` has
+  contributed `librarian.audit_max_per_cluster` (default 5) audit items,
+  further draws from that same cluster are skipped for the rest of the run,
+  so one abnormally large burst can no longer fill the sample on volume
+  alone — live evidence showed 140+ of 158 human-reviewed T1 samples coming
+  from exactly one such family. `cluster_id` is an optional field on the
+  audit record now, wired through both the T1 and T2 merge-proposal screens
+  (`athenaeum.reasoning_screens`); callers that supply none (e.g. the
+  ATTRIBUTION tier) are unaffected (athenaeum#2521).
+
 - `decisions revalidate` (`athenaeum.pending_merges.revalidate_pending_merges`)
   no longer reports a source that was folded into another page the same
   way as a source that is genuinely gone — both used to collapse into one
