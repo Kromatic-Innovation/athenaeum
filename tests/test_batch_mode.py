@@ -4072,28 +4072,59 @@ class TestBatchSpendReservation:
         records = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
         assert [r["batch_id"] for r in records] == ["msgbatch_ok"]
 
-    def test_the_ledger_path_follows_the_spend_ledger_convention(
+    def test_the_ledger_path_always_resolves_into_the_cache_dir(
         self, tmp_path: Path
     ) -> None:
-        """AC1: ``<wiki_root>/…`` with the legacy ``<cache_dir>`` fallback."""
+        """Issue athenaeum#2469: always ``<cache_dir>/…``, never ``<wiki_root>/``.
+
+        Supersedes this test's previous form, which asserted the pre-athenaeum#2469
+        convention (``<wiki_root>/…`` with a legacy ``<cache_dir>`` fallback).
+        The reservation ledger is telemetry, and
+        :meth:`athenaeum.store.FilesystemStore.snapshot` is ``git add -A`` over
+        *wiki_root*, so a ledger left there is committed into corpus history.
+        """
         root = _seed_root(tmp_path, "s10", [])
         cache_dir = tmp_path / "s10-cache"
         cache_dir.mkdir()
-        # Fresh store: behind the seam.
+        # Fresh store: the cache dir, with nothing at the legacy location.
         assert spend.reservation_ledger_path(
             root / "wiki", cache_dir=cache_dir
-        ) == root / "wiki" / spend.RESERVATION_LEDGER_FILENAME
-        # Legacy store with records and nothing migrated: stays put.
-        # The fixture writes an actual RECORD, not a zero-byte file: issue
-        # athenaeum#1512 made "populated"/"migrated" a content check rather
-        # than bare existence, so an empty file no longer stands in for "has
-        # records" -- it now reads as the fresh-store case it literally is.
+        ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        # A populated cache-dir ledger keeps resolving to the same place.
         (cache_dir / spend.RESERVATION_LEDGER_FILENAME).write_text(
-            '{"batch_id":"msgbatch_legacy"}\n', encoding="utf-8"
+            '{"batch_id":"msgbatch_existing"}\n', encoding="utf-8"
         )
         assert spend.reservation_ledger_path(
             root / "wiki", cache_dir=cache_dir
         ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+
+    def test_a_legacy_wiki_root_ledger_is_migrated_and_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2469: the one-time move, seen through this transport.
+
+        The unit-level migration tests live in ``tests/test_spend.py``; this one
+        pins the behaviour at the batch transport's own call site, which is what
+        the superseded test above was guarding.
+        """
+        root = _seed_root(tmp_path, "s11", [])
+        cache_dir = tmp_path / "s11-cache"
+        cache_dir.mkdir()
+        legacy = root / "wiki" / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text(
+            json.dumps(
+                {"v": spend.RESERVATION_LEDGER_VERSION, "batch_id": "msgbatch_legacy"}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        resolved = spend.reservation_ledger_path(root / "wiki", cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not legacy.exists()
+        records = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["batch_id"] for r in records] == ["msgbatch_legacy"]
 
 
 # ---------------------------------------------------------------------------
