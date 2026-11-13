@@ -86,7 +86,6 @@ from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
-    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,  # noqa: F401 — re-exported for back-compat
     resolve_heartbeat_interval,
     resolve_model,
     resolve_page_size_threshold_chars,
@@ -6503,12 +6502,14 @@ def stamp_merge_provenance(
 # (pre-existing, issue athenaeum#1577) reason to never be imported BY tiers
 # at all -- so the resolver had to move rather than either side importing
 # the other, mirroring the exact DEFAULT_CLASSIFY_MODEL precedent this
-# module's own docstring records for issue athenaeum#640. Both names are
-# imported from there above (see the ``athenaeum.config`` import block) and
-# stay reachable as ``athenaeum.tiers.DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`` /
-# ``athenaeum.tiers.resolve_page_size_threshold_chars`` for backwards
-# compatibility -- every existing call site and test in this module is
-# unaffected.
+# module's own docstring records for issue athenaeum#640.
+# ``resolve_page_size_threshold_chars`` is imported from there above (see
+# the ``athenaeum.config`` import block) and used directly by this module's
+# own call sites below, so it stays reachable as
+# ``athenaeum.tiers.resolve_page_size_threshold_chars`` as a normal
+# consequence of that use. ``DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`` had no such
+# use here -- it was a pure back-compat re-export (issue athenaeum#2436
+# removed it); import it from :mod:`athenaeum.config` directly.
 
 # Issue athenaeum#1430: the three EscalationItem.conflict_type values
 # check_page_size_gate can produce (below), treated as one dedup FAMILY by
@@ -6579,13 +6580,6 @@ class _SplitChildPage:
     path: Path
 
 
-# A markdown heading line at any level (mirrors tiers._SECTION_HEADING_RE,
-# issue athenaeum#1181, exactly -- kept as a SEPARATE constant rather than
-# reused because this one additionally computes the shallowest depth
-# present, which that gate's section-scoping use case never needed).
-_SPLIT_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$", re.MULTILINE)
-
-
 def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
     """Split *body* into ``(heading_text, section_text)`` pairs at its
     TOP-LEVEL markdown heading depth (issue athenaeum#1248) -- the
@@ -6609,7 +6603,7 @@ def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
     section": a heading-less oversized page is left to the existing
     ``review`` route (the no-headings cohort is issue athenaeum#1282's job).
     """
-    matches = list(_SPLIT_HEADING_RE.finditer(body))
+    matches = list(_SECTION_HEADING_RE.finditer(body))
     if not matches:
         return []
     top_level = min(len(m.group(1)) for m in matches)
@@ -6911,8 +6905,8 @@ def check_page_size_gate(
     source_ref: str,
     config: dict[str, Any] | None,
     *,
+    existing_meta: dict[str, Any],
     existing_path: Path | None = None,
-    existing_meta: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
 ) -> EscalationItem | None:
     """Enforce the page-size invariant BEFORE a merge is dispatched (issue athenaeum#1182).
@@ -6971,7 +6965,7 @@ def check_page_size_gate(
         return None
 
     configured_action = resolve_oversize_page_action(config)
-    meta = existing_meta if existing_meta is not None else {}
+    meta = existing_meta
 
     if configured_action == "split" and existing_path is not None and wiki_root is not None:
         try:
@@ -7053,143 +7047,36 @@ def check_page_size_gate(
     # Issue athenaeum#2078 AC1 (operator ruling, 2026-10-15): the merge is no
     # longer suppressed here. "Allow the merges, even when the pages are
     # oversized. Then get the issue to split the pages done. Merges happen
-    # first, then splitting into sub-pages." When the caller gave us the
-    # real on-disk frontmatter dict (``existing_meta`` -- every production
-    # call site does; see ``tier3_derive_actions`` and both ``batch.py``
-    # sites), we flag it ``needs_split: true`` IN PLACE (the same
-    # mutate-then-let-the-caller-render pattern the athenaeum#1627
-    # audit_hook already uses on this exact dict) and return ``None`` so
-    # the merge proceeds normally. The flag only ever reaches disk if the
-    # merge itself produces a body the caller writes -- a failed/declined
-    # merge never persists this local ``meta`` mutation. ``decompose-page
-    # --flagged`` (issue athenaeum#2078 AC3) is the operator-facing split
-    # pass over pages carrying this flag; this gate never splits anything
-    # itself.
-    #
-    # A caller that does not pass ``existing_meta`` (e.g. the module's own
-    # older/simpler tests) cannot have the flag land anywhere real, so it
-    # keeps the pre-athenaeum#2078 "review" behaviour: escalate, page
-    # untouched.
-    if existing_meta is not None:
-        meta["needs_split"] = True
-        log.info(
-            "T3 merge allowed into oversized page, flagged needs_split "
-            "(issue athenaeum#2078): page=%s source=%s "
-            "existing_body_chars=%d threshold=%d action=%s",
-            action.name,
-            source_ref,
-            len(existing_body),
-            threshold,
-            configured_action,
-        )
-        return None
-
+    # first, then splitting into sub-pages." ``existing_meta`` is the real
+    # on-disk frontmatter dict every caller supplies (see
+    # ``tier3_derive_actions`` and both ``batch.py`` sites), so we flag it
+    # ``needs_split: true`` IN PLACE (the same mutate-then-let-the-caller-
+    # render pattern the athenaeum#1627 audit_hook already uses on this
+    # exact dict) and return ``None`` so the merge proceeds normally. The
+    # flag only ever reaches disk if the merge itself produces a body the
+    # caller writes -- a failed/declined merge never persists this local
+    # ``meta`` mutation. ``decompose-page --flagged`` (issue athenaeum#2078
+    # AC3) is the operator-facing split pass over pages carrying this flag;
+    # this gate never splits anything itself.
+    meta["needs_split"] = True
     log.info(
-        "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
-        "page=%s source=%s existing_body_chars=%d threshold=%d action=%s",
+        "T3 merge allowed into oversized page, flagged needs_split "
+        "(issue athenaeum#2078): page=%s source=%s "
+        "existing_body_chars=%d threshold=%d action=%s",
         action.name,
         source_ref,
         len(existing_body),
         threshold,
         configured_action,
     )
-    return EscalationItem(
-        raw_ref=source_ref,
-        entity_name=action.name,
-        conflict_type="oversize_page",
-        description=(
-            f"Page {action.name!r} is {len(existing_body)} chars, over "
-            f"the {threshold}-char page-size threshold (issue "
-            "athenaeum#1182). Merging another observation into it was "
-            "suppressed and the page was left unmodified. This page has "
-            "likely outgrown the atomic-page form and should be split "
-            "or demoted to a log (~/knowledge/logs/) by an operator -- "
-            "or, if librarian.oversize_page_action is already configured "
-            "to split/log_demote, it could not proceed automatically (no "
-            "markdown heading to split on, or no librarian.preserved_log_dir "
-            f"configured). The new observation from {source_ref} "
-            f"follows so it is not lost:\n\n{action.observations[:2000]}"
-        ),
-    )
-
-
-@dataclass
-class OversizePage:
-    """One wiki page over the page-size threshold (issue athenaeum#1182 AC3)."""
-
-    path: Path
-    chars: int
-    entity_type: str
-
-
-def enumerate_oversize_pages(
-    wiki_root: Path,
-    config: dict[str, Any] | None = None,
-    threshold: int | None = None,
-) -> list[OversizePage]:
-    """Read-only enumeration of pages over the page-size threshold (issue athenaeum#1182 AC3).
-
-    A non-mutating, dry-run-shaped listing for whoever runs it against the
-    live ``~/knowledge`` corpus this lane has no access to (see the issue's
-    own "criterion you cannot discharge" note -- the 84 pages it names
-    cannot be enumerated or dispositioned from inside a dev container with
-    no corpus, so this ships the ONE-COMMAND job instead of a fabricated
-    list). No wiki write, no reindex, no LLM call -- pure read.
-
-    Walk mirrors :meth:`~athenaeum.models.EntityIndex._load` exactly
-    (``wiki_root.glob("*.md")``, ``_``-prefixed files skipped -- issue
-    athenaeum#1182 explicitly keeps that exclusion unchanged, since the
-    genuinely huge ``_``-prefixed files are already correctly excluded from
-    the entity index and never merged into) and the filing lane's own
-    corpus methodology (non-underscore ``*.md`` only). A file that fails to
-    read/decode is skipped, matching ``EntityIndex._load``'s fail-open
-    behaviour, rather than raising and aborting the whole enumeration.
-
-    Measures a page's BODY (frontmatter stripped via
-    :func:`~athenaeum.models.parse_frontmatter`), not the raw file's byte
-    count, so a page's size here is exactly what
-    :func:`check_page_size_gate` would measure for that same page.
-    ``entity_type`` is the page's ``type:`` frontmatter field, or ``""``
-    when absent (the issue's own table records 9 of the 84 oversized pages
-    carrying no ``type:`` at all).
-
-    ``threshold`` defaults to :func:`resolve_page_size_threshold_chars`
-    (``config``'s ``librarian.page_size_threshold_chars``, or the built-in
-    default) so this reports the SAME threshold the live gate enforces
-    unless the caller deliberately asks for a different cut. Results are
-    sorted by ``chars`` descending -- the largest anomalies first.
-    """
-    resolved_threshold = (
-        threshold
-        if threshold is not None
-        else resolve_page_size_threshold_chars(config)
-    )
-    results: list[OversizePage] = []
-    for fpath in sorted(wiki_root.glob("*.md")):
-        if fpath.name.startswith("_"):
-            continue
-        try:
-            text = fpath.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        meta, body = parse_frontmatter(text)
-        if len(body) > resolved_threshold:
-            raw_type = meta.get("type") if meta else None
-            results.append(
-                OversizePage(
-                    path=fpath,
-                    chars=len(body),
-                    entity_type=str(raw_type) if raw_type else "",
-                )
-            )
-    results.sort(key=lambda p: p.chars, reverse=True)
-    return results
+    return None
 
 
 @dataclass
 class DemoteResult:
     """Outcome of one page's ``log_demote`` disposition (issue athenaeum#1214,
-    the operator-directed counterpart to :func:`enumerate_oversize_pages`)."""
+    the operator-directed counterpart to :func:`check_page_size_gate`'s
+    reactive ``log_demote`` path)."""
 
     path: Path
     dest: Path | None
@@ -7295,15 +7182,16 @@ def tier3_derive_actions(
     test that calls this function directly) disables the hook entirely —
     byte-identical behavior to before this issue.
 
-    Split out of :func:`tier3_write` (issue athenaeum#898) so a caller that needs a
-    checkpoint BETWEEN "all this file's LLM calls are done" and "this file's
-    writes land on disk" has one — see :func:`athenaeum.librarian.process_one`,
-    which calls this directly (not :func:`tier3_write`) so it can raise
-    :class:`~athenaeum.models.RawFileOverBudgetError` here, before
-    ``pending_updates`` is ever flushed. :func:`tier3_write` itself calls this
-    then flushes unconditionally, preserving its exact pre-athenaeum#898 contract for
-    every other caller (``batch.py`` does not use either function; the tests
-    that call ``tier3_write`` directly are unaffected).
+    Makes every Tier-3 LLM call and writes NOTHING itself (issue athenaeum#898)
+    -- the caller flushes ``pending_updates`` once every action has landed.
+    :func:`athenaeum.librarian.process_one` is the real synchronous caller;
+    it flushes through :func:`athenaeum.librarian._apply_tier3_results`, the
+    flush path the librarian actually uses (``batch.py``'s two
+    synchronous-merge sites flush the same ``pending_updates`` shape
+    independently, via their own loop). Calling this function directly,
+    rather than through an intermediate write-and-flush wrapper, lets
+    ``process_one`` raise :class:`~athenaeum.models.RawFileOverBudgetError`
+    here, before ``pending_updates`` is ever flushed.
 
     ``max_api_calls_for_file`` / ``max_runtime_for_file`` / ``calls_before_file`` /
     ``started_at_file`` (issue athenaeum#994) are this file's per-file LLM-call
@@ -7324,19 +7212,39 @@ def tier3_derive_actions(
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
 
-    Invariant (issue athenaeum#663): actions are evaluated in order and a mid-loop
-    *processing* exception (a malformed response, a transient API error)
-    still discards everything derived so far — see :func:`tier3_write`'s
-    docstring for the full rationale (re-derivation non-determinism makes a
-    partial-apply-then-retry-whole unsafe for an ordinary failure). The
-    over-budget path above is a deliberate, narrower exception to that
+    Invariant (issue athenaeum#663): this all-or-nothing boundary is
+    DELIBERATE and is preserved. Actions are evaluated in order and a
+    mid-loop *processing* exception (a malformed response, a transient API
+    error) discards everything derived so far for this raw file -- this
+    function writes nothing itself, and the caller only ever flushes
+    ``pending_updates`` AFTER this function returns cleanly (see
+    :func:`athenaeum.librarian._apply_tier3_results` and ``batch.py``'s own
+    flush loop), so a raise here guarantees the flush never happens at all.
+    A raw file's action set is re-derived from scratch on every run by the
+    non-deterministic LLM tiers (Tier 2 classification), and a failed file
+    is retried WHOLE (never unlinked on the failure path — see
+    ``_run_entity_tier_phase``). Applying a subset of a file's actions and
+    then retrying the whole file would therefore re-apply the
+    already-applied subset — a ``create`` whose page now exists re-enters
+    as an ``update`` and re-merges the same observations; an ``update``
+    re-merges into an already-merged page. The boundary guarantees each raw
+    file's derived actions apply exactly-once-or-not-at-all, so no
+    partial/corrupt wiki state is reachable on a mid-file failure. The cost
+    of this guarantee — a single reliably-failing call discarding the
+    file's other successful work forever — is addressed NOT by weakening
+    the boundary (which cannot be done safely given the non-deterministic
+    re-derivation) but by the stuck-file ledger in ``librarian.py``, which
+    bounds and surfaces a permanently-failing file instead of retrying it
+    silently every night.
+
+    The over-budget path above is a deliberate, narrower exception to that
     invariant (issue athenaeum#994): the actions that already landed a
     result are not "a failure to retry", they are completed, billed work,
     and the raw file is left in place either way — so a future run's tier-1
     match against the already-written page prevents the same duplicate work
     from being re-derived, exactly as it does for any other pre-existing
-    wiki entity. ``tier3_write``'s flush step cannot violate either
-    invariant because it only runs after this function returns cleanly.
+    wiki entity. The caller's flush step cannot violate either invariant
+    because it only runs after this function returns cleanly.
 
     On a mid-file *processing* failure the propagating exception is
     annotated with ``athenaeum_failing_action`` (``"<kind>:<name>"``); the
@@ -7523,63 +7431,6 @@ def tier3_derive_actions(
                 )
 
     return new_entities, pending_updates, updated_uids, escalations
-
-
-def tier3_write(
-    raw: RawFile,
-    actions: list[EntityAction],
-    index: EntityIndex,
-    wiki_root: Path,
-    client: LLMBackend,
-    usage: TokenUsage | None = None,
-    config: dict[str, Any] | None = None,
-) -> tuple[list[WikiEntity], list[str], list[EscalationItem]]:
-    """Process all entity actions for a raw file through the capable LLM.
-
-    All LLM calls are made first (:func:`tier3_derive_actions`); disk writes
-    are deferred until all actions succeed, preventing partial writes on
-    mid-processing failure.
-
-    Invariant (issue athenaeum#663): this all-or-nothing boundary is DELIBERATE and is
-    preserved. A raw file's action set is re-derived from scratch on every run
-    by the non-deterministic LLM tiers (Tier 2 classification), and a failed
-    file is retried WHOLE (never unlinked on the failure path — see
-    ``_run_entity_tier_phase``). Applying a subset of a file's actions and then
-    retrying the whole file would therefore re-apply the already-applied subset
-    — a ``create`` whose page now exists re-enters as an ``update`` and
-    re-merges the same observations; an ``update`` re-merges into an
-    already-merged page. The boundary guarantees each raw file's derived actions
-    apply exactly-once-or-not-at-all, so no partial/corrupt wiki state is
-    reachable on a mid-file failure. The cost of this guarantee — a single
-    reliably-failing call discarding the file's other successful work forever —
-    is addressed NOT by weakening the boundary (which cannot be done safely
-    given the non-deterministic re-derivation) but by the stuck-file ledger in
-    ``librarian.py``, which bounds and surfaces a permanently-failing file
-    instead of retrying it silently every night.
-
-    On a mid-file failure the propagating exception is annotated with
-    ``athenaeum_failing_action`` (``"<kind>:<name>"``) so the caller can record
-    which action failed; the exception object and type are otherwise unchanged.
-
-    Returns (new_entities, updated_uids, escalation_items).
-
-    Operator ruling on athenaeum#1600 (2026-09-10): "LLMs (the librarian)
-    should be rewriting everything. There should be no prohibition there."
-    This used to refuse the WHOLE batch up front when any action in *actions*
-    targeted ``type: person`` (``PersonNeverLLMRewriteError`` /
-    ``_refuse_person_rewrite``, issue athenaeum#1183 AC4); that guard was
-    withdrawn and removed (athenaeum#1597 AC1) — a person action is dispatched
-    like any other now.
-    """
-    new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
-        raw, actions, index, wiki_root, client, usage=usage, config=config
-    )
-
-    # All LLM calls succeeded — apply updates atomically
-    for path, content in pending_updates:
-        atomic_write_text(path, content)
-
-    return new_entities, updated_uids, escalations
 
 
 # ---------------------------------------------------------------------------

@@ -1156,8 +1156,9 @@ def _add_merge_rejection_declaration(source_path: Path, other_name: str) -> bool
     replacement for a former ``_add_refines_declaration`` helper that
     wrote this same suppression fact into ``refines:`` (a fabricated
     directional "A refines B" claim that was never adjudicated);
-    ``merge._declared_relationship`` reads this field and returns the
-    distinct ``"declared-merge-rejection"`` rationale, so Lane 1's
+    :func:`athenaeum.declared_relationships.declared_relationship` reads
+    this field and returns the distinct ``"declared-merge-rejection"``
+    rationale, so Lane 1's
     declared-pair short-circuit still suppresses future detector firings
     on this pair — with NO config gate — while never again writing
     ``refines:`` to record a rejection. Mechanically identical to the
@@ -2989,9 +2990,10 @@ def resolve_merge(
         # from "A refines B", so it must never be recorded as a
         # fabricated `refines:` declaration. Instead write an honest,
         # non-directional `merge_rejected_with:` record into the first
-        # source memory naming the second. merge.py's
-        # `_declared_relationship` reads this field and returns the
-        # distinct `"declared-merge-rejection"` rationale, which keeps
+        # source memory naming the second.
+        # `athenaeum.declared_relationships.declared_relationship` reads
+        # this field and returns the distinct `"declared-merge-rejection"`
+        # rationale, which keeps
         # Lane 1 / athenaeum#167's declared-pair short-circuit suppressing this
         # pair on future detector runs with NO config gate — deleting the
         # marker outright without a replacement would make every rejected

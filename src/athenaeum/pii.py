@@ -44,18 +44,21 @@ Five pieces, in the order the issue settles them:
    is just the writer-facing convenience that resolves to that same excluded
    root under the conventional ``pii`` entity class.
 
-2. **Entity-page lint** (:data:`PII_FLAG` / :func:`has_inline_contact_fields` /
-   :func:`lint_inline_contact_fields`) — flags durable/archival-contact
+2. **Entity-page lint** (:data:`PII_FLAG`) — flags durable/archival-contact
    confusion on a page that stays IN the corpus: an entity page should carry
    only durable identifiers (name, LinkedIn, record id, Google-Contact id);
-   inline ``emails:`` / ``phones:`` frontmatter (or an email/phone-shaped
-   string in the body) is flagged as a validation warning, mirroring the
-   athenaeum#424 ``memory_class`` precedent (:mod:`athenaeum.schemas` / :mod:`athenaeum._lint`)
-   — recoverable, not a hard failure, because migrating existing pages is
-   athenaeum#437. ``pii: true`` is the belt-and-suspenders flag an operator can set on
-   a page that legitimately carries PII inline in narrative; every corpus
-   consumer additionally excludes a ``pii: true`` page even when it is NOT on
-   the excluded surface (see point 3).
+   inline ``emails:`` / ``phones:`` frontmatter is flagged as a validation
+   warning by :class:`athenaeum.schemas.WikiBase`'s ``_warn_inline_contact_fields``
+   validator, mirroring the athenaeum#424 ``memory_class`` precedent — recoverable,
+   not a hard failure, because migrating existing pages is athenaeum#437. The
+   body-text half of the same check (an email/phone-shaped string in the
+   page body) is the corpus-wide sweep below (point 2b, :func:`scan_corpus_pii`
+   / ``athenaeum storage lint-pii``), which has access to the body a
+   frontmatter-only pydantic validator does not. ``pii: true`` is the
+   belt-and-suspenders flag an operator can set on a page that legitimately
+   carries PII inline in narrative; every corpus consumer additionally
+   excludes a ``pii: true`` page even when it is NOT on the excluded surface
+   (see point 3).
 
 3. **Corpus-consumer wiring for ``pii: true``** — :func:`is_pii_flagged`
    is the single predicate (mirrors :func:`athenaeum.authority.is_pointer_stub`)
@@ -353,8 +356,8 @@ DURABLE_IDENTIFIER_FIELDS: frozenset[str] = frozenset(
 #: The two frontmatter fields that hold an entity page's NAME. When one of
 #: these IS an email address the page is excluded from the athenaeum#502 automatic
 #: migration path (renaming is unsafe — see :data:`DURABLE_IDENTIFIER_FIELDS`);
-#: :func:`name_field_holds_pii` reports the population so the separate slice can
-#: pick it up.
+#: :func:`name_field_pii_values` reports the population (a non-empty list) so
+#: the separate slice can pick it up.
 NAME_FIELDS: tuple[str, ...] = ("name", "preferred_name")
 
 # A conservative email-shaped token — good enough to flag a body/narrative
@@ -1267,9 +1270,9 @@ def name_field_pii_values(meta: dict[str, Any]) -> list[str]:
     contact address (Streak email-only import). This returns the actual
     contact datum(s) so a caller can distinguish "this specific token is the
     preserved name-field identifier" from any other inline token on the page
-    (issue athenaeum#1461) — :func:`name_field_holds_pii` only reports whether such
-    a token exists, which is enough to COUNT the population but not enough to
-    exclude just that value from an unrelated rewrite. Order-preserving,
+    (issue athenaeum#1461) — a bare boolean would be enough to COUNT the
+    population but not enough to exclude just that value from an unrelated
+    rewrite. Order-preserving,
     deduped, mirroring :func:`find_inline_emails`/:func:`find_inline_phones`.
     """
     if not meta:
@@ -1285,20 +1288,6 @@ def name_field_pii_values(meta: dict[str, Any]) -> list[str]:
                 if token not in seen:
                     seen.append(token)
     return seen
-
-
-def name_field_holds_pii(meta: dict[str, Any]) -> bool:
-    """True when a ``name:`` / ``preferred_name:`` value is email/phone-shaped.
-
-    The athenaeum#502 name-is-an-email population: ~80 live pages whose NAME is a raw
-    contact address (Streak email-only import). These are deliberately EXCLUDED
-    from the automatic migration path — renaming a page changes its slug and
-    breaks inbound edges (:data:`DURABLE_IDENTIFIER_FIELDS`) — and handled in a
-    separate slice. This predicate lets the bulk migrator COUNT and surface the
-    excluded population so the operator sees exactly how many pages the
-    follow-up slice must cover, rather than the class silently vanishing.
-    """
-    return bool(name_field_pii_values(meta))
 
 
 # ---------------------------------------------------------------------------
@@ -1459,77 +1448,18 @@ def derive_display_name_from_email(email: str) -> str | None:
     return " ".join(p.capitalize() for p in parts)
 
 
-def _frontmatter_contact_values(meta: dict[str, Any]) -> dict[str, list[str]]:
-    """Return ``{field: [values]}`` for any non-empty contact field present."""
-    found: dict[str, list[str]] = {}
-    for field in CONTACT_FRONTMATTER_FIELDS:
-        raw = meta.get(field)
-        if raw is None:
-            continue
-        values = raw if isinstance(raw, list) else [raw]
-        values = [str(v).strip() for v in values if str(v).strip()]
-        if values:
-            found[field] = values
-    return found
-
-
-def has_inline_contact_fields(meta: dict[str, Any], body: str = "") -> bool:
-    """True when *meta*/*body* carry archival contact data on an entity page.
-
-    Checks (a) the ``emails``/``phones`` frontmatter fields for any non-empty
-    value, and (b) the body text for an email- or phone-shaped token. Does
-    NOT consult :data:`PII_FLAG` — that is a separate belt-and-suspenders
-    exclusion signal (point 3), not a suppressor of this lint. A page that is
-    flagged ``pii: true`` AND still carries inline contact data is arguably
-    doing the right corpus-exclusion thing already, but the lint still
-    reports the shape so an operator auditing entity pages sees it (the flag
-    changes what the CORPUS does with the page, not whether the page's
-    shape is worth flagging).
-    """
-    if _frontmatter_contact_values(meta):
-        return True
-    return bool(find_inline_emails(body) or find_inline_phones(body))
-
-
-def lint_inline_contact_fields(
-    meta: dict[str, Any], body: str = "", fpath: Path | None = None
-) -> str | None:
-    """Return a lint message when an entity page carries inline contact data.
-
-    Mirrors :func:`athenaeum._lint.lint_untyped_memory_class`'s shape: a pure
-    function returning ``None`` (nothing to report) or a human-readable
-    message naming the file when *fpath* is given. Intended for a batch
-    lint pass over a wiki tree; :func:`has_inline_contact_fields` is the
-    underlying boolean predicate for callers (e.g. a pydantic validator)
-    that want a ``UserWarning`` instead of a collected message — see
-    :class:`athenaeum.schemas.PersonWiki`'s ``_warn_inline_contact_fields``.
-    """
-    if not has_inline_contact_fields(meta, body):
-        return None
-    fields = sorted(_frontmatter_contact_values(meta))
-    reasons: list[str] = []
-    if fields:
-        reasons.append(f"frontmatter field(s) {fields!r}")
-    if find_inline_emails(body):
-        reasons.append("email-shaped text in body")
-    if find_inline_phones(body):
-        reasons.append("phone-shaped text in body")
-    detail = "; ".join(reasons)
-    msg = f"inline contact data on entity page ({detail})"
-    return f"{fpath}: {msg}" if fpath else msg
-
-
 # ---------------------------------------------------------------------------
 # 2b. Corpus-wide PII lint — any file under wiki/, not only entity pages (athenaeum#495)
 # ---------------------------------------------------------------------------
 #
-# The entity-page lint above (:func:`lint_inline_contact_fields`) only ever
-# looks at entity pages — the pydantic boundary (:class:`athenaeum.schemas.PersonWiki`)
-# runs it per-page, and athenaeum#479's migration walks the same ``wiki/*.md`` entity
-# set. athenaeum#495 measured the gap that leaves: 790 pages carry an email in *body
-# text with no ``emails:`` frontmatter*, and the sample is dominated by the
-# corpus's own ``_``-prefixed queue/index/archive files and a stale ``.bak`` —
-# none of which the entity-page lint or the entity-page migration ever open.
+# The entity-page lint (:class:`athenaeum.schemas.WikiBase`'s
+# ``_warn_inline_contact_fields`` validator) only ever looks at entity pages'
+# frontmatter — the pydantic boundary runs it per-page, and athenaeum#479's
+# migration walks the same ``wiki/*.md`` entity set. athenaeum#495 measured the
+# gap that leaves: 790 pages carry an email in *body text with no
+# ``emails:`` frontmatter*, and the sample is dominated by the corpus's own
+# ``_``-prefixed queue/index/archive files and a stale ``.bak`` — none of
+# which the entity-page lint or the entity-page migration ever open.
 # ``_pending_merges_archive.md`` in particular embeds full draft bodies (every
 # contact datum copied verbatim) inside ``wiki/``, so it is in the corpus and
 # recallable while sitting in the *least* obvious place anyone would look.
@@ -6586,7 +6516,6 @@ __all__ = [
     "CONTACT_FRONTMATTER_FIELDS",
     "DURABLE_IDENTIFIER_FIELDS",
     "NAME_FIELDS",
-    "name_field_holds_pii",
     "name_field_pii_values",
     "ROLE_LOCALPARTS",
     "derive_display_name_from_email",
@@ -6604,8 +6533,6 @@ __all__ = [
     "SERVICE_ADDRESS_DOMAINS",
     "SERVICE_ADDRESSES",
     "is_service_address",
-    "has_inline_contact_fields",
-    "lint_inline_contact_fields",
     "CorpusPiiFinding",
     "DEFAULT_PII_SCAN_EXCLUDE_FILENAMES",
     "resolve_pii_scan_exclude_filenames",

@@ -8927,8 +8927,8 @@ def resolve_witness_keys(config: dict[str, Any] | None) -> dict[str, dict[str, A
 
 
 def resolve_source_trust_enabled(config: dict[str, Any] | None) -> bool:
-    """Unstable, under redesign: the source trust graph may change or be removed
-    without a deprecation cycle; do not build on it.
+    """Experimental: may change or be removed without a deprecation cycle; the
+    trust-graph design is under reconsideration. Do not build on it.
 
     Resolve the trust-graph pairwise-override feature flag (issue
     athenaeum#2330). DEFAULT ``False``.
@@ -8953,8 +8953,8 @@ def resolve_source_trust_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_source_trust_edges(config: dict[str, Any] | None) -> tuple[Any, ...]:
-    """Unstable, under redesign: the source trust graph may change or be removed
-    without a deprecation cycle; do not build on it.
+    """Experimental: may change or be removed without a deprecation cycle; the
+    trust-graph design is under reconsideration. Do not build on it.
 
     Resolve the operator-declared pairwise source-trust edges (issue
     athenaeum#2330) that `athenaeum.trust_graph.compare_sources` consults.

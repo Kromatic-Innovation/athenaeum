@@ -2129,10 +2129,11 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # spend, the safe direction for a financial consumer.
     "claude-opus-5": (5.0, 25.0),
     "claude-sonnet-5": (3.0, 15.0),
-    # claude-fable-5 / claude-mythos-5 (issue athenaeum#777): the "maintain the two
-    # tables together" comment on _SAMPLING_PARAMS_REJECTED_PREFIXES below was
-    # violated — that table has listed claude-fable-5 since athenaeum#577, but this
-    # one never did, so any run tagged claude-fable-5 or claude-mythos-5 fell
+    # claude-fable-5 / claude-mythos-5 (issue athenaeum#777): this table and the
+    # model-level sampling-capability table (a since-removed declaration-only
+    # primitive, uncalled, athenaeum#2437) were not kept in sync while both
+    # existed — the latter had listed claude-fable-5 since athenaeum#577, but
+    # this one never did, so any run tagged claude-fable-5 or claude-mythos-5 fell
     # through to the blended fallback and under-reported spend 6.67x ($1.50/$7.50
     # blended vs. the real $10.00/$50.00). claude-mythos-5 is Project
     # Glasswing-only but is a real, released model, priced identically to Fable.
@@ -2303,40 +2304,6 @@ def _longest_prefix_value(model: str | None, table: dict[str, _T]) -> _T | None:
     return best
 
 
-# Model-level sampling-parameter capability (issue athenaeum#577; epic athenaeum#515 deliverable 4,
-# which lands here ONCE — athenaeum#573 reads this rather than re-declaring it). Records
-# where ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400: the Claude 4.7+
-# / 5-family request surface removed them, while earlier tiers still accept them.
-# This is a DECLARATION for callers to consult, NOT a step toward sending sampling
-# parameters — athenaeum sends none on any path. Verified 2026-08-01 against the
-# ``claude-api`` skill (the source of truth for model facts, per hestia#1055).
-# Keyed by the same longest-prefix ``startswith`` style as the rate table above;
-# maintain the four tables together.
-_SAMPLING_PARAMS_REJECTED_PREFIXES: dict[str, bool] = {
-    # Rejected — sampling parameters return HTTP 400 on these models.
-    "claude-opus-5": True,
-    "claude-opus-4-8": True,
-    "claude-opus-4-7": True,
-    "claude-sonnet-5": True,
-    "claude-fable-5": True,
-    # Accepted — sampling parameters are still honored on these tiers.
-    "claude-haiku-4-5": False,
-    "claude-sonnet-4-6": False,
-}
-
-
-def _sampling_params_rejected(model: str | None) -> bool | None:
-    """Whether ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400 for
-    *model* (longest-prefix match), or ``None`` if *model* matches no recorded
-    prefix.
-
-    Declaration only (issue athenaeum#577): athenaeum sends no sampling parameters —
-    this exists so a caller (e.g. athenaeum#573) can consult one authoritative table
-    instead of re-deriving the request-surface rule from a training prior.
-    """
-    return _longest_prefix_value(model, _SAMPLING_PARAMS_REJECTED_PREFIXES)
-
-
 # Model-level prompt-caching capability (issue athenaeum#927). Records the MINIMUM
 # cacheable prefix length, in tokens. A ``cache_control`` breakpoint on a prefix
 # shorter than this is accepted by the API and then silently ignored — no error,
@@ -2353,8 +2320,8 @@ def _sampling_params_rejected(model: str | None) -> bool | None:
 # Verified 2026-08-15 against the ``claude-api`` skill (the source of truth for
 # model facts, per hestia#1055); it agrees with the per-model figures already
 # recorded in prose at ``resolutions.py``'s athenaeum#230 breakpoint comment.
-# Keyed by the same longest-prefix ``startswith`` style as the rate table and
-# _SAMPLING_PARAMS_REJECTED_PREFIXES above; maintain the four tables together.
+# Keyed by the same longest-prefix ``startswith`` style as the rate table
+# above; maintain the three tables together.
 _MIN_CACHEABLE_PREFIX_TOKENS: dict[str, int] = {
     # Claude 5 tier — 512.
     "claude-opus-5": 512,
@@ -2443,11 +2410,10 @@ def min_cacheable_prefix_tokens(model: str | None) -> int | None:
 #
 # Verified 2026-09-03 against the ``claude-api`` skill (the source of truth for
 # model facts, per hestia#1055). Keyed by the same longest-prefix ``startswith``
-# style as the rate table and _SAMPLING_PARAMS_REJECTED_PREFIXES /
-# _MIN_CACHEABLE_PREFIX_TOKENS above; maintain the four tables together. An
-# unrecorded id resolves to ``None`` (unchanged behaviour), never a guess — this
-# table must not become a gate a newly-released model has to be added to before
-# it works.
+# style as the rate table and _MIN_CACHEABLE_PREFIX_TOKENS above; maintain the
+# three tables together. An unrecorded id resolves to ``None`` (unchanged
+# behaviour), never a guess — this table must not become a gate a
+# newly-released model has to be added to before it works.
 _ADAPTIVE_THINKING_SUPPORTED_PREFIXES: dict[str, bool] = {
     # Supported — adaptive thinking is the on-mode for these tiers.
     "claude-opus-5": True,

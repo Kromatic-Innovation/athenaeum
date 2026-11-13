@@ -216,9 +216,6 @@ from athenaeum.store import (
     _pid_alive,
     heartbeat_age_seconds,
     is_stale,
-    lease_break_lockfile,
-    lease_holds_current_inode,
-    lease_open_fd,
     read_holder,
 )
 
@@ -447,29 +444,15 @@ class RunLock:
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_stop = threading.Event()
 
-    # -- internals -----------------------------------------------------------
-    #
-    # These three delegate to athenaeum.store (issue athenaeum#979, S4 — MOVED,
-    # not copied: see that module's docstring). ``acquire``/``release``/
-    # ``heartbeat`` below no longer call them directly (they go through
-    # athenaeum.store.FileLease instead, the same engine these delegate to) —
-    # they are kept, unchanged in name/behavior, because tests exercise them
-    # directly (``lock._open_fd()``, ``lock._holds_current_inode(fd)``,
-    # ``lock._break_lock()``) as this module's own test-observable surface.
-
-    def _open_fd(self) -> int:
-        return lease_open_fd(self.lockfile)
-
-    def _holds_current_inode(self, fd: int) -> bool:
-        """True if *fd* refers to the inode currently at the lock path (issue athenaeum#526)."""
-        return lease_holds_current_inode(fd, self.lockfile)
-
-    def _break_lock(self) -> None:
-        """Unlink the lockfile so a fresh ``flock`` inode can be acquired."""
-        try:
-            lease_break_lockfile(self.lockfile)
-        except OSError as exc:  # pragma: no cover - unusual FS error
-            log.warning("runlock: could not unlink stale lockfile: %s", exc)
+    # Issue athenaeum#979 (S4): the open/flock/inode-check/unlink mechanics
+    # formerly private to this class MOVED to athenaeum.store (FileLease and
+    # the lease_* module functions) — see that module's docstring.
+    # ``acquire``/``release``/``heartbeat`` below go through
+    # ``athenaeum.store.FileLease`` directly, and the tests that used to
+    # reach ``lock._open_fd()`` / ``lock._holds_current_inode(fd)`` /
+    # ``lock._break_lock()`` now call ``athenaeum.store.lease_open_fd`` /
+    # ``lease_holds_current_inode`` / ``lease_break_lockfile`` directly
+    # (athenaeum#2437).
 
     # -- public API --------------------------------------------------------
 

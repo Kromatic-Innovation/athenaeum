@@ -18,9 +18,7 @@ import pytest
 from athenaeum.models import (
     _BLENDED_INPUT_USD_PER_MTOK,
     _BLENDED_OUTPUT_USD_PER_MTOK,
-    _SAMPLING_PARAMS_REJECTED_PREFIXES,
     _rates_for_model,
-    _sampling_params_rejected,
 )
 
 _BLENDED = (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
@@ -135,85 +133,3 @@ def test_longest_prefix_precedence_holds() -> None:
     assert _rates_for_model("claude-sonnet-4-6") == (3.0, 15.0)
     assert _rates_for_model("claude-haiku-4-5-20251001") == (1.0, 5.0)
 
-
-# ---------------------------------------------------------------------------
-# Sampling-parameter capability (epic athenaeum#515 deliverable 4; athenaeum#573 reads this)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "model,rejected",
-    [
-        ("claude-opus-5", True),
-        ("claude-opus-4-8", True),
-        ("claude-opus-4-7", True),
-        ("claude-sonnet-5", True),
-        ("claude-fable-5", True),
-        ("claude-haiku-4-5", False),
-        ("claude-haiku-4-5-20251001", False),
-        ("claude-sonnet-4-6", False),
-    ],
-)
-def test_sampling_capability_classification(model: str, rejected: bool) -> None:
-    # temperature/top_p/top_k return 400 on the 4.7+/5-family surface and are
-    # accepted on Haiku 4.5 / Sonnet 4.6. This is a declaration only — athenaeum
-    # sends no sampling parameters.
-    assert _sampling_params_rejected(model) is rejected
-
-
-@pytest.mark.parametrize("module_name,const_name", _API_MODEL_DEFAULTS)
-def test_every_default_has_a_sampling_classification(
-    module_name: str, const_name: str
-) -> None:
-    # Forward guard mirroring the rate guard: every current default must be
-    # classified by the sampling table (not None) so a future default cannot
-    # silently fall outside the recorded request-surface knowledge.
-    model = _resolve_default(module_name, const_name)
-    assert _sampling_params_rejected(model) is not None, (
-        f"{module_name}.{const_name} = {model!r} is not classified by "
-        "_SAMPLING_PARAMS_REJECTED_PREFIXES — add its prefix."
-    )
-
-
-def test_sampling_unknown_id_is_none() -> None:
-    assert _sampling_params_rejected("some-unknown-model") is None
-    assert _sampling_params_rejected(None) is None
-
-
-# ---------------------------------------------------------------------------
-# Cross-table invariant ("maintain the two tables together")
-# ---------------------------------------------------------------------------
-
-
-def test_sampling_table_never_references_an_unpriced_model() -> None:
-    """Enforce the ``_SAMPLING_PARAMS_REJECTED_PREFIXES`` comment "maintain the
-    two tables together" — but the two tables answer different questions, so
-    "do not disagree" is NOT the same as "identical key sets."
-
-    ``_MODEL_RATES_USD_PER_MTOK`` MUST have full coverage: every model that is
-    ever tagged onto real spend needs a price, no exceptions, because an
-    unpriced id silently falls to the blended fallback (this issue,
-    athenaeum#777). ``_SAMPLING_PARAMS_REJECTED_PREFIXES`` is a partial
-    declaration: it only needs an entry once a model's 400-on-sampling-params
-    behavior has been verified against the API, and an unclassified id
-    resolves to ``None`` with no financial consequence
-    (``test_sampling_unknown_id_is_none`` above). So the rate table carries
-    broader family-level prefixes (``claude-opus-4``, ``claude-sonnet-4``,
-    ``claude-haiku-4``) that have no per-version sampling declaration yet, and
-    that is fine — it is not a disagreement.
-
-    The invariant this test enforces is therefore ONE-DIRECTIONAL: every
-    prefix the sampling table declares must resolve to a REAL (non-blended)
-    entry in the rate table. If the sampling table has heard of a model, the
-    rate table must have heard of it too. Before this issue's fix,
-    ``claude-fable-5`` was in ``_SAMPLING_PARAMS_REJECTED_PREFIXES`` (since
-    athenaeum#577) but absent from ``_MODEL_RATES_USD_PER_MTOK`` — exactly the
-    disagreement this test would have caught.
-    """
-    for prefix in _SAMPLING_PARAMS_REJECTED_PREFIXES:
-        assert _rates_for_model(prefix) != _BLENDED, (
-            f"{prefix!r} is declared in _SAMPLING_PARAMS_REJECTED_PREFIXES but "
-            "has no matching prefix in _MODEL_RATES_USD_PER_MTOK — the two "
-            "tables have gone out of step (see the 'maintain the two tables "
-            "together' comment above _SAMPLING_PARAMS_REJECTED_PREFIXES)."
-        )

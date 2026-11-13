@@ -922,25 +922,6 @@ class TestFlagOnEscalationAnswers:
         )
         assert load_resolved_records(root)[fp]["resolved_by"] == "human"
 
-    def test_human_unverified_decays_like_auto(self) -> None:
-        from athenaeum.fingerprint import RESOLVED_BY_HUMAN_UNVERIFIED, is_stale_auto_suppression
-
-        now = datetime(2026, 10, 23, tzinfo=timezone.utc)
-
-        def rec(by: str) -> dict:
-            return {
-                "resolved_by": by,
-                "action": "not_a_conflict",
-                "resolved_at": "2026-01-01T00:00:00Z",
-            }
-
-        assert is_stale_auto_suppression(rec("auto"), ttl_days=30, now=now) is True
-        assert (
-            is_stale_auto_suppression(rec(RESOLVED_BY_HUMAN_UNVERIFIED), ttl_days=30, now=now)
-            is True
-        )
-        assert is_stale_auto_suppression(rec("human"), ttl_days=30, now=now) is False
-
 
 # ---------------------------------------------------------------------------
 # flag on: correct_* unchanged

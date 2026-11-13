@@ -646,21 +646,6 @@ def _strip_lines(body: str, bullet_ordinals: set[int], sections: Sequence[Sectio
     return _strip_orphaned_footnote_definitions("\n".join(kept))
 
 
-def _strip_bullets(body: str, ordinals: set[int]) -> str:
-    """Remove the bullets at *ordinals* (1-based) and any footnote
-    definition no remaining line references.
-
-    A thin wrapper over :func:`_strip_lines` with an empty section set — kept
-    as its own name/signature because it reads at every existing call site
-    (and in tests) as "drop these bullets," which is exactly what it does.
-    A definition is removed only when NO line anywhere in the resulting
-    body still cites its label (``BULLET_RE`` numbers bullets page-wide, so
-    a label shared outside the batch's own section is not orphaned just
-    because this batch touched other bullets).
-    """
-    return _strip_lines(body, ordinals, ())
-
-
 def _carry_footnote(raw: str, definitions: dict[str, list[Definition]]) -> tuple[str, str] | None:
     """The ONE definition this bullet's own marker(s) cite, or ``None``.
 

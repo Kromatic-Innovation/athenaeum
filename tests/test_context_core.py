@@ -210,8 +210,8 @@ def test_fts5_path_wall_clock_budget(tmp_path: Path) -> None:
 # regression below — same order of magnitude as MIN_PAGES above, shaped like
 # `raw/claude-session/<file>.md` entries folded into the SAME `wiki` FTS5
 # table real extra-root hits are indexed into
-# (`athenaeum.search._scan_all_entries` folds wiki + extra-root entries into
-# one table — see that function's docstring). A large raw tree is therefore
+# (`athenaeum.search._scan_indexed_records` folds wiki + extra-root entries
+# into one table — see that function's docstring). A large raw tree is therefore
 # a large NUMBER OF ROWS in the identical table this hook already queries,
 # never a second index or a second scan.
 MIN_RAW_ROWS = 2000

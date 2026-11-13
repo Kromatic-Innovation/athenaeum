@@ -306,7 +306,7 @@ three of them are incremental:
 
 | # | Walk | Entry point | Incremental? |
 |---|---|---|---|
-| W1 | **Search index build** (FTS5 and vector share it) | `search._scan_indexed_records`, `src/athenaeum/search.py:450`, driven by `_scan_all_entries`, `search.py:363` | **Yes** — manifest + stat pre-filter (§3.3) |
+| W1 | **Search index build** (FTS5 and vector share it) | `search._scan_indexed_records`, driven by `_scan_surface` | **Yes** — manifest + stat pre-filter (§3.3) |
 | W2 | **Keyword scan-on-query** | `KeywordBackend.query`, `search.py:1753`; re-globs and re-reads every page on **every query** (`search.py:1781`, `search.py:1795`) | No — by design, no persisted index |
 | W3 | **Raw-intake delta snapshot** | `librarian._raw_hash_snapshot`, `src/athenaeum/librarian.py:5362` | **Yes** — a *second*, independent stat+hash manifest |
 | W4 | **Delta-scoped clustering** | `delta.compute_affected_clusters`, `src/athenaeum/delta.py:159` | **Yes** — but see the caveat below |
