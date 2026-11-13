@@ -178,6 +178,11 @@ MODULE_LAYER: dict[str, int] = {
     "provider": 3,
     "push_metrics": 3,
     "query_topics": 3,
+    # Issue athenaeum#2535: the first-class parent/child page relation --
+    # own docstring states "Layering: L3 service", placed below every
+    # named caller (tiers.py's recompile pass, the merge resolver, cli.py)
+    # so none of them has to import another just to reach it.
+    "page_relations": 3,
     "relatedness": 3,
     "rules": 3,
     "screening": 3,
@@ -367,6 +372,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_quiesce": 5,
     "_cmd_reconcile": 5,
     "_cmd_recovery_yield": 5,
+    "_cmd_relate": 5,  # issue athenaeum#2535
     "_cmd_repair": 5,
     "_cmd_retire": 5,
     "_cmd_receipts": 5,  # issue athenaeum#2039
