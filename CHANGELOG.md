@@ -86,6 +86,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
   warning.
 
+- Tier-4 dedup, the relatedness writer, delta compile, the delta live
+  client and the name-collision and qualified-name scans are now always on;
+  their off switches are removed (athenaeum#2461). Removed:
+  `ATHENAEUM_TIER4_DEDUP`; `librarian.relatedness_writer` and
+  `ATHENAEUM_RELATEDNESS_WRITER`; `librarian.delta.enabled`;
+  `librarian.delta.live_client`; `librarian.name_collision_scan`;
+  `librarian.qualified_name_scan`. A stale yaml key still setting one of
+  the four removed yaml keys is ignored with a warning, same as every
+  other removed key; the two removed env vars now have no effect. Anyone
+  who set `librarian.delta.enabled: false` to force a whole-corpus compile
+  should run `athenaeum run --full-compile` instead. `librarian.retire`,
+  `librarian.live_session_guard`, `spend.ledger_enabled` and
+  `recall.hybrid` are unaffected and remain configurable — see
+  `docs/reference/configuration.md`.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available

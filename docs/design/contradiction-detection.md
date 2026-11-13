@@ -427,7 +427,7 @@ yaml; the yaml overrides built-in defaults. The canonical knob table — every
 env var, yaml key, and code default for this pipeline (`models.classify`,
 `resolve.model`, `contradiction.cross_scope_mode`, `cluster_size_cap`,
 `similarity_threshold`, `resolve_max_per_run`,
-`resolved_similarity_threshold`, `ATHENAEUM_TIER4_DEDUP`,
+`resolved_similarity_threshold`,
 `ATHENAEUM_PQ_SNOOZE_HOURS`, and the auto-apply lane) — lives in
 [`docs/reference/configuration.md`](../reference/configuration.md#contradiction-detection-and-resolver).
 
