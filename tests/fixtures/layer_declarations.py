@@ -243,7 +243,6 @@ MODULE_LAYER: dict[str, int] = {
     "ordinary_night_table": 4,
     "pending_merges": 4,
     "pii_classification_decision": 4,
-    "pii_h1_audit": 4,
     # Issue athenaeum#2063: L4 glue wiring the yesno.py YesNoScorer seam into
     # storage lint-pii / merges recompare. Sibling of pii_verdicts.py.
     "pii_hazard_classifier": 4,
