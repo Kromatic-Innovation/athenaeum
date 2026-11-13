@@ -40,9 +40,9 @@ review — exactly as before.
 ## Configuration
 
 The resolver knobs (`resolve.auto_apply`, `resolve.auto_apply_threshold`,
-`resolve.model`, `resolve.full_body_token_cap`, and their env vars) follow the
-standard **env > yaml > default** precedence. The canonical knob table with
-all defaults lives in
+`resolve.full_body_token_cap`, `models.resolve`, and their env vars) follow
+the standard **env > yaml > default** precedence. The canonical knob table
+with all defaults lives in
 [`docs/reference/configuration.md`](../reference/configuration.md#contradiction-detection-and-resolver);
 this document covers the behavior behind those knobs.
 

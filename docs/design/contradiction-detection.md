@@ -421,13 +421,13 @@ tool both require explicit user confirmation before applying.
 ## 4. Configuration reference
 
 Detection keys live under `contradiction:` in `athenaeum.yaml`; the detector
-model under the top-level `models:` block (`models.classify`, athenaeum#232); the
-resolver knobs under the top-level `resolve:` block. Env vars override the
-yaml; the yaml overrides built-in defaults. The canonical knob table — every
-env var, yaml key, and code default for this pipeline (`models.classify`,
-`resolve.model`, `contradiction.cross_scope_mode`, `cluster_size_cap`,
+model and the resolver model both under the top-level `models:` block
+(`models.classify`, `models.resolve`, athenaeum#232); the remaining resolver
+knobs under the top-level `resolve:` block. Env vars override the yaml; the
+yaml overrides built-in defaults. The canonical knob table — every env var,
+yaml key, and code default for this pipeline (`models.classify`,
+`models.resolve`, `contradiction.cross_scope_mode`, `cluster_size_cap`,
 `similarity_threshold`, `resolve_max_per_run`,
-`resolved_similarity_threshold`,
 `ATHENAEUM_PQ_SNOOZE_HOURS`, and the auto-apply lane) — lives in
 [`docs/reference/configuration.md`](../reference/configuration.md#contradiction-detection-and-resolver).
 
@@ -721,7 +721,7 @@ weaker rationales on the precedence-tier comparison. Cost is bounded by
 the most expensive model.
 
 The model is configurable (`ATHENAEUM_RESOLVE_MODEL` /
-`resolve.model`) so an operator can substitute a cheaper
+`models.resolve`) so an operator can substitute a cheaper
 model when the cost tradeoff is unacceptable.
 
 ### Why the per-run cap defaults to 250

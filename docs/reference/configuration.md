@@ -250,8 +250,8 @@ it, the candidate is never surfaced and the create path proceeds as
 today (`NoMatch`).
 
 Deliberately its OWN key — AC6 is explicit that no
-code path may reuse `resolve_resolved_similarity_threshold`'s 0.83
-(`athenaeum.fingerprint`), which was tuned for claim-pair resolution
+code path may reuse `athenaeum.fingerprint._DEFAULT_RESOLVED_SIMILARITY_THRESHOLD`'s
+0.83, which was tuned for claim-pair resolution
 (matching two DESCRIPTIONS of a fact), not short entity names. A wrong
 merge here welds two real people/companies/projects together and is
 hard to detect, so this ships HIGHER than the claim-pair value: 0.90.
@@ -3986,9 +3986,10 @@ single run without editing config, and the yaml key is read only when
 the operator actually set it — no seed in ``_DEFAULTS``.
 Non-string or blank yaml values fall through to *default*. The
 contradiction-resolver model routes through here too, via
-`athenaeum.resolutions._get_model` (knob ``resolve``); that
-wrapper threads the legacy ``resolve.model`` yaml key in as *default*
-so it sits below ``models.resolve`` but above the code default.
+`athenaeum.resolutions._get_model` (knob ``resolve``), passing
+`athenaeum.resolutions.DEFAULT_RESOLVE_MODEL` straight through as
+*default* -- the legacy ``resolve.model`` yaml key it used to thread in
+below ``models.resolve`` was removed here.
 
 ## `off_corpus`
 
@@ -5603,7 +5604,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECOVERY_YIELD_THRESHOLD` | `src/athenaeum/recovery_yield.py` |
-| `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `src/athenaeum/config.py`, `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_DECISION_PROVIDER` | `src/athenaeum/decision_provider.py` |
