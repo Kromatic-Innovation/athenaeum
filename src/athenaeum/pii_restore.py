@@ -2,15 +2,17 @@
 """Anchored PII-restore repair tooling (issue athenaeum#1037).
 
 Rebuilds the "put back the token a `[contact redacted -> excluded surface]`
-marker replaced, IF that token was never PII" idea from
-``scripts/pii-restore.py`` on a method that does not depend on a whole-file
-``difflib`` alignment between the corpus's pre-migration state and its
-current state. athenaeum#691's 2026-08-20 operator lane instrumented that script
-against the live corpus and found it blind to **673 of 844** in-scope
-markers: ``difflib.SequenceMatcher.get_opcodes()`` only yields a usable
-``replace`` span when the marker's new side is EXACTLY one opcode, and any
-edit made to the page since the migration (a librarian reshape, a rename)
-fragments that span. 533 of 606 pages scored literally zero.
+marker replaced, IF that token was never PII" idea from the legacy
+``pii-restore.py`` repair script (deleted by athenaeum#2444 once its golden
+fixtures were ported onto this module's own test suite) on a method that
+does not depend on a whole-file ``difflib`` alignment between the corpus's
+pre-migration state and its current state. athenaeum#691's 2026-08-20 operator
+lane instrumented that script against the live corpus and found it blind to
+**673 of 844** in-scope markers: ``difflib.SequenceMatcher.get_opcodes()``
+only yields a usable ``replace`` span when the marker's new side is EXACTLY
+one opcode, and any edit made to the page since the migration (a librarian
+reshape, a rename) fragments that span. 533 of 606 pages scored literally
+zero.
 
 **Two independent, deterministic methods**, matching the two the issue
 scopes (no third method, no classifier change — athenaeum#720's detector
@@ -99,7 +101,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.pii import iter_contact_records
+from athenaeum.pii import EMAIL_PATTERN, iter_contact_records
 from athenaeum.storage_migrate import INLINE_REDACTION_MARKER
 
 #: The migration marker this module restores tokens behind. Re-exported from
@@ -118,14 +120,14 @@ ANCHOR_CONTEXT_CHARS = 24
 # --------------------------------------------------------------------------- #
 # Classification -- the entire safe/unsafe boundary.
 #
-# Deliberately NOT imported from ``scripts/pii-restore.py``: that file lives
-# outside ``src/athenaeum`` and is not shipped in the installed package, so a
-# library module the installed ``athenaeum pii-restore`` CLI depends on
-# cannot reach it at runtime. The boundary below is the SAME one athenaeum#691's
-# 2026-08-20 lane instrumentation validated against the live corpus (restore
-# only a positively-recognized non-PII shape; every email stays redacted
-# unless it is a service id / role / test-account / known host alias) --
-# mirrored intentionally, not re-derived.
+# This boundary is the SAME one athenaeum#691's 2026-08-20 lane instrumentation
+# validated against the live corpus (restore only a positively-recognized
+# non-PII shape; every email stays redacted unless it is a service id / role
+# / test-account / known host alias) -- mirrored intentionally, not
+# re-derived. The email pattern itself is shared with :mod:`athenaeum.pii`
+# through its PUBLIC :data:`athenaeum.pii.EMAIL_PATTERN` constant (issue
+# athenaeum#2444) rather than a private-name import of that module's own
+# compiled pattern -- one definition, two compiled instances.
 # --------------------------------------------------------------------------- #
 
 _ISO_DATE = re.compile(r"^[(\[]?\d{4}-\d{2}-\d{2}\)?$")
@@ -138,12 +140,11 @@ _DECIMAL = re.compile(r"^\d*\.\d+$")
 
 #: Generic, non-identifying entries safe to ship in a public repo. An
 #: operator-specific address does NOT belong here -- it is read from live
-#: config by :func:`safe_email_exact` below, mirroring
-#: ``scripts/pii-restore.py``'s function of the same name exactly (issue
-#: athenaeum#1284: this module previously never read config at all, so the
-#: documented ``pii.restore.safe_email_exact`` key had no effect on the
-#: installed ``athenaeum pii-restore`` CLI -- a capability regression
-#: against the legacy script).
+#: config by :func:`safe_email_exact` below (issue athenaeum#1284: this module
+#: previously never read config at all, so the documented
+#: ``pii.restore.safe_email_exact`` key had no effect on the installed
+#: ``athenaeum pii-restore`` CLI -- a capability regression against the
+#: historical repair script this module superseded).
 SAFE_EMAIL_EXACT_DEFAULT = frozenset({"git@github.com", "root@example.com"})
 _SAFE_EMAIL_SUBSTR = (
     "group.calendar.google.com",
@@ -151,13 +152,14 @@ _SAFE_EMAIL_SUBSTR = (
     "x-access-token",
 )
 _SAFE_EMAIL_PREFIX = ("noreply@", "no-reply@", "donotreply@", "admin@", "support@", "info@")
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# Shared with athenaeum.pii through its PUBLIC EMAIL_PATTERN constant (issue
+# athenaeum#2444) rather than a private-name import of athenaeum.pii._EMAIL_RE.
+_EMAIL_RE = re.compile(EMAIL_PATTERN)
 
 
 def safe_email_exact(knowledge_root: Path) -> frozenset[str]:
     """Resolve the exact-match safe-email allowlist: code defaults + live
-    config -- mirrors ``scripts/pii-restore.py``'s ``safe_email_exact``
-    exactly (issue athenaeum#1284). *knowledge_root* is required (never
+    config (issue athenaeum#1284). *knowledge_root* is required (never
     defaulted) per this module's own no-default-root contract; callers
     always have an explicit root (:func:`build_restore_plan`'s *repo_root*,
     :func:`apply_restore_plan`'s ``wiki_root.parent``).

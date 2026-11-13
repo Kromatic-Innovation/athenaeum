@@ -54,9 +54,10 @@ from athenaeum.pii_restore import (
 )
 
 # --------------------------------------------------------------------------- #
-# classify() golden fixture -- mirrors scripts/pii-restore.py's boundary
-# (tests/test_pii_restore.py), pinned independently since this module's
-# classify() is intentionally NOT imported from that dev-only script.
+# classify() golden fixture -- mirrors the same boundary pinned independently
+# in tests/test_pii_restore.py, since this module's classify() is
+# intentionally NOT imported from any other module (it is the one, public
+# definition; see this module's own "Layering" docstring note).
 # --------------------------------------------------------------------------- #
 
 GOLDEN_CASES: list[tuple[str, str, str | None]] = [
@@ -690,8 +691,8 @@ def test_genuine_pii_pre_image_stays_residue_never_restored(
 # pii.restore.safe_email_exact from athenaeum.yaml -- prior to this fix,
 # this module never called load_config() at all, so the documented config
 # key had no effect on the installed CLI regardless of what athenaeum.yaml
-# said (a capability regression against scripts/pii-restore.py, which does
-# honour it).
+# said (a capability regression against the legacy repair script this
+# module superseded, which did honour it).
 # --------------------------------------------------------------------------- #
 
 

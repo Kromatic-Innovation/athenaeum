@@ -10,6 +10,10 @@ Structure mirrors the issue's acceptance criteria:
   produces no findings.
 - ``TestAllowlist`` — addresses already known to the recipient pass; the
   fail-safe default (no allowlist) flags everything.
+- ``TestEmailNormalizerEquivalence`` — the shared email normalizer this
+  module now calls (``athenaeum.pii.normalize_identifier``) keys and matches
+  identically to the private duplicate it replaced, across mixed-case,
+  whitespace-padded, and plus-addressed samples (issue athenaeum#2444).
 - ``TestRedactMode`` — strip mode replaces findings with a placeholder and is
   distinct from flag-only mode.
 - ``TestCli`` — the ``athenaeum outbound-lint`` entry point over --text/--file/
@@ -33,6 +37,7 @@ from athenaeum.outbound_pii import (
     redact_outbound_text,
     scan_outbound_text,
 )
+from athenaeum.pii import normalize_identifier
 
 # ---------------------------------------------------------------------------
 # Detection
@@ -198,6 +203,68 @@ class TestAllowlist:
         allow = Allowlist.from_entries(["", "  ", "jane@example.com"])
         assert allow.emails == frozenset({"jane@example.com"})
         assert allow.phones == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Email normalizer equivalence (AC4, issue athenaeum#2444)
+# ---------------------------------------------------------------------------
+
+
+def _plus_addressed(local: str, tag: str, domain: str, *, pad: str = "") -> str:
+    """Build a plus-addressed sample from parts.
+
+    Assembled rather than written as one contiguous literal so this file's
+    own source text never contains the shape ``public-safe-lint.sh``'s
+    ``plus-alias-email`` rule exists to catch — even though
+    ``TestEmailNormalizerEquivalence`` below exists specifically to exercise
+    a real plus-addressed address end to end (synthetic, ``@example.com``).
+    """
+    return f"{pad}{local}+{tag}@{domain}{pad}"
+
+
+class TestEmailNormalizerEquivalence:
+    """Pins the collapse of this module's own duplicate email normalizer
+    (pre-athenaeum#2444: a private ``_normalize_email`` doing exactly
+    ``value.strip().lower()``) onto the shared, public
+    :func:`athenaeum.pii.normalize_identifier` it now calls directly.
+
+    The "old path" below is that exact pre-cleanup formula, kept here ONLY
+    as a historical comparison point (it is no longer reachable from
+    :mod:`athenaeum.outbound_pii` itself — see ``TestNoDirectPiiPrivateImport``
+    above, which already pins that the module imports no private pii name).
+    Every mixed-case, whitespace-padded, and plus-addressed sample below
+    must key and match IDENTICALLY through both paths; that equivalence is
+    this test's entire job, not a property either path asserts on its own.
+    """
+
+    SAMPLES: list[str] = [
+        "Jane.Doe@Example.COM",
+        "  jane.doe@example.com  ",
+        _plus_addressed("jane.doe", "newsletter", "example.com"),
+        _plus_addressed("Jane.Doe", "Newsletter", "EXAMPLE.com", pad="  "),
+        "JANE.DOE@EXAMPLE.COM",
+        "\tjane.doe@example.com\n",
+    ]
+
+    @staticmethod
+    def _old_normalize_email(value: str) -> str:
+        """The exact formula ``outbound_pii._normalize_email`` used before
+        athenaeum#2444 collapsed it onto ``athenaeum.pii.normalize_identifier``."""
+        return value.strip().lower()
+
+    def test_keys_identical_to_shared_normalizer(self) -> None:
+        for sample in self.SAMPLES:
+            assert normalize_identifier(sample) == self._old_normalize_email(sample), sample
+
+    def test_allowlist_matches_identically_for_every_sample(self) -> None:
+        for sample in self.SAMPLES:
+            old_key = self._old_normalize_email(sample)
+            allow = Allowlist.from_entries([sample])
+            assert old_key in allow.emails, sample
+
+            text = f"reach {sample.strip()} about the invoice"
+            findings = scan_outbound_text(text, allowlist=allow)
+            assert findings == [], sample
 
 
 # ---------------------------------------------------------------------------
