@@ -385,42 +385,6 @@ def check_entity_fields(
     return violations
 
 
-def scan_field_constraint_violations(wiki_root: Path) -> list[ConstraintViolation]:
-    """Scan every page for a violation of a DECLARED field constraint (AC4).
-
-    Cheap: with nothing declared this costs exactly one ``stat()`` (the
-    ``field-constraints.md`` existence check in
-    :func:`load_field_constraints`) and no filesystem walk at all. When
-    constraints ARE declared, this is a single flat pass over
-    ``wiki_root`` — same shallow, underscore-excluding convention as
-    :func:`athenaeum.entity_schema.resolve_entity_classes` — cheap enough
-    to run on every intake pass or a routine cron sweep. The issue's own
-    motivating evidence (146 violations undetected for three months) is a
-    LATENCY failure; this closes it by being fast enough to run OFTEN, not
-    by being exhaustive over history.
-    """
-    constraints = load_field_constraints(wiki_root)
-    if not constraints:
-        return []
-    if not wiki_root.is_dir():
-        return []
-    violations: list[ConstraintViolation] = []
-    for fpath in sorted(wiki_root.glob("*.md")):
-        if fpath.name.startswith("_"):
-            continue
-        try:
-            text = fpath.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        meta, body = parse_frontmatter(text)
-        if not meta:
-            continue
-        violations.extend(
-            check_entity_fields(meta, constraints, body=body, path=fpath.name)
-        )
-    return violations
-
-
 def guard_entity_field_constraints(
     wiki_root: Path,
     filename: str,
@@ -497,29 +461,6 @@ def guard_entity_field_constraints(
     return False, violations
 
 
-def list_field_constraint_violations(wiki_root: Path) -> list[dict[str, Any]]:
-    """Read every well-formed record from the field-constraint ledger.
-
-    Tolerant reader (a torn trailing line from a crash mid-append is
-    skipped, not raised on), the same convention as
-    :func:`athenaeum.wiki_write_guard.list_type_rejected`. Returns ``[]``
-    when the ledger does not exist.
-    """
-    path = wiki_root / FIELD_CONSTRAINT_LEDGER_NAME
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return records
-
-
 __all__ = [
     "FIELD_CONSTRAINTS_FILENAME",
     "FIELD_CONSTRAINT_REJECTED_DIR_NAME",
@@ -529,7 +470,5 @@ __all__ = [
     "ConstraintViolation",
     "load_field_constraints",
     "check_entity_fields",
-    "scan_field_constraint_violations",
     "guard_entity_field_constraints",
-    "list_field_constraint_violations",
 ]

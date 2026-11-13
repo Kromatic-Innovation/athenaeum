@@ -67,14 +67,6 @@ you give it. Write the rule you can defend as a shape rule, and expect it
 to have both false positives and false negatives on short or ambiguous
 local parts.
 
-## Detecting violations that already exist
-
-`athenaeum.field_constraints.scan_field_constraint_violations(wiki_root)`
-walks the corpus once and reports every page whose frontmatter or body
-violates a declared constraint. With no `field-constraints.md`, this
-costs one file-existence check and returns immediately — safe to call on
-every routine sweep.
-
 ## What happens to a violating write
 
 A Tier-3 create or merge that would violate a declared constraint is
