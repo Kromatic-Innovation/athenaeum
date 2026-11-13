@@ -800,13 +800,14 @@ def plan_pii_migration(
 #
 # 1. ``[[old-slug]]`` wikilinks anywhere under ``wiki/`` — rewritten via
 #    :func:`athenaeum.pending_merges._rewrite_inbound_wikilinks`.
-# 2. Alias resolution — the OLD slug (and the raw email local-part, so a
+# 2. Alias recording — the OLD slug (and the raw email local-part, so a
 #    literal ``[[jane.doe]]`` or the historical ``[[jdoe]]``-shaped link some
 #    other page might carry) is recorded in the renamed page's own
 #    ``aliases:`` frontmatter via
-#    :func:`athenaeum.pending_merges._add_aliases_to_frontmatter`, so
-#    :func:`athenaeum.pending_merges.resolve_alias_slug` continues to resolve
-#    it after the rename.
+#    :func:`athenaeum.pending_merges._add_aliases_to_frontmatter`, so the
+#    OLD slug stays durably traceable to the renamed page even though no
+#    in-repo reader resolves it today (the dead alias-slug resolver this
+#    once referenced was removed -- see CHANGELOG.md).
 #
 # Reusing this machinery (rather than re-implementing slug-rewrite) keeps
 # there being exactly one definition of "how a wiki-tree rename propagates".

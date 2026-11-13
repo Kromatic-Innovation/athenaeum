@@ -175,6 +175,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `athenaeum.yaml` still setting either key loads fine and is ignored with
   a warning, same as every other removed key.
 
+- Removed the never-exposed `demote_oversize_pages` / `DemoteResult`
+  operator-entrypoint helper from `tiers.py` and the unused
+  `resolve_alias_slug` reader from `pending_merges.py` (athenaeum#2464).
+  Neither had a CLI, MCP, or other caller; the live code paths they
+  overlapped with (`check_page_size_gate`'s reactive `log_demote`
+  disposition, and the write-side alias recording in
+  `_apply_fold_into_existing`) are unaffected.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available
