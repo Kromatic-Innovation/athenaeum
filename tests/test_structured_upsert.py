@@ -832,3 +832,146 @@ def test_editing_a_refused_raw_resets_its_count(
     _loop_run(root)
     ledger = _load_stuck_ledger(root / "wiki")
     assert next(iter(ledger.values()))["failures"] == 1
+
+
+# --- Declared single-valued field-group misfit (issue athenaeum#2197) ------
+#
+# A made-up ``person`` page type with a made-up ``deal`` field group,
+# mirroring the issue's own motivating example: a CRM importer flattens each
+# person's deal onto ``crm_deal_*`` frontmatter fields, which can hold only
+# ONE deal at a time.
+
+PERSON_TYPES = ["person", "company"]
+PERSON_UID = "person-dana-reyes"
+
+FIELD_GROUP_CONFIG: dict = {
+    "librarian": {
+        "structured_upsert": {
+            "person": {
+                "sections": [],
+                "set_keys": ["crm_deal_name", "crm_deal_amount"],
+            }
+        },
+        "field_groups": {
+            "person": {
+                "deal": ["crm_deal_name", "crm_deal_amount"],
+            }
+        },
+    }
+}
+
+PERSON_PAGE = """\
+---
+uid: person-dana-reyes
+type: person
+name: Dana Reyes
+access: personal
+created: '2026-10-01'
+updated: '2026-10-01'
+crm_deal_name: Acme Renewal
+crm_deal_amount: '5000'
+---
+
+# Dana Reyes
+"""
+
+
+def _second_deal_raw(name: str = "Beta Pilot", amount: str = "1200") -> str:
+    return f"""\
+---
+uid: person-dana-reyes
+type: person
+name: Dana Reyes
+access: public
+created: '2026-11-08'
+crm_deal_name: {name}
+crm_deal_amount: '{amount}'
+---
+
+# Dana Reyes
+"""
+
+
+@pytest.fixture
+def person_wiki(tmp_path: Path) -> Path:
+    w = tmp_path / "person_wiki"
+    w.mkdir()
+    (w / f"{PERSON_UID}.md").write_text(PERSON_PAGE, encoding="utf-8")
+    return w
+
+
+def test_declared_field_group_misfit_is_refused_and_keeps_both_values(
+    tmp_path: Path, person_wiki: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC (a) Misfit detection: a second, different deal record for the same
+    person does not overwrite, interleave, or drop either value."""
+    raw = _raw(tmp_path, _second_deal_raw(), "deal2.md")
+    with caplog.at_level(logging.WARNING):
+        out = tier0_structured_upsert(
+            raw, EntityIndex(person_wiki), person_wiki, PERSON_TYPES, config=FIELD_GROUP_CONFIG
+        )
+    assert out is not None and out.status == "refused"
+    assert out.reason == "field-group-misfit"
+    assert out.skipped_label == "structured-upsert-field-group-misfit"
+    assert {m.field_group for m in out.field_group_misfits} == {"deal"}
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    # The page keeps its EXISTING value -- not overwritten, not interleaved.
+    page_meta, _ = parse_frontmatter((person_wiki / f"{PERSON_UID}.md").read_text(encoding="utf-8"))
+    assert page_meta["crm_deal_name"] == "Acme Renewal"
+    assert page_meta["crm_deal_amount"] == "5000"
+
+    # The incoming record is never lost: refusal keeps the raw on disk.
+    assert raw.path.exists()
+    assert raw.path.read_text(encoding="utf-8") == _second_deal_raw()
+
+
+def test_matching_value_is_not_a_misfit(tmp_path: Path, person_wiki: Path) -> None:
+    """Re-filing the SAME deal (no conflicting value) is the ordinary no-op
+    case, not a misfit -- a misfit requires two DIFFERENT values."""
+    raw = _raw(tmp_path, _second_deal_raw(name="Acme Renewal", amount="5000"), "deal_same.md")
+    out = tier0_structured_upsert(
+        raw, EntityIndex(person_wiki), person_wiki, PERSON_TYPES, config=FIELD_GROUP_CONFIG
+    )
+    assert out is not None and out.status == "noop"
+    assert out.field_group_misfits == ()
+
+
+def test_no_declared_groups_means_the_misfit_path_never_fires(
+    tmp_path: Path, person_wiki: Path
+) -> None:
+    """AC: No implicit groups. With no `field_groups` entry for this page
+    type, the misfit path never fires, however related the field names look
+    -- today's ordinary last-write-wins overwrite is unchanged."""
+    raw = _raw(tmp_path, _second_deal_raw(), "deal2.md")
+    config_without_groups = {
+        "librarian": {"structured_upsert": FIELD_GROUP_CONFIG["librarian"]["structured_upsert"]}
+    }
+    out = tier0_structured_upsert(
+        raw, EntityIndex(person_wiki), person_wiki, PERSON_TYPES, config=config_without_groups
+    )
+    assert out is not None and out.status == "applied"
+    assert out.field_group_misfits == ()
+    page_text = (person_wiki / f"{PERSON_UID}.md").read_text(encoding="utf-8")
+    page_meta, _ = parse_frontmatter(page_text)
+    # Ordinary last-write-wins overwrite, unaffected by athenaeum#2197.
+    assert page_meta["crm_deal_name"] == "Beta Pilot"
+
+
+def test_declared_group_for_a_different_page_type_does_not_apply_here(
+    tmp_path: Path, person_wiki: Path
+) -> None:
+    """A group declared under a DIFFERENT page type never reaches this one --
+    reinforces "declared ONLY", keyed by the raw's own `type`."""
+    raw = _raw(tmp_path, _second_deal_raw(), "deal2.md")
+    config_other_type_group = {
+        "librarian": {
+            "structured_upsert": FIELD_GROUP_CONFIG["librarian"]["structured_upsert"],
+            "field_groups": {"company": {"deal": ["crm_deal_name", "crm_deal_amount"]}},
+        }
+    }
+    out = tier0_structured_upsert(
+        raw, EntityIndex(person_wiki), person_wiki, PERSON_TYPES, config=config_other_type_group
+    )
+    assert out is not None and out.status == "applied"
+    assert out.field_group_misfits == ()

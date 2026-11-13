@@ -719,6 +719,13 @@ This is the difference between "the librarian decides what is recorded in what s
 and merely asserting it. A system that could only write pre-declared fields would push
 schema design onto every writer — precisely the per-consumer coupling §1.1 rejects.
 
+A slot that EXISTS but is already held by a conflicting value from a different source
+record is a different scenario, outside the corrections envelope entirely — see
+`docs/design/shape-rules.md` §11 (issue athenaeum#2197) for that sibling mechanism
+(`athenaeum.structured_upsert`'s declared `librarian.field_groups`). It reuses this
+disposition's `schema-amendment` conflict-type taxonomy for the queue label, not this
+module's machinery.
+
 ---
 
 ## 8. Fallthrough — what happens when conformance fails

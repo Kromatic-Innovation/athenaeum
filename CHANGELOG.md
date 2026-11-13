@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Person dedupe's strong-identifier fields are now configurable
   (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
   fields (athenaeum#2472).
+- The librarian proposes a schema amendment, instead of overwriting,
+  interleaving, or dropping a value, when filed data collides with a
+  declared single-valued `librarian.field_groups.<page_type>` field; the
+  proposal grows in the pending-decisions queue and nothing adopts it
+  automatically (athenaeum#2197).
 
 ### Fixed
 
