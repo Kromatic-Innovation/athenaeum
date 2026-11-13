@@ -1126,6 +1126,131 @@ class TestVerdictLedgerWiring:
 
 
 # ---------------------------------------------------------------------------
+# TestDecidedByDiscrimination — issue athenaeum#2523.
+#
+# A merge resolved from a human answer must record `decided_by: human:
+# <actor>` rather than the same `pipeline:merge-<decision>` stamp an
+# automated resolution gets — calibration/audit data (and, eventually, the
+# athenaeum#2077 prior-ruling cooldown) need to tell the two apart. The
+# positive signal is `DecisionAnswer.actor` (threaded from `write_decision_
+# answer`'s `actor` kwarg); its absence is the one thing that still produces
+# the pre-existing `pipeline:` stamp.
+# ---------------------------------------------------------------------------
+
+
+class TestDecidedByDiscrimination:
+    def test_human_answer_with_actor_records_human_decided_by(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC1: an answer that carries a real actor (the shape issue
+        athenaeum#2489 will eventually supply) flows through to
+        `human:<actor>` verbatim."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="human-actor-topic",
+            src_a=wiki_root / "human_actor_a.md",
+            src_b=wiki_root / "human_actor_b.md",
+        )
+        write_decision_answer(
+            raw_root,
+            decision_id=mid,
+            decision_type="merge",
+            verdict="approve",
+            actor="alice",
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "human:alice"
+
+    def test_automated_answer_with_no_actor_keeps_pipeline_decided_by(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC1's counter-example: an answer with no actor signal at all
+        (what an automated/pipeline writer would produce, had one ever
+        written through this raw-intake path) must keep the pre-existing
+        `pipeline:merge-<decision>` stamp — the human label requires a
+        positive signal, never a default."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="no-actor-topic",
+            src_a=wiki_root / "no_actor_a.md",
+            src_b=wiki_root / "no_actor_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "pipeline:merge-approve"
+
+    def test_unattributed_human_surface_records_human_unattributed(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC2: until athenaeum#2489's attributable-answer field exists, the
+        MCP and CLI human surfaces both stamp the placeholder actor
+        "unattributed" (see mcp_server.py's `resolve_merge` tool and
+        _cmd_decisions.py's `_cmd_answer`) — never `pipeline:`."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="unattributed-topic",
+            src_a=wiki_root / "unattributed_a.md",
+            src_b=wiki_root / "unattributed_b.md",
+        )
+        write_decision_answer(
+            raw_root,
+            decision_id=mid,
+            decision_type="merge",
+            verdict="reject",
+            actor="unattributed",
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "human:unattributed"
+
+
+# ---------------------------------------------------------------------------
 # TestFoldRecoverability — issue athenaeum#947 AC4; issue athenaeum#716 turned the
 # recovery mechanism from "deleted, but git-revertible" into "never deleted
 # at all" (a tombstone).

@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from athenaeum.models import TokenUsage
     from athenaeum.provider import LLMBackend
@@ -142,6 +142,16 @@ def _unescape_entity(raw: str) -> str:
 # (:data:`_HEADER_RE`) recovers a boundary swallowed by an unclosed fence.
 _ANY_H2_RE = re.compile(r"^## ")
 
+# Issue athenaeum#2516: one-shot-per-distinct-block WARNING dedup for
+# `_parse_block`'s malformed-header message — module-level so it persists
+# across every parse within one process (mirrors the warn-once convention in
+# `wiki_dedupe._WIKI_FALLBACK_WARNED` / `search._EMBED_TEXTS_NONE_WARNED`,
+# generalized here to a *set* of content hashes rather than a single bool
+# flag, since each distinct malformed block must still warn once on its own).
+# Tests reset it the same way those siblings do: `monkeypatch.setattr(
+# answers, "_MALFORMED_BLOCK_WARNED", set())`.
+_MALFORMED_BLOCK_WARNED: set[str] = set()
+
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
@@ -208,6 +218,14 @@ _CONFLICTING_CLAIMS_PREFIX = "**Conflicting claims**:"
 # time. A plain ``**Key**: value`` line (like ``**Fingerprint**:``) rather
 # than a fenced field — a repo-relative path never spans multiple lines.
 _COMPILED_PAGE_PREFIX = "**Compiled page**:"
+
+# Issue athenaeum#2517: single-line metadata carrying the block's
+# creation-time id disambiguator (see `_make_id`'s docstring and
+# `mint_unique_block_id` below). A plain ``**Key**: value`` line, same shape
+# as ``**Compiled page**:`` — never multi-line, never fenced, and NEVER
+# recomputed once parsed: a human/agent edit to the description must not
+# touch this line, or the id-stability guarantee breaks.
+_ID_SALT_PREFIX = "**Id salt**:"
 
 
 def render_conflicting_claims_field(text: str) -> str:
@@ -340,6 +358,14 @@ class PendingQuestion:
     # resolving the write-back against ``source`` the way every block did
     # before this change (see :func:`_block_source_refs`).
     compiled_page: str = ""
+    # Issue athenaeum#2517: the creation-time id disambiguator, recovered off
+    # the ``**Id salt**:`` line (minted once by `mint_unique_block_id` and
+    # never recomputed). Empty ("") on every block that predates this
+    # change — `_make_id` falls back to the pre-athenaeum#2517 (header,
+    # question)-only hash for those, so an id already handed out (and
+    # possibly cached by an MCP consumer, or embedded in an in-flight
+    # answer) keeps resolving.
+    id_salt: str = ""
 
     @property
     def recovered_observation(self) -> str:
@@ -357,8 +383,8 @@ class PendingQuestion:
         return ""
 
 
-def _make_id(header_line: str, question_text: str) -> str:
-    """Stable id derived from the header line + question text.
+def _make_id(header_line: str, question_text: str, salt: str = "") -> str:
+    """Stable id derived from the header line + question text (+ salt).
 
     Idempotent across runs as long as the block text hasn't been edited —
     which is also when the id should change, because the block's identity
@@ -367,7 +393,8 @@ def _make_id(header_line: str, question_text: str) -> str:
     Stability contract (locked by ``test_id_stable_across_checkbox_flip``
     and ``test_id_changes_when_question_edited``):
 
-    - The id is a 12-hex-char SHA-1 prefix over header + question text.
+    - The id is a 12-hex-char SHA-1 prefix over header + question text
+      (+ ``salt``, when non-empty — see below).
     - It is **stable** across description edits and across checkbox state
       flips (``[ ]`` ↔ ``[x]``). A handle obtained from
       :func:`list_unanswered` therefore remains valid for
@@ -377,9 +404,94 @@ def _make_id(header_line: str, question_text: str) -> str:
 
     This means MCP consumers can cache ``id`` values across a session
     without worrying about description-text churn invalidating them.
+
+    Issue athenaeum#2517 — ``salt`` is a block's ``**Id salt**:`` value (see
+    ``_ID_SALT_PREFIX``): a creation-time disambiguator minted ONCE by
+    :func:`mint_unique_block_id` and persisted verbatim in the block,
+    never recomputed from live content. Folding it into the hash is what
+    lets two blocks that happen to share an identical header + question
+    (e.g. two detector items whose generic question line collapses to the
+    same text and only their ``**Description**:`` differs — the failure
+    mode athenaeum#2517 reports) get different ids, WITHOUT putting the
+    description itself in the hash: unlike the description, the salt line
+    is written once and never touched again, so a later free-text edit to
+    the description still cannot change the id — the stability contract
+    above keeps holding. ``salt=""`` (the default, and every block that
+    predates this field) reproduces the EXACT pre-athenaeum#2517 hash —
+    required so an id already handed out (cached by an MCP consumer, or
+    embedded in an in-flight answer) keeps resolving via
+    :func:`resolve_by_id`.
     """
-    payload = f"{header_line.strip()}\n{question_text.strip()}".encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:12]
+    payload = f"{header_line.strip()}\n{question_text.strip()}"
+    if salt:
+        payload += f"\n{salt.strip()}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+# Issue athenaeum#2517 AC2: bound on the collision-retry loop in
+# `mint_unique_block_id`. Each retry appends a new attempt number to the
+# salt, which can never reproduce a prior candidate string within the same
+# call — this bound only guards against a pathological infinite loop; it
+# is not expected to ever be reached in practice.
+_MAX_ID_SALT_ATTEMPTS = 10_000
+
+
+def mint_unique_block_id(
+    header_line: str,
+    question_text: str,
+    content: str,
+    existing_ids: Iterable[str],
+) -> tuple[str, str]:
+    """Mint a ``(salt, id)`` pair for a brand-new block.
+
+    Issue athenaeum#2517 AC1/AC2. Callers (:func:`raise_pending_question`,
+    ``athenaeum.tiers.tier4_escalate``) write the returned ``salt`` into
+    the new block's ``**Id salt**:`` line and use ``id`` as the block's
+    id — exactly what ``_parse_block`` will recompute (via ``_make_id``)
+    when it later reads the persisted line back, so the id returned here
+    is valid immediately, with no round-trip read required.
+
+    ``content`` is the block's own ``**Description**:``/context text AT
+    CREATION TIME — the salt is a short SHA-1 prefix over it. This is
+    deliberately deterministic (not random, not wall-clock) rather than a
+    generic nonce: it directly targets the collision athenaeum#2517
+    reports (two detector items sharing a header + a generic question
+    line, differing only in description) by construction, it keeps two
+    identically-worded raises (same header, question, AND description —
+    e.g. two "question" calls in the same test with the same args)
+    reproducibly landing on the same id, and it never depends on the
+    wall clock, which several existing golden/round-trip tests pin
+    inputs specifically to keep ids reproducible (see
+    ``test_writer_identity_enforcement.py``'s ``athenaeum#2120`` comment,
+    pinning the header date for exactly this reason). Note this salt is
+    captured ONCE, from *content* as it is at creation — the persisted
+    ``**Id salt**:`` line is what `_make_id` reads back later, never a
+    fresh hash of the (possibly since-edited) live description.
+
+    AC2 — "the writer refuses or disambiguates on write instead of
+    producing two blocks with one id" — is resolved here in favor of
+    DISAMBIGUATE, never refuse: refusing to write a pending question (or
+    an agent-raised decision) would silently drop the item, which is
+    strictly worse than writing it under an id that merely took one extra
+    retry to mint. When the first candidate already appears in
+    *existing_ids* (two blocks share header + question + description
+    verbatim — the only way this fires), a numbered suffix is appended to
+    the content-derived salt and retried, up to `_MAX_ID_SALT_ATTEMPTS`
+    times; each attempt number produces a distinct salt string, so the
+    loop is guaranteed to terminate with an id not in *existing_ids*
+    (barring a genuine SHA-1 collision, which is not a case any amount of
+    retrying can address differently).
+    """
+    existing = set(existing_ids)
+    base_salt = hashlib.sha1(content.strip().encode("utf-8")).hexdigest()[:12]
+    salt = base_salt
+    candidate = _make_id(header_line, question_text, salt)
+    attempt = 1
+    while candidate in existing and attempt < _MAX_ID_SALT_ATTEMPTS:
+        attempt += 1
+        salt = f"{base_salt}#{attempt}"
+        candidate = _make_id(header_line, question_text, salt)
+    return salt, candidate
 
 
 def _split_blocks(text: str) -> list[str]:
@@ -450,7 +562,9 @@ def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
     return [lines[0], f"- [ ] {question}", *lines[1:]]
 
 
-def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | None:
+def _parse_block(
+    block_text: str, *, quiet: bool = False, block_index: int | None = None
+) -> PendingQuestion | None:
     """Parse one block. Returns ``None`` on malformed input.
 
     Args:
@@ -464,6 +578,13 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
             ``caplog``-style capture even under ``--quiet``. Keyword-only;
             defaults to ``False`` so every existing caller (including
             ``resolve_by_id`` and ``parse_pending_questions``) is unaffected.
+        block_index: Issue athenaeum#2516 — the 1-based position of this
+            block within the file it came from (as split by
+            :func:`_split_blocks`), so the malformed-header warning below
+            can name where the block sits. ``None`` (the default) when a
+            caller parses a bare block with no file position available —
+            the warning then falls back to naming the block by its header
+            text alone.
     """
     lines = block_text.splitlines()
     if not lines:
@@ -471,13 +592,30 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
 
     header_match = _HEADER_RE.match(lines[0])
     if not header_match:
-        log.warning("Skipping block with malformed header: %r", lines[0][:80])
-        if not quiet:
-            print(
-                f"[warn] skipping pending-question block with malformed header: "
-                f"{lines[0][:80]!r}",
-                file=sys.stderr,
+        # Issue athenaeum#2516: the pending-questions file is parsed many
+        # times over the life of one process (e.g. a long-lived MCP server
+        # answering repeated `decisions count`/`decisions list` calls) — one
+        # malformed block otherwise re-prints this warning once per parse,
+        # drowning out the real signal within thousands of identical lines.
+        # Dedupe on a content hash of the block itself (not its file
+        # position, which can drift between parses as earlier blocks are
+        # fixed/archived) so the SAME malformed block warns at most once per
+        # process, while two genuinely different malformed blocks — distinct
+        # content, distinct hash — each still get their own warning.
+        block_key = hashlib.sha1(block_text.encode("utf-8")).hexdigest()[:12]
+        already_warned = block_key in _MALFORMED_BLOCK_WARNED
+        _MALFORMED_BLOCK_WARNED.add(block_key)
+        location = f"block #{block_index}" if block_index is not None else "block"
+        if not already_warned:
+            log.warning(
+                "Skipping %s with malformed header: %r", location, lines[0][:80]
             )
+            if not quiet:
+                print(
+                    f"[warn] skipping pending-question {location} with malformed "
+                    f"header: {lines[0][:80]!r}",
+                    file=sys.stderr,
+                )
         return None
 
     # Find the checkbox line — first non-blank line after the header.
@@ -558,6 +696,10 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     conflicting_claims_fence = 0
     conflicting_claims_pending = False
     compiled_page = ""
+    # Issue athenaeum#2517: the creation-time id disambiguator, recovered
+    # off `**Id salt**:` (see `_ID_SALT_PREFIX`). "" for every pre-athenaeum#2517
+    # block — `_make_id` falls back to the old hash for those.
+    id_salt = ""
 
     def _match_confirmation_key(stripped_line: str) -> bool:
         """Recognize a `**<Confirmation key>**:` line; record it if found.
@@ -636,6 +778,13 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
             in_description = False
             compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
             continue
+        if stripped.startswith(_ID_SALT_PREFIX):
+            # Issue athenaeum#2517: creation-time id disambiguator — metadata,
+            # must not leak into answer_lines, and never recomputed once
+            # read (see `_make_id`'s stability contract).
+            in_description = False
+            id_salt = stripped.removeprefix(_ID_SALT_PREFIX).strip()
+            continue
         if stripped.startswith("**Conflict type**:"):
             in_description = False
             conflict_type = stripped.removeprefix("**Conflict type**:").strip()
@@ -710,6 +859,9 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                 if stripped.startswith(_COMPILED_PAGE_PREFIX):
                     compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
                     continue
+                if stripped.startswith(_ID_SALT_PREFIX):
+                    id_salt = stripped.removeprefix(_ID_SALT_PREFIX).strip()
+                    continue
                 if _match_confirmation_key(stripped):
                     continue
                 # Unknown **Key**: — treat as answer body.
@@ -728,7 +880,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         answer_lines.pop()
 
     return PendingQuestion(
-        id=_make_id(lines[0], question),
+        id=_make_id(lines[0], question, id_salt),
         entity=_unescape_entity(header_match.group("entity")),
         source=header_match.group("ref"),
         question=question,
@@ -753,6 +905,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         observation="\n".join(observation_lines).strip("\n"),
         conflicting_claims="\n".join(conflicting_claims_lines).strip("\n"),
         compiled_page=compiled_page,
+        id_salt=id_salt,
     )
 
 
@@ -765,7 +918,11 @@ def parse_pending_questions(pending_path: Path) -> list[PendingQuestion]:
     if not pending_path.exists():
         return []
     text = pending_path.read_text(encoding="utf-8")
-    return [pq for b in _split_blocks(text) if (pq := _parse_block(b)) is not None]
+    return [
+        pq
+        for idx, b in enumerate(_split_blocks(text), start=1)
+        if (pq := _parse_block(b, block_index=idx)) is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1699,8 +1856,8 @@ def ingest_answers(
     iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
-    for block_text in blocks:
-        pq = _parse_block(block_text, quiet=quiet)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, quiet=quiet, block_index=block_index)
         if pq is None:
             # Malformed — preserve as-is in the primary file so the human
             # can see + fix it. Do not archive. Left as an unconditional
@@ -2522,6 +2679,24 @@ def raise_pending_question(
     # grammar (`_HEADER_RE`) instead of corrupting it.
     escaped_entity = ent.replace("\\", "\\\\").replace('"', '\\"')
     header = f'## [{created_at}] Entity: "{escaped_entity}" (from {ref})'
+
+    existing_text = (
+        pending_path.read_text(encoding="utf-8") if pending_path.exists() else ""
+    )
+    # Issue athenaeum#2517: ids already in THIS file, so the fresh id minted
+    # below for a brand-new block cannot collide with one already on disk.
+    existing_ids = {
+        pq.id
+        for b in _split_blocks(existing_text)
+        if (pq := _parse_block(b, quiet=True)) is not None
+    }
+    # The salt is derived from `ctx` (the block's own context/description
+    # text), so two calls with identical args and no on-disk collision mint
+    # the identical id — see
+    # test_plain_question_kind_is_byte_for_byte_unchanged, which relies on
+    # exactly that determinism.
+    id_salt, decision_id = mint_unique_block_id(header, q, ctx, existing_ids)
+
     lines = [header, f"- [ ] {q}", "", f"**Description**: {ctx}"]
     if kind == "confirmation":
         raised_at_iso = now_iso(when)
@@ -2535,18 +2710,10 @@ def raise_pending_question(
             f"{_ALTERNATIVE_PREFIX} {alternative.strip()}",
             f"{_RAISED_AT_PREFIX} {raised_at_iso}",
         ]
+    lines.append(f"{_ID_SALT_PREFIX} {id_salt}")
     lines.append(f"{_RAISED_BY_PREFIX} {_RAISED_BY_AGENT}")
     block = ("\n".join(lines)).rstrip() + "\n"
 
-    # Computed the exact same way `_make_id` computes an id when the block
-    # is later re-parsed off disk, from the same (header, question) pair —
-    # so the id returned here is valid immediately for `resolve_question`
-    # without a round-trip read.
-    decision_id = _make_id(header, q)
-
-    existing_text = (
-        pending_path.read_text(encoding="utf-8") if pending_path.exists() else ""
-    )
     if existing_text.strip():
         new_content = existing_text.rstrip() + "\n\n---\n\n" + block
     else:
@@ -2613,8 +2780,8 @@ def resolve_by_id(
     new_block_text: str | None = None
     rewritten_blocks: list[str] = []
 
-    for block_text in blocks:
-        pq = _parse_block(block_text)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, block_index=block_index)
         if pq is None:
             rewritten_blocks.append(block_text)
             continue

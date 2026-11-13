@@ -182,7 +182,10 @@ class TestT1ScreenDecision:
             _write_source(tmp_path / "a.md", name="Alpha", memory_class="fact"),
             _write_source(tmp_path / "b.md", name="Beta", memory_class="fact"),
         ]
-        client = _mock_client('{"verdict": "reject", "reason": "different entities"}')
+        client = _mock_client(
+            '{"verdict": "reject", "reason": "different entities", '
+            '"reason_code": "different_entities"}'
+        )
         dropped, _ = _screen(
             tmp_path, member_paths=paths, client=client, usage=None, wiki_root=wiki
         )

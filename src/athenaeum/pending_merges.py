@@ -3288,7 +3288,9 @@ def ingest_resolved_merges(merges_path: Path) -> int:
 
 @dataclass
 class RetiredProposal:
-    """One unresolved block the current suppression gate would now retire."""
+    """One unresolved block the current suppression gate would now retire
+    as STALE — never a block archived as satisfied instead (see
+    :class:`SatisfiedProposal`)."""
 
     id: str
     merge_target_name: str
@@ -3298,33 +3300,77 @@ class RetiredProposal:
 
 
 @dataclass
+class SatisfiedProposal:
+    """One unresolved block archived as SATISFIED rather than stale (issue
+    athenaeum#2522 AC2): every one of its sources had already been folded
+    into THIS proposal's own ``merge_target_name`` by an unrelated merge, so
+    the merge this proposal asked for has, in effect, already happened. A
+    source folded into some OTHER page, or only some sources folded, is
+    NOT satisfied — it stays on the ordinary :class:`RetiredProposal` stale
+    path (see :func:`revalidate_pending_merges`'s own-target check).
+    """
+
+    id: str
+    merge_target_name: str
+    n_sources: int
+    confidence: float
+    folded_into: str
+
+
+@dataclass
 class RevalidationResult:
     """Outcome of :func:`revalidate_pending_merges`.
 
-    ``retired`` lists the unresolved blocks the CURRENT gate would suppress;
-    ``kept`` counts the blocks left in the primary file (unresolved-and-legal
-    + resolved + unparseable). ``applied`` is True only when the sweep wrote.
+    ``retired`` lists the unresolved blocks the CURRENT gate would suppress
+    as stale; ``satisfied`` lists ones archived instead as satisfied (issue
+    athenaeum#2522 AC2). ``kept`` counts the blocks left in the primary file
+    (unresolved-and-legal + resolved + unparseable — neither retired nor
+    satisfied). ``applied`` is True only when the sweep wrote (either
+    bucket).
     """
 
     retired: list[RetiredProposal]
+    satisfied: list[SatisfiedProposal]
     kept: int
     applied: bool
 
 
-def _source_page_missing(src: str, *, base: Path | None = None) -> bool:
-    """True iff *src* no longer names a live page (issue athenaeum#2072).
+@dataclass(frozen=True)
+class _SourceStatus:
+    """Classification of one ``**Sources**:`` entry at revalidation time
+    (issue athenaeum#2522). Exactly one of three shapes:
 
-    A queued proposal's source can go stale between queue-time and
-    revalidation-time in two ways: the page may have been deleted or
-    renamed outright (the file no longer exists at that path), or it may
-    have been FOLDED AWAY by an unrelated merge in the meantime — the file
-    still exists on disk but now carries the issue athenaeum#716 tombstone
-    stamp (``status: folded`` — see :func:`athenaeum.models.is_tombstone`).
-    Either way the source is no longer something a human reviewing this
-    proposal can meaningfully act on, so both count as "missing" here. A
-    file that cannot be read at all (``OSError``/``UnicodeDecodeError``) is
-    conservatively treated as missing too — this function cannot prove it
-    is still a live page.
+    * ``missing=True`` — the source no longer names a readable page at all
+      (deleted, renamed, or unreadable: ``OSError``/``UnicodeDecodeError``).
+      Genuinely gone; possibly data loss.
+    * ``missing=False, folded=True`` — the source's FILE is still there but
+      is now a tombstone (``status: folded`` — issue athenaeum#716): present,
+      not absent. ``folded_into`` names the slug/stem it was folded into
+      when :func:`athenaeum.models.tombstone_target` can read it, else
+      ``None`` for a malformed tombstone (fails open rather than raising,
+      matching that function's own house style).
+    * ``missing=False, folded=False`` — an ordinary, live page.
+
+    These three were previously conflated into one ``bool`` ("missing") by
+    :func:`revalidate_pending_merges` (issue athenaeum#2072). They are
+    operator-meaningfully different: a fold usually means this proposal's
+    sources already got absorbed somewhere — possibly into THIS proposal's
+    own target, in which case the proposal is already satisfied — while a
+    genuinely missing page may be data loss.
+    """
+
+    missing: bool
+    folded: bool
+    folded_into: str | None = None
+
+
+def _classify_source(src: str, *, base: Path | None = None) -> _SourceStatus:
+    """Classify *src* as live, missing, or folded (issue athenaeum#2522).
+
+    Reuses the existing tombstone reader (:func:`athenaeum.models.is_tombstone`
+    / :func:`athenaeum.models.tombstone_target`) rather than inventing a
+    second way to detect a fold — see that pair's own docstrings for the
+    fail-open malformed-tombstone handling this delegates to.
 
     ``base`` resolves a RELATIVE *src* the same way
     :func:`athenaeum.models.is_page_authorized_at` does (joined to ``base``;
@@ -3338,13 +3384,97 @@ def _source_page_missing(src: str, *, base: Path | None = None) -> bool:
     if base is not None and not path.is_absolute():
         path = Path(base).expanduser() / path
     if not path.is_file():
-        return True
+        return _SourceStatus(missing=True, folded=False)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return True
+        return _SourceStatus(missing=True, folded=False)
     meta, _ = parse_frontmatter(text)
-    return bool(meta) and is_tombstone(meta)
+    if meta and is_tombstone(meta):
+        return _SourceStatus(
+            missing=False, folded=True, folded_into=tombstone_target(meta)
+        )
+    return _SourceStatus(missing=False, folded=False)
+
+
+def _describe_source_staleness(
+    folded_targets: list[str | None], missing_count: int, total: int
+) -> str:
+    """Compose :attr:`RetiredProposal.reason`, distinguishing a folded
+    source from a genuinely missing one (issue athenaeum#2522 AC1).
+
+    *folded_targets* holds the ``folded_into`` value of every FOLDED
+    source (``None`` entries are malformed tombstones with no readable
+    target). A single distinct, known fold target is named (``source
+    folded into <target>: N of M``); more than one distinct target, or
+    none known, reports the count only — naming one of several would
+    mislead an operator into thinking there is a single answer. Missing
+    and folded counts are reported side by side when both are present,
+    preserving the pre-athenaeum#2522 ``"source page missing: N of M"``
+    string verbatim for an all-missing, no-folds block.
+    """
+    parts: list[str] = []
+    if folded_targets:
+        distinct = {t for t in folded_targets if t is not None}
+        if len(distinct) == 1:
+            parts.append(
+                f"source folded into {next(iter(distinct))}: "
+                f"{len(folded_targets)} of {total}"
+            )
+        else:
+            parts.append(f"source folded: {len(folded_targets)} of {total}")
+    if missing_count:
+        parts.append(f"source page missing: {missing_count} of {total}")
+    return "; ".join(parts)
+
+
+def _own_target_identity(own_target_path: Path) -> tuple[str | None, str | None]:
+    """The (bare slug, own ``uid:``) pair identifying *own_target_path*,
+    read from its own frontmatter (issue athenaeum#2522).
+
+    Reuses :func:`identity_slug` — the SAME shared identity rule
+    :func:`find_identity_pages`/:func:`resolve_target_page` already resolve
+    a fold target by (issue athenaeum#1642) — rather than inventing a
+    second slug/uid split. Returns ``(None, None)`` when the file can't be
+    read/parsed, or its own identity can't be resolved (:func:`identity_slug`'s
+    existing rules: a malformed/missing ``name:``, or a filename prefix
+    that is not the page's own ``uid:``).
+    """
+    try:
+        text = own_target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    meta, _ = parse_frontmatter(text)
+    slug = identity_slug(own_target_path, meta)
+    uid = meta.get("uid") if isinstance(meta, dict) else None
+    return slug, (str(uid).strip() if uid and str(uid).strip() else None)
+
+
+def _folded_into_matches(
+    folded_into: str | None, *, target_slug: str, own_uid: str | None
+) -> bool:
+    """Whether a tombstone's ``folded_into`` value names *target_slug*
+    (issue athenaeum#2522).
+
+    A fold stamps a tombstone's ``folded_into`` with the target's real
+    filename STEM (:func:`_apply_fold_into_existing`'s docstring) — which
+    is ``<uid>-<slug>`` for a uid-prefixed canonical, not the bare slug.
+    Pre-athenaeum#2545 folds stamped the bare slug regardless, so a legacy
+    tombstone's value and a uid-prefixed target's CURRENT stem can name
+    the same page while differing in shape. Normalising BOTH sides down
+    to the bare slug (stripping *only* the known-correct ``<own_uid>-``
+    prefix, never an arbitrary one) before comparing by equality is what
+    makes the two forms comparable — never by substring/``endswith``,
+    which would also match an unrelated, longer slug (``sublime-default-rule``
+    inside ``other-sublime-default-rule``) and misreport a live, distinct
+    proposal as already satisfied.
+    """
+    if folded_into is None:
+        return False
+    normalized = folded_into
+    if own_uid and folded_into.startswith(f"{own_uid}-"):
+        normalized = folded_into[len(own_uid) + 1 :]
+    return normalized == target_slug
 
 
 def revalidate_pending_merges(
@@ -3359,15 +3489,34 @@ def revalidate_pending_merges(
 
     Issue athenaeum#2072: also retires a block when at least one of its
     ``**Sources**:`` entries no longer names a live page (see
-    :func:`_source_page_missing` — deleted/renamed, or folded/tombstoned by
-    a later run). This is a DISTINCT reason from the over-cluster gate
-    below (``source page missing: N of M``, not the suppression-gate
-    reason string), recorded and archived the same way. A name-collision-
-    scan proposal (:mod:`athenaeum.name_collisions`) is the driving case —
-    its canonical/source pages can be folded or retired by a LATER run
-    before a human answers the original proposal — but the check applies
-    to every proposal's sources, not just name-collision ones, since a
-    dangling source is equally unreviewable regardless of origin.
+    :func:`_classify_source` — deleted/renamed, or folded/tombstoned by a
+    later run). This is a DISTINCT reason from the over-cluster gate below
+    (``source page missing: N of M`` / ``source folded into <target>: N of
+    M``, not the suppression-gate reason string), recorded and archived
+    the same way. A name-collision-scan proposal (:mod:`athenaeum.name_collisions`)
+    is the driving case — its canonical/source pages can be folded or
+    retired by a LATER run before a human answers the original proposal —
+    but the check applies to every proposal's sources, not just
+    name-collision ones, since a dangling source is equally unreviewable
+    regardless of origin.
+
+    Issue athenaeum#2522: a deleted/renamed source and a FOLDED one used to be
+    reported identically ("source page missing"), even though they mean
+    different things to an operator — a fold usually means the sources
+    were already absorbed somewhere, while a genuinely missing page may be
+    data loss. :func:`_classify_source` now distinguishes the two, and
+    :func:`_describe_source_staleness` composes a reason naming the fold
+    target when every folded source shares one. Further: when EVERY source
+    of an unresolved block is folded (none missing, none still live) and
+    every one of them was folded into THIS proposal's OWN
+    ``merge_target_name`` (resolved the same way :func:`resolve_target_page`
+    resolves it at approve time), the merge this proposal asked for has, in
+    effect, already happened — that block is archived as SATISFIED
+    (:class:`SatisfiedProposal`, ``**Archived**:`` disposition, the same one
+    :func:`ingest_resolved_merges` uses for a human-resolved block) rather
+    than STALE (:class:`RetiredProposal`, ``**Retired**:`` disposition). A
+    source folded into some OTHER page, or only SOME of a block's sources
+    folded, does not qualify — it stays on the ordinary stale path.
 
     athenaeum#480 closed the write-path bypass, so no NEW degenerate over-cluster
     proposal can be appended. This is the complement: it retires entries that
@@ -3400,7 +3549,7 @@ def revalidate_pending_merges(
     Dry-run by default (reports what WOULD be retired, writes nothing); pass
     ``apply=True`` to write. ``now`` is injectable for deterministic tests.
     """
-    result = RevalidationResult(retired=[], kept=0, applied=False)
+    result = RevalidationResult(retired=[], satisfied=[], kept=0, applied=False)
     if not merges_path.exists():
         return result
 
@@ -3408,8 +3557,14 @@ def revalidate_pending_merges(
     blocks = _split_blocks(text)
 
     ts = now_iso(now)
+    wiki_root = merges_path.parent
+    # knowledge_root (wiki_root's parent) — the same base `list_pending_merges`
+    # resolves a relative source against via
+    # `all_sources_authorized`/`is_page_authorized_at`.
+    knowledge_root = wiki_root.parent
     remaining: list[str] = []
     retired_blocks: list[str] = []
+    satisfied_blocks: list[str] = []
 
     for block_text in blocks:
         pm = _parse_block(block_text)
@@ -3424,15 +3579,56 @@ def revalidate_pending_merges(
             config=config,
         )
         if reason is None:
-            # base = knowledge_root (wiki_root's parent) — the same base
-            # `list_pending_merges` resolves a relative source against via
-            # `all_sources_authorized`/`is_page_authorized_at`.
-            knowledge_root = merges_path.parent.parent
-            missing_count = sum(
-                1 for s in pm.sources if _source_page_missing(s, base=knowledge_root)
-            )
-            if missing_count:
-                reason = f"source page missing: {missing_count} of {len(pm.sources)}"
+            statuses = [_classify_source(s, base=knowledge_root) for s in pm.sources]
+            missing_count = sum(1 for st in statuses if st.missing)
+            folded = [st for st in statuses if st.folded]
+
+            # Issue athenaeum#2522 AC2: every source folded (none missing,
+            # none still live) AND every one of them folded into THIS
+            # proposal's OWN target -> the merge already happened in
+            # effect. Resolve "own target" the same way approve-time does
+            # (:func:`resolve_target_page`), then compare by NORMALISED
+            # bare slug (:func:`_folded_into_matches`) rather than raw
+            # filename-stem equality -- a legacy, pre-athenaeum#2545
+            # tombstone's `folded_into` is a bare slug even when its target
+            # is uid-prefixed, so comparing stems verbatim misses it. A
+            # WRONG target (folded into some third page) or a PARTIAL fold
+            # (some sources still live or missing) does not qualify and
+            # falls through to the ordinary stale path below.
+            if folded and len(folded) == len(pm.sources):
+                own_target_path = resolve_target_page(pm.merge_target_name, wiki_root)
+                if own_target_path is not None:
+                    own_target_slug, own_target_uid = _own_target_identity(
+                        own_target_path
+                    )
+                    if own_target_slug is not None and all(
+                        _folded_into_matches(
+                            st.folded_into,
+                            target_slug=own_target_slug,
+                            own_uid=own_target_uid,
+                        )
+                        for st in folded
+                    ):
+                        result.satisfied.append(
+                            SatisfiedProposal(
+                                id=pm.id,
+                                merge_target_name=pm.merge_target_name,
+                                n_sources=len(pm.sources),
+                                confidence=pm.confidence,
+                                folded_into=own_target_path.stem,
+                            )
+                        )
+                        satisfied_blocks.append(
+                            f"{block_text}\n\n**Archived**: {ts} — satisfied: "
+                            f"all sources already folded into "
+                            f"{own_target_path.stem!r}\n"
+                        )
+                        continue
+
+            if missing_count or folded:
+                reason = _describe_source_staleness(
+                    [st.folded_into for st in folded], missing_count, len(pm.sources)
+                )
         if reason is None:
             remaining.append(block_text)
             continue
@@ -3451,16 +3647,20 @@ def revalidate_pending_merges(
 
     result.kept = len(remaining)
 
-    if not apply or not retired_blocks:
+    if not apply or not (retired_blocks or satisfied_blocks):
         return result
 
-    # --- apply: rewrite primary (retired blocks removed) + append archive ---
+    # --- apply: rewrite primary (handled blocks removed) + append archive ---
     primary_parts = ["# Pending Merges", *remaining]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
     atomic_write_text(merges_path, new_primary)
 
     archive_path = merges_path.parent / "_pending_merges_archive.md"
-    new_section = "\n\n---\n\n".join(retired_blocks)
+    # Both dispositions land in the SAME archive file (retired first, then
+    # satisfied -- an arbitrary but stable order); this sidecar was never
+    # meant to fork into two files, only the block's own ``**Retired**:``
+    # vs ``**Archived**:`` line distinguishes why it's there.
+    new_section = "\n\n---\n\n".join([*retired_blocks, *satisfied_blocks])
     existing_archive = ""
     if archive_path.exists():
         existing_archive = archive_path.read_text(encoding="utf-8")
@@ -3481,16 +3681,24 @@ def revalidate_pending_merges(
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
 
-    _withdraw_widen_questions_for_proposals(
-        merges_path.parent / "_pending_questions.md",
-        [r.id for r in result.retired],
-        "was retired",
-    )
+    if result.retired:
+        _withdraw_widen_questions_for_proposals(
+            merges_path.parent / "_pending_questions.md",
+            [r.id for r in result.retired],
+            "was retired",
+        )
+    if result.satisfied:
+        _withdraw_widen_questions_for_proposals(
+            merges_path.parent / "_pending_questions.md",
+            [s.id for s in result.satisfied],
+            "was archived as satisfied",
+        )
     result.applied = True
     log.info(
-        "pending_merges: revalidation retired %d stale proposal(s) to %s "
-        "(current suppression gate)",
+        "pending_merges: revalidation retired %d stale and archived %d "
+        "satisfied proposal(s) to %s (current suppression gate)",
         len(retired_blocks),
+        len(satisfied_blocks),
         archive_path.name,
     )
     return result

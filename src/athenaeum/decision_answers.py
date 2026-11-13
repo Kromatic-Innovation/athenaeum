@@ -165,6 +165,19 @@ class DecisionAnswer:
     #: (:data:`DECISION_ANSWER_SOURCE_TAG` for every file this module writes).
     #: Empty for a file with no ``source`` key.
     source: str = ""
+    #: Issue athenaeum#2523: the human answerer's identity, when the answer
+    #: surface can supply one. The two human-facing surfaces that can
+    #: currently reach :func:`_apply_merge_answer` (the MCP ``resolve_merge``
+    #: tool and the ``athenaeum decisions answer`` CLI command) both stamp
+    #: the placeholder ``"unattributed"`` here today, because no surface yet
+    #: carries a real per-user identity (that is issue athenaeum#2489,
+    #: still open) — once it lands, a caller that resolves a real actor
+    #: flows straight through to ``human:<actor>`` with no further change
+    #: needed here. Empty for a file with no ``actor`` key, which is the
+    #: honest default for anything written by an automated/pipeline path
+    #: (e.g. :mod:`athenaeum.triage`, which never writes a ``merge`` answer
+    #: at all — see that module's "Why only question/coordinate" note).
+    actor: str = ""
 
 
 @dataclass
@@ -218,6 +231,7 @@ def render_decision_answer(
     resolved_at: str | None = None,
     origin_decision_type: str = "",
     name: str = "",
+    actor: str = "",
 ) -> str:
     """Render a decision-answer raw-intake record (athenaeum#908 D1 format).
 
@@ -240,6 +254,13 @@ def render_decision_answer(
     omitted (every caller for which the two are not known to diverge, and
     every answer file written before this field existed, round-trips as
     "origin == applier", which is correct for all three of those).
+
+    ``actor`` (issue athenaeum#2523): the human answerer's identity, when
+    known. Omitted (empty string) means "no positive human signal" —
+    :func:`_apply_merge_answer` reads this back to decide between a
+    ``human:<actor>`` and a ``pipeline:merge-<decision>`` ``decided_by``
+    stamp. See :attr:`DecisionAnswer.actor`'s docstring for why the two
+    current human surfaces both pass the placeholder ``"unattributed"``.
     """
     if decision_type not in VALID_DECISION_TYPES:
         raise ValueError(
@@ -269,6 +290,8 @@ def render_decision_answer(
         meta["note"] = note
     if name and name.strip():
         meta["name"] = name.strip()
+    if actor and actor.strip():
+        meta["actor"] = actor.strip()
 
     frontmatter = yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True, default_flow_style=False
@@ -291,6 +314,7 @@ def write_decision_answer(
     note: str = "",
     origin_decision_type: str = "",
     name: str = "",
+    actor: str = "",
     config: dict | None = None,
     wiki_root: Path | None = None,
 ) -> Path:
@@ -304,6 +328,10 @@ def write_decision_answer(
     ``origin_decision_type`` (issue athenaeum#1996): see
     :func:`render_decision_answer`'s docstring — forwarded verbatim,
     defaulting to *decision_type* when omitted.
+
+    ``actor`` (issue athenaeum#2523): forwarded verbatim to
+    :func:`render_decision_answer` — see its docstring and
+    :attr:`DecisionAnswer.actor`.
 
     Issue athenaeum#2544: for ``decision_type == "coordinate"``, *verdict*
     is first run through :func:`validate_coordinate_answer` — the exact
@@ -364,6 +392,7 @@ def write_decision_answer(
         resolved_at=iso_ts,
         origin_decision_type=origin_decision_type,
         name=name,
+        actor=actor,
     )
 
     stem = f"{filename_ts}-{decision_type}-{decision_id}"
@@ -794,6 +823,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
     )
 
     raw_name = meta.get("name", "") or ""
+    raw_actor = meta.get("actor", "") or ""
 
     return DecisionAnswer(
         decision_id=decision_id.strip(),
@@ -805,6 +835,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         origin_decision_type=origin_decision_type,
         name=str(raw_name),
         source=str(meta.get("source") or "").strip(),
+        actor=str(raw_actor).strip(),
     )
 
 
@@ -933,12 +964,26 @@ def _apply_merge_answer(
         from athenaeum.verdicts import record_pair_decision
 
         verdict_value = "duplicate" if decision == "approve" else "distinct"
+        # Issue athenaeum#2523: a merge resolved from a human answer must be
+        # distinguishable from an automated one in the ledger. `answer.actor`
+        # is the positive signal — set only by the two human-facing answer
+        # surfaces (MCP's `resolve_merge` tool, the `athenaeum decisions
+        # answer` CLI command), both of which stamp the placeholder
+        # "unattributed" today because no surface yet carries a real
+        # per-user identity (that is issue athenaeum#2489, still open).
+        # Once it lands, a caller that resolves a real actor flows straight
+        # through to `human:<actor>` with no further change needed here.
+        # A DecisionAnswer with no actor (e.g. a hypothetical future
+        # automated writer that reuses this same raw-intake path) keeps the
+        # pre-existing `pipeline:merge-<decision>` stamp unchanged — the
+        # human label requires that positive signal, never a default.
+        decided_by = f"human:{answer.actor}" if answer.actor else f"pipeline:merge-{decision}"
         record_pair_decision(
             wiki_root,
             source_a=sources[0],
             source_b=sources[1],
             verdict=verdict_value,
-            decided_by=f"pipeline:merge-{decision}",
+            decided_by=decided_by,
             lock=lock,
             # Issue athenaeum#984 (AC3): let record_pair_decision route an
             # erasure-class or cross-boundary pair to the off-corpus ledger

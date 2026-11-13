@@ -4856,6 +4856,12 @@ def create_server(
             decision_type="merge",
             verdict=decision,
             note=note,
+            # Issue athenaeum#2523: this tool is owner-only (see the
+            # `caller_audience` check above), so every answer it writes is
+            # human-originated — but no surface yet carries a real per-user
+            # identity (issue athenaeum#2489, still open), so the
+            # placeholder stands in until that lands.
+            actor="unattributed",
         )
         message = (
             "decision recorded; applied on the next `athenaeum ingest-answers` tick"
