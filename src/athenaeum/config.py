@@ -9466,3 +9466,98 @@ def resolve_strong_identifier_keys(config: dict[str, Any] | None) -> list[str] |
     if not isinstance(raw, list):
         return None
     return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2197 -- `librarian.field_groups.<page_type>`. Appended
+# here, at the end of the file, per this module's own established
+# convention (see the `dedupe.strong_identifier_keys` block above) of
+# giving a concurrently-landing lane's resolver its own append point so two
+# lanes' diffs don't collide on the same hunk.
+# ---------------------------------------------------------------------------
+
+
+def resolve_page_type_field_groups(
+    config: dict[str, Any] | None,
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Resolve ``librarian.field_groups`` -- per page type, the declared
+    single-valued field groups a misfit can fire against
+    (``librarian.field_groups.<page_type>.<group_name>``, a list of field
+    names).
+
+    A field group names a set of frontmatter fields that, together, hold
+    ONE record's worth of data for a page -- a second, distinct record's
+    values competing for the same fields is a misfit the structured-upsert
+    merge (:mod:`athenaeum.structured_upsert`) must not silently overwrite,
+    interleave, or drop (see that module's ``field_group_misfits`` output;
+    issue athenaeum#2197).
+
+    Example -- a deployment whose CRM importer flattens each person's deals
+    onto `crm_*` frontmatter fields, and wants a misfit flagged the moment a
+    second, different deal collides with the first::
+
+        librarian:
+          field_groups:
+            person:
+              deal:
+                - crm_deal_name
+                - crm_deal_amount
+                - crm_deal_stage
+
+    **Declared groups only -- there is no built-in grouping heuristic.** An
+    importer-prefix default was considered and explicitly dropped as
+    deployment policy (operator ruling 2026-11-13). A page type absent from
+    this config -- or present with no groups -- has NO field groups, however
+    related its field names look; the misfit path in
+    :mod:`athenaeum.structured_upsert` never fires for it. Only fields also
+    listed under that type's ``librarian.structured_upsert.<type>.set_keys``
+    (:func:`resolve_structured_upsert`) are eligible: a field group names
+    scalar, single-valued slots, not the list-valued ``union_keys`` this
+    module's structured-upsert merge unions instead of overwriting.
+
+    Validation never raises: a non-dict ``field_groups``/page-type/group
+    entry, a non-string page type or group name, or a group with no
+    non-empty string field names is dropped (logged at WARNING) rather than
+    half-applied. Missing or malformed config returns an empty mapping, so
+    every existing deployment is unaffected.
+    """
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    if not isinstance(config, dict):
+        return out
+    lib = config.get("librarian")
+    if not isinstance(lib, dict):
+        return out
+    section = lib.get("field_groups")
+    if not isinstance(section, dict):
+        return out
+    for page_type, groups in section.items():
+        if not isinstance(page_type, str) or not page_type.strip() or not isinstance(groups, dict):
+            logger.warning(
+                "librarian.field_groups: ignoring malformed entry %r "
+                "(want a non-empty page type mapping to a dict of groups)",
+                page_type,
+            )
+            continue
+        type_groups: dict[str, tuple[str, ...]] = {}
+        for group_name, fields in groups.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                logger.warning(
+                    "librarian.field_groups.%s: ignoring group with a "
+                    "non-string or empty name: %r",
+                    page_type.strip(),
+                    group_name,
+                )
+                continue
+            field_tuple = _structured_upsert_str_list(fields)
+            if not field_tuple:
+                logger.warning(
+                    "librarian.field_groups.%s.%s: ignoring group with no "
+                    "non-empty field names",
+                    page_type.strip(),
+                    group_name.strip(),
+                )
+                continue
+            type_groups[group_name.strip()] = field_tuple
+        if type_groups:
+            out[page_type.strip()] = type_groups
+    return out
