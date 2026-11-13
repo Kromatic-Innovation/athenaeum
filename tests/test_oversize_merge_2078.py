@@ -311,7 +311,64 @@ def _page(wiki: Path, uid: str, name: str, *, sections: int, flagged: bool = Fal
     return path
 
 
+def _titled_page(
+    wiki: Path, uid: str, name: str, *, sections: int, flagged: bool = True
+) -> Path:
+    """Same shape as :func:`_page` but with a LONE top-level ``# <name>``
+    title ahead of the ``##`` sections (issue athenaeum#2524) -- the
+    compiled-page shape that used to make the CLI's split route cut at
+    the title instead of the sections."""
+    body = (
+        f"# {name}\n\nIntro under the title.\n\n"
+        + "\n\n".join(
+            f"## Section {i}\n\nDetail {i}. " + "Filler prose. " * 400 for i in range(sections)
+        )
+    )
+    flag = "needs_split: true\n" if flagged else ""
+    path = wiki / f"{uid}-{name}.md"
+    path.write_text(f"---\nuid: {uid}\ntype: project\nname: {name}\n{flag}---\n\n{body}\n")
+    return path
+
+
 class TestAC3SplitPass:
+    def test_titled_page_splits_on_sections_not_the_lone_title(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2524 AC1, through the CLI's own caller
+        (:func:`split_pages`, not just the reactive gate): a lone ``#
+        <name>`` title with three ``##`` sections splits into three
+        children named off the SECTION heading, never ``<name>: <name>``
+        (AC3)."""
+        from athenaeum.oversize_split import split_pages
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path = _titled_page(wiki, "aaaa1111", "big", sections=3, flagged=True)
+        (out,) = split_pages(wiki, uids={"aaaa1111"}, auto=False, dry_run=False)
+        assert out.status == "split"
+        children = [p for p in wiki.glob("*.md") if p != path]
+        assert len(children) == 3
+        child_names = {parse_frontmatter(c.read_text())[0]["name"] for c in children}
+        assert "big: big" not in child_names
+        for i in range(3):
+            assert f"big: Section {i}" in child_names
+
+    def test_titled_page_with_one_section_is_refused_as_no_heading(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2524 AC2, through the CLI's own caller: a lone
+        title with only ONE section would still yield exactly one child --
+        refused via the same ``no_heading`` outcome/path the heading-less
+        cohort already uses, nothing written."""
+        from athenaeum.oversize_split import split_pages
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path = _titled_page(wiki, "dddd4444", "lone", sections=1, flagged=True)
+        before = path.read_text()
+        (out,) = split_pages(wiki, uids={"dddd4444"}, auto=False, dry_run=False)
+        assert out.status == "no_heading"
+        assert path.read_text() == before
+        assert list(wiki.glob("*.md")) == [path]
+
     def test_uid_approved_split_and_flag_cleared(self, tmp_path: Path) -> None:
         from athenaeum.oversize_split import split_pages
 
