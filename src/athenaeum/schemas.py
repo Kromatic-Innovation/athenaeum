@@ -186,7 +186,20 @@ class WikiBase(BaseModel):
     claimed_scope: str | None = None
     subject: str | None = None
 
-    @field_validator("recorded_at", "provenance_scope", "claimed_scope", "subject", mode="before")
+    # Issue athenaeum#2535: the child half of the first-class parent/child page
+    # relation (:mod:`athenaeum.page_relations`) -- a top-level uid-valued
+    # pointer at the child. The parent's matching row lives in `related`
+    # (`{uid, role: child, via}`), which needs no declared field here since
+    # `related` has never been a declared field on this schema at all --
+    # it round-trips today purely via `extra="allow"`. `parent` is declared
+    # explicitly anyway, same discipline as `observed_at`/`scope` above, so
+    # it is a first-class, documented part of the schema rather than a bare
+    # passthrough extra.
+    parent: str | None = None
+
+    @field_validator(
+        "recorded_at", "provenance_scope", "claimed_scope", "subject", "parent", mode="before"
+    )
     @classmethod
     def _validate_dimension_coordinate_str(cls, v: Any) -> Any:
         if v is None or v == "":
