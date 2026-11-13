@@ -153,6 +153,38 @@ context on every turn, no tool call required. → [guides/sidecar](docs/guides/s
 nightly batch job is a barrier when you already pay for Claude Code. One provider seam, two
 transports, identical prompts either way. → [modules/provider](docs/modules/provider.md)
 
+**Can be served remotely (experimental).** A host that cannot launch a local process,
+such as ChatGPT or the Grok apps, can't reach a stdio memory server at all.
+`athenaeum serve --transport http` serves the store over HTTPS behind your reverse proxy,
+with OIDC bearer-token auth (`serve.auth.*`) and a `remote` serve profile that narrows
+what leaves your machine. Experimental, and not covered by the `athenaeum.__all__`
+compatibility promise: flags and keys may change in a minor release.
+→ [guides/remote](docs/guides/remote.md)
+
+**Transcript authorship can be attested (experimental).** `promptwitness` is a separate
+package and console script that keeps a hash-chained ledger recording that a human typed
+each prompt, with no prompt text stored, so a transcript can later be checked against it.
+Experimental, and not part of `athenaeum.__all__`: its CLI and formats may change in a
+minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
+
+## Stability and versioning
+
+- **Pre-1.0.** Athenaeum follows semantic versioning, but until 1.0 a minor
+  version (0.x) may make breaking changes. Read the [CHANGELOG](CHANGELOG.md)
+  before upgrading across a minor.
+- **Public API.** Only the names in `athenaeum.__all__` are public API and carry the
+  compatibility promise. Everything else, including every other importable module
+  and each CLI flag, config key and file format not documented as stable, is
+  internal and may change.
+- **Experimental surfaces** are marked as such where they are documented (remote
+  serving with OIDC auth, `promptwitness`, and the source trust graph). They sit
+  outside `athenaeum.__all__` and may change in any minor release without a
+  deprecation cycle.
+- **Scheduled removal.** `athenaeum merges` and `athenaeum questions` are removed in
+  0.24.0. Use `athenaeum decisions` instead.
+- **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
+  for supported versions and how to report a vulnerability.
+
 ## Where to go next
 
 | | |
