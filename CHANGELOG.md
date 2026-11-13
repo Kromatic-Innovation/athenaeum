@@ -179,6 +179,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The warning now also names the block's 1-based position in the file
   (`block #N`) so the operator can find it (athenaeum#2516).
 
+- Two pending questions sharing one header + the same (often generic)
+  question line — e.g. two detector-raised field-correction items that
+  differ only in `**Description**:` — no longer collapse onto one
+  decision id: every new block now carries a `**Id salt**:` line (a
+  creation-time disambiguator, hashed once from the block's own
+  description/context and persisted — never recomputed), folded into the
+  id hash alongside header + question. A block written before this
+  change (no salt line) still hashes exactly as before, so an in-flight
+  cached id or answer keeps resolving. If a writer's minted id would
+  still collide with one already in the file, it disambiguates (mints a
+  fresh one) rather than silently dropping the item. `decisions list`
+  now also warns on stderr if it ever finds two pending items sharing one
+  id (athenaeum#2517).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
