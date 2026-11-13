@@ -188,7 +188,6 @@ class TestArtifactRegistryClassMembership:
         athenaeum/store.py for what physically moved vs. what has a
         not-yet-wired relocation mechanism)."""
         for name in (
-            "llm-schema-observations-ledger",
             "spend-ledger",
             "push-records-ledger",
         ):

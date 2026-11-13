@@ -5786,7 +5786,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `src/athenaeum/rule_proposals.py` |
 | `ATHENAEUM_RULE_PROPOSALS_THINKING` | `src/athenaeum/rule_proposals.py` |
 | `ATHENAEUM_RUN_TYPE` | `src/athenaeum/_cmd_run.py`, `src/athenaeum/librarian.py`, `src/athenaeum/spend.py` |
-| `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` | `src/athenaeum/llm_schemas.py` |
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |

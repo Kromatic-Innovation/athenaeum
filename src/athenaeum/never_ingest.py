@@ -13,8 +13,14 @@ via :mod:`athenaeum.intake_audit`'s pending-question queue. Raw intake that
 IS recognised but matches a DECLARED refusal class is a different outcome —
 no human escalation is needed (the class was already declared), but the
 refusal must never be a silent drop either. This module supplies that other
-rung: every refusal is appended to a durable, ids-only JSONL ledger
-(:data:`REFUSALS_FILENAME`) — the "intake disposition" the issue's AC names.
+rung: :func:`check_and_refuse` logs an INFO line naming the class and detail
+so the "intake disposition" the issue's AC names is never silent.
+
+Issue athenaeum#2468 removed this module's durable, ids-only JSONL ledger
+(formerly :data:`REFUSALS_FILENAME`, under the cache dir) — nothing outside
+this module's own tests ever read it. The refusal DECISION (excluding the
+file from this run's compilation) is unchanged; only the append-only record
+of it is gone.
 
 Two classes ship (both are the never-ingest list's seed evidence — see the
 issue's filing comment, a 2026-08-07 operator evidence log of three
@@ -86,7 +92,8 @@ own drop already works. This module contains no
 ``tests/test_never_ingest.py``'s static scan.
 
 Layering: L2 primitive, alongside :mod:`athenaeum.ephemeral`. Imports
-:mod:`athenaeum.authority` (L1) and :mod:`athenaeum.config` (leaf) only. Must
+:mod:`athenaeum.authority` (L1), :mod:`athenaeum.models` and
+:mod:`athenaeum.store` (leaf) only. Must
 NEVER import :mod:`athenaeum.librarian`/:mod:`athenaeum.intake` back (the
 same cycle-avoidance rule :mod:`athenaeum.intake`'s own docstring states) —
 callers in ``librarian.py`` import THIS module, not the reverse.
@@ -95,7 +102,6 @@ callers in ``librarian.py`` import THIS module, not the reverse.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -108,16 +114,16 @@ from athenaeum.authority import (
     AuthorityManifest,
     find_duplicate_source,
 )
-from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_frontmatter
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
-#: Filename under the cache dir for the never-ingest refusal ledger. Never
-#: under the wiki/raw corpus — same discipline as
-#: :data:`athenaeum.push_metrics.PUSH_RECORDS_FILENAME` — so a refusal
-#: record can never itself become a claim or enter the embedded index.
+#: Former filename under the cache dir for the never-ingest refusal ledger
+#: (issue athenaeum#2468 stopped writing it -- nothing outside this module's
+#: own tests ever read it). Kept only as a documented historical constant so
+#: ``docs/guides/upgrading.md`` and a stray pre-upgrade file on disk can both
+#: be traced back to one name; no code resolves a path from it anymore.
 REFUSALS_FILENAME = "_never_ingest_refusals.jsonl"
 
 #: Which intake pipeline produced a refusal (issue athenaeum#968). Both tiers
@@ -240,19 +246,6 @@ def classify_never_ingest(
 # ---------------------------------------------------------------------------
 
 
-def _append_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync), via
-    :func:`athenaeum.store.append_line_durable` — the single shared
-    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
-    (design note §2.4 / §6.2)."""
-    append_line_durable(path, line.encode("utf-8"))
-
-
-def refusals_path(cache_dir: Path | None = None) -> Path:
-    """Resolve the refusal-ledger path: ``<cache_dir>/_never_ingest_refusals.jsonl``."""
-    return resolve_cache_dir(cache_dir) / REFUSALS_FILENAME
-
-
 def _hash_ref(origin_scope: str, filename: str) -> str:
     """Stable, content-free digest of a refused file's identity.
 
@@ -298,52 +291,8 @@ class NeverIngestRefusal:
         }
 
 
-def record_refusal(refusal: NeverIngestRefusal, *, cache_dir: Path | None = None) -> bool:
-    """Append one refusal to the durable ledger. Best-effort, never raises.
-
-    Mirrors :func:`athenaeum.push_metrics.record_push`'s own contract: a
-    ledger-write failure must never break intake, but must never be silently
-    swallowed either — it is logged at warning level.
-    """
-    try:
-        path = refusals_path(cache_dir)
-        _append_line(path, json.dumps(refusal.to_dict(), separators=(",", ":")) + "\n")
-        return True
-    except Exception as exc:  # noqa: BLE001 — must never break intake
-        log.warning(
-            "never-ingest refusal ledger write FAILED (%s): %s — this "
-            "refusal will be invisible to the intake-disposition report",
-            type(exc).__name__,
-            exc,
-        )
-        return False
-
-
-def read_refusals(cache_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Read every refusal record. Tolerates a torn trailing line; never raises."""
-    path = refusals_path(cache_dir)
-    if not path.is_file():
-        return []
-    out: list[dict[str, Any]] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            out.append(row)
-    return out
-
-
 # ---------------------------------------------------------------------------
-# check_and_refuse — the ONE classify+ledger primitive both tiers share.
+# check_and_refuse — the ONE classify primitive both tiers share.
 # ---------------------------------------------------------------------------
 
 
@@ -358,17 +307,24 @@ def check_and_refuse(
     cache_dir: Path | None = None,
     dry_run: bool = False,
 ) -> NeverIngestRefusal | None:
-    """Classify one (meta, body) pair and, on a match, build + ledger the
-    refusal in one call. Returns ``None`` when nothing matches (or no
-    classes are enabled) — the common, cheap case, and the caller's signal
-    to proceed with this file normally.
+    """Classify one (meta, body) pair and, on a match, build the refusal in
+    one call. Returns ``None`` when nothing matches (or no classes are
+    enabled) — the common, cheap case, and the caller's signal to proceed
+    with this file normally.
 
     The SINGLE shared primitive both intake tiers call (issue athenaeum#968):
     :func:`filter_never_ingest` (auto-memory, pre-clustering) and
     ``athenaeum.librarian.process_one`` (entity tier, per-file at the
     compile choke point — never at discovery, see :data:`NEVER_INGEST_TIER_ENTITY`'s
-    docstring for why). One code path means the classify → build → log →
-    ledger sequence cannot drift between the two tiers.
+    docstring for why). One code path means the classify → build → log
+    sequence cannot drift between the two tiers.
+
+    ``cache_dir`` and ``dry_run`` are retained for call-signature stability
+    (every production and test caller still passes them) but no longer
+    select a ledger write target: issue athenaeum#2468 removed this
+    primitive's ledger write (nothing outside this module's own tests ever
+    read it). The refusal DECISION itself — excluding *filename* from this
+    run's compilation — is unchanged; only the durable record is gone.
     """
     match = classify_never_ingest(meta, body, manifest=manifest)
     if match is None:
@@ -390,8 +346,6 @@ def check_and_refuse(
         match.class_slug,
         match.detail,
     )
-    if not dry_run:
-        record_refusal(refusal, cache_dir=cache_dir)
     return refusal
 
 
@@ -465,8 +419,5 @@ __all__ = [
     "NeverIngestRefusal",
     "classify_never_ingest",
     "check_and_refuse",
-    "refusals_path",
-    "record_refusal",
-    "read_refusals",
     "filter_never_ingest",
 ]

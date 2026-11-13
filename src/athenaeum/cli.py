@@ -176,6 +176,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
     "attribution": ("athenaeum._cmd_attribution", "add_attribution_subparser"),
     "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
+    "provenance": ("athenaeum._cmd_provenance", "add_provenance_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
     "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
     "subject-population": (
@@ -235,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_paste_cleanup import add_paste_cleanup_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
     from athenaeum._cmd_pii_restore import add_pii_restore_subparser
+    from athenaeum._cmd_provenance import add_provenance_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_quarantine import add_quarantine_subparser
     from athenaeum._cmd_query import add_query_subparsers
@@ -300,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_decisions_subparser(subparsers)  # decisions
     add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
     add_paste_cleanup_subparser(subparsers)  # paste-cleanup (issue athenaeum#1717)
+    add_provenance_subparser(subparsers)  # provenance adapter (issue athenaeum#2468)
     add_schema_subparser(subparsers)  # schema migrate (issue athenaeum#1628)
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom

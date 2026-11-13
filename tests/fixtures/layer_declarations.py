@@ -192,7 +192,6 @@ MODULE_LAYER: dict[str, int] = {
     "metrics": 3,
     "spend": 3,
     "usage_report": 3,
-    "wiki_dedupe_attribution": 3,
     # witness_readout.py: "Layering: L3 service" (athenaeum#2160) -- imports
     # transcript_receipts/witness_attestation/config (all L2) and
     # promptwitness.ledger, nothing above, so the L5 CLI and the L4 nightly
@@ -339,6 +338,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_correct_notes": 5,
     "_cmd_corrections_trust_dryrun": 5,  # issue athenaeum#2331 (TG3)
     "_cmd_paste_cleanup": 5,
+    "_cmd_provenance": 5,  # issue athenaeum#2468
     "_cmd_authority": 5,
     "_cmd_axiom": 5,
     "_cmd_bounce_contract": 5,

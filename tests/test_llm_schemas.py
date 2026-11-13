@@ -23,7 +23,6 @@ import pytest
 from pydantic import ValidationError
 
 from athenaeum import contradictions, llm_schemas, push_metrics, query_topics, resolutions, spend
-from athenaeum.config import resolve_cache_dir
 from athenaeum.llm_schemas import SCHEMA_MISMATCH_MARKER
 from athenaeum.models import CLAIM_KINDS
 from athenaeum.resolutions import _VALID_ACTIONS
@@ -41,20 +40,18 @@ def _mismatch_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecor
 def _isolate_observation_ledger(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Point the athenaeum#724 observation ledger at a per-test tmp cache dir, so
-    observe() writes never touch the real ``~/.cache/athenaeum`` during the run.
+    """Point ``ATHENAEUM_CACHE_DIR`` at a per-test tmp cache dir, own tmp dir
+    per test via ``tmp_path_factory`` (distinct from the global fixture's
+    ``tmp_path``), so any call in this module stays self-contained and never
+    touches the real ``~/.cache/athenaeum`` during the run.
 
-    This module's tests specifically exercise the ledger (they assert
-    observations ARE recorded), so — unlike the rest of the suite — it opts
-    back IN to recording explicitly: the repo-wide ``tests/conftest.py``
-    ``_isolate_cache_dir`` autouse fixture (athenaeum#750) defaults
-    ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`` for every test, so this
-    re-enables it here. ``ATHENAEUM_CACHE_DIR`` is re-pointed too (own tmp dir
-    per test via ``tmp_path_factory``, distinct from the global fixture's
-    ``tmp_path``) so this module's ledger reads/writes stay self-contained.
+    Issue athenaeum#2468 removed the observation ledger this fixture used to
+    re-enable recording for (``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=1``) --
+    nothing outside this module's own tests ever read it, and the switch
+    itself is gone. The cache-dir redirect remains: several tests still
+    resolve a cache dir and must not escape into the real one.
     """
     monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path_factory.mktemp("obs-cache")))
-    monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +284,7 @@ class TestPhase2aStrictness:
         msg = recs[0].getMessage()
         assert "error_class=ValidationError" in msg
         assert "surprise" in msg
-        agg = llm_schemas.aggregate_observations()
-        assert agg["tiers.tier2"]["by_class"].get(llm_schemas.MISMATCH_EXTRA_KEYS) == 1
+        assert f"classes={llm_schemas.MISMATCH_EXTRA_KEYS}" in msg
 
     def test_tier2_missing_name_is_still_strict_fail(self) -> None:
         # Unchanged: name was already required pre-athenaeum#1035, and it is the one
@@ -337,10 +333,9 @@ class TestPhase2aStrictness:
     ) -> None:
         with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
             llm_schemas.observe_tier3_merge_ops([{"anchor": "x", "text": "y"}], call_site="t")
-        agg = llm_schemas.aggregate_observations()
-        assert (
-            agg["tiers.tier3-merge"]["by_class"].get(llm_schemas.MISMATCH_MISSING_REQUIRED) == 1
-        )
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        assert f"classes={llm_schemas.MISMATCH_MISSING_REQUIRED}" in recs[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -372,10 +367,6 @@ class TestPhase2Strictness:
         # this test is the thing that must be updated deliberately.
         assert "resolutions" not in llm_schemas.STRICT_CONTRACTS
         assert llm_schemas.ResolutionResponse.model_config.get("extra") == "allow"
-        # every INSTRUMENTED contract is either decided or the one deferral
-        assert set(llm_schemas.INSTRUMENTED_CONTRACTS) - llm_schemas.STRICT_CONTRACTS == {
-            "resolutions"
-        }
 
     # --- claim_kind / contradictions: strict-pass vs strict-fail -----------
 
@@ -432,10 +423,10 @@ class TestPhase2Strictness:
         recs = _mismatch_records(caplog)
         assert len(recs) == 1
         msg = recs[0].getMessage()
+        assert f"contract={contract}" in msg
         assert "error_class=ValidationError" in msg
         assert "surprise" in msg
-        agg = llm_schemas.aggregate_observations()
-        assert agg[contract]["by_class"].get(llm_schemas.MISMATCH_EXTRA_KEYS) == 1
+        assert f"classes={llm_schemas.MISMATCH_EXTRA_KEYS}" in msg
 
     @pytest.mark.parametrize(
         "model,payload",
@@ -480,8 +471,9 @@ class TestPhase2Strictness:
         # degrade. observe() logs it and returns None; it never gates.
         with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
             assert llm_schemas.observe_query_topics(["alpha", 7], call_site="t") is None
-        agg = llm_schemas.aggregate_observations()
-        assert agg["query_topics"]["by_class"].get(llm_schemas.MISMATCH_WRONG_TYPE) == 1
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        assert f"classes={llm_schemas.MISMATCH_WRONG_TYPE}" in recs[0].getMessage()
 
     # --- the phase-2 answer to reject-vs-degrade --------------------------
 
@@ -505,105 +497,45 @@ class TestPhase2Strictness:
 
 
 # ---------------------------------------------------------------------------
-# Observation ledger — denominator, class-tagged mismatches, parse-fail
-# counting, and the aggregation (issue athenaeum#724)
+# Issue athenaeum#2468: the observation ledger (denominator, class-tagged
+# mismatches, parse-fail counting, and the aggregation -- issue athenaeum#724)
+# was removed. ``record_observation``, ``read_observations`` and
+# ``aggregate_observations`` are gone; nothing outside this module's own
+# tests ever read it. ``observe``/``observe_parse_failure`` still validate
+# and log (covered above and in ``TestParseGuardCallSitesCountFailures``
+# below); only the durable per-observation record is gone.
 # ---------------------------------------------------------------------------
-#
-# Before athenaeum#724 the instrument logged only ON a mismatch, with no
-# denominator, and a total parse failure returned BEFORE reaching observe() — so
-# the athenaeum#608 measurement got "0 across every contract" and could not tell 0/0 from
-# 0/400. These pin the three defects fixed: every observation is counted, every
-# mismatch carries its class, and a parse failure is a countable record.
 
 
-class TestObservationLedger:
-    def test_clean_observation_is_counted_as_the_denominator(self) -> None:
-        llm_schemas.observe_contradictions(
-            {"detected": False, "rationale": "ok"}, call_site="t"
-        )
-        agg = llm_schemas.aggregate_observations()
-        assert agg["contradictions"]["observations"] == 1
-        assert agg["contradictions"]["mismatches"] == 0
-        assert agg["contradictions"]["mismatch_rate"] == 0.0
-        assert agg["contradictions"]["no_data"] is False
-
-    def test_zero_over_zero_is_no_data_not_zero_percent(self) -> None:
-        # AC2: a contract with 0 observations is reportable as *no data*,
-        # distinctly from 0 mismatches over 400.
-        agg = llm_schemas.aggregate_observations()
-        assert agg["resolutions"]["no_data"] is True
-        assert agg["resolutions"]["mismatch_rate"] is None
-        # …and every instrumented contract is present (explicit, not silently
-        # absent) — including claim_kind, which has no production caller.
-        assert set(llm_schemas.INSTRUMENTED_CONTRACTS) <= set(agg)
-        assert agg["claim_kind"]["no_data"] is True
-
-    @pytest.mark.parametrize(
-        "payload,expected_class",
-        [
-            ({}, llm_schemas.MISMATCH_MISSING_REQUIRED),
-            ({"claim_kind": 123}, llm_schemas.MISMATCH_WRONG_TYPE),
-            ({"claim_kind": "fact", "surprise": 1}, llm_schemas.MISMATCH_EXTRA_KEYS),
-        ],
-    )
-    def test_mismatch_carries_its_class(self, payload: dict, expected_class: str) -> None:
-        # AC3: extra-keys / missing-required / wrong-type each tagged.
-        llm_schemas.observe_claim_kind(payload, call_site="t")
-        agg = llm_schemas.aggregate_observations()
-        assert agg["claim_kind"]["by_class"].get(expected_class) == 1
-        assert agg["claim_kind"]["mismatches"] == 1
-
-    def test_parse_failure_is_counted(self) -> None:
-        # AC1: a total parse failure is a countable record with class parse-fail.
-        llm_schemas.observe_parse_failure(
-            contract="contradictions", call_site="t", detail="no-json"
-        )
-        agg = llm_schemas.aggregate_observations()
-        assert agg["contradictions"]["observations"] == 1
-        assert agg["contradictions"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
-
-    def test_aggregation_over_a_run_has_nonzero_denominators(self) -> None:
-        # AC7: an aggregation over a run shows non-zero denominators per contract
-        # and at least one deliberately-induced parse-fail counted.
-        for _ in range(5):
-            llm_schemas.observe_contradictions(
-                {"detected": False, "rationale": "ok"}, call_site="t"
-            )
-        llm_schemas.observe_query_topics(["a", "b"], call_site="t")
-        llm_schemas.observe_parse_failure(
-            contract="contradictions", call_site="t", detail="no-json"
-        )
-        agg = llm_schemas.aggregate_observations()
-        assert agg["contradictions"]["observations"] == 6  # 5 clean + 1 parse-fail
-        assert agg["query_topics"]["observations"] == 1
-        assert agg["contradictions"]["by_class"][llm_schemas.MISMATCH_PARSE_FAIL] == 1
-        # every contract with traffic has a real denominator to divide by
-        assert agg["contradictions"]["mismatch_rate"] == pytest.approx(1 / 6)
-
-    def test_ledger_records_no_field_values_only_shape(self) -> None:
-        # Redaction: the ledger carries field paths, error messages, and KEY
-        # names — never a field VALUE, so no claim content or personal data.
-        llm_schemas.observe_contradictions(
-            {"detected": False, "rationale": "SECRET-CONTENT", "leaked_secret": "hunter2"},
-            call_site="t",
-        )
-        rows = llm_schemas.read_observations()
-        blob = "\n".join(str(r) for r in rows)
-        assert "leaked_secret" in blob  # the KEY name is recorded (extra-keys)
-        assert "hunter2" not in blob  # the VALUE is NOT
-        assert "SECRET-CONTENT" not in blob
-
-    def test_disabled_env_writes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "0")
-        llm_schemas.observe_contradictions(
-            {"detected": False, "rationale": "ok"}, call_site="t"
-        )
-        assert llm_schemas.read_observations() == []
-
+class TestObserveBehaviorNeutrality:
     def test_observe_never_changes_behavior_or_raises(self) -> None:
-        # Behavior neutrality preserved: observe returns None and never raises,
-        # even when the ledger path is unwritable (best-effort).
+        # Behavior neutrality preserved: observe returns None and never
+        # raises.
         assert llm_schemas.observe_contradictions({"detected": True}, call_site="t") is None
+
+
+class TestNoObservationLedgerWritten:
+    """Issue athenaeum#2468: a test per removed writer asserting the run no
+    longer creates that file. FAILS on pre-athenaeum#2468 code, which wrote
+    ``_llm_schema_observations.jsonl`` under the cache dir on every
+    ``observe*``/``observe_parse_failure`` call.
+    """
+
+    def test_observe_creates_no_observation_ledger_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        llm_schemas.observe_contradictions(
+            {"detected": False, "rationale": "ok"}, call_site="t"
+        )
+        llm_schemas.observe_claim_kind(
+            {"claim_kind": "fact", "surprise": 1}, call_site="t"
+        )
+        llm_schemas.observe_parse_failure(
+            contract="contradictions", call_site="t", detail="no-json"
+        )
+        assert not list(tmp_path.rglob("_llm_schema_observations.jsonl"))
 
 
 class TestParseGuardCallSitesCountFailures:
@@ -612,18 +544,24 @@ class TestParseGuardCallSitesCountFailures:
     athenaeum#724 these returns were structurally invisible to the instrument.
     """
 
-    def test_contradictions_parse_response_counts_a_parse_failure(self) -> None:
+    def test_contradictions_parse_response_counts_a_parse_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         from athenaeum import contradictions
 
-        result = contradictions._parse_response("this is not json at all", [])
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            result = contradictions._parse_response("this is not json at all", [])
         # Behavior unchanged: still the detector-returned-no-json fallback.
         assert result.detected is False
         assert result.rationale == "detector-returned-no-json"
-        # …and it is now counted.
-        agg = llm_schemas.aggregate_observations()
-        assert agg["contradictions"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
+        # …and it is still observed (now via the WARNING marker, not a ledger).
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        assert f"classes={llm_schemas.MISMATCH_PARSE_FAIL}" in recs[0].getMessage()
 
-    def test_claim_kind_classify_counts_a_parse_failure(self) -> None:
+    def test_claim_kind_classify_counts_a_parse_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         from unittest.mock import MagicMock
 
         from athenaeum import claim_kind
@@ -640,10 +578,12 @@ class TestParseGuardCallSitesCountFailures:
         client.messages.create.return_value = response
 
         # Behavior unchanged: unparseable → unclassified "".
-        assert claim_kind.classify_claim_kind("Some memory body.", client) == ""
-        # …and the parse failure is now counted.
-        agg = llm_schemas.aggregate_observations()
-        assert agg["claim_kind"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            assert claim_kind.classify_claim_kind("Some memory body.", client) == ""
+        # …and the parse failure is still observed (WARNING marker, not a ledger).
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        assert f"classes={llm_schemas.MISMATCH_PARSE_FAIL}" in recs[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -663,61 +603,19 @@ class TestParseGuardCallSitesCountFailures:
 
 
 class TestObservationsPathIsolation:
-    def test_observations_path_no_arg_resolves_under_test_tmp_dir(self) -> None:
-        """AC3 regression pin: ``observations_path()`` with NO argument must
-        resolve under a test-owned tmp dir, never the real user cache dir,
-        because an autouse fixture has already pointed ``ATHENAEUM_CACHE_DIR``
-        at one — the repo-wide ``tests/conftest.py`` ``_isolate_cache_dir``
-        fixture (athenaeum#750) for the suite generally, or this module's own
-        ``_isolate_observation_ledger`` override here specifically. Either
-        way, the property under test is "the env var wins over the real
-        default", so the assertions read the env var pytest actually set
-        rather than hardcoding either fixture's tmp path.
-        """
-        resolved = llm_schemas.observations_path()
-        real_default = Path("~/.cache/athenaeum").expanduser()
-        assert resolved != real_default / llm_schemas.OBSERVATIONS_FILENAME
-        assert resolved.name == llm_schemas.OBSERVATIONS_FILENAME
-        # It must live under whatever ATHENAEUM_CACHE_DIR an autouse fixture
-        # pointed at (this module's own, or the repo-wide one in
-        # tests/conftest.py — either way, the point is "the env var wins,
-        # and the env var is a test tmp dir"), and that dir must NOT be the
-        # real home cache dir.
-        env_cache_dir = Path(os.environ["ATHENAEUM_CACHE_DIR"]).expanduser()
-        assert env_cache_dir != real_default
-        assert resolved == env_cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        assert resolve_cache_dir(cache_dir=None) == env_cache_dir
-
     # AC1/AC2 (athenaeum#791): the pattern below was originally pinned to ONE
-    # cache-dir artifact (``_llm_schema_observations.jsonl``, athenaeum#750).
-    # "the count is the audit trail" applies just as much to the OTHER
-    # artifacts a no-arg cache-dir resolution can escape into — ``spend.jsonl``
-    # (athenaeum#776) and, per the evidence that opened athenaeum#791,
-    # ``_push_records.jsonl`` / ``_push_references.jsonl``. Three independent
-    # ledgers hitting the same escape is the signal that the invariant is
-    # "no cache-dir artifact leaks", not "this one file doesn't leak" — so this
-    # canary is parametrized over every artifact instead of naming one.
+    # cache-dir artifact (``_llm_schema_observations.jsonl``, athenaeum#750);
+    # issue athenaeum#2468 removed that ledger (and its own
+    # ``record_observation``-based case here) as something nothing outside
+    # this module's own tests ever read. "the count is the audit trail"
+    # still applies to the OTHER artifacts a no-arg cache-dir resolution can
+    # escape into — ``spend.jsonl`` (athenaeum#776) and, per the evidence
+    # that opened athenaeum#791, ``_push_records.jsonl`` /
+    # ``_push_references.jsonl``. Two independent ledgers hitting the same
+    # escape is still the signal that the invariant is "no cache-dir
+    # artifact leaks", not "this one file doesn't leak" — so this canary
+    # stays parametrized over the remaining artifacts.
     _NESTED_POLLUTION_CASES = [
-        pytest.param(
-            llm_schemas.OBSERVATIONS_FILENAME,
-            textwrap.dedent(
-                """
-                from athenaeum.llm_schemas import record_observation
-
-                def test_calls_record_observation_with_no_explicit_cache_dir():
-                    # No cache_dir kwarg — exercises the SAME no-arg resolution
-                    # path production call sites use, so this only stays out of
-                    # the real ledger if the child process's own conftest.py
-                    # isolation (session AND per-test) fired.
-                    record_observation(
-                        contract="query_topics",
-                        call_site="nested-pytest-pollution-probe-791",
-                        outcome="ok",
-                    )
-                """
-            ),
-            id="llm_schema_observations",
-        ),
         pytest.param(
             spend.LEDGER_FILENAME,
             textwrap.dedent(
@@ -883,158 +781,9 @@ class TestObservationsPathIsolation:
 
 
 # ---------------------------------------------------------------------------
-# durable_observations_path — issue athenaeum#1601: the ledger resolves to
-# the cache dir, ALWAYS, and never into wiki_root. This withdraws issue
-# athenaeum#980 AC4's relocation of this artifact (the same withdrawal issue
-# athenaeum#1591 already made for `_push_records.jsonl`) and closes issue
-# athenaeum#1512 defect 2's bare-``exists()`` flip at this call site. See the
-# function's own docstring for the archaeology, and
-# athenaeum.store.ARTIFACT_REGISTRY's "llm-schema-observations-ledger" entry
-# for the (unchanged) R3 class/scope declaration.
-#
-# The four-way resolution matrix below is exhaustive over the two files'
-# populated/absent states — the point being that the answer is now the same
-# in every cell, so no state of the disk can migrate a deployment.
+# Issue athenaeum#2468 removed `durable_observations_path`/`observations_path`
+# along with the ledger they resolved a path for -- `TestDurableObservationsPath`
+# (the four-way wiki-root/cache-dir resolution matrix from issue athenaeum#1601,
+# and the ARTIFACT_REGISTRY "llm-schema-observations-ledger" entry it pinned)
+# is gone with them; neither function nor that registry entry exists anymore.
 # ---------------------------------------------------------------------------
-
-
-class TestDurableObservationsPath:
-    @staticmethod
-    def _roots(tmp_path: Path) -> tuple[Path, Path]:
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        return wiki_root, cache_dir
-
-    def test_matrix_neither_populated(self, tmp_path: Path) -> None:
-        wiki_root, cache_dir = self._roots(tmp_path)
-        assert (
-            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-            == cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        )
-
-    def test_matrix_legacy_populated(self, tmp_path: Path) -> None:
-        wiki_root, cache_dir = self._roots(tmp_path)
-        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        legacy.write_text('{"v":1}\n', encoding="utf-8")
-        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
-
-    def test_matrix_wiki_path_populated(self, tmp_path: Path) -> None:
-        """The cell that used to migrate a deployment. A populated
-        ``<wiki_root>/_llm_schema_observations.jsonl`` no longer captures
-        resolution."""
-        wiki_root, cache_dir = self._roots(tmp_path)
-        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).write_text(
-            '{"v":1}\n', encoding="utf-8"
-        )
-        assert (
-            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-            == cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        )
-
-    def test_matrix_both_populated(self, tmp_path: Path) -> None:
-        wiki_root, cache_dir = self._roots(tmp_path)
-        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        legacy.write_text('{"v":1}\n', encoding="utf-8")
-        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).write_text(
-            '{"v":1}\n', encoding="utf-8"
-        )
-        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
-
-    def test_empty_wiki_path_never_captures_resolution(self, tmp_path: Path) -> None:
-        """Regression test for issue athenaeum#1512 defect 2, which was still
-        live in THIS resolver (a bare ``new_path.exists()``) until issue
-        athenaeum#1601: an EMPTY
-        ``<wiki_root>/_llm_schema_observations.jsonl`` — a stray ``touch``, a
-        partially written file from a crashed run — must not look "already
-        migrated" and permanently flip resolution away from a populated
-        legacy ledger."""
-        wiki_root, cache_dir = self._roots(tmp_path)
-        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-        legacy.write_text('{"v":1}\n', encoding="utf-8")
-        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).touch()
-
-        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
-
-    def test_populated_wiki_path_no_longer_warns(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Issue athenaeum#2467: a deployment already carrying the misrouted
-        file is left alone — nothing is auto-migrated or auto-deleted, and
-        (unlike before athenaeum#2467) the operator is no longer warned
-        either. The old-location file is simply ignored."""
-        wiki_root, cache_dir = self._roots(tmp_path)
-        misrouted = wiki_root / llm_schemas.OBSERVATIONS_FILENAME
-        misrouted.write_text('{"v":1}\n', encoding="utf-8")
-
-        with caplog.at_level(logging.WARNING, logger=llm_schemas.log.name):
-            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-
-        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
-
-    def test_absent_wiki_path_is_silent(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Counter-example: the healthy case must not warn."""
-        wiki_root, cache_dir = self._roots(tmp_path)
-        with caplog.at_level(logging.WARNING, logger=llm_schemas.log.name):
-            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
-
-    def test_artifact_registry_declares_the_cache_dir(self) -> None:
-        """Issue athenaeum#1601 AC5: the resolver and the R3 declaration must
-        agree, or the contradiction this issue was filed about simply moves
-        to a different pair of files."""
-        from athenaeum.store import ARTIFACT_REGISTRY
-
-        decl = next(a for a in ARTIFACT_REGISTRY if a.name == "llm-schema-observations-ledger")
-        assert decl.persistence_class == "operational"
-        assert decl.operational_scope == "store-durable"
-        assert decl.location == "cache dir"
-
-    def test_explicit_cache_dir_now_does_isolate_this_function(self, tmp_path: Path) -> None:
-        """Issue athenaeum#1512 defect 1 at the function level. Before issue
-        athenaeum#1601 this function could not isolate ``cache_dir``: a
-        populated live ``wiki_root`` won over an empty scratch cache dir. It
-        is now isolated by construction — ``cache_dir`` is the only input
-        that can affect the answer."""
-        would_be_live_wiki_root = tmp_path / "wiki"
-        would_be_live_wiki_root.mkdir()
-        scratch_cache_dir = tmp_path / "scratch-cache"  # deliberately not created
-
-        resolved = llm_schemas.durable_observations_path(
-            would_be_live_wiki_root, cache_dir=scratch_cache_dir
-        )
-
-        assert resolved == scratch_cache_dir / llm_schemas.OBSERVATIONS_FILENAME
-
-    def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
-        """The production WRITE path (record_observation, as observe()/
-        observe_parse_failure() call it) and the production READ path
-        (read_observations) must agree on where a fresh store's ledger
-        lives, and neither may put it under wiki_root (issue athenaeum#1601)."""
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-
-        llm_schemas.record_observation(
-            contract="split-brain-probe",
-            call_site="test",
-            outcome="ok",
-            cache_dir=cache_dir,
-            wiki_root=wiki_root,
-        )
-
-        # The write must have landed in the CACHE DIR, never under wiki_root.
-        assert (cache_dir / llm_schemas.OBSERVATIONS_FILENAME).exists()
-        assert not (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).exists()
-
-        rows = llm_schemas.read_observations(cache_dir, wiki_root=wiki_root)
-        assert any(r.get("contract") == "split-brain-probe" for r in rows)
-
-        # A read that omits wiki_root= must agree — there is no longer a
-        # wiki-root branch for it to diverge on.
-        same_rows = llm_schemas.read_observations(cache_dir)
-        assert same_rows == rows

@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -90,6 +90,8 @@ python scripts/gen_cli_reference.py
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
 - [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
+- [`athenaeum provenance`](#athenaeum-provenance) (group) — Read-only provenance-ledger lookups. `adapter --uid <uid>` prints which adapter/source produced a compiled page, from the adapter-provenance ledger.
+- [`athenaeum provenance adapter`](#athenaeum-provenance-adapter) (command) — Print the adapter-provenance ledger row(s) recorded for one compiled page uid -- source, source_object_id, raw_ref, and the captured adapter fields -- or say none were recorded.
 - [`athenaeum push-metrics`](#athenaeum-push-metrics) (group) — Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, stream the documented NDJSON tail contract over the ledgers, and sample/score the `used` heuristic against human labels.
 - [`athenaeum push-metrics baseline`](#athenaeum-push-metrics-baseline) (command) — Compute precision + coverage over a window; write the dated snapshot to docs/measurements/memory-model-measurements.md. Refuses to write (exit 1) when the window has zero reference-determination records. See --dry-run to inspect without writing.
 - [`athenaeum push-metrics coverage-audit`](#athenaeum-push-metrics-coverage-audit) (command) — Sample N sessions' push records into a worksheet of the structural facts hash-only records support (candidate-pool size, tier/scope concentration, filter removal, policy-set bounds) — never a per-candidate marking or a measured miss rate.
@@ -1164,6 +1166,24 @@ Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded sur
 | `--reindex` | off (flag absent) | — | After a successful --apply, rebuild the search index so restored text replaces corrupted text in the vector/fts5 index. Rewriting a page changes its content hash -- WITHOUT this, --apply leaves the corrupted prose live in the index. Ignored on a dry-run. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki directory to scan for markers (default: <knowledge-root>/wiki). |
+
+## `athenaeum provenance`
+
+Read-only provenance-ledger lookups. `adapter --uid <uid>` prints which adapter/source produced a compiled page, from the adapter-provenance ledger.
+
+Subcommands:
+
+- `athenaeum provenance adapter` — Print the adapter-provenance ledger row(s) recorded for one compiled page uid -- source, source_object_id, raw_ref, and the captured adapter fields -- or say none were recorded.
+
+## `athenaeum provenance adapter`
+
+Print the adapter-provenance ledger row(s) recorded for one compiled page uid -- source, source_object_id, raw_ref, and the captured adapter fields -- or say none were recorded.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory the ledger lives under (default: ~/.cache/athenaeum). |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--uid` | — | — | The compiled page's durable uid. |
 
 ## `athenaeum push-metrics`
 

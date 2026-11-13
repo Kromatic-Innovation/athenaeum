@@ -115,11 +115,9 @@ from athenaeum.clusters import (
 )
 from athenaeum.compile_routing import (
     PERSON_ENTITY_TYPE,
-    CompileRouteRecord,
     CorrespondentRef,
     classify_route,
     correspondent_from_raw,
-    record_compile_route,
     resolve_correspondent_page,
     resolved_correspondent_uid,
 )
@@ -2332,31 +2330,12 @@ def _apply_tier3_results(
             raw.source, raw.ref, raw.content, _written_uids
         )
 
-    # Issue athenaeum#1949 (AC2): the durable per-file `raw ref -> written
-    # uid(s)` join. Written for EVERY raw file that reaches this boundary,
-    # including one that wrote nothing -- an empty `written_uids` is exactly
-    # the observed symptom ("afterwards, no page in the wiki cites the file")
-    # and is the row a reconstruction most needs. Unlike the
-    # adapter-provenance call immediately above, this is source-agnostic: see
-    # `compile_routing.record_compile_route` for why widening that ledger
-    # instead would have meant inventing an external id for sources with none.
-    if raw is not None:
-        record_compile_route(
-            CompileRouteRecord(
-                raw_ref=raw.ref,
-                source=raw.source,
-                written_uids=list(_written_uids),
-                created_uids=[e.uid for e in result.created],
-                updated_uids=list(_admitted_updated_uids),
-                correspondent_uid=_route.correspondent_uid,
-                prevented_uids=[u for u in _prevented_uids if u],
-                logged_uids=[
-                    str(updated_uids[i]).strip()
-                    for i in _route.logged
-                    if i < len(updated_uids)
-                ],
-            )
-        )
+    # Issue athenaeum#2468 removed the durable per-file `raw ref -> written
+    # uid(s)` compile-route ledger this call site used to write (issue
+    # athenaeum#1949's `compile_routing.record_compile_route`) -- nothing
+    # outside its own tests ever read it. `classify_route`'s routing GUARD
+    # above (which admits/prevents/logs each update) is unchanged; only the
+    # durable row is gone.
 
     result.updated.extend(_admitted_updated_uids)
     result.escalated.extend(escalations)

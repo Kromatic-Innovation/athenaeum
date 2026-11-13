@@ -51,8 +51,7 @@ from athenaeum.batch import (
     process_batch_run,
 )
 from athenaeum.cli import main
-from athenaeum.compile_routing import read_compile_routes
-from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS, resolve_cache_dir
 from athenaeum.intake import discover_raw_files
 from athenaeum.librarian import (
     EXIT_LIBRARIAN_REFUSAL,
@@ -803,14 +802,11 @@ class TestBatchSyncEquivalence:
         pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
         assert "uid-dana" in pending
         assert "received no write" in pending
-        # The durable route row names both the intended and the refused page,
-        # which is what makes the misroute reconstructible (AC2).
-        rows = read_compile_routes()
-        assert rows, "no compile-route row was written"
-        row = rows[-1]
-        assert row["correspondent_uid"] == "uid-dana"
-        assert row["prevented_uids"] == ["uid-robin"]
-        assert row["written_uids"] == []
+        # Issue athenaeum#2468 removed the durable compile-route ledger that
+        # used to carry this row (nothing outside its own tests read it);
+        # the misroute guard above is unaffected and still prevents the
+        # write + escalates, but no ledger file is created for it anymore.
+        assert not (resolve_cache_dir() / "_compile_route_records.jsonl").exists()
 
     def test_multi_action_file_create_plus_merge_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
