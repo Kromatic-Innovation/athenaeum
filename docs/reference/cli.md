@@ -106,8 +106,10 @@ python scripts/gen_cli_reference.py
 - [`athenaeum receipts attest-readout`](#athenaeum-receipts-attest-readout) (command) — Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
 - [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
-- [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass. Only `candidates` exists today: a read-only scan reported as counts.
+- [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, and a plan viewer. Writes no page.
 - [`athenaeum recompile candidates`](#athenaeum-recompile-candidates) (command) — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- [`athenaeum recompile plan`](#athenaeum-recompile-plan) (command) — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+- [`athenaeum recompile show`](#athenaeum-recompile-show) (command) — Print a recorded plan by its plan id.
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
 - [`athenaeum recover-parked`](#athenaeum-recover-parked) (command) — One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
@@ -1376,11 +1378,13 @@ Report unsealed ranges and seals that no longer verify, by partition and line ra
 
 ## `athenaeum recompile`
 
-Page-recompile maintenance pass. Only `candidates` exists today: a read-only scan reported as counts.
+Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, and a plan viewer. Writes no page.
 
 Subcommands:
 
 - `athenaeum recompile candidates` — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- `athenaeum recompile plan` — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+- `athenaeum recompile show` — Print a recorded plan by its plan id.
 
 ## `athenaeum recompile candidates`
 
@@ -1388,6 +1392,31 @@ Scan for active pages over librarian.page_size_threshold_chars or flagged needs_
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile plan`
+
+Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dry-run` | off (flag absent) | — | Run the planner but append nothing to the ledger. |
+| `--json` | off (flag absent) | — | Print the plan as JSON. |
+| `--no-verify` | off (flag absent) | — | Skip the verify-knob check of the parent summary. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--uid` | — | — | uid of the page to plan |
+
+## `athenaeum recompile show`
+
+Print a recorded plan by its plan id.
+
+**Positional arguments:**
+
+- `plan_id` — plan id, as printed by `recompile plan`
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Print the record as JSON. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum reconcile`

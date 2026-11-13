@@ -323,14 +323,17 @@ class TestLibrarianRoutedKnobsDerivation:
         the trap the issue's Occam pre-flight warned about was a naive
         ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` silently
         folding ``topic`` (already deliberately excluded, issue athenaeum#786),
-        ``rule_proposals`` (default-off phase, issue athenaeum#1063), and
+        ``rule_proposals`` (default-off phase, issue athenaeum#1063),
         ``attribution`` (escalation-only, called by a writer rather than
-        this module's bulk pipeline, issue athenaeum#2211) into the
-        entity/merge pipeline's per-knob client cache."""
+        this module's bulk pipeline, issue athenaeum#2211), and
+        ``page_recompile``/``verify`` (issue athenaeum#2537 -- an
+        operator-invoked, shadow-only CLI pass that builds its own client,
+        never a phase of the nightly pipeline) into the entity/merge
+        pipeline's per-knob client cache."""
         from athenaeum.librarian import _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
 
         assert _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS == frozenset(
-            {"topic", "rule_proposals", "attribution"}
+            {"topic", "rule_proposals", "attribution", "page_recompile", "verify"}
         )
 
 

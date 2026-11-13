@@ -40,7 +40,8 @@ EVERY L4 module that owns a registered prompt (:mod:`athenaeum.tiers`,
 :mod:`athenaeum.contradictions`, :mod:`athenaeum.resolutions`,
 :mod:`athenaeum.claim_kind`, :mod:`athenaeum.decay_bucket`,
 :mod:`athenaeum.query_topics`,
-:mod:`athenaeum.reasoning_tiers`, :mod:`athenaeum.rule_proposals`) at IMPORT TIME (module-scope
+:mod:`athenaeum.reasoning_tiers`, :mod:`athenaeum.rule_proposals`,
+:mod:`athenaeum.page_recompile_plan`) at IMPORT TIME (module-scope
 :data:`PROMPTS` dict comprehension) to resolve the live constants. This is the
 one deliberate exception to "L3 does not import L4" in this file's
 assignment: the registry's whole point is indexing prompts that live in L4
@@ -170,6 +171,44 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
         "CONTACT_ATTRIBUTION_JUDGE_SYSTEM",
         "attribution",
         512,
+        False,
+    ),
+    # athenaeum#2537: the page-recompile planner's three prompts. Text lives
+    # in src/athenaeum/prompts/page_recompile_{label,plan,verify}.md, loaded
+    # via importlib.resources into module-level constants -- the same
+    # convention the contact-attribution judge row above uses. Two knobs are
+    # NEW to this list and therefore to ``KNOBS``:
+    #
+    #   * ``page_recompile`` -- grouping, routing and the parent summary;
+    #     its model defaults to whatever the ``verify`` knob resolves to
+    #     (``page_recompile_plan._get_page_recompile_model``).
+    #   * ``verify`` -- named by ``config.DEFAULT_VERIFY_MODEL`` since
+    #     athenaeum#1717's proposer/verifier split, but with no registered
+    #     prompt until now.
+    #
+    # The labelling pass deliberately rides the EXISTING ``classify`` knob
+    # rather than minting a third. No cache_control breakpoint at any of the
+    # three call sites, so ``cacheable`` is ``False`` like every row above
+    # except ``resolutions.resolve_system``.
+    (
+        "page_recompile_plan.page_recompile_label_system",
+        "PAGE_RECOMPILE_LABEL_SYSTEM",
+        "classify",
+        2048,
+        False,
+    ),
+    (
+        "page_recompile_plan.page_recompile_plan_system",
+        "PAGE_RECOMPILE_PLAN_SYSTEM",
+        "page_recompile",
+        8192,
+        False,
+    ),
+    (
+        "page_recompile_plan.page_recompile_verify_system",
+        "PAGE_RECOMPILE_VERIFY_SYSTEM",
+        "verify",
+        2048,
         False,
     ),
 ]

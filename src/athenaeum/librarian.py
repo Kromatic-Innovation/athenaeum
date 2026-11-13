@@ -6394,6 +6394,10 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
     instead of repeating the athenaeum#1174 defect this function's derivation
     exists to prevent.
     """
+    from athenaeum.page_recompile_plan import (
+        _get_page_recompile_model,
+        _get_verify_model,
+    )
     from athenaeum.pii_attribution import _get_attribution_model_for_preflight
     from athenaeum.query_topics import _get_topic_model
     from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
@@ -6410,6 +6414,11 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
         "reasoning_t2": get_t2_model,
         "rule_proposals": _get_rule_proposals_model,
         "attribution": _get_attribution_model_for_preflight,
+        # athenaeum#2537: both knobs the page-recompile planner routes. The
+        # ``page_recompile`` getter resolves the ``verify`` one internally
+        # for its own default, so the pair cannot drift.
+        "page_recompile": _get_page_recompile_model,
+        "verify": _get_verify_model,
     }
 
 
@@ -6465,13 +6474,22 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
 #:   at escalation time (out of scope here; issue athenaeum#2212), never by
 #:   this module's bulk entity/merge pipeline — mirroring ``rule_proposals``,
 #:   not a routed knob every run serves.
+#: * ``page_recompile`` / ``verify`` (issue athenaeum#2537) -- the
+#:   page-recompile planner (``athenaeum recompile plan``) is an
+#:   operator-invoked, shadow-only CLI pass that builds its own client for
+#:   the one page it is asked about. It is not a phase of this module's
+#:   bulk entity/merge pipeline at all, so folding either knob into the
+#:   per-knob client cache would build two clients at startup for work no
+#:   ``athenaeum run`` ever does. Same posture as ``rule_proposals``.
 #:
 #: Naively setting ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` would
-#: silently fold all three into the client-cache pipeline — a behaviour
+#: silently fold all five into the client-cache pipeline — a behaviour
 #: change none of these knobs' own issues asked for (in ``rule_proposals``'s
 #: case, it would also mean building a real LLM client at startup for a
 #: phase that is off by default).
-_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals", "attribution"})
+_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset(
+    {"topic", "rule_proposals", "attribution", "page_recompile", "verify"}
+)
 
 #: The knobs the librarian's entity/merge pipeline serves, each through its
 #: OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
@@ -6489,7 +6507,7 @@ _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals", "a
 #: ``tests/test_pricing_config.py::TestLibrarianRoutedKnobsDerivation``
 #: asserts ``set(_LIBRARIAN_ROUTED_KNOBS) | _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
 #: == set(prompt_registry.KNOBS)`` (with no overlap) at TEST time instead, so
-#: a ninth knob added to ``_META_ROWS`` without an explicit routing decision
+#: an eleventh knob added to ``_META_ROWS`` without an explicit routing decision
 #: here still fails loudly — just via a test, not a runtime import.
 _LIBRARIAN_ROUTED_KNOBS = (
     "classify",

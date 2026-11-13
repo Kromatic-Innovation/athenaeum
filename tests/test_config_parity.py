@@ -548,13 +548,19 @@ class TestModelPlumbingProductionPath:
             # unmodified resolve/topic/reasoning_t1/reasoning_t2 knobs' code
             # defaults (claude-opus-5, claude-haiku-4-5-*, claude-opus-4-8),
             # or the preflight would block the run before it ever reaches
-            # tier2/tier3.
+            # tier2/tier3. claude-sonnet-5 joined that list with issue
+            # athenaeum#2537: the page-recompile planner's `page_recompile`
+            # and `verify` knobs both default to it, and the preflight is
+            # derived from prompt_registry.KNOBS, so every registered knob's
+            # resolved model has to be priced even when this run never calls
+            # it.
             "pricing:\n"
             "  yaml-classify-model: [1.0, 5.0]\n"
             "  yaml-write-model: [3.0, 15.0]\n"
             "  claude-opus-5: [5.0, 25.0]\n"
             "  claude-haiku-4-5: [1.0, 5.0]\n"
-            "  claude-opus-4-8: [5.0, 25.0]\n",
+            "  claude-opus-4-8: [5.0, 25.0]\n"
+            "  claude-sonnet-5: [3.0, 15.0]\n",
             encoding="utf-8",
         )
 
