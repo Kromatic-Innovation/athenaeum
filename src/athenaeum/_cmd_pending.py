@@ -122,11 +122,14 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     uniform intake path ``resolve_question`` / ``resolve_merge`` /
     ``review_audit_item`` defer to (see
     :func:`athenaeum.decision_answers.apply_decision_answers`). That step is
-    purely mechanical (no LLM client, ever); for ``decision_type: question``
-    it only flips the block's checkbox, so the LEGACY ``ingest_answers`` pass
-    immediately below it — unchanged — is what actually completes the
-    write-back/archival for a question answered this way, in the SAME
-    run-locked tick.
+    purely mechanical for every decision type except ``coordinate`` (issue
+    athenaeum#2515 adds one narrow scope-sameness model judgement there — see
+    that function's docstring; ``classify_client`` below is what makes it
+    possible rather than deterministically unavailable); for
+    ``decision_type: question`` it only flips the block's checkbox, so the
+    LEGACY ``ingest_answers`` pass immediately below it — unchanged — is
+    what actually completes the write-back/archival for a question answered
+    this way, in the SAME run-locked tick.
 
     Builds the LLM client via the provider seam (``build_llm_client``, athenaeum#330)
     and passes it to ``ingest_answers`` so free-text answers can use the
@@ -199,20 +202,44 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         # (a misconfig) is fatal, handled above.
         pass
 
+    # Issue athenaeum#2515: a SEPARATE client, built on the `classify` knob --
+    # the same knob `comparator.content_relation`/`tiers.tier2_classify` ride
+    # -- for the one narrow scope-sameness judgement a `coordinate` decision
+    # answer can trigger (see `decision_answers._apply_coordinate_answer`).
+    # Built independently of `anthropic_client` above (which is pinned to the
+    # `resolve` knob for the free-text answer proposer) so an operator's
+    # `llm.providers.classify` override is honored here exactly as it is for
+    # every other classify-knob call site. Same fail-loud-on-misconfig /
+    # fail-open-to-None-on-missing-key posture as the block above.
+    classify_client = None
+    try:
+        classify_client = build_llm_client(cfg, knob="classify")
+    except ProviderConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception:  # noqa: BLE001 — see the identical fallback above.
+        pass
+
     lock = _acquire_or_exit(target, args, cfg)  # issue athenaeum#309
     if isinstance(lock, int):
         return lock
     try:
         # Issue athenaeum#908: apply pending decision-answer files FIRST, in the same
-        # locked tick — deterministic, no LLM call. For a `question` answer
-        # this only flips the checkbox; the ingest_answers() pass right
-        # below completes the write-back/archival for it, unchanged.
+        # locked tick. For a `question` answer this only flips the checkbox;
+        # the ingest_answers() pass right below completes the
+        # write-back/archival for it, unchanged. Issue athenaeum#2515: this is
+        # no longer unconditionally LLM-free -- `client=classify_client` is
+        # forwarded ONLY for the narrow scope-sameness judgement a
+        # `coordinate` answer can trigger; every other decision type still
+        # never looks at it.
         wiki_root = target / "wiki"
         # Issue athenaeum#712: forward the run lock already held above (`lock =
         # _acquire_or_exit(...)`) so a merge decision applied in this tick can
         # record a verdict-ledger entry when librarian.verdict_ledger_enabled
         # is on — see apply_decision_answers's `lock` docstring.
-        decision_report = apply_decision_answers(wiki_root, raw_root, config=cfg, lock=lock)
+        decision_report = apply_decision_answers(
+            wiki_root, raw_root, config=cfg, lock=lock, client=classify_client
+        )
         # Issue athenaeum#1446: `--quiet` suppresses the per-block
         # `log.warning` noise `_parse_block`/`ingest_answers` emit by
         # level, not by structurally deleting the calls — restored in

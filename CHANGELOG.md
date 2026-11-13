@@ -86,6 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter dropped both, so their raw members became retirable while the
   system still needed them (athenaeum#2497).
 
+- Answering a coordinate item's `subject` dimension with the SAME value on
+  both sides no longer leaves `scope` to be rediscovered by a later
+  comparator sweep and re-raised as a fresh "same scope?" item a day later:
+  `_apply_coordinate_answer` now makes one model judgement of scope
+  sameness in the same apply pass, writing the scope coordinate when the
+  judgement is clear and raising the scope item immediately (recording
+  model vs. human provenance) when it is unclear or the model call fails
+  or is unavailable (athenaeum#2515).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
