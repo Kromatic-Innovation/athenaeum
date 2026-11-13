@@ -3547,8 +3547,8 @@ this many days of "now".
 - **Default:** `()`
 - **Precedence:** `athenaeum.yaml` > code default
 
-Unstable, under redesign: the source trust graph may change or be removed
-without a deprecation cycle; do not build on it.
+Experimental: may change or be removed without a deprecation cycle; the
+trust-graph design is under reconsideration. Do not build on it.
 
 Resolve the operator-declared pairwise source-trust edges that `athenaeum.trust_graph.compare_sources` consults.
 DEFAULT ```` (empty tuple).
@@ -3598,8 +3598,8 @@ operator who wrote the contradiction. No seed in ``_DEFAULTS``.
 - **Default:** `False`
 - **Precedence:** `athenaeum.yaml` > code default
 
-Unstable, under redesign: the source trust graph may change or be removed
-without a deprecation cycle; do not build on it.
+Experimental: may change or be removed without a deprecation cycle; the
+trust-graph design is under reconsideration. Do not build on it.
 
 Resolve the trust-graph pairwise-override feature flag. DEFAULT ``False``.
 
@@ -5784,7 +5784,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_THINKING` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS` | `src/athenaeum/tiers.py` |
-| `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_QUARANTINE_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_REASONING_T1_LLM_PROVIDER` | `src/athenaeum/provider.py` |

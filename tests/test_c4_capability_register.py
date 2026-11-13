@@ -13,23 +13,16 @@ whatever now serves it. A test in this file failing (outside of a
 deliberate, documented change) means a load-bearing consumer of a
 contradiction verdict just lost its data.
 
-All four tests are OFFLINE — no network call is made anywhere in this file.
+All three tests are OFFLINE — no network call is made anywhere in this file.
 
 Register (post-retirement state):
 
-1. :class:`TestFrontmatterWrite` — the ``status: contradiction-flagged`` +
-   ``contradiction_type`` frontmatter written by
-   ``athenaeum.merge.render_merged_entry`` off an already-populated
-   :class:`~athenaeum.merge.MergedWikiEntry.contradiction`. UNCHANGED: both
-   the field and the projection were deliberately KEPT by the retirement
-   (the merge pass itself just no longer populates them). CONSUMER-side,
-   independent of who/what populates ``contradiction``.
-2. :class:`TestRecallHeaderRender` — the contested-header line rendered by
+1. :class:`TestRecallHeaderRender` — the contested-header line rendered by
    ``athenaeum.mcp_server._recall_metadata_lines`` off
    ``status == "contradiction-flagged"``. UNCHANGED: writes the status
    directly to a page on disk, so it never depended on the detector in the
    first place. CONSUMER-side.
-3. :class:`TestRetireGuard` — the retire-pass MOVE guard, now
+2. :class:`TestRetireGuard` — the retire-pass MOVE guard, now
    ``athenaeum.retire._move_eligibility(entry, wiki_root, members)``
    (issue athenaeum#1256 changed its signature from the old one-argument
    ``_move_eligibility(entry)``). It no longer reads ``entry.contradiction``
@@ -39,7 +32,7 @@ Register (post-retirement state):
    the old test pinned — a cluster with no trustworthy verdict is NOT
    move-eligible — against a REAL ledger fixture (no stub), per the idiom
    in ``tests/test_retire_ledger_eligibility.py``.
-4. :class:`TestConflictTypeReachesPendingQuestions` — the ``conflict_type``
+3. :class:`TestConflictTypeReachesPendingQuestions` — the ``conflict_type``
    value (``factual`` / ``prescriptive`` / ``stance``) reaching
    ``wiki/_pending_questions.md``. PRODUCER-side and end-to-end, but no
    longer through ``merge_clusters_to_wiki`` (which writes no escalation
@@ -51,12 +44,22 @@ Register (post-retirement state):
    not the hardcoded ``"principled"`` fallback it uses only when a caller
    never classifies at all.
 
-Tests 1-3 pin the CONSUMER contracts independently of whether anything
+A fourth register entry used to live here: :class:`TestFrontmatterWrite`
+pinned the ``status: contradiction-flagged`` + ``contradiction_type``
+frontmatter :func:`athenaeum.merge.render_merged_entry` wrote off an
+already-populated :class:`~athenaeum.merge.MergedWikiEntry.contradiction`.
+Issue athenaeum#2435 removed that branch from ``render_merged_entry``
+outright (nothing reaches it through a ``MergedWikiEntry`` any more — a
+contested page's ``status`` key is written directly by the comparator /
+verdict-effects lane instead, which test 1 above already pins), so the
+capability this test characterised is gone, not merely re-pointed.
+
+Tests 1-2 pin the CONSUMER contracts independently of whether anything
 upstream currently produces the data they consume — a defensible choice
 (each consumer contract should hold on its own), but it means this register
 does not, by itself, prove a producer keeps producing ``contradiction`` /
-``contradictions_detected`` / ledgered verdicts. Only test 4 does that, and
-only for the comparator lane's own escalation path (test 3's ledger lane is
+``contradictions_detected`` / ledgered verdicts. Only test 3 does that, and
+only for the comparator lane's own escalation path (test 2's ledger lane is
 exercised directly against a real ledger fixture instead, since the
 comparator has no live caller yet — issue athenaeum#1946).
 
@@ -76,14 +79,8 @@ from athenaeum.comparator import (
     CompareOutcome,
     page_from_text,
 )
-from athenaeum.contradictions import ContradictionResult
 from athenaeum.mcp_server import recall_search
-from athenaeum.merge import (
-    CONTRADICTION_STATUS_FLAGGED,
-    MergedWikiEntry,
-    render_merged_entry,
-)
-from athenaeum.models import parse_frontmatter
+from athenaeum.merge import MergedWikiEntry
 from athenaeum.retire import _move_eligibility
 from athenaeum.runlock import RunLock
 from athenaeum.verdict_effects import apply_verdict_effect
@@ -115,49 +112,7 @@ def _comparator_page(page_id: str, body: str) -> object:
 
 
 # ---------------------------------------------------------------------------
-# 1. merge.py: status + contradiction_type frontmatter
-# ---------------------------------------------------------------------------
-
-
-class TestFrontmatterWrite:
-    """Pins ``render_merged_entry``'s contradiction-flag frontmatter write.
-
-    Capability-loss register (athenaeum#1254 / athenaeum#1256): the
-    ``contradiction`` field and this frontmatter projection were both
-    deliberately KEPT by the C4 retirement -- only the merge pass's own
-    *population* of the field was removed. If a future change ever deleted
-    the field or the projection, every downstream consumer that gates on
-    ``status: contradiction-flagged`` -- the recall header
-    (:class:`TestRecallHeaderRender`) included -- would silently stop
-    seeing contested pages as contested, however they got flagged.
-    """
-
-    def test_frontmatter_carries_status_and_conflict_type(self) -> None:
-        contradiction = ContradictionResult(
-            detected=True,
-            conflict_type="factual",
-            members_involved=["a.md", "b.md"],
-            conflicting_passages=["claim A", "claim B"],
-            rationale="incompatible claims",
-        )
-        entry = MergedWikiEntry(
-            topic_slug="pinned-topic",
-            cluster_id="c-pin-1",
-            cluster_centroid_score=0.6,
-            contradictions_detected=True,
-            contradiction=contradiction,
-            body="Some merged body text.\n",
-        )
-
-        rendered = render_merged_entry(entry)
-        meta, _ = parse_frontmatter(rendered)
-
-        assert meta["status"] == CONTRADICTION_STATUS_FLAGGED
-        assert meta["contradiction_type"] == "factual"
-
-
-# ---------------------------------------------------------------------------
-# 2. mcp_server.py: recall header render
+# 1. mcp_server.py: recall header render
 # ---------------------------------------------------------------------------
 
 
@@ -194,7 +149,7 @@ class TestRecallHeaderRender:
 
 
 # ---------------------------------------------------------------------------
-# 3. retire.py: move-eligibility guard
+# 2. retire.py: move-eligibility guard
 # ---------------------------------------------------------------------------
 
 
@@ -266,7 +221,7 @@ class TestRetireGuard:
 
 
 # ---------------------------------------------------------------------------
-# 4. verdict_effects.py: conflict_type reaching _pending_questions.md
+# 3. verdict_effects.py: conflict_type reaching _pending_questions.md
 # ---------------------------------------------------------------------------
 
 

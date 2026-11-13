@@ -195,149 +195,20 @@ class TestResolveMinMergeMeanSimilarity:
         assert resolve_min_merge_mean_similarity(None) == 0.6
 
 
-class TestCompleteLinkageGate:
-    """Issue athenaeum#421 — complete-linkage: min pairwise below cluster threshold = chain."""
-
-    def test_chain_suppressed(self) -> None:
-        # A 4-member cluster whose weakest pair (0.40) is below the 0.55
-        # threshold is a single-linkage chain, not a merge — suppressed even
-        # though it is small and mean-cohesive.
-        reason = _merge_proposal_suppression_reason(
-            n_sources=4,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.8,
-            min_pairwise=0.40,
-            cluster_threshold=0.55,
-        )
-        assert reason is not None and "complete-linkage" in reason
-
-    def test_clique_passes(self) -> None:
-        # Every pair clears the threshold → a genuine complete-linkage clique.
-        assert (
-            _merge_proposal_suppression_reason(
-                n_sources=4,
-                confidence=0.9,
-                config=None,
-                mean_similarity=0.8,
-                min_pairwise=0.70,
-                cluster_threshold=0.55,
-            )
-            is None
-        )
-
-    def test_min_at_threshold_kept(self) -> None:
-        # Boundary is inclusive-keep (>=): min exactly at threshold is a clique.
-        assert (
-            _merge_proposal_suppression_reason(
-                n_sources=3,
-                confidence=0.9,
-                config=None,
-                mean_similarity=0.8,
-                min_pairwise=0.55,
-                cluster_threshold=0.55,
-            )
-            is None
-        )
-
-    def test_disabled_when_threshold_zero(self) -> None:
-        # A caller that does not supply a threshold (0.0) disables this arm.
-        assert (
-            _merge_proposal_suppression_reason(
-                n_sources=3,
-                confidence=0.9,
-                config=None,
-                mean_similarity=0.8,
-                min_pairwise=0.01,
-                cluster_threshold=0.0,
-            )
-            is None
-        )
-
-
-class TestMeanSimilarityFloor:
-    """Issue athenaeum#421 — mean pairwise 0.59 suppressed, 0.61 passes (the AC boundary)."""
-
-    def test_below_floor_suppressed(self) -> None:
-        reason = _merge_proposal_suppression_reason(
-            n_sources=3,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.59,
-            min_pairwise=0.59,
-            cluster_threshold=0.55,
-        )
-        assert reason is not None and "low cohesion" in reason
-
-    def test_above_floor_passes(self) -> None:
-        assert (
-            _merge_proposal_suppression_reason(
-                n_sources=3,
-                confidence=0.9,
-                config=None,
-                mean_similarity=0.61,
-                min_pairwise=0.61,
-                cluster_threshold=0.55,
-            )
-            is None
-        )
-
-    def test_at_floor_inclusive_keep(self) -> None:
-        # 0.60 exactly clears the floor (strict <).
-        assert (
-            _merge_proposal_suppression_reason(
-                n_sources=3,
-                confidence=0.9,
-                config=None,
-                mean_similarity=0.60,
-                min_pairwise=0.60,
-                cluster_threshold=0.55,
-            )
-            is None
-        )
-
-
 class TestSuppressionReasonPrecision:
     """Issue athenaeum#804 — the suppression message must print each
     threshold-comparison value at a precision that makes the printed
-    comparison decidable. The live-store evidence was ``mean pairwise 0.60 <
+    comparison decidable.
+
+    The original live-store evidence (``mean pairwise 0.60 <
     min_merge_mean_similarity=0.60`` for a cluster whose actual mean was
-    0.5996 — true at full float precision, false as printed at 2dp.
+    0.5996 — true at full float precision, false as printed at 2dp) drove
+    the fix via the mean-similarity and complete-linkage arms, both of
+    which issue athenaeum#2435 later removed as dead code (their only
+    caller never supplied the data either arm needed to fire). The
+    remaining confidence-floor and size-cap arms below are unaffected by
+    that removal and still need the precision fix.
     """
-
-    def test_low_cohesion_message_distinguishes_near_floor_value(self) -> None:
-        # 0.5996 rounds to 0.60 at 2dp — the exact defect reported in
-        # athenaeum#804. At >=4 significant figures the two numbers must
-        # render distinguishably and the printed comparison must be true.
-        reason = _merge_proposal_suppression_reason(
-            n_sources=3,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.5996,
-            min_pairwise=0.5996,
-            cluster_threshold=0.55,
-        )
-        assert reason is not None and "low cohesion" in reason
-        # This is the literal old-format string the athenaeum#804 evidence
-        # showed; it must not appear once the value is genuinely below the
-        # floor by less than 2dp resolution.
-        assert "mean pairwise 0.60 < min_merge_mean_similarity=0.60" not in reason
-        assert "0.5996" in reason
-        assert "0.6000" in reason
-
-    def test_single_linkage_chain_message_precision(self) -> None:
-        # 0.5501 < 0.5502 — both round to 0.55 at 2dp.
-        reason = _merge_proposal_suppression_reason(
-            n_sources=4,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.8,
-            min_pairwise=0.5501,
-            cluster_threshold=0.5502,
-        )
-        assert reason is not None and "complete-linkage" in reason
-        assert "0.5501" in reason
-        assert "0.5502" in reason
 
     def test_low_confidence_message_precision(self) -> None:
         cfg = {"librarian": {"min_merge_confidence": 0.5000}}
@@ -358,42 +229,23 @@ class TestSuppressionReasonPrecision:
 
 
 class TestGateOrdering:
-    """Issue athenaeum#421 — size cap, then complete-linkage, then mean, then confidence."""
+    """Issue athenaeum#421 — size cap checked before confidence.
 
-    def test_size_cap_before_complete_linkage(self) -> None:
-        reason = _merge_proposal_suppression_reason(
-            n_sources=1700,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.33,
-            min_pairwise=0.01,
-            cluster_threshold=0.55,
-        )
-        assert reason is not None and "sources" in reason
-
-    def test_complete_linkage_before_mean(self) -> None:
-        # min below threshold AND mean below floor: the chain reason wins.
-        reason = _merge_proposal_suppression_reason(
-            n_sources=3,
-            confidence=0.9,
-            config=None,
-            mean_similarity=0.30,
-            min_pairwise=0.20,
-            cluster_threshold=0.55,
-        )
-        assert reason is not None and "complete-linkage" in reason
+    The complete-linkage and mean-similarity arms this class used to order
+    against were removed as dead code by issue athenaeum#2435 (their only
+    caller, ``revalidate_pending_merges``, never supplied the
+    ``min_pairwise``/``mean_similarity``/``cluster_threshold`` data either
+    arm needed to fire).
+    """
 
     def test_incident_shape_zero_proposals(self) -> None:
-        # The 1,711-source / mean-sim-0.33 incident produces a suppression under
-        # the athenaeum#421 defaults (size cap fires first; complete-linkage + mean would
-        # also fire). Regression alongside test_over_cluster_suppressed_by_size_cap.
+        # The 1,711-source incident produces a suppression under the
+        # athenaeum#421 size-cap default. Regression alongside
+        # test_over_cluster_suppressed_by_size_cap.
         reason = _merge_proposal_suppression_reason(
             n_sources=1711,
             confidence=0.33,
             config=None,
-            mean_similarity=0.33,
-            min_pairwise=0.05,
-            cluster_threshold=0.55,
         )
         assert reason is not None
 

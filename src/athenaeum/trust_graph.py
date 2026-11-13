@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure, operator-overridable source-vs-source comparison (issue athenaeum#2330, TG2).
 
-Unstable, under redesign: the source trust graph may change or be removed
-without a deprecation cycle; do not build on it.
+Experimental: may change or be removed without a deprecation cycle; the
+trust-graph design is under reconsideration. Do not build on it.
 
 Parent epic: athenaeum#2145 ("trust graph"). This is the second slice (TG2):
 a pure comparison function plus the config surface for the edges it

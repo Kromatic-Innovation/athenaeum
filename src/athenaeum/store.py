@@ -168,17 +168,16 @@ def now_iso(when: datetime | None = None) -> str:
     rendering (``datetime.isoformat()`` with its ``+00:00`` offset suffix
     swapped for a bare ``Z``) and a second-precision one (``datetime.strftime``
     with an explicit second-precision-then-``Z`` format string) — one of
-    which, the second-precision form, is also the exact rendering
-    :data:`athenaeum.fingerprint._RESOLVED_AT_FORMAT` parses back with
-    ``datetime.strptime``. Second precision is the rendering kept here (not
-    widened to also accept microseconds) because that parser is the sole
-    consumer that round-trips this value, and pinning the format in ONE
-    place — rather than teaching the parser two shapes — is what makes a
-    future drift back to microsecond rendering fail loudly instead of
-    silently: any writer that reaches for this helper can no longer produce
-    a timestamp the parser rejects. Mirrors :func:`append_line_durable`
-    (issue athenaeum#980) as the package's shared-primitive home for this
-    class of drift.
+    which, the second-precision form, is also the exact rendering every
+    caller across the package that parses this value back with
+    ``datetime.strptime("%Y-%m-%dT%H:%M:%SZ")`` expects. Second precision
+    is the rendering kept here (not widened to also accept microseconds)
+    because pinning the format in ONE place — rather than teaching every
+    parser two shapes — is what makes a future drift back to microsecond
+    rendering fail loudly instead of silently: any writer that reaches for
+    this helper can no longer produce a timestamp a strict parser rejects.
+    Mirrors :func:`append_line_durable` (issue athenaeum#980) as the
+    package's shared-primitive home for this class of drift.
 
     A naive *when* (no ``tzinfo``) is assumed to already be UTC — the
     convention every existing caller in this package uses when it constructs

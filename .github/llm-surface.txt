@@ -203,8 +203,6 @@ src/athenaeum/tiers.py::parse_merge_ops_response
 src/athenaeum/tiers.py::tier1_programmatic_match
 # turns a tier-3 answer into actions
 src/athenaeum/tiers.py::tier3_derive_actions
-# the write path a tier-3 answer takes
-src/athenaeum/tiers.py::tier3_write
 # gates which create-name classifications reach a model
 src/athenaeum/tiers.py::gate_create_name_classifications
 # partitions classifications before they are acted on
@@ -225,8 +223,6 @@ src/athenaeum/tiers.py::_reresolve_open_questions_impl
 # reasoning outcome. ---
 # parses the model identifier a call is routed to
 src/athenaeum/models.py::parse_model
-# decides which sampling params a model is sent
-src/athenaeum/models.py::_sampling_params_rejected
 # decides whether a prompt prefix is cached
 src/athenaeum/models.py::min_cacheable_prefix_tokens
 # decides whether the thinking knob is sent

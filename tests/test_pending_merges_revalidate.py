@@ -17,6 +17,9 @@ Covered:
    the gate reason recorded, and is idempotent on a second run.
 4. The opt-in confidence floor retires a low-confidence block.
 5. A missing sidecar is a clean no-op.
+6. Issue athenaeum#2435: a low-cohesion proposal's suppression outcome is
+   unaffected by deleting the gate's dead complete-linkage/mean-similarity
+   arms, because this call path never fed them cohesion data to begin with.
 """
 
 from __future__ import annotations
@@ -271,3 +274,58 @@ def test_both_sources_present_is_untouched(tmp_path: Path) -> None:
     remaining = parse_pending_merges(merges_path)
     assert {pm.merge_target_name for pm in remaining} == {"acme-corp"}
     assert not (wiki / "_pending_merges_archive.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2435 — the complete-linkage and mean-similarity arms of
+# ``_merge_proposal_suppression_reason`` were deleted as dead code: this
+# call path never supplied the ``min_pairwise`` / ``mean_similarity`` /
+# ``cluster_threshold`` data either arm needed to fire, because a queued
+# ``_pending_merges.md`` block carries no cohesion data at all. The
+# suppression set this sweep produces is therefore IDENTICAL before and
+# after that deletion for any proposal, including a low-cohesion one.
+# ---------------------------------------------------------------------------
+
+
+def test_low_cohesion_proposal_suppression_set_unchanged_by_dead_arm_removal(
+    tmp_path: Path,
+) -> None:
+    """A low-cohesion-looking proposal (the single-linkage-chain / weak-mean
+    shape the now-deleted complete-linkage and mean-similarity arms used to
+    target) is NOT suppressed by the revalidation sweep, because the sweep
+    never had cohesion data to evaluate it with in the first place — only
+    ``n_sources`` and ``confidence`` ever reached ``_merge_proposal_suppression_reason``
+    from here. The suppression set (which target names get retired) is
+    empty for this fixture both before and after issue athenaeum#2435's arm
+    removal, proving the deletion changed no observable revalidate
+    behaviour."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    # Issue athenaeum#2072: revalidate also retires a block with a
+    # missing/tombstoned source, so these must be REAL, live files -- the
+    # same idiom _legal_block uses -- or the "source page missing" gate
+    # fires first and masks the cohesion-arm behaviour under test.
+    chain_sources = []
+    for name in ("chain-a", "chain-b", "chain-c"):
+        src = wiki / f"{name}.md"
+        src.write_text(f"{name}\n", encoding="utf-8")
+        chain_sources.append(str(src))
+    low_cohesion = render_block(
+        merge_target_name="weak-bridge-cluster",
+        sources=chain_sources,
+        rationale="single-linkage chain -- weak pairwise bridge, would have "
+        "tripped the retired complete-linkage/mean-similarity arms if this "
+        "call path ever supplied cohesion data to them",
+        draft_merged_body="draft",
+        confidence=0.9,
+        created_at="2026-07-28",
+    )
+    merges_path = _write_sidecar(wiki, low_cohesion, _legal_block(wiki))
+
+    result = revalidate_pending_merges(merges_path, apply=False, now=_FIXED_NOW)
+
+    # Suppression set is empty: the sweep has no cohesion data to act on,
+    # so the low-cohesion proposal is kept -- unchanged by the arm removal.
+    assert result.retired == []
+    remaining_names = {pm.merge_target_name for pm in parse_pending_merges(merges_path)}
+    assert remaining_names == {"weak-bridge-cluster", "acme-corp"}
