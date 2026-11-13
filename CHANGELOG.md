@@ -91,6 +91,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: security docs now state that erasure is not yet available
   (athenaeum#2454).
 
+- `context`, `codex-context` and the Codex adapter now use the configured
+  search backend and recall cap ceiling instead of fixed defaults
+  (athenaeum#2458). **Behaviour change for Codex users:** a
+  `codex-context` snapshot previously always ranked with `fts5`; it now
+  ranks with whatever `search_backend` resolves to, which on a default
+  install is `vector` — so snapshot ordering and contents can change
+  without any config edit. Set `search_backend: fts5` (or pass
+  `--backend fts5`) to keep the old ranking. The same applies to
+  `athenaeum context` and to any library caller of
+  `athenaeum.context.build_context` that did not name a backend. The Codex
+  adapter also honours `recall.cap.ceiling` and its
+  `ATHENAEUM_RECALL_CAP_CEILING` override now, where it previously used
+  the built-in ceiling unconditionally. Neither resolver's precedence or
+  defaults changed.
+
 ## [0.23.5] - 2026-11-12
 
 **Summary.** 0.23.5 is a roll-up of three workstreams built on `develop` since

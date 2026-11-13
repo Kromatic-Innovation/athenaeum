@@ -534,7 +534,11 @@ def _apply_merge_answer(
     config: dict | None,
     lock: "RunLock | None" = None,
 ) -> DecisionAnswerOutcome:
-    from athenaeum.config import resolve_cache_dir, resolve_verdict_ledger_enabled
+    from athenaeum.config import (
+        resolve_cache_dir,
+        resolve_search_backend,
+        resolve_verdict_ledger_enabled,
+    )
     from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 
     decision = answer.verdict.strip().lower()
@@ -549,7 +553,10 @@ def _apply_merge_answer(
         )
 
     cfg = config or {}
-    search_backend = cfg.get("search_backend", "fts5") if isinstance(cfg, dict) else "fts5"
+    # Issue athenaeum#2458: `cfg=None` (the common case on this path) used to
+    # pin `fts5` here while every `load_config`-backed surface answered on
+    # the shipped default — resolve it through `resolve_search_backend`.
+    search_backend = resolve_search_backend(cfg if isinstance(cfg, dict) else None)
     cache_dir = resolve_cache_dir(None)
 
     # Issue athenaeum#712: when the verdict ledger is enabled AND a lock is

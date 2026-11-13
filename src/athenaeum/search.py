@@ -3160,7 +3160,17 @@ def meets_relevance_floor(backend_name: str, score: float, floor: float | None) 
 # Issue athenaeum#1783: the ONE cap rule, shared by the UserPromptSubmit hook
 # and the MCP ``recall`` tool -- see ``athenaeum.config.resolve_recall_cap_ceiling``
 # for the push path's derived ceiling and ``docs/design/recall-architecture.md``
-# for the wider design. Kept tiny and score-agnostic, matching
+# for the wider design. Issue athenaeum#2458 made that sentence true of every
+# surface rather than just these two: ``resolve_recall_cap_ceiling``
+# (``ATHENAEUM_RECALL_CAP_CEILING`` env > ``recall.cap.ceiling`` yaml >
+# ``RECALL_CAP_CEILING_DEFAULT``) is now the only place the push-path ceiling
+# is derived -- the Codex Tier-2 adapter and the Claude Code adapter delegate
+# to it instead of reading the bare constant and the env respectively, and
+# ``examples/claude-code/session-start-recall.sh`` caches ITS yaml value.
+# ``athenaeum.config.resolve_search_backend`` (yaml ``search_backend`` > the
+# shipped default) is the matching single rule for WHICH backend answers.
+#
+# Kept tiny and score-agnostic, matching
 # ``meets_relevance_floor``'s / ``reciprocal_rank_fusion``'s own shape: the
 # CALLER applies the relevance floor to *hits* BEFORE calling this (this
 # function never re-derives or re-checks a floor), and the caller decides

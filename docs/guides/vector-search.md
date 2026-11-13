@@ -28,6 +28,25 @@ environment:
 SEARCH_BACKEND=vector
 ```
 
+**There is one resolution rule, and every surface follows it:**
+`search_backend` in `athenaeum.yaml`, falling back to the shipped default
+(`vector`). The `recall` CLI, the MCP `recall` tool, `athenaeum context`,
+`athenaeum codex-context`, `reindex`, `doctor` and the Claude Code hook all
+read that one answer — none of them carries a default of its own. Passing
+`--backend` to a command that offers it overrides the config for that
+invocation; omitting it means "use what is configured".
+
+The recall-cap ceiling — how many results the per-turn push and the Codex
+snapshot may render — resolves the same way, one rule for every surface:
+`ATHENAEUM_RECALL_CAP_CEILING` in the environment, then `recall.cap.ceiling`
+in `athenaeum.yaml`, then the shipped default:
+
+```yaml
+recall:
+  cap:
+    ceiling: 7
+```
+
 ## I want to understand why both backends matter
 
 A short proper-noun query like "Acme Corp" embeds in vector space closer
@@ -64,7 +83,7 @@ unavailable.
 
 | Variable | Description |
 |---|---|
-| `SEARCH_BACKEND` | `fts5` or `vector`, hook shell env (the hooks default to `vector`; `athenaeum context --backend` defaults to `fts5`) |
+| `SEARCH_BACKEND` | `fts5` or `vector`, hook shell env. The SessionStart hook caches the resolved `search_backend` here; set it yourself to override for one session |
 | `ATHENAEUM_TOPIC_MODEL` | Override the query-topic model (default: `claude-haiku-4-5-20251001`) |
 
 The per-turn hook is fail-silent: a vector-backend error leaves the turn

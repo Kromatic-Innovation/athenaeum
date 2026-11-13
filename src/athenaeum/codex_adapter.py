@@ -41,7 +41,11 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import RECALL_CAP_CEILING_DEFAULT
+from athenaeum.config import (
+    load_config,
+    resolve_recall_cap_ceiling,
+    resolve_search_backend,
+)
 from athenaeum.context import build_context
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import parse_audience_index_string
@@ -145,7 +149,7 @@ def refresh(
     cache_dir: Path,
     output: Path | None = None,
     n: int | None = None,
-    backend: str = "fts5",
+    backend: str | None = None,
     interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
     max_age_seconds: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -153,7 +157,24 @@ def refresh(
     """Run one refresh and write the snapshot. Returns the process exit code.
 
     ``output=None`` means the default path; a path of ``-`` prints to stdout.
+
+    ``backend=None`` and ``n=None`` (both defaults, issue athenaeum#2458)
+    mean "whatever the deployment configured": they resolve through
+    :func:`athenaeum.config.resolve_search_backend` and
+    :func:`athenaeum.config.resolve_recall_cap_ceiling` respectively, off
+    the SAME ``athenaeum.yaml`` every other recall surface reads. An
+    explicit value (``--backend`` / ``--n``) still wins. Before that the
+    backend was pinned to ``fts5`` and the ceiling to the bare
+    ``RECALL_CAP_CEILING_DEFAULT`` constant, so a Codex snapshot ranked
+    differently from the same query asked through the CLI or MCP and
+    ignored ``recall.cap.ceiling`` (and its env override) entirely.
     """
+    config = load_config()
+    if backend is None:
+        backend = resolve_search_backend(config)
+    if n is None:
+        n = resolve_recall_cap_ceiling(config)
+
     generated_at = now()
     max_age = max_age_seconds if max_age_seconds is not None else 2 * interval_seconds
     stale_after = generated_at + timedelta(seconds=max_age)
@@ -165,7 +186,7 @@ def refresh(
             seed,
             SESSION_ID,
             cache_dir=cache_dir,
-            n=n if n is not None else RECALL_CAP_CEILING_DEFAULT,
+            n=n,
             search_backend=backend,
             exclude=frozenset(),
             use_llm=False,

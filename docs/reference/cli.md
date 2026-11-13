@@ -414,11 +414,11 @@ Write a periodic Athenaeum knowledge snapshot for OpenAI Codex (Tier-2 static co
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--backend` | `fts5` | fts5, vector | Search backend (default: fts5) |
+| `--backend` | — | fts5, vector | Search backend (default: the configured `search_backend`) |
 | `--cache-dir` | — | — | Athenaeum cache directory |
 | `--interval-seconds` | `900` | — | Declared refresh cadence; must match the scheduler (default: 900) |
 | `--max-age-seconds` | — | — | Seconds until the snapshot is stale (default: twice the interval) |
-| `--n` | — | — | Max candidates (default: 7) |
+| `--n` | — | — | Max candidates (default: the configured `recall.cap.ceiling`) |
 | `--output` | — | — | Snapshot path, or '-' for stdout (default: ~/.codex/athenaeum-context.md) |
 | `--seed` | — | — | Static topic string the snapshot is built for |
 
@@ -455,7 +455,7 @@ Build one sidecar context envelope (ranked candidates + rendered text) for a pro
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--backend` | `fts5` | fts5, vector | Search backend (default: fts5) |
+| `--backend` | — | fts5, vector | Search backend (default: the configured `search_backend`) |
 | `--budget` | — | — | Push token budget (default: resolved/1200) |
 | `--cache-dir` | — | — | Cache dir holding wiki-index.db (default: ~/.cache/athenaeum) |
 | `--llm-timeout` | `3.0` | — | LLM extraction timeout in seconds |

@@ -571,6 +571,62 @@ class TestSessionStartRecall:
         body = config_env.read_text()
         assert "SEARCH_BACKEND=vector" in body
 
+    def test_cached_cap_ceiling_is_the_yaml_value_not_the_env_override(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2458: the embedded Python now takes the ceiling
+        from ``athenaeum.config.resolve_recall_cap_ceiling``, whose precedence
+        is env > yaml > default -- but ``config.env`` is a SESSION-START cache
+        of the YAML value only. Baking a runtime override into it would
+        silently pin that override for the rest of the session (and, because
+        the file is sourced under ``set -a``, for every child process), which
+        is the whole reason the cached name is ``RECALL_CAP_CEILING`` rather
+        than ``ATHENAEUM_RECALL_CAP_CEILING``.
+
+        Counter-example this defeats: handing ``cfg`` to the resolver with
+        ``ATHENAEUM_RECALL_CAP_CEILING`` still set in the hook's own
+        environment, which caches 3 here instead of 11. The per-turn override
+        is applied later, by
+        ``athenaeum.claude_code_adapter._resolve_recall_cap_ceiling``.
+        """
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text(
+            "auto_recall: true\nsearch_backend: fts5\nrecall:\n  cap:\n    ceiling: 11\n"
+        )
+        env = dict(hook_env)
+        env["ATHENAEUM_RECALL_CAP_CEILING"] = "3"
+
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (tmp_path / ".cache" / "athenaeum" / "config.env").read_text()
+        assert "RECALL_CAP_CEILING=11" in body
+        assert "RECALL_CAP_CEILING=3" not in body
+
+        # The shell fallback below the python branch resolves the SAME yaml
+        # value, so the assertions above alone cannot tell which branch ran --
+        # and the AC is specifically about the embedded PYTHON. The two
+        # writers emit these two keys in opposite order, which is the one
+        # cheap discriminator available: python writes RECALL_CAP_CEILING
+        # before PUSH_METRICS_ENABLED, the shell writer after it. Without
+        # this, the python branch could silently abort (it did, for both of
+        # the reasons athenaeum#2458 fixed: `load_config` was handed a bare
+        # argv string, and the ATHENAEUM_SRC spec-loader never registered
+        # its module) and this test would still pass.
+        keys = [ln.split("=", 1)[0] for ln in body.splitlines() if "=" in ln]
+        assert keys.index("RECALL_CAP_CEILING") < keys.index("PUSH_METRICS_ENABLED"), (
+            "config.env was written by the shell fallback, not the embedded "
+            f"python the acceptance criterion is about (order: {keys})"
+        )
+
     @pytest.mark.parametrize("flavor", ["gnu", "bsd"])
     def test_vector_freshness_check_works_with_either_stat_flavor(
         self, hook_env: dict[str, str], tmp_path: Path, flavor: str
@@ -5486,9 +5542,15 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
     """The documented `SEARCH_BACKEND` default matches the code.
 
     Issue athenaeum#2232 item 1: the hooks default to `vector` and the docs
-    said `fts5`, which is the CLI flags' default. Asserted against the live
-    defaults so the docs cannot drift back, and so a future change to
+    said `fts5`, which was then the CLI flags' default. Asserted against the
+    live defaults so the docs cannot drift back, and so a future change to
     either default fails here rather than in a reader's install.
+
+    Issue athenaeum#2458 removed the divergence this class was named after
+    rather than re-documenting it: the two CLI flags now default to `None`
+    and resolve through `athenaeum.config.resolve_search_backend`, so there
+    IS one default and `vector` is it. The assertions below moved with the
+    code; the doc-drift guard stays, now pinning the one-rule wording.
     """
 
     def test_the_hooks_and_the_yaml_resolver_default_to_vector(self) -> None:
@@ -5500,21 +5562,27 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
                 'SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"' in hook.read_text()
             ), f"{hook.name} no longer defaults SEARCH_BACKEND to vector"
 
-    def test_the_two_cli_flags_default_to_fts5(self) -> None:
+    def test_the_two_cli_flags_defer_to_the_resolver(self) -> None:
         """Read through `parse_args`, not the parser's internals.
 
         An argparse default read off `_actions` can be right while the flag
         resolves to something else (a parser-level `set_defaults`, a
         subparser override); parsing an argv with the flag omitted is the
         same path a real invocation takes.
+
+        Issue athenaeum#2458: an omitted `--backend` must arrive as `None` --
+        the signal "resolve it" -- and never as a backend name of its own.
+        A flag that silently re-acquired an argparse default would reinstate
+        exactly the per-surface divergence this class documents.
         """
         from athenaeum.cli import build_parser
 
         parser = build_parser()
-        assert parser.parse_args(["context", "a prompt"]).backend == "fts5"
-        assert (
-            parser.parse_args(["codex-context", "--seed", "a topic"]).backend == "fts5"
-        )
+        assert parser.parse_args(["context", "a prompt"]).backend is None
+        assert parser.parse_args(["codex-context", "--seed", "a topic"]).backend is None
+
+        explicit = parser.parse_args(["context", "a prompt", "--backend", "fts5"])
+        assert explicit.backend == "fts5"
 
     def test_neither_doc_still_claims_a_single_fts5_default(self) -> None:
         readme = (HOOKS_DIR / "README.md").read_text()
@@ -5523,6 +5591,10 @@ class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
         ).read_text()
         assert "from `athenaeum.yaml` (`fts5`)" not in readme
         assert "`fts5` (default) or `vector`" not in readme
-        # The per-entry-point table is what replaced the single claim.
-        assert "differs by entry point" in environment
-        assert "`athenaeum context --backend`" in environment
+        # Issue athenaeum#2458: the per-entry-point table that replaced the
+        # single `fts5` claim is itself gone -- there is one rule again, and
+        # the docs must say so rather than reviving either earlier wording.
+        assert "differs by entry point" not in environment
+        assert "One resolution rule, every entry point" in environment
+        assert "resolve_search_backend" in environment
+        assert "resolve_search_backend" in readme

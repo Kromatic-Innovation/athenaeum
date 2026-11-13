@@ -55,12 +55,17 @@ def add_codex_context_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Seconds until the snapshot is stale (default: twice the interval)",
     )
-    parser.add_argument("--n", type=_positive_int, default=None, help="Max candidates (default: 7)")
+    parser.add_argument(
+        "--n",
+        type=_positive_int,
+        default=None,
+        help="Max candidates (default: the configured `recall.cap.ceiling`)",
+    )
     parser.add_argument(
         "--backend",
         choices=("fts5", "vector"),
-        default="fts5",
-        help="Search backend (default: fts5)",
+        default=None,
+        help="Search backend (default: the configured `search_backend`)",
     )
     parser.add_argument("--cache-dir", default=None, help="Athenaeum cache directory")
     parser.set_defaults(func=cmd_codex_context)

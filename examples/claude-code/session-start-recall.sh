@@ -775,22 +775,42 @@ _read_config_ok=false
 
 if _athenaeum_run_budgeted "config-read" "$PYTHON" -c "
 import sys, os, importlib.util
+from pathlib import Path
 src = os.environ.get('ATHENAEUM_SRC', '')
 cfg_path = os.path.join(src, 'src/athenaeum/config.py') if src else ''
 if cfg_path and os.path.isfile(cfg_path):
     spec = importlib.util.spec_from_file_location('athenaeum_config_only', cfg_path)
     mod = importlib.util.module_from_spec(spec)
+    # Issue athenaeum#2458: register BEFORE exec_module. config.py defines
+    # frozen dataclasses, and dataclasses resolves KW_ONLY by looking the
+    # defining class's own module up in sys.modules -- an unregistered module
+    # makes that lookup return None and the whole load died on an
+    # AttributeError. This is the documented spec-loader idiom; without it
+    # this branch could never return a config at all.
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     load_config = mod.load_config
-    cap_ceiling_default = mod.RECALL_CAP_CEILING_DEFAULT
+    resolve_recall_cap_ceiling = mod.resolve_recall_cap_ceiling
+    resolve_search_backend = mod.resolve_search_backend
 else:
-    from athenaeum.config import RECALL_CAP_CEILING_DEFAULT as cap_ceiling_default
     from athenaeum.config import load_config
-cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
+    from athenaeum.config import resolve_recall_cap_ceiling, resolve_search_backend
+# Issue athenaeum#2458: load_config takes a Path, and \`knowledge_root /
+# 'athenaeum.yaml'\` raises TypeError on the bare argv string -- so this whole
+# python branch used to abort before writing a single line and the shell
+# fallback below silently did all the work. Coerced here because the resolver
+# calls in the block below only run on this branch.
+_root = sys.argv[1] if len(sys.argv) > 1 else ''
+cfg = load_config(Path(_root) if _root else None)
 env_path = sys.argv[2]
 with open(env_path, 'w') as f:
     f.write(f'AUTO_RECALL={str(cfg.get(\"auto_recall\", True)).lower()}\n')
-    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"vector\")}\n')
+    # Issue athenaeum#2458: resolved through athenaeum.config.resolve_search_backend
+    # -- the ONE resolution rule every recall surface shares -- rather than a
+    # second inline read with its own copy of the default backend name. This
+    # resolver has no env var of its own, so (unlike RECALL_CAP_CEILING below)
+    # there is nothing here that could bake a runtime override into the cache.
+    f.write(f'SEARCH_BACKEND={resolve_search_backend(cfg)}\n')
     provider = 'chromadb'
     if isinstance(cfg.get('vector'), dict):
         provider = cfg['vector'].get('provider', 'chromadb')
@@ -817,20 +837,21 @@ with open(env_path, 'w') as f:
     # import -- same hook-local-name reasoning as PUSH_TOKEN_BUDGET above
     # (RECALL_CAP_CEILING, not ATHENAEUM_RECALL_CAP_CEILING, so this cached
     # value can never shadow athenaeum.config.resolve_recall_cap_ceiling's
-    # own env>yaml precedence for a downstream Python caller). Only the
-    # yaml value is resolved here; the env override is applied at per-turn-
-    # hook runtime, not baked in at session start. cap_ceiling_default
-    # (bound above, from the SAME athenaeum.config module load_config came
-    # from) is the single source of truth for the fallback -- never a
-    # second hardcoded literal here.
-    cap_ceiling = cap_ceiling_default
-    recall_cfg = cfg.get('recall')
-    if isinstance(recall_cfg, dict):
-        cap_cfg = recall_cfg.get('cap')
-        if isinstance(cap_cfg, dict):
-            raw = cap_cfg.get('ceiling')
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-                cap_ceiling = raw
+    # own env>yaml precedence for a downstream Python caller).
+    #
+    # Issue athenaeum#2458: the value now comes FROM that resolver -- bound
+    # above off the SAME athenaeum.config module load_config came from --
+    # instead of a second hand-rolled recall.cap walk with its own type
+    # guards. The rule that only the YAML value may be baked in is
+    # preserved, and is why ATHENAEUM_RECALL_CAP_CEILING is dropped from
+    # this subprocess's environment first: the resolver's precedence is
+    # env > yaml > default, so leaving the override set would cache a
+    # runtime value at session start. The env override is still applied at
+    # per-turn-hook runtime instead, by
+    # athenaeum.claude_code_adapter._resolve_recall_cap_ceiling, which
+    # hands this cached line to the same resolver in the yaml position.
+    os.environ.pop('ATHENAEUM_RECALL_CAP_CEILING', None)
+    cap_ceiling = resolve_recall_cap_ceiling(cfg)
     f.write(f'RECALL_CAP_CEILING={cap_ceiling}\n')
     # Issue athenaeum#1343 (D10): cache the yaml-configured push-metrics
     # enable flag so the per-turn hook's telemetry append can honour

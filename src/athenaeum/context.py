@@ -112,6 +112,29 @@ ENVELOPE_VERSION = SCHEMA_VERSION
 
 DEFAULT_BUDGET_TOKENS = 1200
 
+#: The shipped ``search_backend`` default, duplicated here as a same-module
+#: constant (issue athenaeum#2458). Same reasoning as
+#: :data:`_FALLBACK_STOPWORDS` below and :func:`_recall_disabled`'s docstring:
+#: a ``from athenaeum.config import resolve_search_backend`` reached on EVERY
+#: call adds real marginal cost on top of the already-paid package-root cost
+#: (``config.py`` pulls in ``yaml`` and ``athenaeum.models``), and this
+#: module's wall-clock budget cannot afford it. Measured at ~15ms per call --
+#: 30% of the 50ms delta budget
+#: ``tests/test_context_core.py::test_fts5_path_wall_clock_budget`` pins,
+#: enough to red that guard on a CI runner on its own.
+#:
+#: :func:`build_context` therefore imports the resolver ONLY when there is a
+#: ``config`` to resolve from. With ``config=None`` there is nothing to
+#: honour, so the resolver's default is the only answer it could return and
+#: this constant is it -- identical behaviour, no import.
+#:
+#: This is a deliberate second copy of a value, so it is pinned:
+#: ``tests/test_recall_backend_resolution.py``'s
+#: ``test_context_default_backend_constant_matches_the_resolver`` asserts it
+#: equals BOTH ``config._DEFAULTS["search_backend"]`` and
+#: ``resolve_search_backend(None)``, so it cannot drift from either.
+_DEFAULT_SEARCH_BACKEND = "vector"
+
 # Baked-in minimal fallback, used ONLY when the caller supplies no stopword
 # set at all (e.g. a fresh cache dir with no cached list yet). Callers that
 # have `athenaeum.search.STOPWORDS` available (the canonical list, issue
@@ -669,7 +692,7 @@ def build_context(
     cache_dir: Path,
     n: int = 3,
     budget: int | None = None,
-    search_backend: str = "fts5",
+    search_backend: str | None = None,
     exclude: frozenset[str] = frozenset(),
     stopwords: frozenset[str] | None = None,
     use_llm: bool = True,
@@ -687,9 +710,43 @@ def build_context(
     seam. A Tier-1 (per-turn push) caller that wants those side effects
     without reimplementing them should call :func:`build_context_for_turn`
     instead of this function directly — see that function's docstring.
+
+    ``search_backend=None`` (the default, issue athenaeum#2458) means
+    "whatever the deployment configured": it is resolved from ``config``
+    through :func:`athenaeum.config.resolve_search_backend` — the same
+    yaml-over-shipped-default rule every other recall surface applies —
+    rather than silently pinning ``fts5``. Pass an explicit name to
+    override it (a ``--backend`` flag still wins over the config). With
+    ``config=None`` as well, the answer is :data:`_DEFAULT_SEARCH_BACKEND`
+    without importing the resolver at all — identical value, no import
+    cost; see that constant's own comment.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
+
+    # Issue athenaeum#2458: `search_backend=None` means "whatever is
+    # configured" and is resolved HERE, through the one resolver every
+    # other recall surface uses (yaml `search_backend` > the shipped
+    # default). It was a hardcoded `"fts5"` default, which silently
+    # overrode a `search_backend: vector` deployment for `athenaeum
+    # context`, `athenaeum codex-context` and every library caller that
+    # did not pass the argument.
+    #
+    # The `config is None` arm is NOT an optimization to be tidied away: it
+    # IS this module's import-weight contract (see the module docstring and
+    # `_DEFAULT_SEARCH_BACKEND`). With no config there is nothing to resolve
+    # FROM, so the resolver could only return its own default -- and
+    # reaching for `athenaeum.config` to be told that costs ~15ms per call
+    # against a 50ms delta budget. A caller that passes either a config or
+    # an explicit backend name (the per-turn adapter passes a name) never
+    # touches `athenaeum.config` here at all.
+    if search_backend is None:
+        if config is None:
+            search_backend = _DEFAULT_SEARCH_BACKEND
+        else:
+            from athenaeum.config import resolve_search_backend
+
+            search_backend = resolve_search_backend(config)
 
     # Kill switch (issue athenaeum#379), honoured at entry. See
     # `_recall_disabled`'s own docstring for why this is a same-module
@@ -993,7 +1050,7 @@ def build_context_for_turn(
     cache_dir: Path,
     n: int = 3,
     budget: int | None = None,
-    search_backend: str = "fts5",
+    search_backend: str | None = None,
     use_llm: bool = True,
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
@@ -1022,6 +1079,10 @@ def build_context_for_turn(
     that must never let such a failure reach its own caller (issue
     athenaeum#1621 AC3) wraps ITS call to this function, not the other way
     around.
+
+    ``search_backend=None`` is forwarded as-is and resolved inside
+    :func:`build_context` (issue athenaeum#2458) — see that function's
+    docstring for the one resolution rule.
     """
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)

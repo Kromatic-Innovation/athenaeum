@@ -282,6 +282,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         load_config,
         resolve_audience,
         resolve_extra_intake_roots,
+        resolve_search_backend,
     )
     from athenaeum.models import (
         is_inactive_memory,
@@ -299,7 +300,9 @@ def cmd_recall(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(knowledge_root)
-    backend_name = args.backend or cfg.get("search_backend", "fts5")
+    # Issue athenaeum#2458: resolved through `resolve_search_backend` (yaml >
+    # shipped default) so every recall surface answers on the same backend.
+    backend_name = args.backend or resolve_search_backend(cfg)
     cache_dir = resolve_cache_dir(args.cache_dir).resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
 

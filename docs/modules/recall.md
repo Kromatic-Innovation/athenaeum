@@ -83,8 +83,19 @@ rewritten, or refused on this number.
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the
-  vector store, selected by `search_backend` (yaml, default `vector`) / `--backend`
-  (`athenaeum context` and `codex-context`, default `fts5`).
+  vector store. **One resolution rule, everywhere:** `search_backend` in
+  `athenaeum.yaml` over the shipped default (`vector`), via
+  `athenaeum.config.resolve_search_backend`. There is no second default: the
+  `recall` CLI, the MCP `recall` tool, `athenaeum context`,
+  `athenaeum codex-context`, the Claude Code hook, `reindex` and `doctor` all
+  answer on the backend that resolver returns. An explicit `--backend` on the
+  commands that offer it wins over the config; omitting it means "whatever is
+  configured", not a fixed `fts5`.
+- The recall-cap ceiling, resolved the same single way:
+  `ATHENAEUM_RECALL_CAP_CEILING` env over `recall.cap.ceiling` yaml over the
+  shipped default, via `athenaeum.config.resolve_recall_cap_ceiling`. It bounds
+  the push path (the per-turn hook and the Codex snapshot); an explicit `recall`
+  call still passes its own `top_k`.
 - `recall.extra_intake_roots` — additional roots folded into the search surface beyond the
   compiled wiki (default `["raw/auto-memory", "raw/claude-session", "raw/remote-session"]`;
   `[]` restricts recall to the wiki alone). `raw/claude-session` is where the `remember`
