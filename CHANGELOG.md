@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
+  rename primitive: dry-run by default, `--apply` sets `name:`, appends the
+  previous name to `aliases:` (deduplicated), rebuilds the recall index,
+  and writes a provenance record; `--reslug` additionally moves the file
+  and rewrites inbound `[[wikilinks]]` (reusing the fold's own rewrite
+  helper). Idempotent, and takes the run lock on `--apply` (athenaeum#2488).
+
 - `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
   ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
   and source object produced a compiled page, or says plainly that none was
