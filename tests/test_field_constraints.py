@@ -16,7 +16,9 @@ never a suite where every assertion is about the empty case.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from athenaeum.field_constraints import (
     BODY_PSEUDO_FIELD,
@@ -25,9 +27,7 @@ from athenaeum.field_constraints import (
     FieldConstraint,
     check_entity_fields,
     guard_entity_field_constraints,
-    list_field_constraint_violations,
     load_field_constraints,
-    scan_field_constraint_violations,
 )
 from athenaeum.librarian import _apply_tier3_results
 from athenaeum.models import EntityIndex, ProcessingResult, RawFile, WikiEntity
@@ -60,6 +60,23 @@ def _write_page(wiki: Path, filename: str, *, uid: str, page_type: str, name: st
         encoding="utf-8",
     )
     return path
+
+
+def _read_ledger(wiki_root: Path) -> list[dict[str, Any]]:
+    """Test-local stand-in for the removed public ledger-reader function.
+
+    The guard (``guard_entity_field_constraints``) still writes this ledger
+    (athenaeum#2471 removed only the unused reader, not the write side), so
+    these tests read it directly rather than through a public function.
+    """
+    path = wiki_root / FIELD_CONSTRAINT_LEDGER_NAME
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _raw(content: str = "irrelevant") -> RawFile:
@@ -316,53 +333,6 @@ class TestCheckEntityFieldsPopulatedSchema:
 
 
 # ---------------------------------------------------------------------------
-# scan_field_constraint_violations (AC4 detector)
-# ---------------------------------------------------------------------------
-
-
-class TestScanFieldConstraintViolationsEmptySchema:
-    def test_no_constraints_scans_nothing(self, tmp_path: Path) -> None:
-        wiki_root = _wiki_root(tmp_path)
-        _write_page(wiki_root, "a.md", uid="u1", page_type="company", name="Acme")
-        assert scan_field_constraint_violations(wiki_root) == []
-
-    def test_missing_wiki_root_returns_empty_when_unset(self, tmp_path: Path) -> None:
-        wiki_root = tmp_path / "does-not-exist"
-        assert scan_field_constraint_violations(wiki_root) == []
-
-
-class TestScanFieldConstraintViolationsPopulatedSchema:
-    def test_detects_violating_page_across_corpus(self, tmp_path: Path) -> None:
-        wiki_root = _wiki_root(tmp_path)
-        _write_field_constraints(wiki_root, "| company | emails | forbidden | |\n")
-        clean = wiki_root / "clean.md"
-        clean.write_text(
-            "---\nuid: u1\ntype: company\nname: Initech\n---\n\nNo contact fields.\n",
-            encoding="utf-8",
-        )
-        dirty = wiki_root / "dirty.md"
-        dirty.write_text(
-            "---\nuid: u2\ntype: company\nname: Acme\nemails: [bob@example.com]\n---\n\nBody.\n",
-            encoding="utf-8",
-        )
-        violations = scan_field_constraint_violations(wiki_root)
-        assert len(violations) == 1
-        assert violations[0].path == "dirty.md"
-        assert violations[0].uid == "u2"
-        assert violations[0].value == "bob@example.com"
-
-    def test_underscore_prefixed_pages_excluded_from_scan(self, tmp_path: Path) -> None:
-        wiki_root = _wiki_root(tmp_path)
-        _write_field_constraints(wiki_root, "| company | emails | forbidden | |\n")
-        hidden = wiki_root / "_type_rejected.md"
-        hidden.write_text(
-            "---\nuid: u9\ntype: company\nname: Hidden\nemails: [x@example.net]\n---\n\nBody.\n",
-            encoding="utf-8",
-        )
-        assert scan_field_constraint_violations(wiki_root) == []
-
-
-# ---------------------------------------------------------------------------
 # guard_entity_field_constraints (write-boundary guard)
 # ---------------------------------------------------------------------------
 
@@ -403,7 +373,7 @@ class TestGuardEntityFieldConstraintsPopulatedSchema:
         assert parked.read_text(encoding="utf-8") == rendered
         # And the original target path was never written.
         assert not (wiki_root / "acme.md").exists()
-        records = list_field_constraint_violations(wiki_root)
+        records = _read_ledger(wiki_root)
         assert len(records) == 1
         assert records[0]["field"] == "emails"
         assert records[0]["value"] == "bob@example.com"
@@ -553,7 +523,7 @@ class TestWritePathIntegrationPopulatedSchema:
         assert not (wiki_root / entity.filename).exists()
         parked = wiki_root / FIELD_CONSTRAINT_REJECTED_DIR_NAME / entity.filename
         assert "bob@example.com" in parked.read_text(encoding="utf-8")
-        records = list_field_constraint_violations(wiki_root)
+        records = _read_ledger(wiki_root)
         assert len(records) == 1
         assert records[0]["source"] == "tier3-create"
 
@@ -597,7 +567,7 @@ class TestWritePathIntegrationPopulatedSchema:
         # uid is NOT counted as updated (the merge never landed).
         assert existing.read_text(encoding="utf-8") == original_content
         assert result.updated == []
-        records = list_field_constraint_violations(wiki_root)
+        records = _read_ledger(wiki_root)
         assert len(records) == 1
         assert records[0]["source"] == "tier3-merge"
 
