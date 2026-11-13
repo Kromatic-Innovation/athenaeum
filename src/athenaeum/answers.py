@@ -73,6 +73,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from athenaeum.models import TokenUsage
     from athenaeum.provider import LLMBackend
 
@@ -909,6 +911,23 @@ _NO_SOURCE_WRITEBACK_CONFLICT_TYPES: frozenset[str] = frozenset(
     ("field-correction", "schema-amendment")
 )
 
+# Issue athenaeum#2518: a `duplicate`-verdict FOLD question
+# (`athenaeum.verdict_effects._apply_duplicate`) is raised with
+# `raw_ref=f"comparator:{pair_key}"` -- a ref that never resolves to a file,
+# by construction (it names a comparator PAIR, not a source memory). Routing
+# it through `_writeback_source` is exactly athenaeum#1804's bug for this one
+# block shape: every answer held forever, nothing ever folded. `duplicate`
+# is used for no other escalation (verified: it is the only
+# `conflict_type="duplicate"` call site in verdict_effects.py), so
+# classifying on it alone is unambiguous. See `_writeback_class` and the
+# `"fold"` branch in `ingest_answers` below -- the actual apply (via
+# `athenaeum.pending_merges`) is injected by the caller as `fold_applier`
+# (`_cmd_pending._resolve_fold_question`), never imported here: that edge
+# would create an `answers` <-> `pending_merges` import cycle
+# (`pending_merges` already imports from `answers` at module load; see
+# `tests/test_import_graph_acyclic.py`, `ALLOWED_SCCS = []`).
+_FOLD_CONFLICT_TYPE = "duplicate"
+
 
 def _parse_verdict(answer_body: str) -> tuple[str | None, str]:
     """Split a leading verdict token off an answer body.
@@ -1059,13 +1078,18 @@ def _writeback_class(pq: PendingQuestion) -> str:
 
     Returns ``"agent"`` for an agent-raised block (:func:`raise_pending_question`
     — the answer is consumed by whoever reads the archive, not written back
-    to a source), ``"field-correction"`` / ``"schema-amendment"`` for a block
-    whose source ref is unresolvable by design (see
+    to a source), ``"fold"`` for a `duplicate`-verdict fold question (issue
+    athenaeum#2518 — never a source write-back; approve/reject is handed to
+    the normal merge path instead, see the ``"fold"`` branch in
+    :func:`ingest_answers`), ``"field-correction"`` / ``"schema-amendment"``
+    for a block whose source ref is unresolvable by design (see
     :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or ``"source"`` for every
     ordinary detector-raised block, where a write-back IS expected.
     """
     if pq.raised_by == "agent":
         return "agent"
+    if pq.conflict_type == _FOLD_CONFLICT_TYPE:
+        return "fold"
     if pq.conflict_type in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
         return pq.conflict_type
     return "source"
@@ -1510,6 +1534,14 @@ class IngestAnswersReport:
             ``recorded-as-prose``/``noop``).
         corrections_rejected: Issue athenaeum#1850 — field-correction blocks
             archived this run whose answer was ``reject`` (no write).
+        folds_applied: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose "approve" answer folded the pair
+            (``fold_applier`` returned ``"folded"``).
+        folds_rejected: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose answer was "reject" (no pages changed).
+        folds_refused: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose "approve" was refused by one of the normal merge
+            path's safety checks (``fold_applier`` returned ``"refused"``).
     """
 
     files_written: int = 0
@@ -1518,6 +1550,9 @@ class IngestAnswersReport:
     archived_no_writeback: dict[str, int] = field(default_factory=dict)
     corrections_applied: int = 0
     corrections_rejected: int = 0
+    folds_applied: int = 0
+    folds_rejected: int = 0
+    folds_refused: int = 0
 
 
 def ingest_answers(
@@ -1528,6 +1563,7 @@ def ingest_answers(
     config: "dict | None" = None,
     quiet: bool = False,
     report: IngestAnswersReport | None = None,
+    fold_applier: "Callable[[PendingQuestion], tuple[str, str]] | None" = None,
 ) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
@@ -1575,6 +1611,23 @@ def ingest_answers(
             accumulator, updated in place. Keyword-only; defaults to
             ``None`` so every existing caller is unaffected. The function's
             return value stays a plain ``int`` regardless.
+        fold_applier: Issue athenaeum#2518 — callback invoked for an answered
+            ``"fold"``-class block (see :func:`_writeback_class`) in place of
+            :func:`_writeback_source`, which this block's `comparator:`
+            source ref could never resolve against. Takes the
+            :class:`PendingQuestion` and returns ``(outcome, detail)`` where
+            ``outcome`` is ``"folded"``, ``"refused"``, ``"rejected"``, or
+            ``"held"`` — never raises. This module cannot do the apply
+            itself: it would need :mod:`athenaeum.pending_merges`, which
+            already imports FROM this module at load time, so the reverse
+            edge would be an import cycle (see
+            ``tests/test_import_graph_acyclic.py``). The production caller
+            (``athenaeum._cmd_pending.cmd_ingest_answers``, which already
+            imports both modules) supplies the real implementation
+            (``_resolve_fold_question``); ``None`` (the default) holds every
+            fold question instead of crashing, so a caller that does not
+            thread this through degrades safely rather than silently
+            dropping the answer.
 
     Returns:
         Count of answers moved to the archive on this run (a held block is
@@ -1697,6 +1750,11 @@ def ingest_answers(
         # same early-evaluation shape the "source" class already uses for
         # its own hold_refs resolution check just above.
         field_correction_outcome: tuple[str, str] | None = None
+        # Issue athenaeum#2518: the fold-question twin of
+        # `field_correction_outcome`, computed the same way (before deciding
+        # whether this run needs to write anything) so a fold's
+        # folded/refused/rejected/held status is known up front.
+        fold_outcome: tuple[str, str] | None = None
         if writeback_class == "source" and existing_state != "waived":
             hold_body = _answer_body(pq)
             hold_refs = _block_source_refs(pq)
@@ -1710,6 +1768,17 @@ def ingest_answers(
                 config=config,
             )
             if field_correction_outcome[0] == "held":
+                will_hold = True
+        elif writeback_class == "fold" and existing_state != "waived":
+            if fold_applier is None:
+                fold_outcome = (
+                    "held",
+                    "no fold_applier wired into this ingest_answers call "
+                    "(issue athenaeum#2518)",
+                )
+            else:
+                fold_outcome = fold_applier(pq)
+            if fold_outcome[0] == "held":
                 will_hold = True
 
         if will_hold and existing_state == "held":
@@ -1829,6 +1898,30 @@ def ingest_answers(
                         report.corrections_applied += 1
                     else:
                         report.corrections_rejected += 1
+        elif writeback_class == "fold":
+            # Issue athenaeum#2518: a fold question never calls
+            # _writeback_source either (its `comparator:` ref never
+            # resolves) — `fold_outcome`, computed above via `fold_applier`,
+            # is the ONLY record of what happened. Unlike field-correction,
+            # an unresolvable answer or missing page went to `will_hold`
+            # above; everything reaching this branch is "folded", "refused",
+            # or "rejected" — never "held" (AC4: approve/reject never end
+            # held).
+            skip_writeback = True
+            if existing_state == "waived":
+                if report is not None:
+                    report.waived += 1
+            elif not will_hold:
+                assert fold_outcome is not None
+                outcome, detail = fold_outcome
+                archive_status_line = f"**Write-back**: {outcome} — {detail}"
+                if report is not None:
+                    if outcome == "folded":
+                        report.folds_applied += 1
+                    elif outcome == "rejected":
+                        report.folds_rejected += 1
+                    else:
+                        report.folds_refused += 1
         elif writeback_class == "schema-amendment":
             skip_writeback = True
             archive_status_line = (
@@ -1854,6 +1947,14 @@ def ingest_answers(
                 held_line = (
                     f"**Write-back**: held — {hold_detail} as of {iso_ts}; answer "
                     '"ratify" or "reject", or change "held" to "waived" to '
+                    "archive without a write"
+                )
+            elif writeback_class == "fold":
+                assert fold_outcome is not None
+                _, hold_detail = fold_outcome
+                held_line = (
+                    f"**Write-back**: held — {hold_detail} as of {iso_ts}; answer "
+                    '"approve" or "reject", or change "held" to "waived" to '
                     "archive without a write"
                 )
             else:
