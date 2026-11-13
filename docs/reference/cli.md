@@ -109,6 +109,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
 - [`athenaeum registry`](#athenaeum-registry) (command) — : compile the source-handle registry.json (entity uid → handle set) from wiki entity frontmatter. Deterministic, no LLM; emits a well-formed registry even when no handles are populated yet.
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch. The incremental delta is keyed off each file's whole-content hash, not off how its frontmatter is parsed, so a page whose on-disk text has not changed since it was last indexed is hash-matched and skipped even after a parser fix lands -- an index built before the block-list aliases:/tags: parser fix (commit 324bb3c4) keeps stale, empty aliases/tags columns for any page an --incremental run does not otherwise touch. Only --full re-parses every page from scratch and refills them. To check the result, run `SELECT COUNT(*) FROM wiki WHERE aliases != ''` against cache-dir/wiki-index.db (swap in tags for the other column). The vector backend disables onnxruntime's telemetry client at import, before it can start its background worker thread, to prevent a shutdown-time crash in that thread.
+- [`athenaeum relate`](#athenaeum-relate) (command) — Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum repair`](#athenaeum-repair) (command) — Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
@@ -1394,6 +1395,19 @@ Rebuild the search index (FTS5 or vector, per config). --incremental (default) a
 | `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--full` | off (flag absent) | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
 | `--incremental` | off (flag absent) | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum relate`
+
+Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--child` | — | — | The child page's uid. |
+| `--detach` | off (flag absent) | — | Remove --child's current parent relation. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--parent` | — | — | The parent page's uid to attach --child under. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 

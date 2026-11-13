@@ -13,8 +13,9 @@ hand to find out.
 
 **Contract:** :func:`run_checks` returns one :class:`CheckResult` per link
 named in the issue (package version, interpreter version, MCP registration,
-hook presence, LLM key mode, search index, last compile time), each in one
-of three states:
+hook presence, LLM key mode, search index, last compile time), plus
+:func:`check_page_relations` (issue athenaeum#2535 AC7: the count of
+one-sided parent/child page relation pairs), each in one of three states:
 
 - ``"ok"`` -- healthy, or (package version only) nothing to report.
 - ``"fail"`` -- broken; ``detail`` says what is wrong and ``fix`` names the
@@ -48,8 +49,9 @@ made visible -- a plain "OK, regex mode" would repeat the same silence this
 command exists to end.
 
 Layering: L4 domain/pipeline. Imports :mod:`athenaeum.config` (L2),
-:mod:`athenaeum.provider` (L3), :mod:`athenaeum.search` (L3), and
-:mod:`athenaeum.run_summary_log` (L2) -- all function-local/deferred inside
+:mod:`athenaeum.provider` (L3), :mod:`athenaeum.search` (L3),
+:mod:`athenaeum.run_summary_log` (L2), and (issue athenaeum#2535)
+:mod:`athenaeum.page_relations` (L3) -- all function-local/deferred inside
 each check (matching every other best-effort/advisory reader's own
 discipline, e.g. :mod:`athenaeum.status`) -- plus :mod:`athenaeum`'s own
 ``__version__`` (a PEP 562 attribute access, not a submodule import, so it
@@ -635,6 +637,32 @@ def check_schedule_state(
     )
 
 
+def check_page_relations(wiki_root: Path) -> CheckResult:
+    """Count of one-sided parent/child page relation pairs (issue
+    athenaeum#2535 AC7) -- a ``parent:`` key with no matching ``related``
+    row on the named parent, or the reverse. Counts only, no further
+    diagnosis. Read-only (AC5): :func:`athenaeum.page_relations.count_one_sided_relations`
+    only ever parses existing frontmatter.
+
+    A missing ``wiki/`` directory reports zero -- there is nothing to
+    check, not a broken install (that is :func:`check_last_compile`'s and
+    friends' job, not this one's).
+    """
+    from athenaeum.page_relations import count_one_sided_relations
+
+    if not wiki_root.is_dir():
+        return CheckResult(name="page_relations", status="ok", detail="0 one-sided pair(s)")
+    count = count_one_sided_relations(wiki_root)
+    if count == 0:
+        return CheckResult(name="page_relations", status="ok", detail="0 one-sided pair(s)")
+    return CheckResult(
+        name="page_relations",
+        status="fail",
+        detail=f"{count} one-sided parent/child pair(s)",
+        fix="athenaeum relate --child <uid> --parent <uid> (or --detach) to repair each pair",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration + rendering.
 # ---------------------------------------------------------------------------
@@ -674,6 +702,7 @@ def run_checks(
         check_search_index(resolved_cache_dir, config),
         check_last_compile(resolved_cache_dir),
         check_schedule_state(home=home),
+        check_page_relations(knowledge_root / "wiki"),
     ]
 
 

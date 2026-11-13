@@ -53,6 +53,56 @@ Entities are indexed in `wiki/_index.md` grouped by type. Conflicts requiring
 human review are appended to `wiki/_pending_questions.md`. Each run logs
 token usage and estimated costs at the end.
 
+**Parent/child page relation.** A page may be the sub-page of exactly one
+other page, up to two levels deep (a page that already has a parent cannot
+itself gain children, and vice versa). The child carries a top-level
+`parent:` key naming the parent's `uid`; the parent carries one `related`
+row per child:
+
+```yaml
+# child page
+---
+uid: b2c3d4e5
+type: reference
+name: Acme client-count figures
+parent: a1b2c3d4
+---
+```
+
+```yaml
+# parent page
+---
+uid: a1b2c3d4
+type: company
+name: Acme Corp
+related:
+  - uid: b2c3d4e5
+    role: child
+    via: manual
+---
+```
+
+`via` records how the relation was set: `split` (a by-product of the
+oversize-page split, `tiers.py`), `attach`/`fold` (a recompile or fold
+decision), or `manual` (`athenaeum relate`, below). A page split before
+this relation existed still reads as `via: split` — its `related` rows use
+the older `split-into`/`split-from` roles, which are read-compatible but
+never written going forward.
+
+The writer (`src/athenaeum/page_relations.py`) renders the relation into
+both bodies: a "Sub-pages" section on the parent listing each child as a
+wikilink with its one-line `description:`, and a first-line breadcrumb on
+the child linking back to the parent. Set or remove the relation by hand
+with:
+
+```bash
+athenaeum relate --child <uid> --parent <uid>   # attach (via: manual)
+athenaeum relate --child <uid> --detach         # remove
+```
+
+`athenaeum doctor` reports the count of one-sided pairs — a `parent:` key
+with no matching `related` row on the named parent, or the reverse.
+
 **Degraded runs.** When a run exhausts its API call budget (see
 `ATHENAEUM_MAX_API_CALLS` above), it writes a `wiki/_deferred_work.md`
 manifest itemizing the raw files it did not process and ends with a

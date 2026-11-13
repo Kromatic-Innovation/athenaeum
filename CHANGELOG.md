@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Person dedupe's strong-identifier fields are now configurable
   (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
   fields (athenaeum#2472).
+- First-class parent/child page relation (`src/athenaeum/page_relations.py`):
+  one atomic writer/remover with invariant checks (second parent, cycle,
+  third nesting level, inactive parent), idempotent "Sub-pages"/breadcrumb
+  rendering, and read-compat for the legacy `split-into`/`split-from`
+  roles; `athenaeum relate --child <uid> --parent <uid>` / `--detach` sets
+  or removes it by hand (exits 75 under a held run lock); `athenaeum
+  doctor` reports the count of one-sided pairs (athenaeum#2535).
 
 ### Fixed
 
