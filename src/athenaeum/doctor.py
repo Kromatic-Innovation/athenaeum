@@ -681,9 +681,28 @@ def run_checks(
 _STATUS_LABEL: dict[Status, str] = {"ok": "OK", "fail": "FAIL", "skip": "SKIP"}
 
 
+#: Appended (issue athenaeum#2450) only when at least one check is "fail" --
+#: a fresh or not-yet-configured install reports FAILs for every setup step
+#: not yet done, and nothing before this line said that was expected rather
+#: than broken. Points back at the per-FAIL ``fix:`` lines rather than
+#: repeating them.
+_FRESH_INSTALL_NOTE = (
+    "FAILs above are expected on a fresh or not-yet-configured install "
+    "until setup is complete -- see the \"fix:\" line under each FAIL for "
+    "what to run."
+)
+
+
 def format_report(results: list[CheckResult]) -> str:
     """Human-readable report (issue athenaeum#2298 AC2): every failed check
-    prints what is wrong AND the fix."""
+    prints what is wrong AND the fix.
+
+    When at least one check is ``"fail"``, the report ends with a short
+    note (issue athenaeum#2450) saying FAILs are expected on a fresh or
+    not-yet-configured install and pointing back at the per-FAIL ``fix:``
+    lines above -- never printed when every check is ``"ok"``/``"skip"``,
+    and it changes no exit code (that is still :func:`exit_code`'s call).
+    """
     lines = ["Athenaeum Doctor", "=" * 40]
     for result in results:
         label = _STATUS_LABEL.get(result.status, result.status.upper())
@@ -695,6 +714,8 @@ def format_report(results: list[CheckResult]) -> str:
     lines.append(
         f"{len(failed)} check(s) failed." if failed else "All checks passed."
     )
+    if failed:
+        lines.append(_FRESH_INSTALL_NOTE)
     return "\n".join(lines)
 
 

@@ -18,9 +18,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from athenaeum._cli_shared import _resolve_knowledge_root
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+
+if TYPE_CHECKING:
+    from athenaeum.runlock import RunLock
 
 
 def cmd_schema(args: argparse.Namespace) -> int:
@@ -42,29 +46,46 @@ def cmd_schema(args: argparse.Namespace) -> int:
     )
 
     report = build_migrate_report(wiki_root)
-    changed = apply_migrations(report) if should_write else 0
 
-    if args.json:
-        payload = report.to_dict()
-        payload["applied"] = should_write
-        payload["files_changed"] = changed
-        sys.stdout.write(json.dumps(payload) + "\n")
+    # Writing path only (issue athenaeum#2453): acquire the single-machine
+    # run lock before any write, same helper every other writing _cmd_*
+    # module uses. A dry-run never reaches this branch.
+    lock: "RunLock | int | None" = None
+    if should_write:
+        from athenaeum.config import load_config
+
+        config = load_config(knowledge_root)
+        lock = _acquire_or_exit(knowledge_root, args, config)
+        if isinstance(lock, int):
+            return lock
+
+    try:
+        changed = apply_migrations(report) if should_write else 0
+
+        if args.json:
+            payload = report.to_dict()
+            payload["applied"] = should_write
+            payload["files_changed"] = changed
+            sys.stdout.write(json.dumps(payload) + "\n")
+            return 0
+
+        by_reason = report.counts_by_reason()
+        print(f"scanned: {report.scanned} page(s) under {wiki_root}")
+        print(f"migratable: {len(report.migrations)}")
+        print("skipped:")
+        for reason, count in by_reason.items():
+            if reason == "migrated":
+                continue
+            print(f"  {reason}: {count}")
+        print(
+            f"applied: {changed} file(s) written"
+            if should_write
+            else "dry run: nothing written (pass --apply to write)"
+        )
         return 0
-
-    by_reason = report.counts_by_reason()
-    print(f"scanned: {report.scanned} page(s) under {wiki_root}")
-    print(f"migratable: {len(report.migrations)}")
-    print("skipped:")
-    for reason, count in by_reason.items():
-        if reason == "migrated":
-            continue
-        print(f"  {reason}: {count}")
-    print(
-        f"applied: {changed} file(s) written"
-        if should_write
-        else "dry run: nothing written (pass --apply to write)"
-    )
-    return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
 
 
 def add_schema_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -112,3 +133,4 @@ def add_schema_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit machine-readable JSON instead of plain text.",
     )
+    _add_lock_args(migrate)
