@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -65,7 +65,8 @@ python scripts/gen_cli_reference.py
 - [`athenaeum doctor`](#athenaeum-doctor) (command) — Read-only health check of an athenaeum install — package version, interpreter, MCP registration, hooks, LLM key mode, search index, last compile time. Exits non-zero on any failed check.
 - [`athenaeum drain`](#athenaeum-drain) (command) — Supervised API+batch drain of the raw-intake backlog (cost-guarded)
 - [`athenaeum enable`](#athenaeum-enable) (command) — Undo 'athenaeum disable' — restore all background work.
-- [`athenaeum entity`](#athenaeum-entity) (command) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
+- [`athenaeum entity`](#athenaeum-entity) (group) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
+- [`athenaeum entity rename`](#athenaeum-entity-rename) (command) — Rename a wiki page by uid: sets name:, records the previous name in aliases: (deduplicated), refreshes the recall index, and writes a provenance record. Dry-run by default; --apply writes.
 - [`athenaeum enumerate`](#athenaeum-enumerate) (command) — Enumerate every entity of a declared type matching field predicates — no query text. The generalized form of the former `athenaeum people` (removed) — see docs/design/recall-architecture.md's capability-parity table.
 - [`athenaeum explain-routing`](#athenaeum-explain-routing) (command) — Read-only preview: resolved provider/model/batch/price per model knob. Prints what 'athenaeum run' would actually use for this athenaeum.yaml + environment -- no LLM call, no file processed, no routing behavior changed.
 - [`athenaeum fold-lint`](#athenaeum-fold-lint) (command) — Read-only check of the two fold-graph invariants: the folded_into graph is acyclic, and every fold set has exactly one live canonical page.
@@ -828,8 +829,30 @@ One-call read of a SINGLE entity's page by uid, for any entity class, with an ex
 | `--class` | `person` | — | The page's `type:` (person, vendor, …). Selects which excluded SURFACE is read — a `person` page's record lives on the `pii` surface — while the page itself is resolved by uid whatever its type. Default: person. |
 | `--include-excluded` | off (flag absent) | — | Include the actual excluded values (default: off — withheld fields carry a redaction marker instead). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--uid` | — | — | The entity's durable uid. |
+| `--uid` | — | — | The entity's durable uid. Required for the default read mode (enforced in cmd_entity, not by argparse —: a nested `rename` sub-action below needs its OWN, independently required `--uid`, and argparse's PARSER-nargs subparsers action swallows every token after the sub-action name, including any `--uid` meant for THIS parser — so this one can no longer be `required=True` at the argparse level without breaking `entity rename --uid...`). |
 | `--usage-class` | `[]` | observed, provider, unclassified | Return only values of this usage class (repeatable; one of observed, provider, unclassified). Default: every value, each carrying its class. |
+
+Subcommands:
+
+- `athenaeum entity rename` — Rename a wiki page by uid: sets name:, records the previous name in aliases: (deduplicated), refreshes the recall index, and writes a provenance record. Dry-run by default; --apply writes.
+
+## `athenaeum entity rename`
+
+Rename a wiki page by uid: sets name:, records the previous name in aliases: (deduplicated), refreshes the recall index, and writes a provenance record. Dry-run by default; --apply writes.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | off (flag absent) | — | Write the rename. Without this flag the command is a dry-run that changes nothing. |
+| `--backend` | — | fts5, vector | Override the recall index backend for the post-apply rebuild (default: read from athenaeum.yaml). --apply only. |
+| `--by` | — | — | Who is authorizing the rename, recorded in the provenance record. Default: the OS user running this command (getpass.getuser). |
+| `--cache-dir` | — | — | Cache directory, used both for the single-uid resolution fast path and the recall-index rebuild after --apply (default: ~/.cache/athenaeum). |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--name` | — | — | The new name: value. Equal to the page's CURRENT name is a no-op (idempotent rename). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--reason` | `` | — | Why this page is being renamed. Recorded verbatim in the provenance record (--apply only). |
+| `--reslug` | off (flag absent) | — | Also rename the file to the new slug and rewrite every inbound [[old-slug]] wikilink to the new slug. Default off: the uid and file slug are left unchanged and only name:/aliases: change. |
+| `--uid` | — | — | The page's durable uid. |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum enumerate`
 
