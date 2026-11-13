@@ -521,6 +521,18 @@ RATCHET_GUARDED_DECISION_TYPES: frozenset[str] = frozenset(
 #: caller can match on it rather than parsing prose.
 RATCHET_REFUSAL_QUEUE_INFLOW_BREACH = "queue_inflow_breach"
 
+#: Issue athenaeum#2449: the named refusal reason a ratification applier
+#: returns when it could not read the effort-budget breach signal at all
+#: (for example the :func:`budget_report` read raised). This guard fails
+#: CLOSED on an unreadable signal (operator ruling, 2026-11-12): the
+#: applier refuses the ratification with THIS reason rather than treating
+#: an unreadable signal as "no breach" and calling
+#: :func:`ratification_refusal`. That is the deliberate opposite of
+#: :mod:`athenaeum.wiki_dedupe`'s duplicate-fold guard, which fails OPEN on
+#: the same kind of read failure -- this constant is never returned by
+#: :func:`ratification_refusal` itself, only by its callers.
+RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE = "breach_signal_unreadable"
+
 
 def ratification_refusal(decision_type: str, *, effort_budget_breach: bool) -> str | None:
     """The ratchet-guard refusal reason for ratifying *decision_type*, or
@@ -539,13 +551,14 @@ def ratification_refusal(decision_type: str, *, effort_budget_breach: bool) -> s
     non-guarded decision type, regardless of breach state, and for a
     guarded type when the budget is NOT in breach.
 
-    This function does not itself gate any applier call site -- wiring a
-    ratification applier to call it is the next child's job (whichever
-    module ends up answering ``"policy-pack-edit"`` / the sibling's auto-
-    apply-threshold type; see athenaeum#2019's own AC). It exists now, with its
-    own test coverage, so that applier has a single, already-tested guard
-    to import rather than reinventing the breach check at ratification
-    time.
+    This function does not itself gate every call site: issue athenaeum#2449
+    wired it into the ``"auto-apply-threshold"`` applier
+    (:func:`athenaeum.decision_answers._apply_auto_apply_threshold_proposal_answer`);
+    wiring the ``"policy-pack-edit"`` side is still the next child's job --
+    that type has no applier yet (framed but not answerable). It exists
+    with its own test coverage so each applier has a single, already-tested
+    guard to import rather than reinventing the breach check at
+    ratification time.
     """
     if decision_type not in RATCHET_GUARDED_DECISION_TYPES:
         return None
@@ -571,5 +584,6 @@ __all__ = [
     "format_budget_report",
     "RATCHET_GUARDED_DECISION_TYPES",
     "RATCHET_REFUSAL_QUEUE_INFLOW_BREACH",
+    "RATCHET_REFUSAL_BREACH_SIGNAL_UNREADABLE",
     "ratification_refusal",
 ]

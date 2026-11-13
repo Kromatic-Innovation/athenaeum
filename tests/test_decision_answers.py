@@ -1354,6 +1354,243 @@ class TestApplyProposedRule:
 
 
 # ---------------------------------------------------------------------------
+# TestRatchetGuardEffortBudgetBreach — issue athenaeum#2449 (athenaeum#2019
+# Ratchet guard 1, wired)
+# ---------------------------------------------------------------------------
+
+#: Mirrors ``tests/test_page_split_auto_apply_wiring.py``'s
+#: ``_AUTO_APPLY_CONFIG`` exactly -- same disagreement trigger/widen step,
+#: so a proposal seeded here is guaranteed drafted.
+_RATCHET_AUTO_APPLY_CONFIG = {
+    "librarian": {
+        "audit_sample_rate_t1_rejects": 1.0,
+        "audit_sample_rate_t2_approvals": 1.0,
+        "auto_apply_proposals": {
+            "disagreement_trigger": 0.2,
+            "widen_step": 0.05,
+        },
+    }
+}
+
+
+def _seed_auto_apply_threshold_pending(wiki_root: Path) -> str:
+    """Seed one pending ``auto-apply-threshold`` widen proposal; return its
+    id. Mirrors ``tests/test_page_split_auto_apply_wiring.py``'s
+    ``_seed_auto_apply_pending`` (same calibration-sample-then-review dance
+    that makes ``run_auto_apply_proposal_detection`` draft a real widen
+    proposal), duplicated locally rather than imported across test modules.
+    """
+    from athenaeum.auto_apply_proposals import (
+        list_pending_auto_apply_threshold_proposals,
+        run_auto_apply_proposal_detection,
+    )
+    from athenaeum.calibration import (
+        read_calibration_ledger,
+        record_audit_review,
+        sample_tier_decision,
+    )
+
+    for idx in range(4):
+        human_verdict = "approve" if idx < 3 else "reject"
+        proposal_id = f"prop-{idx}"
+        sample_tier_decision(
+            wiki_root,
+            tier="T1",
+            verdict="reject",
+            proposal_id=proposal_id,
+            reason="test",
+            config=_RATCHET_AUTO_APPLY_CONFIG,
+        )
+        audit_id = next(
+            r["id"]
+            for r in read_calibration_ledger(wiki_root)
+            if r.get("kind") == "audit" and r.get("proposal_id") == proposal_id
+        )
+        record_audit_review(wiki_root, audit_id=audit_id, human_verdict=human_verdict)
+
+    run_auto_apply_proposal_detection(
+        ["not_a_conflict"], wiki_root=wiki_root, config=_RATCHET_AUTO_APPLY_CONFIG
+    )
+    return list_pending_auto_apply_threshold_proposals(wiki_root)[0]["id"]
+
+
+class TestRatchetGuardEffortBudgetBreach:
+    """AC1-AC4: an ``approve`` of an auto-apply-threshold widening proposal
+    is refused while the decision queue's effort budget is in breach, and
+    refused with a DIFFERENT named reason (fails CLOSED) when the breach
+    signal cannot be read at all -- operator ruling 2026-11-12. A
+    ``reject`` is never refused by this guard either way.
+
+    Each test monkeypatches ``athenaeum.decision_budget.budget_report`` --
+    the function :func:`athenaeum.decision_answers.
+    _resolve_auto_apply_effort_budget_breach` imports fresh on every call,
+    so patching the attribute on its home module is enough to control what
+    the guard observes, without needing to engineer a real breach via
+    ledger timestamps/thresholds.
+    """
+
+    def test_approve_in_breach_is_refused_and_ledger_unchanged(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as decision_budget_mod
+        from athenaeum.auto_apply_proposals import (
+            list_pending_auto_apply_threshold_proposals,
+        )
+
+        item_id = _seed_auto_apply_threshold_pending(wiki_root)
+        pending_before = list_pending_auto_apply_threshold_proposals(wiki_root)
+
+        real_budget_report = decision_budget_mod.budget_report
+
+        def _forced_breach(*args: object, **kwargs: object) -> dict:
+            result = real_budget_report(*args, **kwargs)  # type: ignore[arg-type]
+            result["breach"] = True
+            return result
+
+        monkeypatch.setattr(decision_budget_mod, "budget_report", _forced_breach)
+
+        write_decision_answer(
+            raw_root,
+            decision_id=item_id,
+            decision_type="auto-apply-threshold",
+            verdict="approve",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 0
+        assert report.skipped == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is False
+        assert outcome.error_code == "queue_inflow_breach"
+        assert "queue_inflow_breach" in outcome.message
+        assert "pending" in outcome.message
+        # No ledger append: the proposal is still exactly where it was.
+        assert (
+            list_pending_auto_apply_threshold_proposals(wiki_root) == pending_before
+        )
+
+    def test_approve_not_in_breach_still_applies(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.auto_apply_proposals import (
+            list_pending_auto_apply_threshold_proposals,
+        )
+
+        item_id = _seed_auto_apply_threshold_pending(wiki_root)
+        write_decision_answer(
+            raw_root,
+            decision_id=item_id,
+            decision_type="auto-apply-threshold",
+            verdict="approve",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is True
+        assert outcome.error_code is None
+        assert list_pending_auto_apply_threshold_proposals(wiki_root) == []
+
+    def test_reject_in_breach_still_applies(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as decision_budget_mod
+        from athenaeum.auto_apply_proposals import (
+            list_pending_auto_apply_threshold_proposals,
+        )
+
+        item_id = _seed_auto_apply_threshold_pending(wiki_root)
+
+        real_budget_report = decision_budget_mod.budget_report
+
+        def _forced_breach(*args: object, **kwargs: object) -> dict:
+            result = real_budget_report(*args, **kwargs)  # type: ignore[arg-type]
+            result["breach"] = True
+            return result
+
+        monkeypatch.setattr(decision_budget_mod, "budget_report", _forced_breach)
+
+        write_decision_answer(
+            raw_root,
+            decision_id=item_id,
+            decision_type="auto-apply-threshold",
+            verdict="reject",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is True
+        assert outcome.error_code is None
+        assert list_pending_auto_apply_threshold_proposals(wiki_root) == []
+
+    def test_approve_with_unreadable_breach_signal_is_refused_and_ledger_unchanged(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as decision_budget_mod
+        from athenaeum.auto_apply_proposals import (
+            list_pending_auto_apply_threshold_proposals,
+        )
+
+        item_id = _seed_auto_apply_threshold_pending(wiki_root)
+        pending_before = list_pending_auto_apply_threshold_proposals(wiki_root)
+
+        def _boom(*args: object, **kwargs: object) -> dict:
+            raise RuntimeError("decision-budget ledger unreadable (test)")
+
+        monkeypatch.setattr(decision_budget_mod, "budget_report", _boom)
+
+        write_decision_answer(
+            raw_root,
+            decision_id=item_id,
+            decision_type="auto-apply-threshold",
+            verdict="approve",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 0
+        assert report.skipped == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is False
+        assert outcome.error_code == "breach_signal_unreadable"
+        assert "breach_signal_unreadable" in outcome.message
+        assert "pending" in outcome.message
+        # No ledger append: the proposal is still exactly where it was.
+        assert (
+            list_pending_auto_apply_threshold_proposals(wiki_root) == pending_before
+        )
+
+    def test_reject_with_unreadable_breach_signal_still_applies(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as decision_budget_mod
+        from athenaeum.auto_apply_proposals import (
+            list_pending_auto_apply_threshold_proposals,
+        )
+
+        item_id = _seed_auto_apply_threshold_pending(wiki_root)
+
+        def _boom(*args: object, **kwargs: object) -> dict:
+            raise RuntimeError("decision-budget ledger unreadable (test)")
+
+        monkeypatch.setattr(decision_budget_mod, "budget_report", _boom)
+
+        write_decision_answer(
+            raw_root,
+            decision_id=item_id,
+            decision_type="auto-apply-threshold",
+            verdict="reject",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is True
+        assert outcome.error_code is None
+        assert list_pending_auto_apply_threshold_proposals(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
 # TestBatch — AC5
 # ---------------------------------------------------------------------------
 
