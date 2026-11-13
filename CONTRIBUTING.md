@@ -55,14 +55,14 @@ What the suite assumes:
   different thing and does not satisfy those). Each is probed by
   `tests/test_shell_hooks.py`'s `_require`, which skips naming the missing
   tool.
-- **You do NOT need to isolate `HOME` or the XDG directories.** The suite
-  isolates what it needs to: `tests/conftest.py`'s `pytest_configure` hook
-  redirects `ATHENAEUM_CACHE_DIR` and `ATHENAEUM_SPEND_LEDGER` to a throwaway
-  directory for the whole session *before collection begins* (a
-  session-scoped fixture would be too late for a module that resolves the
-  cache dir at import or parametrize time), and the `_isolate_cache_dir`
-  fixture narrows that to one directory per test. Running with your real
-  `HOME` does not touch your real `~/.cache/athenaeum`.
+- **Run the suite with an isolated `HOME`**, e.g. `HOME=$(mktemp -d) pytest`.
+  The suite redirects `ATHENAEUM_CACHE_DIR` and `ATHENAEUM_SPEND_LEDGER` to a
+  throwaway directory (`tests/conftest.py`'s `pytest_configure` hook, narrowed
+  per test by the `_isolate_cache_dir` fixture), but some tests still read
+  `~/knowledge` or `~/.cache/athenaeum` directly. On a machine with a real
+  athenaeum install, about 26 tests fail without isolation (mostly
+  `tests/test_spend.py`, plus `tests/test_llm_schemas.py`). On a clean machine
+  the suite passes either way.
 - **Do NOT, however, carry ambient athenaeum or knowledge configuration in
   your environment.** `KNOWLEDGE_ROOT`, `KNOWLEDGE_WIKI_PATH`,
   `KNOWLEDGE_RAW_PATH` and the `ATHENAEUM_*` knobs are honoured by config

@@ -100,17 +100,6 @@ _WIKI_SURFACE = "quarantine-wiki"
 _RAW_SURFACE = "quarantine-raw"
 
 
-def default_quarantine_ledger_path(wiki_root: Any) -> str:
-    """Default quarantine ledger path: ``<wiki_root>/_quarantine.jsonl``.
-
-    Returns a plain ``str``, not a filesystem path-object — issue athenaeum#982
-    removed this module's path-object import entirely (module docstring), and
-    nothing else in the repo consumes this function's return value as such an
-    object (checked at migration time).
-    """
-    return os.path.join(os.fspath(wiki_root), QUARANTINE_LEDGER_FILENAME)
-
-
 def quarantine_item_id(ref: str, created_at: str) -> str:
     """Deterministic idempotency key for one quarantine EVENT.
 
@@ -553,7 +542,6 @@ __all__ = [
     "QUARANTINE_KIND",
     "RELEASE_KIND",
     "ATTEMPT_KIND",
-    "default_quarantine_ledger_path",
     "quarantine_item_id",
     "read_quarantine_ledger",
     "list_pending_quarantine",

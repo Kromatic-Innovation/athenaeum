@@ -26,7 +26,7 @@ script** — it defines the interface both build against.
 
 `build_context()` returns one plain dict, the **envelope**. Its schema is
 versioned and pinned in code at
-[`src/athenaeum/context_schema.py`](../src/athenaeum/context_schema.py)
+[`src/athenaeum/context_schema.py`](../../src/athenaeum/context_schema.py)
 (`SCHEMA_VERSION`, `REQUIRED_FIELDS`, `validate_envelope()`) — this section
 is the human-readable mirror of that module; the module is the source of
 truth a test enforces against.

@@ -83,6 +83,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
 
+from athenaeum._cli_shared import _positive_int, _resolve_knowledge_root
 from athenaeum._cmd_viewer import (
     DEFAULT_EDITOR_COMMAND,
     DEFAULT_PORT,
@@ -404,38 +405,6 @@ def _aggregate_sessions(records: list[dict[str, Any]]) -> dict[str, dict[str, An
     return sessions
 
 
-def _positive_limit(value: str) -> int:
-    """argparse ``type=`` for ``--limit``: a POSITIVE integer, or a clear
-    error (issue athenaeum#1531 review finding).
-
-    Two silent-failure modes this closes, neither of which argparse's plain
-    ``type=int`` catches on its own:
-
-    - ``0`` is falsy in Python, so a caller reading it back with
-      ``value or DEFAULT`` silently substitutes the default -- an explicit
-      request for zero rows would render as the full default list instead,
-      with no error. This module deliberately does not read ``--limit`` that
-      way (see :func:`cmd_list_sessions`) precisely so this type function is
-      the ONE place a bad value gets caught.
-    - A negative value passes ``int()`` fine but reaches ``list[:N]``
-      slicing downstream, where ``[:-5]`` silently drops the 5 MOST RECENT
-      entries rather than erroring -- the opposite of what an operator
-      asking for a short list wants, and worse than doing nothing.
-
-    Neither is defined as meaningful by issue athenaeum#1531's AC2 ("a
-    --limit (sensible default)"), so both are refused outright rather than
-    guessed at (e.g. treating 0 as "unlimited") -- an explicit value is
-    never silently replaced by a different one.
-    """
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"must be an integer, got {value!r}") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
-    return parsed
-
-
 def cmd_list_sessions(args: argparse.Namespace) -> int:
     """``athenaeum demo --list-sessions`` (issue athenaeum#1531).
 
@@ -446,7 +415,7 @@ def cmd_list_sessions(args: argparse.Namespace) -> int:
     contract runner the viewer itself uses; no ledger file is ever opened
     in-process.
     """
-    path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    path = _resolve_knowledge_root(args)
     projects_root = (args.projects_root or DEFAULT_PROJECTS_ROOT).expanduser()
 
     # `getattr(..., None) or DEFAULT` looks equivalent but is not: `0` is
@@ -463,7 +432,7 @@ def cmd_list_sessions(args: argparse.Namespace) -> int:
     # same as a negative value -- because a negative limit silently drops the
     # N MOST RECENT sessions via Python's `list[:-N]` slicing, which is the
     # opposite of what an operator asking for a short list wants, with no
-    # error at all. :func:`_positive_limit` already enforces this at argparse
+    # error at all. :func:`athenaeum._cli_shared._positive_int` already enforces this at argparse
     # parse time for the normal CLI path; this is the same check applied
     # again for a caller that builds its own ``Namespace`` and skips argparse
     # (e.g. a unit test), so the contract holds either way.
@@ -529,7 +498,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if getattr(args, "list_sessions", False):
         return cmd_list_sessions(args)
 
-    path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    path = _resolve_knowledge_root(args)
     session_id = args.session or resolve_session_id(projects_root=args.projects_root)
     if not session_id:
         print(
@@ -660,7 +629,7 @@ def add_demo_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     demo_p.add_argument(
         "--limit",
-        type=_positive_limit,
+        type=_positive_int,
         default=DEFAULT_LIST_SESSIONS_LIMIT,
         help="With --list-sessions, the maximum number of sessions to print. "
         "Must be a positive integer -- 0 and negative values are rejected "

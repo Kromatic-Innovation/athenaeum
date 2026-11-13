@@ -34,15 +34,11 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import EXIT_PII_FOUND
 from athenaeum.outbound_pii import (
     Allowlist,
     lint_outbound_text,
 )
-
-#: Exit code when flag-only mode finds PII (mirrors the repo's dry-run-found
-#: (2) convention — a "found something to act on" signal distinct from the
-#: generic error code 1).
-EXIT_PII_FOUND = 2
 
 
 def _read_input(args: argparse.Namespace) -> str:

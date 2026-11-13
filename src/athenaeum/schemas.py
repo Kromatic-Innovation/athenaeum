@@ -69,8 +69,8 @@ PII off-corpus (issue athenaeum#427):
   observation log, supersession fold); this module only hosts the
   frontmatter-boundary half of the lint (body-text inline detection needs
   the page body, which is out of scope for a frontmatter-only validator —
-  see :func:`athenaeum.pii.lint_inline_contact_fields` for the body-aware
-  batch-lint counterpart).
+  see :func:`athenaeum.pii.scan_corpus_pii` / ``athenaeum storage lint-pii``
+  for the body-aware corpus-wide counterpart).
 
 Layering: L1 (data model — pydantic validation boundary alongside
 :mod:`athenaeum.models`). Imports :mod:`athenaeum.provenance` (L1, sibling)
@@ -268,9 +268,10 @@ class WikiBase(BaseModel):
         explicit acknowledgment every corpus consumer already keys off of
         (:func:`athenaeum.pii.is_pii_flagged`), so warning here too would be
         noise, not signal. Frontmatter-only (the ``emails``/``phones`` fields)
-        — inline body text is checked separately by
-        :func:`athenaeum.pii.lint_inline_contact_fields`, which has access to
-        the page body this schema-boundary validator does not.
+        — inline body text is checked separately by the corpus-wide scan
+        (:func:`athenaeum.pii.scan_corpus_pii`, ``athenaeum storage lint-pii``),
+        which has access to the page body this schema-boundary validator
+        does not.
         """
         meta = self.model_dump(exclude_none=True)
         if is_pii_flagged(meta):

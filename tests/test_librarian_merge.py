@@ -29,7 +29,6 @@ import pytest
 
 from athenaeum.merge import (
     AUTO_WIKI_PREFIX,
-    CONTRADICTION_COHESION_THRESHOLD,
     dedupe_sources,
     derive_topic_slug,
     merge_clusters_to_wiki,
@@ -225,9 +224,8 @@ def contradiction_merge_root(tmp_path: Path) -> Path:
                     "-Users-tristankromer-Code/feedback_prior_session_debris_v1.md",
                     "-Users-tristankromer-Code/feedback_prior_session_debris_v2.md",
                 ],
-                # Below the 0.75 cohesion threshold — load-bearing only for
-                # tests that still consult CONTRADICTION_COHESION_THRESHOLD
-                # directly; the merge pass itself no longer acts on this.
+                # A low centroid score -- cosmetic now; the merge pass
+                # itself no longer acts on it (issue athenaeum#1256).
                 "centroid_score": 0.62,
                 "rationale": "cosine >= 0.55; shares tokens: prior, session, debris",
             },
@@ -643,8 +641,9 @@ class TestContradictionFixture:
     The merge pass itself never populates ``contradictions_detected`` or
     ``contradiction`` anymore — it makes no LLM call — so with no detector
     to flag anything, the wiki entry stays unflagged by construction. The
-    ``contradiction`` dataclass fields and the ``CONTRADICTION_COHESION_THRESHOLD``
-    constant are kept on the API for backwards compatibility only.
+    ``contradiction`` dataclass field is kept on the API for backwards
+    compatibility only; the retired C4 ``CONTRADICTION_COHESION_THRESHOLD``
+    constant itself was deleted as dead code by issue athenaeum#2435.
     """
 
     def test_no_client_means_no_flag(
@@ -664,11 +663,6 @@ class TestContradictionFixture:
         assert len(meta["sources"]) == 2
         # No _pending_questions.md side-effect when the detector is a no-op.
         assert not (wiki / "_pending_questions.md").exists()
-
-    def test_threshold_constant_retained_for_bc(self) -> None:
-        # C4 no longer reads this constant, but it stays exported at its
-        # historical value so any downstream import does not break.
-        assert CONTRADICTION_COHESION_THRESHOLD == 0.75
 
 
 class TestSessionTurnDedupe:

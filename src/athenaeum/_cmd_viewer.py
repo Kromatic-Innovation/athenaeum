@@ -109,6 +109,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from athenaeum._cli_shared import _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.viewer_corpus import build_uid_index, load_page_info, resolve_path
 
@@ -1026,7 +1027,7 @@ def make_server(
 
 def cmd_viewer(args: argparse.Namespace) -> int:
     """``athenaeum viewer`` -- serve until interrupted (Ctrl-C)."""
-    path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    path = _resolve_knowledge_root(args)
     editor = resolve_editor_command(getattr(args, "editor", None))
     server = make_server(
         session_id=args.session,

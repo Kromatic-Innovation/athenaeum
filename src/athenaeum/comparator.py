@@ -1016,8 +1016,8 @@ def compare_pages(
         )
 
     # athenaeum#1682: declared-pair filter, ported from C4's
-    # ``_declared_relationship`` (merge.py:216) via the shared
-    # :func:`~athenaeum.declared_relationships.declared_relationship`
+    # ``_declared_relationship`` (merge.py, removed by athenaeum#2435) via
+    # the shared :func:`~athenaeum.declared_relationships.declared_relationship`
     # primitive. A pair whose two pages already declare a supersession,
     # refinement, or merge-rejection relationship to each other in their
     # OWN frontmatter is settled here, before Gate 2 / any LLM call --

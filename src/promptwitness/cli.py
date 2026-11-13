@@ -62,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     console script)."""
     parser = argparse.ArgumentParser(
         prog="promptwitness",
-        description="Harness-agnostic prompt witness ledger: hash-chained, no prompt text, ever.",
+        description="Harness-agnostic prompt witness ledger: hash-chained, no prompt text, ever. "
+        "EXPERIMENTAL: not covered by athenaeum's semver promise; flags and formats may "
+        "change in a minor release.",
     )
     sub = parser.add_subparsers(dest="command")
 

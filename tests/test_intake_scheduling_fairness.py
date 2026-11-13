@@ -44,11 +44,9 @@ from athenaeum.run_summary_log import (
     STARVATION_STREAK_THRESHOLD,
     combined_starvation_priority,
     parse_run_summary_line,
-    previous_starved_sources,
     read_combined_starvation_priority,
     read_run_summary_ledger,
     read_stall_streaks,
-    read_starvation_priority,
     read_starvation_streaks,
     stall_priority,
     stall_streaks,
@@ -389,32 +387,6 @@ class TestStarvationPriority:
     def test_skips_runs_whose_entity_phase_never_ran(self) -> None:
         history = [_record(["s3"]), _record(None, entity=False)]
         assert starvation_priority(history) == ["s3"]
-
-    def test_reads_the_durable_ledger_and_fails_open(self, tmp_path: Path) -> None:
-        ledger = tmp_path / "run_summary.jsonl"
-        ledger.write_text(
-            json.dumps(_record(["s3", "s4"])) + "\n" + json.dumps(_record(["s4"])) + "\n",
-            encoding="utf-8",
-        )
-        assert read_starvation_priority(ledger_path=ledger) == ["s4"]
-        assert read_starvation_priority(ledger_path=tmp_path / "absent") == []
-
-
-class TestPreviousStarvedSources:
-    def test_reads_the_most_recent_entity_run(self) -> None:
-        history = [_record(["old"]), _record(["s3", "s4"])]
-        assert previous_starved_sources(history) == ["s3", "s4"]
-
-    def test_skips_runs_whose_entity_phase_never_ran(self) -> None:
-        history = [_record(["s3"]), _record(None, entity=False)]
-        assert previous_starved_sources(history) == ["s3"]
-
-    def test_a_run_that_starved_nobody_reads_as_empty_not_stale(self) -> None:
-        history = [_record(["s3"]), _record([])]
-        assert previous_starved_sources(history) == []
-
-    def test_no_history_reads_as_nothing_starved(self) -> None:
-        assert previous_starved_sources([]) == []
 
 
 class TestRunSummaryNamesStarvedSources:

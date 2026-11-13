@@ -37,11 +37,9 @@ from athenaeum.pii import (
     find_inline_emails,
     find_inline_phones,
     fold_observations,
-    has_inline_contact_fields,
     is_bounced,
     is_pii_class_excluded,
     is_pii_flagged,
-    lint_inline_contact_fields,
     mark_bounced,
     read_bounce_record,
     read_observations,
@@ -134,9 +132,9 @@ class TestExcludedSurfaceFailsClosed:
         # nowhere, so zero hits is the expected/safe outcome for that probe).
         assert all("alice-contact" not in fname for fname, _name, _score in hits)
         # Direct proof the excluded root was never part of the scanned set.
-        from athenaeum.search import _scan_all_entries
+        from athenaeum.search import _scan_indexed_records
 
-        scanned = {name for name, _p in _scan_all_entries(wiki_root, None)}
+        scanned = {name for name, *_ in _scan_indexed_records(wiki_root, None)}
         assert "alice-public.md" in scanned
         assert not any("alice-contact" in n for n in scanned)
 
@@ -214,18 +212,16 @@ class TestPiiFlagBeltAndSuspenders:
         backend = FTS5Backend()
         count = backend.build_index(wiki_root, cache_dir)
         assert count == 1
-        from athenaeum.search import _scan_all_entries
-
-        scanned = {name for name, _p in _scan_all_entries(wiki_root, None)}
-        # _scan_all_entries itself doesn't filter pii (that happens in
-        # _scan_indexed_records) — confirm via the actual indexed record scan.
+        # The pii filter lives in the real index-build scan
+        # (_scan_indexed_records), not at the filesystem level — confirm via
+        # the actual indexed record scan.
         from athenaeum.search import _scan_indexed_records
 
         recs = list(_scan_indexed_records(wiki_root, None))
         names = {n for n, _p, _h, _t, _m, _s in recs}
         assert "bob.md" not in names
         assert "carol.md" in names
-        assert "bob.md" in scanned  # present on disk, just excluded from the index
+        assert (wiki_root / "bob.md").exists()  # on disk, just excluded from the index
 
     def test_flagged_page_excluded_from_keyword_recall(self, tmp_path: Path) -> None:
         wiki_root = tmp_path / "wiki"
@@ -268,27 +264,6 @@ class TestEntityPageLint:
         assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
         assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
         assert find_inline_phones("issue athenaeum#427 page 12") == []
-
-    def test_has_inline_contact_fields_frontmatter(self) -> None:
-        assert has_inline_contact_fields({"emails": ["a@example.com"]})
-        assert has_inline_contact_fields({"phones": ["+1-555-0100"]})
-        assert not has_inline_contact_fields({"name": "Alice", "linkedin_url": "https://x"})
-
-    def test_has_inline_contact_fields_body(self) -> None:
-        assert has_inline_contact_fields({}, "email me at alice@example.com")
-        assert has_inline_contact_fields({}, "call +1-555-0100")
-        assert not has_inline_contact_fields({}, "durable identifier only, no contact info")
-
-    def test_lint_message_names_file_and_reason(self, tmp_path: Path) -> None:
-        msg = lint_inline_contact_fields(
-            {"emails": ["a@example.com"]}, "", Path("/wiki/alice.md")
-        )
-        assert msg is not None
-        assert "/wiki/alice.md" in msg
-        assert "emails" in msg
-
-    def test_lint_silent_when_no_contact_data(self) -> None:
-        assert lint_inline_contact_fields({"name": "Alice", "linkedin_url": "https://x"}) is None
 
     def test_pydantic_warns_on_inline_emails(self) -> None:
         meta = {

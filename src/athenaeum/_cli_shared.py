@@ -32,18 +32,24 @@ if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
 
 
-def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    """Resolve the ``--path``/``args.path`` knowledge root (issue athenaeum#1349).
+def _resolve_knowledge_root(args: argparse.Namespace, attr: str = "path") -> Path:
+    """Resolve the knowledge root off ``args`` (issue athenaeum#1349, athenaeum#2445).
 
-    Shared by every ``_cmd_*`` subcommand that accepts ``--path``: falls back
-    to :data:`athenaeum.config.DEFAULT_KNOWLEDGE_ROOT` when ``args`` carries
-    no ``path`` attribute or it is ``None``, then expands a ``~`` prefix and
-    resolves to an absolute path. Formerly re-derived independently in nine
-    modules (seven ``_resolve_wiki_root`` copies plus two of this function's
-    own name); collapsed here so ``.expanduser().resolve()`` is applied in
-    exactly one place.
+    Shared by every ``_cmd_*`` subcommand that accepts a knowledge-root flag:
+    falls back to :data:`athenaeum.config.DEFAULT_KNOWLEDGE_ROOT` when ``args``
+    carries no ``attr`` attribute or it is ``None``, then expands a ``~``
+    prefix and resolves to an absolute path. Formerly re-derived independently
+    in nine modules (seven ``_resolve_wiki_root`` copies plus two of this
+    function's own name); collapsed here so ``.expanduser().resolve()`` is
+    applied in exactly one place.
+
+    ``attr`` defaults to ``"path"`` (the ``--path`` flag most subcommands
+    expose). A handful of subcommands instead expose the same concept as
+    ``--knowledge-root`` / ``args.knowledge_root``; pass ``attr="knowledge_root"``
+    for those so the identical ``.expanduser().resolve()`` behaviour applies
+    without a second copy of this function (issue athenaeum#2445).
     """
-    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    return (getattr(args, attr, None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def _resolve_wiki_root(args: argparse.Namespace) -> Path:
@@ -122,6 +128,15 @@ EXIT_NOT_FOUND = 1
 #: sysexits.h's ``EX_SOFTWARE`` ("an internal software error"); chosen over an
 #: adjacent small integer so it reads as intentional, not incremented.
 EXIT_INTERNAL_ERROR = 70
+
+#: Exit code when a PII-scanning command finds something to act on (issue
+#: athenaeum#2445). A "found something" signal distinct from the generic
+#: error code 1, shared by ``athenaeum outbound-lint`` (``_cmd_outbound.py``)
+#: and ``athenaeum storage lint-pii`` (``_cmd_storage.py``) — both previously
+#: defined this constant locally with the same value (2); collapsed here so
+#: a caller keying off the exit code sees one definition, not two that could
+#: drift apart.
+EXIT_PII_FOUND = 2
 
 
 def _add_lock_args(parser: argparse.ArgumentParser) -> None:
