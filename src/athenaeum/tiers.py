@@ -6603,26 +6603,39 @@ def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
     section": a heading-less oversized page is left to the existing
     ``review`` route (the no-headings cohort is issue athenaeum#1282's job).
 
-    Issue athenaeum#2524: when there is exactly ONE heading at the
-    shallowest depth, it is a page TITLE (e.g. a lone ``# <Name>``
-    carrying the whole body), not a section to split on -- it has nothing
-    to be split *from* at its own depth. In that case the split depth
-    moves one level down, to the shallowest depth actually present
-    BENEATH that lone heading, so a ``# Name`` page whose real structure
-    lives under ``##`` splits on the ``##`` headings instead of yielding
-    one child holding the entire body. The lone title heading and any
-    text before/after it at that depth folds into the leading
-    ``("", preamble_text)`` pair like any other pre-heading content, so
-    it stays on the hub rather than becoming a same-named child. If
-    nothing is nested beneath the lone heading, the depth is left alone
-    (the caller's exactly-one-child refusal below is what catches that
-    case, the same way it catches the no-heading case).
+    The presumptive top level is the FIRST heading's own depth, not the
+    shallowest depth occurring anywhere in the body. A boundary match is
+    any heading AT OR SHALLOWER than that depth (``<=``, not ``==``) --
+    so a heading that is merely shallower than the first one but appears
+    LATER (e.g. a trailing ``# Appendix`` after ``## Section A`` / ``##
+    Section B``) is still an ordinary section boundary, not grounds to
+    re-derive the top level from it; it does not get swallowed into the
+    preceding section's text (issue athenaeum#2524's review finding on
+    this exact shape).
+
+    Issue athenaeum#2524: when there is exactly ONE such boundary match,
+    it can only be the first heading itself (every boundary match is, by
+    construction, at or shallower than the first heading's own depth, and
+    the first heading always qualifies) -- i.e. it genuinely spans the
+    whole body. That is a page TITLE (e.g. a lone ``# <Name>`` carrying
+    the whole body), not a section to split on -- it has nothing to be
+    split *from* at its own depth. In that case the split depth moves one
+    level down, to the shallowest depth actually present BENEATH that
+    lone heading, so a ``# Name`` page whose real structure lives under
+    ``##`` splits on the ``##`` headings instead of yielding one child
+    holding the entire body. The lone title heading and any text
+    before/after it at that depth folds into the leading ``("",
+    preamble_text)`` pair like any other pre-heading content, so it stays
+    on the hub rather than becoming a same-named child. If nothing is
+    nested beneath the lone heading, the depth is left alone (the
+    caller's exactly-one-child refusal below is what catches that case,
+    the same way it catches the no-heading case).
     """
     matches = list(_SECTION_HEADING_RE.finditer(body))
     if not matches:
         return []
-    top_level = min(len(m.group(1)) for m in matches)
-    top_matches = [m for m in matches if len(m.group(1)) == top_level]
+    top_level = len(matches[0].group(1))
+    top_matches = [m for m in matches if len(m.group(1)) <= top_level]
     if len(top_matches) == 1:
         deeper = [m for m in matches if len(m.group(1)) > top_level]
         if deeper:

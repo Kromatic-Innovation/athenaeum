@@ -605,6 +605,28 @@ class TestOversizePageSplit:
         assert path.read_text() == before
         assert list(wiki.glob("*.md")) == [path]
 
+    def test_trailing_lone_shallow_heading_stays_its_own_section(self) -> None:
+        """Review finding on athenaeum#2524's PR: a lone heading at the
+        shallowest depth that comes AFTER deeper headings (e.g. ``##
+        Section A``, ``## Section B``, then a trailing ``# Appendix``)
+        does NOT span the whole body, so it must NOT be treated as a
+        title -- it stays an ordinary section boundary, and its text must
+        not be swallowed into the preceding ``## Section B`` child."""
+        body = (
+            "## Section A\n\nDetail A.\n\n"
+            "## Section B\n\nDetail B.\n\n"
+            "# Appendix\n\nAppendix detail.\n"
+        )
+        sections = tiers_module._split_into_atomic_sections(body)
+        headings = [heading for heading, _ in sections]
+        assert headings == ["Section A", "Section B", "Appendix"]
+
+        section_b_text = next(text for heading, text in sections if heading == "Section B")
+        appendix_text = next(text for heading, text in sections if heading == "Appendix")
+        assert "Appendix detail." not in section_b_text
+        assert "Appendix detail." in appendix_text
+        assert "Detail B." not in appendix_text
+
     def test_split_without_headings_falls_back_to_review_untouched(
         self, tmp_path: Path
     ) -> None:
