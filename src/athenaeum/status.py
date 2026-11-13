@@ -52,6 +52,17 @@ function-local imports of ``athenaeum.drain_advisor`` and
 ``drain_advisor``/``verdicts`` are deferred because eager-importing them
 (or a module they transitively touch) would reopen a residual SCC; adding
 ``run_summary_log`` at the top does not, so it is not deferred.
+
+Issue athenaeum#2536's page-recompile backlog reads
+:mod:`athenaeum.page_recompile` at TOP level. That module is L4, the SAME
+layer as this one, which ``tests/test_layer_boundary.py`` permits (an
+importer's layer must be ``>=``, not ``>``, the imported module's), and it
+imports nothing that reaches back here -- its own closure is
+``config``/``models``/``footnote_markers``/``page_relations``/``oversize_split``,
+none of which import ``status``, ``librarian`` or ``drain`` -- so the
+dissolved ``{librarian, drain, status}`` cycle described above stays
+dissolved. Pinned by ``tests/test_import_graph_acyclic.py``'s ``[]``
+baseline.
 """
 
 from __future__ import annotations
@@ -60,12 +71,14 @@ import logging
 import subprocess
 from datetime import date
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 
 from athenaeum.config import (
     load_config,
     resolve_cache_dir,
+    resolve_oversize_hard_ceiling_chars,
     resolve_page_flag_bytes,
+    resolve_page_size_threshold_chars,
     resolve_page_warn_bytes,
     resolve_unmarked_sentence_max_ratio,
 )
@@ -73,6 +86,13 @@ from athenaeum.footnote_markers import unmarked_sentence_ratio
 from athenaeum.hook_status import read_latest_degradation
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
+from athenaeum.page_recompile import (
+    BlockedPage,
+    CandidateScan,
+    RecompileCandidate,
+    classify_page_text,
+    sort_candidates,
+)
 from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
 from athenaeum.stuck_ledger import held_stuck_summary, load_stuck_ledger
 from athenaeum.tiers import schema_fragment_state
@@ -236,29 +256,72 @@ class StatusInfo(TypedDict):
     # full shape (``{"ts", "hook", "event", "detail"}``). ``None`` when no
     # shipped hook has ever recorded one.
     hook_degradation: dict[str, object] | None
+    # Issue athenaeum#2536: the oversized-page BACKLOG, as one dict, built
+    # from the athenaeum#2534 candidate scan -- the chars-vocabulary view
+    # (``librarian.page_size_threshold_chars`` /
+    # ``librarian.oversize_hard_ceiling_chars``) that agrees with the split
+    # machinery about which pages are oversized, unlike the ``pages_warn`` /
+    # ``pages_flag`` byte buckets above, which measure frontmatter + body in
+    # BYTES against their own thresholds and know nothing of ``needs_split``.
+    # One key, so the whole block travels together through
+    # ``athenaeum status --json`` (AC5). See
+    # :func:`build_page_recompile_backlog` for the field-by-field contract,
+    # including the three athenaeum#2525 fields that report ``None`` ("not
+    # available") rather than a misleading ``0`` until the plan ledger and
+    # the nightly phase exist (AC4).
+    page_recompile: dict[str, object]
 
 
-def scan_page_sizes(
-    wiki_root: Path,
-    warn_bytes: int,
-    flag_bytes: int,
-) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
-    """Bucket oversized wiki entity pages (issue athenaeum#310).
+#: Printed for a :data:`StatusInfo` ``page_recompile`` field whose producer
+#: does not exist yet (issue athenaeum#2536 AC4). A dedicated sentinel, not
+#: ``0``: "no plan has ever been proposed because nothing can propose one"
+#: and "the queue is empty" are different facts, and an operator reading a
+#: starvation signal must not be shown the healthy-looking one.
+PAGE_RECOMPILE_NOT_AVAILABLE = "not available"
 
-    Walks the same ``wiki/*.md`` set the entity count walks — skipping
-    ``_``-prefixed files and non-entity pages (no frontmatter ``name``) — and
-    measures each page's UTF-8 size (frontmatter + body) in bytes. Returns
-    ``(pages_warn, pages_flag)`` where each list holds ``(filename, byte_size)``
-    tuples sorted largest-first. A page whose size exceeds ``flag_bytes`` lands
-    only in ``pages_flag`` (not also in ``pages_warn``); a page over
-    ``warn_bytes`` but at/under ``flag_bytes`` lands in ``pages_warn``.
+#: The ``page_recompile`` fields that have NO producer yet -- the plan
+#: ledger (``plans_awaiting_approval``, ``applied_last_7_days``) and the
+#: nightly phase (``nights_since_progress``), both explicitly out of scope
+#: for issue athenaeum#2536. Each is ``None`` in :data:`StatusInfo` and
+#: prints as :data:`PAGE_RECOMPILE_NOT_AVAILABLE`. Named here so the test
+#: that pins "never as zero" enumerates them from the source of truth
+#: rather than from a second hand-maintained list.
+PAGE_RECOMPILE_PENDING_FIELDS = (
+    "plans_awaiting_approval",
+    "applied_last_7_days",
+    "nights_since_progress",
+)
 
-    Guards an inverted config: if ``flag_bytes <= warn_bytes`` (which would make
-    the flag bucket no stricter than warn and invert severity), ``flag_bytes``
-    is clamped up to ``warn_bytes`` and a single ``WARNING`` names the
-    misconfiguration. Aside from that guard it is observational — it reads,
-    measures, and reports; it never modifies any file.
+#: The release that REMOVES the byte-based ``pages_warn`` / ``pages_flag``
+#: keys and their ``Oversized pages (warn/flag)`` status line, superseded by
+#: the chars-vocabulary ``page_recompile`` block (issue athenaeum#2536 AC3).
+#: Stated once, here, and quoted by the deprecation notices in the status
+#: output, in :func:`scan_page_sizes`'s docstring, and in the
+#: ``page_warn_bytes`` / ``page_flag_bytes`` entries of the generated
+#: configuration reference.
+PAGE_SIZE_BYTES_REMOVAL_RELEASE = "0.25.0"
+
+
+class PageSizeWalk(NamedTuple):
+    """The result of ONE walk of ``wiki/*.md`` (issue athenaeum#2536 AC3).
+
+    ``pages_warn``/``pages_flag`` are the issue athenaeum#310 byte buckets
+    (deprecated, see :data:`PAGE_SIZE_BYTES_REMOVAL_RELEASE`);
+    ``recompile`` is the athenaeum#2534 candidate scan. Both are produced
+    from the same single read of each page -- the AC3 requirement is that
+    status walk the wiki ONCE for page sizes, not that it report one
+    vocabulary.
     """
+
+    pages_warn: list[tuple[str, int]]
+    pages_flag: list[tuple[str, int]]
+    recompile: CandidateScan
+
+
+def _clamped_flag_bytes(warn_bytes: int, flag_bytes: int) -> int:
+    """``flag_bytes``, clamped up to ``warn_bytes`` when an inverted config
+    would make the flag bucket no stricter than warn (issue athenaeum#310).
+    Logs a single WARNING naming the misconfiguration when it clamps."""
     if flag_bytes <= warn_bytes:
         log.warning(
             "page_flag_bytes (%d) <= page_warn_bytes (%d): flag threshold "
@@ -267,30 +330,187 @@ def scan_page_sizes(
             flag_bytes,
             warn_bytes,
         )
-        flag_bytes = max(flag_bytes, warn_bytes)
+        return max(flag_bytes, warn_bytes)
+    return flag_bytes
 
+
+def scan_page_backlog(
+    wiki_root: Path,
+    *,
+    warn_bytes: int,
+    flag_bytes: int,
+    threshold_chars: int,
+    ceiling_chars: int,
+) -> PageSizeWalk:
+    """ONE walk of ``wiki/*.md`` producing BOTH page-size reports (issue
+    athenaeum#2536 AC3).
+
+    Status previously would have needed two walks to show both vocabularies
+    -- :func:`scan_page_sizes`'s byte buckets and
+    :func:`athenaeum.page_recompile.find_recompile_candidates`'s chars-based
+    candidate scan -- each re-reading every page. This reads each page
+    exactly once and feeds the SAME text to both classifiers:
+
+    * the byte buckets, inline (they are four lines, and their population is
+      narrower: entity pages only, i.e. frontmatter carrying a ``name``);
+    * the candidate scan, via
+      :func:`athenaeum.page_recompile.classify_page_text` -- the predicates
+      extracted from that module's own loop body, so the two surfaces can
+      never drift about what "oversized", "blocked" or "inactive" means.
+
+    Ordering of ``recompile.candidates`` is
+    :func:`athenaeum.page_recompile.sort_candidates`, identical to the
+    standalone scan's.
+    """
+    flag_bytes = _clamped_flag_bytes(warn_bytes, flag_bytes)
     pages_warn: list[tuple[str, int]] = []
     pages_flag: list[tuple[str, int]] = []
+    candidates: list[RecompileCandidate] = []
+    blocked: list[BlockedPage] = []
     if not wiki_root.exists():
-        return pages_warn, pages_flag
+        return PageSizeWalk(pages_warn, pages_flag, CandidateScan((), ()))
     for fpath in sorted(wiki_root.glob("*.md")):
         if fpath.name.startswith("_"):
             continue
         try:
             text = fpath.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            # The candidate scan REPORTS an unreadable page (athenaeum#2534
+            # AC2) where the byte buckets silently skip it; preserve both
+            # behaviours rather than quietly changing either.
+            blocked.append(BlockedPage(path=fpath, uid="", reason="unreadable"))
             continue
-        meta, _ = parse_frontmatter(text)
-        if not meta or not meta.get("name"):
-            continue
-        size = len(text.encode("utf-8"))
-        if size > flag_bytes:
-            pages_flag.append((fpath.name, size))
-        elif size > warn_bytes:
-            pages_warn.append((fpath.name, size))
+        meta, _body = parse_frontmatter(text)
+        if isinstance(meta, dict) and meta.get("name"):
+            size = len(text.encode("utf-8"))
+            if size > flag_bytes:
+                pages_flag.append((fpath.name, size))
+            elif size > warn_bytes:
+                pages_warn.append((fpath.name, size))
+        outcome = classify_page_text(
+            fpath, text, threshold=threshold_chars, ceiling=ceiling_chars
+        )
+        if isinstance(outcome, RecompileCandidate):
+            candidates.append(outcome)
+        elif isinstance(outcome, BlockedPage):
+            blocked.append(outcome)
     pages_warn.sort(key=lambda item: item[1], reverse=True)
     pages_flag.sort(key=lambda item: item[1], reverse=True)
-    return pages_warn, pages_flag
+    return PageSizeWalk(
+        pages_warn,
+        pages_flag,
+        CandidateScan(candidates=sort_candidates(candidates), blocked=tuple(blocked)),
+    )
+
+
+def build_page_recompile_backlog(
+    scan: CandidateScan, *, threshold_chars: int, ceiling_chars: int
+) -> dict[str, object]:
+    """The issue athenaeum#2536 backlog block, as one JSON-native dict.
+
+    Fields:
+
+    * ``threshold_chars`` / ``ceiling_chars`` -- the resolved
+      ``librarian.page_size_threshold_chars`` and
+      ``librarian.oversize_hard_ceiling_chars`` the counts below were
+      measured against, carried WITH the counts so a reader never has to
+      guess which thresholds produced them (AC1).
+    * ``backlog`` -- candidates: active pages flagged ``needs_split: true``
+      OR over the threshold.
+    * ``flagged`` / ``over_ceiling`` -- subsets of ``backlog``, NOT disjoint:
+      a flagged page over the ceiling counts in both (AC2 states exactly
+      this case).
+    * ``blocked`` / ``blocked_by_reason`` -- pages the pass cannot act on,
+      with a count per reason (AC1).
+    * the three :data:`PAGE_RECOMPILE_PENDING_FIELDS`, always ``None`` here
+      (AC4) -- see that constant.
+    * ``pages`` / ``blocked_pages`` -- the page NAMES behind the counts.
+      :func:`format_status` prints them only under its ``verbose`` flag
+      (AC7); they live in the dict because ``--json`` is a deliberate
+      machine read, and because a verbose render must not require a second
+      scan to name what the first one counted.
+    """
+    blocked_by_reason: dict[str, int] = {}
+    for page in scan.blocked:
+        blocked_by_reason[page.reason] = blocked_by_reason.get(page.reason, 0) + 1
+    block: dict[str, object] = {
+        "threshold_chars": threshold_chars,
+        "ceiling_chars": ceiling_chars,
+        "backlog": len(scan.candidates),
+        "flagged": sum(1 for c in scan.candidates if c.flagged),
+        "over_ceiling": sum(1 for c in scan.candidates if c.over_ceiling),
+        "blocked": len(scan.blocked),
+        "blocked_by_reason": blocked_by_reason,
+        "pages": [
+            {
+                "name": c.path.name,
+                "chars": c.chars,
+                "flagged": c.flagged,
+                "over_ceiling": c.over_ceiling,
+            }
+            for c in scan.candidates
+        ],
+        "blocked_pages": [
+            {"name": b.path.name, "reason": b.reason} for b in scan.blocked
+        ],
+    }
+    for field in PAGE_RECOMPILE_PENDING_FIELDS:
+        block[field] = None
+    return block
+
+
+def scan_page_sizes(
+    wiki_root: Path,
+    warn_bytes: int,
+    flag_bytes: int,
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """DEPRECATED. Bucket oversized wiki entity pages by BYTES (issue
+    athenaeum#310); removed in ``0.25.0``.
+
+    Superseded by the chars-vocabulary page-recompile backlog (issue
+    athenaeum#2536): this function measures frontmatter + body in BYTES
+    against its OWN ``librarian.page_warn_bytes`` /
+    ``librarian.page_flag_bytes`` thresholds and knows nothing of
+    ``needs_split``, so it and the split machinery disagree about which
+    pages are oversized. Read
+    :data:`StatusInfo`'s ``page_recompile`` block instead; its
+    ``threshold_chars`` / ``ceiling_chars`` are the same figures the
+    splitter itself acts on.
+
+    Kept, unchanged in behaviour, only as long as its ``pages_warn`` /
+    ``pages_flag`` keys are documented -- see
+    :data:`PAGE_SIZE_BYTES_REMOVAL_RELEASE` for the release that removes
+    them, quoted in the status output and in the generated configuration
+    reference.
+
+    Walks the same ``wiki/*.md`` set the entity count walks -- skipping
+    ``_``-prefixed files and non-entity pages (no frontmatter ``name``) --
+    and measures each page's UTF-8 size (frontmatter + body) in bytes.
+    Returns ``(pages_warn, pages_flag)`` where each list holds
+    ``(filename, byte_size)`` tuples sorted largest-first. A page whose size
+    exceeds ``flag_bytes`` lands only in ``pages_flag`` (not also in
+    ``pages_warn``); a page over ``warn_bytes`` but at/under ``flag_bytes``
+    lands in ``pages_warn``.
+
+    Guards an inverted config: if ``flag_bytes <= warn_bytes`` (which would
+    make the flag bucket no stricter than warn and invert severity),
+    ``flag_bytes`` is clamped up to ``warn_bytes`` and a single ``WARNING``
+    names the misconfiguration. Aside from that guard it is observational --
+    it reads, measures, and reports; it never modifies any file.
+
+    Implemented as a thin projection of :func:`scan_page_backlog` so there
+    is exactly ONE byte-bucketing implementation in this module while the
+    deprecation runs (issue athenaeum#2536 AC3); the chars half of that
+    walk is simply discarded here.
+    """
+    walk = scan_page_backlog(
+        wiki_root,
+        warn_bytes=warn_bytes,
+        flag_bytes=flag_bytes,
+        threshold_chars=resolve_page_size_threshold_chars(None),
+        ceiling_chars=resolve_oversize_hard_ceiling_chars(None),
+    )
+    return walk.pages_warn, walk.pages_flag
 
 
 def scan_unmarked_sentences(
@@ -451,11 +671,29 @@ def status(knowledge_root: Path) -> StatusInfo:
             "status: corrections-parked check skipped (%s): %s", type(exc).__name__, exc
         )
 
-    # Oversized wiki pages (issue athenaeum#310). Thresholds come from config so an
+    # Oversized wiki pages — ONE walk, both vocabularies (issue
+    # athenaeum#2536 AC3). The byte buckets are the deprecated issue
+    # athenaeum#310 pair (see `scan_page_sizes`'s docstring for the release
+    # that removes them); the chars-based candidate scan is the athenaeum#2534
+    # one the splitter itself acts on. Thresholds all come from config so an
     # operator can tune them; the scan is warn-only and never mutates anything.
     warn_bytes = resolve_page_warn_bytes(config)
     flag_bytes = resolve_page_flag_bytes(config)
-    pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)
+    threshold_chars = resolve_page_size_threshold_chars(config)
+    ceiling_chars = resolve_oversize_hard_ceiling_chars(config)
+    page_walk = scan_page_backlog(
+        wiki_root,
+        warn_bytes=warn_bytes,
+        flag_bytes=flag_bytes,
+        threshold_chars=threshold_chars,
+        ceiling_chars=ceiling_chars,
+    )
+    pages_warn, pages_flag = page_walk.pages_warn, page_walk.pages_flag
+    page_recompile = build_page_recompile_backlog(
+        page_walk.recompile,
+        threshold_chars=threshold_chars,
+        ceiling_chars=ceiling_chars,
+    )
 
     # Per-claim provenance post-check (issue athenaeum#1730). Same posture as the
     # oversized-page scan directly above: a configurable soft threshold, a
@@ -702,11 +940,82 @@ def status(knowledge_root: Path) -> StatusInfo:
         "repair_debt": repair_debt,
         "decision_budget": decision_budget,
         "hook_degradation": hook_degradation,
+        "page_recompile": page_recompile,
     }
 
 
-def format_status(info: StatusInfo) -> str:
-    """Format status dict as human-readable output."""
+def _format_page_recompile_block(
+    block: dict[str, object], *, verbose: bool
+) -> list[str]:
+    """The issue athenaeum#2536 backlog block, as output lines.
+
+    AC7: NO page name appears unless *verbose* — the default block is counts
+    only. AC4: the three :data:`PAGE_RECOMPILE_PENDING_FIELDS` render as
+    :data:`PAGE_RECOMPILE_NOT_AVAILABLE`, never as ``0``, for as long as
+    they are ``None``; each is formatted through the same ``None``-check so
+    a future producer that starts supplying a real figure (including a real
+    ``0``) needs no change here.
+    """
+
+    def _value(key: str) -> str:
+        raw = block.get(key)
+        return PAGE_RECOMPILE_NOT_AVAILABLE if raw is None else str(raw)
+
+    threshold = block.get("threshold_chars")
+    ceiling = block.get("ceiling_chars")
+    lines = [
+        "Page recompile backlog (chars):",
+        f"  backlog (flagged or over threshold): {block.get('backlog', 0)}",
+        f"  flagged (needs_split: true):         {block.get('flagged', 0)}",
+        f"  over hard ceiling:                   {block.get('over_ceiling', 0)}",
+        f"  blocked:                             {block.get('blocked', 0)}",
+    ]
+    blocked_by_reason = block.get("blocked_by_reason") or {}
+    if isinstance(blocked_by_reason, dict):
+        for reason in sorted(blocked_by_reason):
+            lines.append(f"    {reason}: {blocked_by_reason[reason]}")
+    lines.extend(
+        [
+            f"  plans awaiting approval:             {_value('plans_awaiting_approval')}",
+            f"  applied in the last 7 days:          {_value('applied_last_7_days')}",
+            f"  nights since progress:               {_value('nights_since_progress')}",
+            "  thresholds: librarian.page_size_threshold_chars="
+            f"{threshold} chars, librarian.oversize_hard_ceiling_chars="
+            f"{ceiling} chars",
+        ]
+    )
+    if not verbose:
+        return lines
+    pages = block.get("pages") or []
+    blocked_pages = block.get("blocked_pages") or []
+    if isinstance(pages, list) and pages:
+        lines.append("  candidate pages:")
+        for page in pages:
+            if not isinstance(page, dict):  # pragma: no cover - defensive
+                continue
+            marks = []
+            if page.get("flagged"):
+                marks.append("flagged")
+            if page.get("over_ceiling"):
+                marks.append("over ceiling")
+            suffix = f", {', '.join(marks)}" if marks else ""
+            lines.append(f"    {page.get('name')} ({page.get('chars')} chars{suffix})")
+    if isinstance(blocked_pages, list) and blocked_pages:
+        lines.append("  blocked pages:")
+        for page in blocked_pages:
+            if not isinstance(page, dict):  # pragma: no cover - defensive
+                continue
+            lines.append(f"    {page.get('name')} ({page.get('reason')})")
+    return lines
+
+
+def format_status(info: StatusInfo, *, verbose: bool = False) -> str:
+    """Format status dict as human-readable output.
+
+    *verbose* (issue athenaeum#2536 AC7) additionally lists the page NAMES
+    behind the page-recompile backlog counts. Keyword-only and defaulted, so
+    every pre-athenaeum#2536 caller keeps the counts-only output it had.
+    """
     lines = ["Athenaeum Status", "=" * 40]
 
     lines.append(f"Raw files pending:    {info['raw_pending']}")
@@ -826,11 +1135,34 @@ def format_status(info: StatusInfo) -> str:
         ) or "(no clusters recorded)"
         lines.append(f"Cluster report embedder distribution: {snapshot_str}")
 
+    # Issue athenaeum#2536: the oversized-page BACKLOG, in the chars
+    # vocabulary the split machinery itself uses — printed immediately
+    # BEFORE the byte-based athenaeum#310 lines it supersedes, so the
+    # deprecation notice on those lines can point "above" at its
+    # replacement. ``.get`` keeps a pre-athenaeum#2536 status dict (missing
+    # this key) formatting cleanly, and an absent/empty block prints
+    # nothing at all rather than a row of hollow zeros.
+    page_recompile = info.get("page_recompile")
+    if page_recompile:
+        lines.extend(_format_page_recompile_block(page_recompile, verbose=verbose))
+
     # Issue athenaeum#310: oversized-page summary. Use ``.get`` so pre-athenaeum#310 status
     # dicts (missing these keys) still format cleanly.
+    #
+    # DEPRECATED (issue athenaeum#2536 AC3): these BYTE-based lines measure
+    # frontmatter + body against `librarian.page_warn_bytes` /
+    # `librarian.page_flag_bytes` and know nothing of `needs_split`, so they
+    # disagree with the splitter about which pages are oversized. The
+    # chars-vocabulary block above is the replacement; the notice names the
+    # removing release so an operator scripting against these lines is not
+    # surprised by their disappearance.
     pages_warn = info.get("pages_warn", [])
     pages_flag = info.get("pages_flag", [])
-    lines.append(f"Oversized pages (warn/flag): {len(pages_warn)}/{len(pages_flag)}")
+    lines.append(
+        f"Oversized pages (warn/flag): {len(pages_warn)}/{len(pages_flag)} "
+        f"[DEPRECATED, bytes — removed in {PAGE_SIZE_BYTES_REMOVAL_RELEASE}; "
+        "use the chars-based page-recompile backlog above]"
+    )
     for name, size in pages_flag:
         lines.append(f"  [flag] {name} ({size} bytes)")
     for name, size in pages_warn:

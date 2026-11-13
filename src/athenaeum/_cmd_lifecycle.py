@@ -91,6 +91,19 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Cache directory holding the kill-switch state "
         "(default: ~/.cache/athenaeum). Only affects the kill-switch line.",
     )
+    status_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Also list the page names behind the page-recompile backlog "
+        "counts. Without it the backlog block is counts only.",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the whole status snapshot as JSON on stdout instead of "
+        "the human-readable report (the kill-switch line is suppressed so "
+        "the output is parseable).",
+    )
     status_parser.set_defaults(func=cmd_status)
 
     # disable / enable commands — the kill switch (issue athenaeum#379)
@@ -339,22 +352,48 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """``athenaeum status``.
+
+    ``--json`` (issue athenaeum#2536 AC5) prints the :class:`~athenaeum.
+    status.StatusInfo` snapshot itself, so every figure the human report
+    derives -- including the whole ``page_recompile`` backlog block under
+    that one key -- is machine-readable without parsing prose. The
+    kill-switch line is suppressed in that mode for the obvious reason: it
+    is not part of the snapshot and would make stdout unparseable.
+    """
+    import json
+
     from athenaeum.killswitch import format_status_line
     from athenaeum.status import format_status, status
+
+    as_json = bool(getattr(args, "json", False))
 
     # Kill-switch state (issue athenaeum#379) is process/cache state, independent of the
     # knowledge base — report it first so 'athenaeum status' always answers
     # "is it on?" even when the knowledge directory is missing.
-    print(format_status_line(getattr(args, "cache_dir", None)))
-    print()
+    if not as_json:
+        print(format_status_line(getattr(args, "cache_dir", None)))
+        print()
 
     target = args.path.expanduser().resolve()
     if not target.exists():
-        print(f"Knowledge directory not found: {target}")
-        print(f"Run 'athenaeum init --path {args.path}' first, then retry.")
+        # Under --json the two prose lines go to stderr, so stdout stays
+        # either valid JSON or empty — never half-JSON prose.
+        stream = sys.stderr if as_json else sys.stdout
+        print(f"Knowledge directory not found: {target}", file=stream)
+        print(
+            f"Run 'athenaeum init --path {args.path}' first, then retry.",
+            file=stream,
+        )
         return 1
     info = status(target)
-    print(format_status(info))
+    if as_json:
+        # ``default=str`` only so an unexpected non-JSON-native value a
+        # future StatusInfo key introduces degrades to its repr instead of
+        # raising — status must never break (see status.py's contract).
+        print(json.dumps(info, indent=2, sort_keys=True, default=str))
+        return 0
+    print(format_status(info, verbose=bool(getattr(args, "verbose", False))))
     return 0
 
 

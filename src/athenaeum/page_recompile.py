@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -194,6 +194,81 @@ def _candidate_sort_key(candidate: RecompileCandidate) -> tuple[int, int, int]:
     )
 
 
+def sort_candidates(
+    candidates: "Iterable[RecompileCandidate]",
+) -> tuple[RecompileCandidate, ...]:
+    """*candidates* in AC3 order (:func:`_candidate_sort_key`).
+
+    Public so a caller that assembles candidates from its OWN walk --
+    :func:`athenaeum.status.scan_page_backlog`, which reads each page once
+    and feeds the text to :func:`classify_page_text` below rather than
+    walking the wiki a second time (issue athenaeum#2536 AC3) -- gets the
+    same ordering as :func:`find_recompile_candidates` without reaching
+    into a private sort key.
+    """
+    return tuple(sorted(candidates, key=_candidate_sort_key))
+
+
+def classify_page_text(
+    path: Path, text: str, *, threshold: int, ceiling: int
+) -> "RecompileCandidate | BlockedPage | None":
+    """Classify ONE already-read page: a :class:`RecompileCandidate`, a
+    :class:`BlockedPage`, or ``None`` for a page this pass has nothing to
+    say about (inactive, or under the threshold and not flagged).
+
+    Extracted verbatim from :func:`find_recompile_candidates`'s loop body
+    (issue athenaeum#2536 AC3) so a caller that has ALREADY read a page's
+    text can reuse the exact same predicates -- the inactive-page filter,
+    the malformed-frontmatter split, the no-uid blocked bucket -- instead
+    of either walking the wiki a second time or growing a second,
+    drift-prone copy of them. Takes *text*, not *path* alone: the caller
+    owns the read (and therefore owns the ``unreadable`` outcome, which
+    cannot arise here).
+    """
+    meta, body = parse_frontmatter(text)
+    if not isinstance(meta, dict):
+        # Frontmatter block present but not a mapping (e.g. a bare YAML
+        # list between the ``---`` fences) -- cannot check needs_split,
+        # uid, or the inactive-page predicate, so this page is reported
+        # rather than silently skipped (AC2).
+        return BlockedPage(path=path, uid="", reason="invalid_frontmatter")
+    if not meta and _frontmatter_block_is_malformed(text):
+        # Genuinely unparseable YAML: parse_frontmatter fails open to
+        # ({}, text) here -- the SAME shape as "no frontmatter at all"
+        # (see _frontmatter_block_is_malformed's docstring) -- and
+        # `body` in this branch is the WHOLE text including the ``---``
+        # fences, so a size/threshold check on it would be meaningless.
+        # Checked and blocked here, BEFORE the threshold gate below, so
+        # it is reported regardless of size rather than only when it
+        # happens to be large enough to look like a candidate (AC2).
+        return BlockedPage(path=path, uid="", reason="invalid_frontmatter")
+    if is_inactive_relation_target(meta):
+        return None
+    flagged = meta.get(NEEDS_SPLIT_KEY) is True
+    over = len(body) > threshold
+    if not (flagged or over):
+        return None
+    uid = str(meta.get("uid") or "")
+    if not uid:
+        # Deliberate: a page with NO frontmatter at all (meta == {} and
+        # _frontmatter_block_is_malformed(text) is False -- no ``---``
+        # fence was ever found) lands here too, as an ordinary missing-
+        # uid page, not as `invalid_frontmatter` -- nothing about it is
+        # malformed, it simply never had a uid to find. It is only
+        # reported at all once it already qualifies as a candidate
+        # (flagged/over threshold) above; a small plain-text file with
+        # no frontmatter is unremarkable and never reaches this line.
+        return BlockedPage(path=path, uid="", reason="no_uid")
+    return RecompileCandidate(
+        path=path,
+        uid=uid,
+        chars=len(body),
+        flagged=flagged,
+        over_ceiling=len(body) > ceiling,
+        updated=validity_bound_str(meta, "updated"),
+    )
+
+
 def find_recompile_candidates(
     wiki_root: Path, config: dict[str, Any] | None = None
 ) -> CandidateScan:
@@ -201,6 +276,10 @@ def find_recompile_candidates(
     ``needs_split: true`` (issue athenaeum#2534 AC1), ordered per
     :func:`_candidate_sort_key` (AC3). See the module docstring for the two
     gaps this closes relative to :func:`athenaeum.oversize_split.find_split_candidates`.
+
+    The walk itself lives here; the per-page predicates live in
+    :func:`classify_page_text` above, so a caller already holding a page's
+    text (issue athenaeum#2536) reuses them rather than re-deriving them.
     """
     threshold = resolve_page_size_threshold_chars(config)
     ceiling = resolve_oversize_hard_ceiling_chars(config)
@@ -214,55 +293,12 @@ def find_recompile_candidates(
         except (OSError, UnicodeDecodeError):
             blocked.append(BlockedPage(path=fpath, uid="", reason="unreadable"))
             continue
-        meta, body = parse_frontmatter(text)
-        if not isinstance(meta, dict):
-            # Frontmatter block present but not a mapping (e.g. a bare YAML
-            # list between the ``---`` fences) -- cannot check needs_split,
-            # uid, or the inactive-page predicate, so this page is reported
-            # rather than silently skipped (AC2).
-            blocked.append(BlockedPage(path=fpath, uid="", reason="invalid_frontmatter"))
-            continue
-        if not meta and _frontmatter_block_is_malformed(text):
-            # Genuinely unparseable YAML: parse_frontmatter fails open to
-            # ({}, text) here -- the SAME shape as "no frontmatter at all"
-            # (see _frontmatter_block_is_malformed's docstring) -- and
-            # `body` in this branch is the WHOLE text including the ``---``
-            # fences, so a size/threshold check on it would be meaningless.
-            # Checked and blocked here, BEFORE the threshold gate below, so
-            # it is reported regardless of size rather than only when it
-            # happens to be large enough to look like a candidate (AC2).
-            blocked.append(BlockedPage(path=fpath, uid="", reason="invalid_frontmatter"))
-            continue
-        if is_inactive_relation_target(meta):
-            continue
-        flagged = meta.get(NEEDS_SPLIT_KEY) is True
-        over = len(body) > threshold
-        if not (flagged or over):
-            continue
-        uid = str(meta.get("uid") or "")
-        if not uid:
-            # Deliberate: a page with NO frontmatter at all (meta == {} and
-            # _frontmatter_block_is_malformed(text) is False -- no ``---``
-            # fence was ever found) lands here too, as an ordinary missing-
-            # uid page, not as `invalid_frontmatter` -- nothing about it is
-            # malformed, it simply never had a uid to find. It is only
-            # reported at all once it already qualifies as a candidate
-            # (flagged/over threshold) above; a small plain-text file with
-            # no frontmatter is unremarkable and never reaches this line.
-            blocked.append(BlockedPage(path=fpath, uid="", reason="no_uid"))
-            continue
-        candidates.append(
-            RecompileCandidate(
-                path=fpath,
-                uid=uid,
-                chars=len(body),
-                flagged=flagged,
-                over_ceiling=len(body) > ceiling,
-                updated=validity_bound_str(meta, "updated"),
-            )
-        )
-    candidates.sort(key=_candidate_sort_key)
-    return CandidateScan(candidates=tuple(candidates), blocked=tuple(blocked))
+        outcome = classify_page_text(fpath, text, threshold=threshold, ceiling=ceiling)
+        if isinstance(outcome, RecompileCandidate):
+            candidates.append(outcome)
+        elif isinstance(outcome, BlockedPage):
+            blocked.append(outcome)
+    return CandidateScan(candidates=sort_candidates(candidates), blocked=tuple(blocked))
 
 
 # ---------------------------------------------------------------------------
