@@ -639,3 +639,137 @@ class TestDryRun:
         librarian._apply_pending_batch_leases(wet)  # type: ignore[arg-type]
         assert [r.ref for r in dry.raw_files] == [r.ref for r in wet.raw_files]
         assert [r.ref for r in dry.raw_files] == [free.ref, expired.ref]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2469 — reconcile_ledger_path's one-time migration off
+# wiki_root. The resolver used to prefer wiki_root by default and gate its
+# legacy-cache-dir fallback on a bare `exists()` (the athenaeum#1512 defect);
+# it now always resolves to the cache dir and actively migrates a populated
+# legacy file into it via spend._migrate_legacy_ledger, gated by
+# spend._has_migrated_content instead.
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileLedgerPathMigration:
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        return wiki_root, cache_dir
+
+    def test_a_fresh_install_writes_only_to_the_cache_dir(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+
+        resolved = batch_state.reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / batch_state.RECONCILE_LEDGER_FILENAME
+        assert not (wiki_root / batch_state.RECONCILE_LEDGER_FILENAME).exists()
+
+    def test_b_a_legacy_ledger_is_migrated_with_every_record_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """Fails on today's code: before issue athenaeum#2469,
+        ``reconcile_ledger_path`` resolved into ``wiki_root`` by default and
+        only fell back to a legacy cache-dir file gated by bare ``exists()``
+        -- it never copied records anywhere and never removed the old
+        file."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / batch_state.RECONCILE_LEDGER_FILENAME
+        legacy.write_text(
+            '{"v":1,"batch_id":"a"}\n{"v":1,"batch_id":"b"}\n',
+            encoding="utf-8",
+        )
+
+        resolved = batch_state.reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / batch_state.RECONCILE_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert resolved.read_text(encoding="utf-8").splitlines() == [
+            '{"v":1,"batch_id":"a"}',
+            '{"v":1,"batch_id":"b"}',
+        ]
+
+    def test_c_running_the_migration_twice_changes_nothing(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / batch_state.RECONCILE_LEDGER_FILENAME
+        legacy.write_text('{"v":1,"batch_id":"a"}\n', encoding="utf-8")
+
+        first = batch_state.reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+        first_content = first.read_text(encoding="utf-8")
+
+        second = batch_state.reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert second == first
+        assert second.read_text(encoding="utf-8") == first_content
+        assert not legacy.exists()
+
+    def test_d_a_legacy_file_with_only_a_header_line_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """A legacy file that carries bytes but no parseable record (a
+        header/garbage line, or an entirely empty file) must not make the
+        resolver raise."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / batch_state.RECONCILE_LEDGER_FILENAME
+        legacy.write_text("# batch reconcile ledger\n", encoding="utf-8")
+
+        resolved = batch_state.reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / batch_state.RECONCILE_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert resolved.read_text(encoding="utf-8") == "# batch reconcile ledger\n"
+
+        # An entirely empty legacy file (no bytes at all) is equally inert:
+        # _has_migrated_content excludes it, so it is left in place.
+        second = tmp_path / "second"
+        second.mkdir()
+        wiki_root2, cache_dir2 = self._roots(second)
+        empty_legacy = wiki_root2 / batch_state.RECONCILE_LEDGER_FILENAME
+        empty_legacy.write_text("", encoding="utf-8")
+
+        resolved2 = batch_state.reconcile_ledger_path(wiki_root2, cache_dir=cache_dir2)
+
+        assert resolved2 == cache_dir2 / batch_state.RECONCILE_LEDGER_FILENAME
+        assert empty_legacy.exists()
+        assert empty_legacy.stat().st_size == 0
+
+    def test_two_concurrent_migration_attempts_do_not_duplicate_records(
+        self, tmp_path: Path
+    ) -> None:
+        """Simulates two processes racing the same legacy file via the
+        shared migration helper: one wins the atomic-rename claim, the other
+        loses it. Both must complete without raising, and the record must
+        land in the cache-dir file exactly once."""
+        import threading
+
+        from athenaeum.spend import _migrate_legacy_ledger
+
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / batch_state.RECONCILE_LEDGER_FILENAME
+        legacy.write_text('{"v":1,"batch_id":"a"}\n', encoding="utf-8")
+        new_path = cache_dir / batch_state.RECONCILE_LEDGER_FILENAME
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def attempt() -> None:
+            barrier.wait()
+            try:
+                _migrate_legacy_ledger(legacy, new_path)
+            except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert not legacy.exists()
+        assert new_path.read_text(encoding="utf-8").splitlines() == [
+            '{"v":1,"batch_id":"a"}',
+        ]

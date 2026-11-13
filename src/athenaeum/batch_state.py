@@ -68,6 +68,7 @@ from typing import Any
 
 from athenaeum import config
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.spend import _migrate_legacy_ledger
 
 log = logging.getLogger(__name__)
 
@@ -610,26 +611,29 @@ RECONCILE_LEDGER_FILENAME = "batch_reconcile.jsonl"
 
 
 def reconcile_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """``<wiki_root>/batch_reconcile.jsonl``, with a legacy cache-dir fallback.
+    """Always ``<cache_dir>/batch_reconcile.jsonl`` — never ``wiki_root``.
 
-    **Docstring correction, athenaeum#2437:** this no longer mirrors
-    :func:`athenaeum.spend.durable_ledger_path` — athenaeum#1601 moved that
-    function's resolution to ALWAYS be ``<cache_dir>/spend.jsonl`` (never
-    ``wiki_root``). This function was not part of that move and still
-    resolves into *wiki_root* by default: a fresh or already-migrated store
-    returns the ``wiki_root`` path, and only an installation that already has
-    records at the legacy ``<cache_dir>`` path (and none yet at
-    ``wiki_root``) keeps using that legacy path until something copies the
-    file forward. Whether to move this ledger out of ``wiki_root`` too is a
-    separate operator decision (see athenaeum#2437's Out of scope).
+    **Docstring correction, athenaeum#2469.** The prior text here (written
+    for athenaeum#2437) claimed this function "no longer mirrors
+    :func:`athenaeum.spend.durable_ledger_path`" while still resolving into
+    *wiki_root* by default with a bare-``exists()`` legacy-cache-dir
+    fallback — true at the time, no longer true. This resolver now always
+    returns the cache-dir path, and on the way there performs a real
+    one-time migration via :func:`athenaeum.spend._migrate_legacy_ledger` —
+    the same helper :func:`athenaeum.spend.reservation_ledger_path` uses for
+    the sibling batch-reservation ledger: a populated legacy file at
+    *wiki_root* has every record merged into the cache-dir file (none
+    duplicated, safe under two racing processes) and is then removed, gated
+    by :func:`athenaeum.spend._has_migrated_content` rather than bare
+    existence. *wiki_root* is retained as a parameter purely for
+    call-signature stability; every call site still passes it.
     """
-    new_path = Path(wiki_root) / RECONCILE_LEDGER_FILENAME
-    legacy_path = Path(
+    new_path = Path(
         cache_dir if cache_dir is not None else resolve_cache_dir()
     ) / RECONCILE_LEDGER_FILENAME
-    if new_path.exists() or not legacy_path.exists():
-        return new_path
-    return legacy_path
+    legacy_path = Path(wiki_root) / RECONCILE_LEDGER_FILENAME
+    _migrate_legacy_ledger(legacy_path, new_path)
+    return new_path
 
 
 def record_reconciliation(

@@ -108,6 +108,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -273,6 +274,80 @@ def _has_migrated_content(path: Path) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _migrate_legacy_ledger(legacy_path: Path, new_path: Path) -> None:
+    """One-time, concurrency-safe migration of *legacy_path*'s records into
+    *new_path* (issue athenaeum#2469).
+
+    Called from a ledger's own path resolver on every resolution. The common
+    case — no legacy file, or a previous call already migrated and removed
+    it — is a single :func:`_has_migrated_content` check (``is_file`` +
+    ``stat``), which gates everything below it; this is a no-op whenever that
+    check is ``False``.
+
+    **Concurrency.** Two processes racing this function at the same instant
+    must neither lose nor duplicate a record. The exclusivity primitive is
+    ``os.rename`` within *legacy_path*'s own directory, which POSIX
+    guarantees is atomic: at most one of two concurrent ``rename`` calls can
+    see *legacy_path* still present, because whichever succeeds first removes
+    it out from under the other. The loser's ``rename`` raises ``OSError``
+    (typically ``FileNotFoundError``) and returns immediately, trusting the
+    winner (or, if the winner crashed mid-migration, a future attempt once a
+    legacy file reappears) to finish the merge. Each line of the claimed file
+    is appended individually through
+    :func:`athenaeum.store.append_line_durable` — the same ``O_APPEND`` +
+    ``fsync`` primitive every writer in this module already uses — so a
+    record a live writer appends to *new_path* at the same moment interleaves
+    safely instead of being lost or overwritten. The claimed file is removed
+    only after every line has been appended.
+
+    This function copies LINES, not records: it never parses JSON. A legacy
+    file holding no parseable records — a non-empty file whose lines are not
+    valid ledger rows, or a lone header/blank line — costs nothing extra and
+    raises nothing; every reader of these ledgers already tolerates an
+    unparseable line (see e.g.
+    :func:`athenaeum.batch_state.read_reconcile_ledger`). A zero-byte file is
+    excluded upfront by :func:`_has_migrated_content` and is left in place,
+    untouched.
+    """
+    if not _has_migrated_content(legacy_path):
+        return
+    claim_path = legacy_path.with_name(legacy_path.name + ".migrating")
+    try:
+        os.rename(legacy_path, claim_path)
+    except OSError:
+        # Lost the race to another process, or nothing left to claim.
+        return
+    try:
+        text = claim_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "could not read the claimed legacy ledger %s during migration "
+            "(%s: %s) — leaving it at %s for the next attempt",
+            claim_path,
+            type(exc).__name__,
+            exc,
+            claim_path,
+        )
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        append_line_durable(new_path, (line + "\n").encode("utf-8"))
+    try:
+        claim_path.unlink()
+    except OSError as exc:
+        log.warning(
+            "migrated %s into %s but could not remove the claimed legacy "
+            "file %s (%s: %s)",
+            legacy_path,
+            new_path,
+            claim_path,
+            type(exc).__name__,
+            exc,
+        )
 
 
 def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
@@ -1857,32 +1932,35 @@ RESERVATION_STATE_SETTLED = "settled"
 
 
 def reservation_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """``<wiki_root>/batch_reservations.jsonl``, with the legacy cache-dir fallback.
+    """Always ``<cache_dir>/batch_reservations.jsonl`` — never ``wiki_root``.
 
-    Historically mirrored :func:`durable_ledger_path` exactly (AC1),
-    including its migration rule: an installation with records already at
-    the legacy ``<cache_dir>`` path keeps using it until something copies the
-    file forward. That mirror is why this function moved with issue
-    athenaeum#1512 too: "populated"/"migrated" is judged by
-    :func:`_has_migrated_content`, not bare existence, so an empty new-path
-    file cannot by itself repoint a populated legacy reservation ledger.
+    **Docstring rewrite, issue athenaeum#2469 — supersedes the "legacy
+    cache-dir fallback" ruling below.** Before this issue, this function
+    mirrored the PRE-athenaeum#1601 ``durable_ledger_path``: it preferred
+    *wiki_root* and fell back to *cache_dir* only when a populated legacy
+    file already lived there, via :func:`_has_migrated_content` (never bare
+    ``exists()``, the defect issue athenaeum#1512 fixed for every such
+    resolver). ``durable_ledger_path`` has since moved on — athenaeum#1601
+    made it always resolve to the cache dir — and this issue brings the
+    reservation ledger to the same place, using the same ``wiki_root``/
+    ``cache_dir`` artifact pair as athenaeum#980's telemetry-stays-outside-
+    the-corpus rule: :meth:`athenaeum.store.FilesystemStore.snapshot` is
+    ``git add -A`` over *wiki_root*, so a populated reservation ledger left
+    there is committed into corpus history on every librarian snapshot.
 
-    **Divergence, issue athenaeum#1601:** ``durable_ledger_path`` (the
-    ``spend.jsonl`` resolver) now always returns the cache dir and no longer
-    has a wiki-root migration branch at all. This ledger — ``batch_reservations.jsonl``,
-    a distinct artifact issue athenaeum#1601 does not name — was not in that
-    issue's scope and keeps its own independent legacy-fallback rule below,
-    unchanged, using the same :func:`_has_migrated_content` predicate the two
-    functions used to share.
+    Unlike athenaeum#1601's ledgers, which simply abandon a leftover
+    *wiki_root* file in place, this resolver performs a real one-time
+    migration on every call via :func:`_migrate_legacy_ledger`: a populated
+    legacy file is merged into the cache-dir file (every record preserved,
+    none duplicated, concurrency-safe under two racing processes) and then
+    removed from *wiki_root*. ``_has_migrated_content`` is what gates that
+    migration's "is there anything left to move" check.
     """
-    new_path = Path(wiki_root) / RESERVATION_LEDGER_FILENAME
-    legacy_path = Path(
+    new_path = Path(
         cache_dir if cache_dir is not None else default_cache_dir()
     ) / RESERVATION_LEDGER_FILENAME
-    if _has_migrated_content(new_path):
-        return new_path
-    if _has_migrated_content(legacy_path):
-        return legacy_path
+    legacy_path = Path(wiki_root) / RESERVATION_LEDGER_FILENAME
+    _migrate_legacy_ledger(legacy_path, new_path)
     return new_path
 
 
