@@ -32,13 +32,9 @@ import pytest
 
 from athenaeum.authority import AuthorityManifest, AuthoritySource, parse_authority_manifest
 from athenaeum.never_ingest import (
-    NeverIngestRefusal,
     check_and_refuse,
     classify_never_ingest,
     filter_never_ingest,
-    read_refusals,
-    record_refusal,
-    refusals_path,
 )
 
 _MANIFEST_YAML = """\
@@ -119,39 +115,12 @@ class TestClassifyPendingStateTodo:
         assert classify_never_ingest(meta, "body", manifest=manifest) is None
 
 
-class TestRefusalLedgerRoundtrip:
-    def test_record_then_read(self, tmp_path: Path) -> None:
-        cache_dir = tmp_path / "cache"
-        refusal = NeverIngestRefusal(
-            ts="2026-08-21T00:00:00Z",
-            class_slug="mirror-of-live-source",
-            detail="topic owned by css-typeface-source",
-            origin_scope="-Users-alice-Code-projectx",
-            file_ref_hash="abc123",
-        )
-        assert record_refusal(refusal, cache_dir=cache_dir) is True
-        rows = read_refusals(cache_dir)
-        assert len(rows) == 1
-        assert rows[0]["class"] == "mirror-of-live-source"
-        assert rows[0]["origin_scope"] == "-Users-alice-Code-projectx"
-        assert rows[0]["tier"] == "auto-memory"  # default tier
-        # ids-only: no content field anywhere in the row.
-        assert set(rows[0]) == {
-            "ts",
-            "class",
-            "detail",
-            "origin_scope",
-            "file_ref_hash",
-            "tier",
-        }
-
-    def test_missing_ledger_reads_empty(self, tmp_path: Path) -> None:
-        assert read_refusals(tmp_path / "cache") == []
-
-    def test_ledger_path_under_cache_dir(self, tmp_path: Path) -> None:
-        cache_dir = tmp_path / "cache"
-        assert refusals_path(cache_dir) == cache_dir / "_never_ingest_refusals.jsonl"
-
+# Issue athenaeum#2468 removed `record_refusal`/`read_refusals`/
+# `refusals_path` and the `TestRefusalLedgerRoundtrip` class that pinned
+# their round trip -- nothing outside this module's own tests ever read the
+# ledger those built. `NeverIngestRefusal` itself (the refusal DECISION's
+# shape) is unchanged; see `TestNoRefusalLedgerWritten` below for the
+# replacement negative assertion.
 
 LEGIT_SCOPE = "-Users-alice-Code-projectx"
 
@@ -219,20 +188,7 @@ class TestFilterNeverIngest:
         assert refused_path.exists()
         assert refused_path.read_text(encoding="utf-8") == original_text
 
-    def test_refusal_is_ledgered(self, tmp_path: Path) -> None:
-        from athenaeum.intake import discover_auto_memory_files
-
-        knowledge_root = _write_auto_memory_root(tmp_path)
-        files = discover_auto_memory_files(knowledge_root)
-        cache_dir = tmp_path / "cache"
-
-        filter_never_ingest(files, _manifest(), cache_dir=cache_dir)
-
-        rows = read_refusals(cache_dir)
-        assert len(rows) == 1
-        assert rows[0]["class"] == "mirror-of-live-source"
-
-    def test_dry_run_does_not_write_ledger(self, tmp_path: Path) -> None:
+    def test_dry_run_still_reports_the_refusal_to_the_caller(self, tmp_path: Path) -> None:
         from athenaeum.intake import discover_auto_memory_files
 
         knowledge_root = _write_auto_memory_root(tmp_path)
@@ -244,7 +200,6 @@ class TestFilterNeverIngest:
         )
 
         assert len(refused) == 1  # still reported to the caller
-        assert read_refusals(cache_dir) == []  # but not durably ledgered
 
     def test_no_classes_enabled_is_a_complete_noop(self, tmp_path: Path) -> None:
         from athenaeum.intake import discover_auto_memory_files
@@ -257,6 +212,27 @@ class TestFilterNeverIngest:
 
         assert len(kept) == len(files)
         assert refused == []
+
+
+class TestNoRefusalLedgerWritten:
+    """Issue athenaeum#2468: a test per removed writer asserting the run no
+    longer creates that file. FAILS on pre-athenaeum#2468 code, which wrote
+    ``_never_ingest_refusals.jsonl`` under the cache dir on every refusal.
+    """
+
+    def test_filter_never_ingest_creates_no_refusal_ledger_file(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.intake import discover_auto_memory_files
+
+        knowledge_root = _write_auto_memory_root(tmp_path)
+        files = discover_auto_memory_files(knowledge_root)
+        cache_dir = tmp_path / "cache"
+
+        kept, refused = filter_never_ingest(files, _manifest(), cache_dir=cache_dir)
+
+        assert len(refused) == 1  # the refusal itself is unchanged
+        assert not list(tmp_path.rglob("_never_ingest_refusals.jsonl"))
 
 
 def _write_all_refused_auto_memory_root(tmp_path: Path) -> Path:
@@ -376,9 +352,13 @@ class TestNoDeletionStaticScan:
 
 
 class TestCheckAndRefuse:
-    """The shared classify+ledger primitive both intake tiers call."""
+    """The shared classify primitive both intake tiers call. Issue
+    athenaeum#2468 removed this primitive's ledger write (nothing outside
+    this module's own tests ever read it) -- the classify-and-build
+    DECISION these tests assert on is unchanged.
+    """
 
-    def test_match_builds_and_ledgers(self, tmp_path: Path) -> None:
+    def test_match_builds_the_refusal(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         meta = {"name": "x", "topics": ["webfont-embedding"]}
         refusal = check_and_refuse(
@@ -393,9 +373,8 @@ class TestCheckAndRefuse:
         assert refusal is not None
         assert refusal.tier == "entity"
         assert refusal.class_slug == "mirror-of-live-source"
-        assert read_refusals(cache_dir) == [refusal.to_dict()]
 
-    def test_no_match_returns_none_and_ledgers_nothing(self, tmp_path: Path) -> None:
+    def test_no_match_returns_none(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         refusal = check_and_refuse(
             {"name": "x"},
@@ -407,9 +386,8 @@ class TestCheckAndRefuse:
             cache_dir=cache_dir,
         )
         assert refusal is None
-        assert read_refusals(cache_dir) == []
 
-    def test_dry_run_returns_match_but_does_not_ledger(self, tmp_path: Path) -> None:
+    def test_dry_run_still_returns_the_match(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         meta = {"name": "x", "topics": ["webfont-embedding"]}
         refusal = check_and_refuse(
@@ -423,7 +401,6 @@ class TestCheckAndRefuse:
             dry_run=True,
         )
         assert refusal is not None
-        assert read_refusals(cache_dir) == []
 
 
 ENTITY_SOURCE_DIR = "graph-writer"
@@ -550,16 +527,24 @@ class TestEntityTierWiring:
         assert raw.path.read_text(encoding="utf-8") == original_text
         assert list(wiki.glob("*.md")) == []
 
-    def test_refusal_ledgered_with_entity_tier(self, tmp_path: Path) -> None:
+    def test_refused_entity_tier_file_creates_no_refusal_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2468: a test per removed writer asserting the run
+        no longer creates that file. FAILS on pre-athenaeum#2468 code, which
+        wrote ``_never_ingest_refusals.jsonl`` under the cache dir here too.
+        """
         from athenaeum.librarian import process_one
         from athenaeum.models import EntityIndex
 
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
         wiki = tmp_path / "wiki"
         wiki.mkdir(parents=True)
         raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
         manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
 
-        process_one(
+        result = process_one(
             raw,
             EntityIndex(wiki),
             wiki,
@@ -569,15 +554,10 @@ class TestEntityTierWiring:
             valid_access=["open", "internal", "confidential", "personal"],
             never_ingest_manifest=manifest,
         )
-        # process_one resolves the cache dir itself (mirrors the auto-memory
-        # gate's own ATHENAEUM_CACHE_DIR-driven resolution) -- read it back
-        # the same way rather than threading cache_dir through process_one.
-        from athenaeum.config import resolve_cache_dir
-
-        rows = read_refusals(resolve_cache_dir(None))
-        assert len(rows) == 1
-        assert rows[0]["tier"] == "entity"
-        assert rows[0]["class"] == "mirror-of-live-source"
+        # The refusal itself is unchanged (still excluded this run).
+        assert result.retain_raw is True
+        assert result.retain_raw_by_design is True
+        assert not list(tmp_path.rglob("_never_ingest_refusals.jsonl"))
 
     def test_no_manifest_threaded_is_a_complete_noop(self, tmp_path: Path) -> None:
         """``never_ingest_manifest=None`` (the default -- every pre-athenaeum#968

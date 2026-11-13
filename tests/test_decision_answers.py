@@ -2071,6 +2071,12 @@ class TestNoLLMCall:
 # TestMutatorsDefer — AC4
 # ---------------------------------------------------------------------------
 
+# athenaeum#2460: the legacy ``block`` / ``error`` / ``resolved_block``
+# aliases were removed from every resolve_question / resolve_merge /
+# review_audit_item response. Every mutator result checked below is swept
+# for these keys.
+_LEGACY_MCP_RESPONSE_KEYS = {"block", "error", "resolved_block"}
+
 
 class TestMutatorsDefer:
     def _server(self, tmp_path: Path, *, wiki: Path, raw: Path):
@@ -2110,6 +2116,7 @@ class TestMutatorsDefer:
         assert answer_file.exists()
         # Not yet applied -- checkbox still unchecked.
         assert "- [x]" not in pending_path.read_text(encoding="utf-8")
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
 
     def test_resolve_question_preflight_still_reports_already_answered(
         self, tmp_path: Path
@@ -2131,6 +2138,7 @@ class TestMutatorsDefer:
         assert result["error_code"] == "already_answered"
         # Nothing written on the error path.
         assert not (raw / "answers").exists()
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
 
     def test_resolve_merge_defers_and_writes_answer_file(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
@@ -2157,6 +2165,7 @@ class TestMutatorsDefer:
         # Not yet applied -- no target page written, checkbox unflipped.
         assert not (wiki / "mcp-topic.md").exists()
         assert "- [x]" not in merges_path.read_text(encoding="utf-8")
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
 
     def test_resolve_merge_preflight_still_reports_invalid_decision(
         self, tmp_path: Path
@@ -2172,6 +2181,7 @@ class TestMutatorsDefer:
         assert result["ok"] is False
         assert result["error_code"] == "invalid_decision"
         assert not (raw / "answers").exists()
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
 
     def test_review_audit_item_defers_and_writes_answer_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2197,6 +2207,7 @@ class TestMutatorsDefer:
 
         records = read_calibration_ledger(wiki)
         assert not [r for r in records if r.get("kind") == "review"]
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
 
     def test_review_audit_item_preflight_still_reports_unknown_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2212,6 +2223,43 @@ class TestMutatorsDefer:
         )
         assert result["ok"] is False
         assert result["error_code"] == "id_not_found"
+        assert not (_LEGACY_MCP_RESPONSE_KEYS & set(result))
+
+    @pytest.mark.parametrize(
+        ("name", "call"),
+        [
+            ("resolve_question", lambda fn: fn("no-such-id", "an answer")),
+            ("resolve_merge", lambda fn: fn("no-such-id", "reject")),
+        ],
+    )
+    def test_kill_switch_response_has_no_legacy_keys(
+        self, tmp_path: Path, name: str, call
+    ) -> None:
+        # athenaeum#2460: the kill-switch refusal shape (``_kill_switch_result``)
+        # used to carry legacy ``block`` / ``error`` / ``resolved_block``
+        # aliases alongside ``message`` — removed for every mutator it backs.
+        from athenaeum import killswitch
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        killswitch.disable(killswitch.SCOPE_ALL, cache_dir=cache_dir)
+
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        server = create_server(raw_root=raw, wiki_root=wiki, cache_dir=cache_dir)
+        result = self._call(server, name, call)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "disabled"
+        assert result.get("message")
+        assert "block" not in result
+        assert "error" not in result
+        assert "resolved_block" not in result
 
 
 # ---------------------------------------------------------------------------

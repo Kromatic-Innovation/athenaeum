@@ -357,16 +357,15 @@ class TestWikiDedupeHonoursRulings:
         assert [r["verdict"] for r in results] == ["duplicate"]
         client.messages.create.assert_called()
 
-        # Issue athenaeum#2094 AC2/AC3: the lapsed rejection is named in the
-        # pair's attribution row (earlier merge id + the human's note), not
-        # dropped. Fails if the proposer discards ``.expired``.
-        from athenaeum.wiki_dedupe_attribution import read_attribution_report
-
-        details = " ".join(r.detail for r in read_attribution_report(wiki))
-        assert "Earlier ruling on this pair (" in details
-        assert "not the same thing" in details
-        assert "previously rejected by a human" in details
-        assert "cooldown has since lapsed" in details
+        # Issue athenaeum#2094 AC2/AC3: the lapsed rejection is named in what
+        # a human adjudicates (earlier merge id + the human's note), not
+        # dropped -- fails if the proposer discards ``.expired``. Formerly
+        # asserted here via the wiki-dedupe attribution row; issue
+        # athenaeum#2468 removed that ledger (nothing outside its own tests
+        # read it). ``TestQueuedDuplicateNamesEarlierRuling`` below covers the
+        # same propagation through the surfaces that remain:
+        # ``_pending_merges.md`` rationale (auto-apply on) and
+        # ``_pending_questions.md`` (auto-apply off).
 
 
 class TestQueuedDuplicateNamesEarlierRuling:

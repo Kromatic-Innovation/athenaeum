@@ -103,9 +103,7 @@ explicitly, lazily imports an ``observe_*`` wrapper.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -118,33 +116,17 @@ log = logging.getLogger(__name__)
 #: validation error and/or an unexpected key). Aggregate by ``contract=``.
 SCHEMA_MISMATCH_MARKER = "llm-schema-mismatch"
 
-#: Durable, append-only observation ledger (issue athenaeum#724). Under the cache
-#: dir — same discipline as ``push_metrics``' ``_push_records.jsonl`` — because
-#: the ``query_topics`` contract runs inside the MCP server, whose Python logging
-#: is retained NOWHERE (athenaeum#724 defect 3): a log-only marker there is
-#: emitted and discarded, so the mismatch rate is unmeasurable. A ledger the
-#: aggregation reads fixes that. Each line records ONE observation — outcome
-#: ``ok``/``mismatch``, the mismatch class(es), and the contract/call-site — so
-#: every reported rate has a real denominator (athenaeum#724 defect 2), and a
-#: total parse failure (which returns BEFORE the payload ever reaches
-#: :func:`observe`, athenaeum#724 defect 1) is counted via
-#: :func:`observe_parse_failure`.
-#:
-#: **This ledger is production-only** (issue athenaeum#750). ``tests/conftest.py``
-#: carries an autouse fixture that isolates ``ATHENAEUM_CACHE_DIR`` to a
-#: per-test tmp dir and defaults ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0``,
-#: so the test suite no longer appends to the real ``~/.cache/athenaeum``
-#: ledger by default — trustworthy (free of test-run pollution) for records
-#: written from 2026-08-05 onward. A test that specifically needs to exercise
-#: this module's ledger (``tests/test_llm_schemas.py``) opts back in
-#: explicitly: pass ``cache_dir=`` (wins over the env var per
-#: :func:`athenaeum.config.resolve_cache_dir`'s precedence) and/or
-#: ``monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")``. See
-#: ``docs/reference/configuration.md`` § "LLM schema-observation ledger".
-OBSERVATIONS_FILENAME = "_llm_schema_observations.jsonl"
-
-#: Schema version stamped on every observation record.
-OBSERVATION_SCHEMA_VERSION = 1
+#: Former durable, append-only observation ledger filename (issue athenaeum#724),
+#: under the cache dir. Issue athenaeum#2468 removed the writer
+#: (``record_observation``), the readers (``read_observations`` /
+#: ``aggregate_observations``) and the schema-observations-enabled env
+#: switch that gated it (named in ``docs/guides/upgrading.md`` and
+#: ``CHANGELOG.md``) -- nothing outside this module's own tests ever read
+#: it. :func:`observe` / :func:`observe_parse_failure` still emit the greppable
+#: WARNING marker (:data:`SCHEMA_MISMATCH_MARKER`) on every mismatch; only the
+#: durable per-observation record is gone. The file it used to write was
+#: ``_llm_schema_observations.jsonl`` under the cache dir; a stray pre-upgrade
+#: copy is simply ignored.
 
 #: The four mismatch classes athenaeum#724 requires so athenaeum#608's
 #: reject-vs-degrade question can be answered per class without re-reading raw
@@ -157,25 +139,6 @@ MISMATCH_MISSING_REQUIRED = "missing-required"
 MISMATCH_PARSE_FAIL = "parse-fail"
 MISMATCH_WRONG_TYPE = "wrong-type"
 MISMATCH_OTHER = "other"
-
-#: Every contract :func:`observe` instruments, so :func:`aggregate_observations`
-#: can report a contract with ZERO observations as an EXPLICIT *no-data* row
-#: rather than a silent absence (athenaeum#724). ``claim_kind`` was a structural
-#: no-data row before athenaeum#742 wired ``stamp_claim_kind`` into the nightly
-#: auto-memory intake phase (``librarian._stamp_unclassified_claim_kinds``,
-#: called from ``_run_auto_memory_phase``); now that real traffic flows, its
-#: row reports actual observations like every other contract here. Surfacing
-#: a genuinely-unreached contract explicitly (as this tuple still does for any
-#: future no-caller addition) is what keeps a permanent no-data contract from
-#: reading as "0 mismatches" (a false clean signal).
-INSTRUMENTED_CONTRACTS: tuple[str, ...] = (
-    "query_topics",
-    "claim_kind",
-    "contradictions",
-    "resolutions",
-    "tiers.tier2",
-    "tiers.tier3-merge",
-)
 
 #: **M17 phase 2a strictness decision (athenaeum#1035, split from athenaeum#608).**
 #: Contracts whose response model has graduated from the phase-1 uniform
@@ -394,13 +357,10 @@ class DecayBucketResponse(BaseModel):
     measured window at all: athenaeum#1837 is its first release, so an
     ``extra="forbid"`` here would be a guess wearing a measurement's clothes,
     exactly the reasoning :data:`STRICT_CONTRACTS` applies to ``resolutions``.
-    It is deliberately absent from both :data:`STRICT_CONTRACTS` and
-    :data:`INSTRUMENTED_CONTRACTS`: the former is a decided-from-measurement
-    registry, and the latter exists to surface a *genuinely unreached* contract
-    as an explicit no-data row — this one ships with a live nightly caller
-    (``librarian._stamp_unbucketed_auto_memory``), and
-    :func:`aggregate_observations` picks its records up via ``setdefault``
-    regardless. Revisit both once a representative window exists.
+    It is deliberately absent from :data:`STRICT_CONTRACTS`, a
+    decided-from-measurement registry — revisit once a representative window
+    exists. It ships with a live nightly caller
+    (``librarian._stamp_unbucketed_auto_memory``) regardless.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -621,230 +581,18 @@ def _classify_validation_errors(raw_errors: list[Mapping[str, Any]]) -> list[str
     return classes
 
 
-def observations_path(cache_dir: Path | None = None) -> Path:
-    """Resolve the observation ledger path under the (resolved) cache dir."""
-    from athenaeum.config import resolve_cache_dir
-
-    return resolve_cache_dir(cache_dir) / OBSERVATIONS_FILENAME
-
-
-def _has_migrated_content(path: Path) -> bool:
-    """``True`` only when *path* exists AND carries at least one byte.
-
-    Mirrors :func:`athenaeum.push_metrics._has_migrated_content` exactly
-    (issue athenaeum#1512 defect 2, closed here by issue athenaeum#1601): the
-    prior check at this call site was a bare ``new_path.exists()``, which
-    treats a stray ``touch``, a partially-written file from a crashed run, or
-    an empty file some other process created at ``<wiki_root>/`` as proof of
-    a completed migration — permanently repointing every subsequent
-    read/write away from a populated legacy ledger with no rows actually
-    moved. ``is_file()`` (not ``exists()``) so a *directory* at the path,
-    which ``stat().st_size`` reports as non-zero on most filesystems, is not
-    mistaken for rows.
-
-    Since issue athenaeum#1601 this no longer gates resolution at all — the
-    ledger always resolves to the cache dir — and it survives as the
-    "is there a real, non-empty ledger stranded here?" predicate behind
-    :func:`durable_observations_path`'s operator warning.
-    """
-    try:
-        return path.is_file() and path.stat().st_size > 0
-    except OSError:
-        return False
-
-
-#: ``<wiki_root>/_llm_schema_observations.jsonl`` paths already warned about,
-#: so the stranded-ledger warning in :func:`durable_observations_path` fires
-#: once per path per process rather than once per observation.
-_MISROUTED_WARNED: set[str] = set()
-
-
-def durable_observations_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """Always ``<cache_dir>/_llm_schema_observations.jsonl`` — NEVER
-    ``<wiki_root>/``.
-
-    *wiki_root* is retained (every caller passes it) but is **never a write
-    target**: it is read only to detect a ledger stranded at the withdrawn
-    location and warn about it. Passing it can no longer route an
-    observation into the corpus.
-
-    **Operator decision, issue athenaeum#1601 (2026-09-15):** this ledger and
-    ``spend.jsonl`` (:func:`athenaeum.spend.durable_ledger_path`) both used to
-    resolve into ``<wiki_root>/`` once a file there had content — the same
-    R3-relocation-by-table-membership rule issue athenaeum#1591 already
-    withdrew for ``_push_records.jsonl``, for the same reason (design note
-    §5.2's table classifies *persistence*, not *filesystem location* — see the
-    correction note added there by athenaeum#1591 and generalized by
-    athenaeum#1601). Both ledgers now mirror
-    :func:`athenaeum.push_metrics.durable_push_records_path` exactly,
-    including this one-time stranded-file warning. The R3 class/scope
-    declaration (``operational``/``store-durable``) is unchanged; see
-    :data:`athenaeum.store.ARTIFACT_REGISTRY`'s ``llm-schema-observations-ledger``
-    entry.
-
-    This also closes issue athenaeum#1512 defect 2 at this call site: the
-    resolver used a bare ``new_path.exists()`` (see
-    :func:`_has_migrated_content`'s docstring), so a stray empty file at
-    ``<wiki_root>/`` could permanently flip resolution even though no rows
-    had migrated. That branch no longer exists.
-    """
-    legacy_path = observations_path(cache_dir)
-    misrouted = Path(wiki_root) / OBSERVATIONS_FILENAME
-    if _has_migrated_content(misrouted) and str(misrouted) not in _MISROUTED_WARNED:
-        _MISROUTED_WARNED.add(str(misrouted))
-        log.warning(
-            "llm-schema observations ledger found at the withdrawn wiki-root "
-            "location %s (issue athenaeum#1601: that location is no longer "
-            "written or read). Its rows are stranded — they sit inside the "
-            "corpus the R3 store-durable/cache-dir placement excludes. Merge "
-            "them into %s (deduplicated, re-sorted by 'ts'), then move the "
-            "file out of the knowledge root and commit its removal. Nothing "
-            "is migrated automatically: this is operator-decided, one-way "
-            "data movement over a git-tracked corpus.",
-            misrouted,
-            legacy_path,
-        )
-    return legacy_path
-
-
-def record_observation(
-    *,
-    contract: str,
-    call_site: str,
-    outcome: str,
-    classes: list[str] | None = None,
-    errors: list[str] | None = None,
-    extra_keys: list[str] | None = None,
-    cache_dir: Path | None = None,
-    wiki_root: Path | None = None,
-) -> None:
-    """Append ONE observation record to the durable ledger. Best-effort.
-
-    ``outcome`` is ``"ok"`` (a clean parse — the denominator athenaeum#724 defect
-    2 was missing) or ``"mismatch"`` (carrying its ``classes``). Never raises: a
-    telemetry write must not degrade the pipeline. Enabled by default; set
-    ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`` to disable.
-
-    *wiki_root*, when supplied, is passed to :func:`durable_observations_path`
-    only to detect (and warn about) a ledger stranded at the withdrawn
-    ``<wiki_root>/`` location (issue athenaeum#1601); it never changes where
-    this write lands. Resolution is the cache dir either way.
-    """
-    try:
-        if os.environ.get("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1").strip().lower() in (
-            "0",
-            "false",
-            "no",
-        ):
-            return
-        # Deferred import (module scope stays athenaeum-import-free, per this
-        # module's own docstring). :func:`athenaeum.store.now_iso` is the
-        # single shared UTC-ISO rendering (issue athenaeum#1348).
-        from athenaeum.store import now_iso
-
-        record = {
-            "v": OBSERVATION_SCHEMA_VERSION,
-            "ts": now_iso(),
-            "contract": contract,
-            "call_site": call_site,
-            "outcome": outcome,
-            "classes": classes or [],
-            # Redaction: only the schema-shape delta is recorded — field paths,
-            # error messages, and unexpected KEY names — never any field VALUE,
-            # so no claim content or personal data reaches the ledger.
-            "errors": errors or [],
-            "extra_keys": extra_keys or [],
-        }
-        path = (
-            durable_observations_path(wiki_root, cache_dir=cache_dir)
-            if wiki_root is not None
-            else observations_path(cache_dir)
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:  # pragma: no cover - defensive: telemetry must never throw
-        log.debug(
-            "llm-schema: could not record observation for contract=%s call_site=%s",
-            contract,
-            call_site,
-            exc_info=True,
-        )
-
-
-def read_observations(
-    cache_dir: Path | None = None, *, wiki_root: Path | None = None
-) -> list[dict[str, Any]]:
-    """Read every observation record from the ledger (``[]`` when absent).
-
-    *wiki_root*, when supplied, resolves via :func:`durable_observations_path`
-    — the SAME resolution :func:`record_observation` uses, so a read against
-    a given store always finds exactly what the matching write produced.
-    """
-    path = (
-        durable_observations_path(wiki_root, cache_dir=cache_dir)
-        if wiki_root is not None
-        else observations_path(cache_dir)
-    )
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
-    return rows
-
-
-def aggregate_observations(cache_dir: Path | None = None) -> dict[str, dict[str, Any]]:
-    """Per-contract observation summary over the ledger (athenaeum#724 AC7).
-
-    Returns one entry per :data:`INSTRUMENTED_CONTRACTS` (so a contract with no
-    records is an EXPLICIT *no-data* row, not a silent absence that reads as a
-    clean 0). Each entry carries ``observations`` (the denominator),
-    ``mismatches``, a ``by_class`` count, and ``mismatch_rate`` — or
-    ``no_data=True`` and ``mismatch_rate=None`` when ``observations == 0``, so
-    "0 over 0" is never confused with "0 over 400".
-    """
-    rows = read_observations(cache_dir)
-    summary: dict[str, dict[str, Any]] = {
-        contract: {
-            "observations": 0,
-            "mismatches": 0,
-            "by_class": {},
-            "mismatch_rate": None,
-            "no_data": True,
-        }
-        for contract in INSTRUMENTED_CONTRACTS
-    }
-    for row in rows:
-        contract = str(row.get("contract", ""))
-        entry = summary.setdefault(
-            contract,
-            {
-                "observations": 0,
-                "mismatches": 0,
-                "by_class": {},
-                "mismatch_rate": None,
-                "no_data": True,
-            },
-        )
-        entry["observations"] += 1
-        if row.get("outcome") == "mismatch":
-            entry["mismatches"] += 1
-            for cls in row.get("classes") or []:
-                entry["by_class"][cls] = entry["by_class"].get(cls, 0) + 1
-    for entry in summary.values():
-        obs = entry["observations"]
-        entry["no_data"] = obs == 0
-        entry["mismatch_rate"] = None if obs == 0 else entry["mismatches"] / obs
-    return summary
+# Issue athenaeum#2468 removed this module's durable observation ledger --
+# `observations_path`/`durable_observations_path` (path resolution),
+# `record_observation` (the writer), `read_observations` /
+# `aggregate_observations` (the readers), and the schema-observations-enabled
+# env switch that gated the writer (named in docs/guides/upgrading.md and
+# CHANGELOG.md) -- nothing outside this module's own tests ever read it.
+# `observe` and
+# `observe_parse_failure` below still validate every call and emit the
+# greppable WARNING marker (`SCHEMA_MISMATCH_MARKER`) on a mismatch; only the
+# durable per-observation record is gone. `wiki_root` stays on every
+# `observe*` signature below for call-signature stability (every production
+# and test caller still passes it) but is now entirely unused.
 
 
 def observe(
@@ -858,24 +606,23 @@ def observe(
 ) -> None:
     """Validate ``payload`` against ``model`` for OBSERVATION ONLY.
 
-    Records ONE observation to the durable ledger on EVERY call (the denominator
-    athenaeum#724 needs), emits the structured WARNING marker on a mismatch
-    (validation error and/or unexpected key), then returns ``None``. This
-    function **never raises and never alters behavior** — the entire body is
-    wrapped so even a bug in validation cannot touch the pipeline. Callers invoke
-    it *after* their own parse and ignore its result. A TOTAL parse failure never
+    Emits the structured WARNING marker on a mismatch (validation error
+    and/or unexpected key), then returns ``None``. This function **never
+    raises and never alters behavior** — the entire body is wrapped so even
+    a bug in validation cannot touch the pipeline. Callers invoke it *after*
+    their own parse and ignore its result. A TOTAL parse failure never
     reaches here (the caller returns first); count that via
     :func:`observe_parse_failure`.
 
     Args:
         model: the contract's response model.
         payload: the already-parsed payload (dict, list, …) to validate.
-        contract: the contract name (aggregate mismatch counts by this).
+        contract: the contract name (named in the WARNING marker).
         call_site: a stable label identifying the parse site.
-        cache_dir: override the ledger location (tests / non-default deploys).
-        wiki_root: forwarded to :func:`record_observation` / :func:`durable_observations_path`
-            for the stranded-ledger warning only (issue athenaeum#1601); the write
-            always lands in the cache dir regardless.
+        cache_dir: unused (issue athenaeum#2468 removed the durable
+            observation ledger this used to select); kept for
+            call-signature stability.
+        wiki_root: unused, same reason; kept for call-signature stability.
     """
     try:
         errors: list[str] = []
@@ -903,16 +650,6 @@ def observe(
                 extra_keys or "-",
                 ",".join(classes) or "-",
             )
-        record_observation(
-            contract=contract,
-            call_site=call_site,
-            outcome="mismatch" if is_mismatch else "ok",
-            classes=classes,
-            errors=errors,
-            extra_keys=extra_keys,
-            cache_dir=cache_dir,
-            wiki_root=wiki_root,
-        )
     except Exception:  # pragma: no cover - defensive: observation must never throw
         # A failure to *observe* must not degrade the pipeline in any way — the
         # whole point of phase 1 is behavior neutrality. Record at DEBUG so a
@@ -939,11 +676,11 @@ def observe_parse_failure(
     yielded a JSON object at all, so it never reaches :func:`observe`. A total
     parse failure is the most extreme missing-required case (athenaeum#608), and
     exactly the class the pre-athenaeum#724 instrument could not see. Emits the
-    same WARNING marker and records a mismatch to the ledger. Never raises.
+    same WARNING marker. Never raises.
 
-    *wiki_root*: forwarded to :func:`record_observation`, which passes it to
-    :func:`durable_observations_path` for the stranded-ledger warning only
-    (issue athenaeum#1601); it never changes where the write lands.
+    *cache_dir* / *wiki_root*: unused (issue athenaeum#2468 removed the
+    durable observation ledger these used to select); kept for
+    call-signature stability.
     """
     try:
         log.warning(
@@ -953,15 +690,6 @@ def observe_parse_failure(
             call_site,
             [detail] if detail else "-",
             MISMATCH_PARSE_FAIL,
-        )
-        record_observation(
-            contract=contract,
-            call_site=call_site,
-            outcome="mismatch",
-            classes=[MISMATCH_PARSE_FAIL],
-            errors=[detail] if detail else [],
-            cache_dir=cache_dir,
-            wiki_root=wiki_root,
         )
     except Exception:  # pragma: no cover - defensive: observation must never throw
         log.debug(

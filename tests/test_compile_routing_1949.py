@@ -24,9 +24,11 @@ Cases:
 - ``TestMultiPersonCompilationStillWorks`` — the regression guard on the
   above: when the correspondent's page IS written, a second person's page is
   logged rather than refused.
-- ``TestRouteLedger`` — AC2: each compile records which uid(s) it wrote for
-  each raw file, durably, so a misroute is reconstructible after the log
-  rotates.
+- ``TestNoCompileRouteLedgerWritten`` — issue athenaeum#2468: AC2's durable
+  per-file ledger (``record_compile_route``/``read_compile_routes``) was
+  removed as a ledger nothing outside this module's own tests read; a
+  compile now creates no ``_compile_route_records.jsonl`` at all. The
+  routing GUARD above (admit/prevent/log) is unaffected.
 """
 
 from __future__ import annotations
@@ -42,13 +44,9 @@ from athenaeum.compile_routing import (
     CORRESPONDENT_EMAIL_KEY,
     DIVERGENCE_LOGGED,
     DIVERGENCE_PREVENTED,
-    CompileRouteRecord,
     classify_route,
-    compile_route_ledger_path,
     correspondent_from_raw,
     page_uid,
-    read_compile_routes,
-    record_compile_route,
     resolved_correspondent_uid,
 )
 from athenaeum.librarian import process_one
@@ -418,80 +416,32 @@ class TestMultiPersonCompilationStillWorks:
         assert raw.path.name in robin, "a legitimate second-person write still lands"
 
 
-class TestRouteLedger:
-    def test_the_written_uids_are_recorded_for_the_raw_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC2 — runs logged counts only; now the per-file uid join is durable."""
-        _, _, raw = _compile(
-            tmp_path, monkeypatch, classified=[_update_of(_DANA_UID, _DISPLAY)]
-        )
-        rows = read_compile_routes(tmp_path / "cache")
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["raw_ref"] == raw.ref
-        assert row["source"] == "voltaire"
-        assert row["written_uids"] == [_DANA_UID]
-        assert row["updated_uids"] == [_DANA_UID]
-        assert row["correspondent_uid"] == _DANA_UID
-        assert row["prevented_uids"] == []
-        assert row["recorded_at"]
+class TestNoCompileRouteLedgerWritten:
+    """Issue athenaeum#2468: the compile-route ledger (``record_compile_route`` /
+    ``CompileRouteRecord`` / ``read_compile_routes``) was removed -- nothing
+    outside this module's own tests ever read it. ``classify_route``'s
+    routing GUARD (admit/prevent/log) is unchanged; only the durable row is
+    gone. These assertions FAIL on pre-athenaeum#2468 code, which wrote
+    ``_compile_route_records.jsonl`` under the cache dir on every compile.
+    """
 
-    def test_a_misroute_is_reconstructible_from_the_ledger_alone(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The exact reconstruction the rotated log could not provide."""
-        _compile(
-            tmp_path, monkeypatch, classified=[_update_of(_ROBIN_UID, "Robin Vance")]
-        )
-        rows = read_compile_routes(tmp_path / "cache")
-        assert len(rows) == 1
-        row = rows[0]
-        # Nothing was written for this file at all -- the observed symptom.
-        assert row["written_uids"] == []
-        # And the ledger names both the intended page and the refused one.
-        assert row["correspondent_uid"] == _DANA_UID
-        assert row["prevented_uids"] == [_ROBIN_UID]
-
-    def test_a_legitimate_second_person_write_is_recorded_as_logged(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _compile(
-            tmp_path,
-            monkeypatch,
-            classified=[
-                _update_of(_DANA_UID, _DISPLAY),
-                _update_of(_ROBIN_UID, "Robin Vance"),
-            ],
-        )
-        row = read_compile_routes(tmp_path / "cache")[0]
-        assert sorted(row["written_uids"]) == sorted([_DANA_UID, _ROBIN_UID])
-        assert row["logged_uids"] == [_ROBIN_UID]
-        assert row["prevented_uids"] == []
-
-    def test_a_row_is_written_even_for_a_file_with_no_correspondent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC2 is per raw file, not per conversation note."""
-        _, _, raw = _compile(
-            tmp_path,
-            monkeypatch,
-            classified=[_update_of(_ROBIN_UID, "Robin Vance")],
-            note=_prose_note(with_key=False),
-        )
-        row = read_compile_routes(tmp_path / "cache")[0]
-        assert row["raw_ref"] == raw.ref
-        assert row["written_uids"] == [_ROBIN_UID]
-        assert row["correspondent_uid"] == ""
-
-    def test_the_ledger_lives_outside_the_corpus(
+    def test_a_compile_creates_no_compile_route_ledger_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         knowledge, _, _ = _compile(
             tmp_path, monkeypatch, classified=[_update_of(_DANA_UID, _DISPLAY)]
         )
-        assert read_compile_routes(tmp_path / "cache")
+        assert not list(tmp_path.rglob("_compile_route_records.jsonl"))
         assert not list(knowledge.rglob("_compile_route_records.jsonl"))
+
+    def test_a_misrouted_compile_also_creates_no_ledger_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same assertion on the misroute path, which wrote the richest row."""
+        _compile(
+            tmp_path, monkeypatch, classified=[_update_of(_ROBIN_UID, "Robin Vance")]
+        )
+        assert not list(tmp_path.rglob("_compile_route_records.jsonl"))
 
 
 # ---------------------------------------------------------------------------
@@ -561,40 +511,6 @@ class TestFailOpen:
             )
             == ""
         )
-
-    def test_a_ledger_write_failure_is_swallowed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def _boom(*_a: object, **_k: object) -> None:
-            raise OSError("cache dir is read-only")
-
-        monkeypatch.setattr("athenaeum.compile_routing.append_line_durable", _boom)
-        # Must not raise.
-        record_compile_route(
-            CompileRouteRecord(raw_ref="voltaire/summary.md", source="voltaire"),
-            cache_dir=tmp_path / "cache",
-        )
-        assert read_compile_routes(tmp_path / "cache") == []
-
-    def test_a_malformed_ledger_row_does_not_make_the_trail_unreadable(
-        self, tmp_path: Path
-    ) -> None:
-        cache = tmp_path / "cache"
-        record_compile_route(
-            CompileRouteRecord(raw_ref="voltaire/good.md", source="voltaire"),
-            cache_dir=cache,
-        )
-        path = compile_route_ledger_path(cache)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")  # blank line
-            handle.write("{not json\n")  # torn row
-            handle.write('"a bare string"\n')  # valid JSON, wrong shape
-        rows = read_compile_routes(cache)
-        assert [row["raw_ref"] for row in rows] == ["voltaire/good.md"]
-
-    def test_a_missing_ledger_reads_as_empty(self, tmp_path: Path) -> None:
-        assert read_compile_routes(tmp_path / "never-written") == []
-
 
 class TestAdmittedWrites:
     """Only writes that will ACTUALLY land may decide the verdict.

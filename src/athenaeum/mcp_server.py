@@ -147,10 +147,6 @@ def _kill_switch_result() -> dict:
         "ok": False,
         "error_code": "disabled",
         "message": _KILL_SWITCH_MSG,
-        "resolved_block": None,
-        # legacy aliases (see resolve_question / resolve_merge):
-        "block": None,
-        "error": _KILL_SWITCH_MSG,
     }
 
 
@@ -198,10 +194,6 @@ def _forbidden_result() -> dict:
         "ok": False,
         "error_code": "forbidden",
         "message": _FORBIDDEN_MSG,
-        "resolved_block": None,
-        # legacy aliases (see resolve_question / resolve_merge):
-        "block": None,
-        "error": _FORBIDDEN_MSG,
     }
 
 
@@ -4237,13 +4229,11 @@ def create_server(
             - ``answer_file`` (str | None): path to the written
               decision-answer file on success; ``None`` on failure.
             - ``decision_id`` (str | None): echoes ``id`` on success.
-            - ``resolved_block`` (None): kept for shape back-compat; no
-              longer populated since the block isn't rewritten here.
 
-            For backward compatibility the dict also includes legacy
-            aliases ``block`` (= ``resolved_block``) and ``error``
-            (= ``message`` on failure). New callers should prefer
-            ``error_code`` + ``message`` + ``deferred``.
+            New callers should use ``error_code`` + ``message`` +
+            ``deferred``. (The legacy ``block`` / ``error`` / ``resolved_block``
+            aliases this dict used to carry were removed in athenaeum#2460 — they
+            always duplicated ``message``/``None``.)
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
@@ -4263,10 +4253,6 @@ def create_server(
                 "deferred": False,
                 "answer_file": None,
                 "decision_id": None,
-                "resolved_block": None,
-                # legacy aliases:
-                "block": None,
-                "error": message,
             }
 
         answer_path = write_decision_answer(
@@ -4282,10 +4268,6 @@ def create_server(
             "deferred": True,
             "answer_file": str(answer_path),
             "decision_id": id,
-            "resolved_block": None,
-            # legacy aliases:
-            "block": None,
-            "error": None,
         }
 
     @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
@@ -4377,10 +4359,10 @@ def create_server(
             ``list_pending_decisions`` / ``list_pending_questions`` will
             report for this item, usable immediately with
             ``resolve_question`` without a round-trip list call. ``raw_block``
-            carries the rendered block text (``None`` on failure); ``block``
-            / ``error`` are legacy-shaped aliases for ``raw_block`` /
-            ``message``-on-failure, mirroring every other write tool's
-            result shape in this module.
+            carries the rendered block text (``None`` on failure). (The
+            legacy ``block`` / ``error`` aliases this dict used to carry
+            for ``raw_block`` / ``message``-on-failure were removed in
+            athenaeum#2460.)
 
             The item is tagged with a provenance marker distinguishing it
             from a detector-raised item — surfaced as ``payload["raised_by"]
@@ -4404,15 +4386,12 @@ def create_server(
         for — gating it owner-only would defeat the tool's own purpose.
         """
         if is_disabled("capture", cache_dir=cache_dir):
-            msg = _KILL_SWITCH_MSG
             return {
                 "ok": False,
                 "error_code": "disabled",
-                "message": msg,
+                "message": _KILL_SWITCH_MSG,
                 "decision_id": None,
                 "raw_block": None,
-                "block": None,
-                "error": msg,
             }
 
         from athenaeum.answers import raise_pending_question
@@ -4724,15 +4703,15 @@ def create_server(
         Returns:
             A dict with ``ok``, ``error_code`` (``id_not_found`` /
             ``already_resolved`` on failure; ``None`` on success),
-            ``deferred`` (``True`` on success), ``answer_file``,
-            ``decision_id``, and ``error`` (legacy alias, failure only).
-            Unlike before athenaeum#908, a success response no longer includes the
-            review record itself (``overturned`` etc.) — that is only known
-            once the next ``ingest-answers`` tick applies the answer.
+            ``deferred`` (``True`` on success), ``answer_file``, and
+            ``decision_id``. Unlike before athenaeum#908, a success response no
+            longer includes the review record itself (``overturned`` etc.)
+            — that is only known once the next ``ingest-answers`` tick
+            applies the answer.
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
-            return {"ok": False, "error_code": "forbidden", "error": _FORBIDDEN_MSG}
+            return _forbidden_result()
 
         # Issue athenaeum#518: reviewing tier audits is meaningless when the tiers are
         # disabled — gate behind the same opt-in as the summary surface.
@@ -4761,7 +4740,6 @@ def create_server(
                 "deferred": False,
                 "answer_file": None,
                 "decision_id": None,
-                "error": message,
             }
 
         answer_path = write_decision_answer(
@@ -4781,7 +4759,6 @@ def create_server(
             "deferred": True,
             "answer_file": str(answer_path),
             "decision_id": id,
-            "error": None,
         }
 
     @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
@@ -4835,13 +4812,12 @@ def create_server(
             - ``answer_file`` (str | None): path to the written
               decision-answer file on success; ``None`` on failure.
             - ``decision_id`` (str | None): echoes ``id`` on success.
-            - ``resolved_block`` (None): kept for shape back-compat.
 
-            For backward compatibility the dict also includes legacy
-            aliases ``block`` (= ``resolved_block``) and ``error``
-            (= ``message`` on failure), mirroring ``resolve_question``.
-            New callers should prefer ``error_code`` + ``message`` +
-            ``deferred``.
+            New callers should use ``error_code`` + ``message`` +
+            ``deferred``. (The legacy ``block`` / ``error`` / ``resolved_block``
+            aliases this dict used to carry, mirroring ``resolve_question``,
+            were removed in athenaeum#2460 — they always duplicated
+            ``message``/``None``.)
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
@@ -4861,10 +4837,6 @@ def create_server(
                 "deferred": False,
                 "answer_file": None,
                 "decision_id": None,
-                "resolved_block": None,
-                # legacy aliases:
-                "block": None,
-                "error": message,
             }
 
         answer_path = write_decision_answer(
@@ -4884,10 +4856,6 @@ def create_server(
             "deferred": True,
             "answer_file": str(answer_path),
             "decision_id": id,
-            "resolved_block": None,
-            # legacy aliases:
-            "block": None,
-            "error": None,
         }
 
     # Issue athenaeum#2383, AC2's counter-example: validate the allowlist
