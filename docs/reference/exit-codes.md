@@ -14,7 +14,7 @@ command's `1` means something else.
 | `0` | — | Clean run — no failed files, no budget/deadline/spend-ceiling trip, no `EXIT_LIBRARIAN_REFUSAL`-eligible zero-progress trip; or `--strict-budget` is off and a non-zero-progress trip happened anyway; or `--allow-degraded` waived an otherwise-refusal-eligible zero-progress trip. | n/a |
 | `1` | — | A file failed processing (retried next run), or `--strict-budget` is set and the run deferred work under any resource budget/ceiling. | Yes — deferred/failed work is picked up by the next run. |
 | `3` | `EXIT_LIBRARIAN_REFUSAL` | **DEGRADED REFUSAL (issue athenaeum#1135): the run stopped early for a resource reason (`reason=budget` / `spend-ceiling` / `entity-share`) AND committed ZERO files.** Before this code existed, this case fell through to `0` — indistinguishable from a genuine success by exit code, the exact gap this issue closes (`athenaeum drain` already refused loudly on the analogous "made ZERO progress" condition; this brings `athenaeum run` up to the same standard). The `librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]` marker line (ERROR) is ALWAYS logged when the predicate holds, regardless of this code — see "Why 3 is its own code" below. Default-ON (no flag needed to opt in); `--allow-degraded` opts OUT (exits `0` instead, marker line still fires); `--strict-budget` takes precedence when both flags are set (its broader "any deferral" check runs first and returns `1`). | **Yes** — nothing was lost; the deferred intake is picked up exactly like any other budget/deadline trip. |
-| `75` | `EXIT_GRACEFUL_PARTIAL` **or** `EXIT_LOCK_HELD` | **Two unrelated constants both evaluate to `75` — see "`75` also collides with `EXIT_LOCK_HELD`" below (issue athenaeum#1379).** (1) `EXIT_GRACEFUL_PARTIAL` (`src/athenaeum/librarian.py`): athenaeum's own internal wall-clock deadline tripped. Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. (2) `EXIT_LOCK_HELD` (`src/athenaeum/_cli_shared.py`): any of the `_cmd_*` modules that call `_acquire_or_exit` (a count is deliberately not given here — it drifted twice; the enumeration below is the list `tests/test_exit_codes_doc_parity.py` checks) — `athenaeum run` (`_cmd_run.py`), `athenaeum attribution place`/`athenaeum attribution ack-observe-report` (`_cmd_attribution.py`), `athenaeum audit` (`_cmd_audit.py`), `athenaeum dedupe` (`_cmd_curate.py`; `athenaeum claims` is read-only and never takes the lock), `athenaeum decay-sweep` (`_cmd_decay.py`), `athenaeum decisions challenge-coordinate` (`_cmd_decisions.py`, issue athenaeum#1994), `athenaeum decompose-page` (`_cmd_decompose_page.py`), `athenaeum description backfill --apply` (`_cmd_description.py`, issue athenaeum#2453), `athenaeum correct-notes` (`_cmd_correct_notes.py`), `athenaeum drain` (`_cmd_drain.py`), `athenaeum import-memory` (`_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum reindex`/`athenaeum ingest`/`athenaeum session-end` (`_cmd_index.py`), `athenaeum decisions recompare --apply` (`_cmd_merges.py`, issue athenaeum#2456), `athenaeum ingest-answers`/`athenaeum ingest-merges`/`athenaeum reresolve-questions` (`_cmd_pending.py`), `athenaeum pii-restore` (`_cmd_pii_restore.py`), `athenaeum quarantine requeue --apply` (`_cmd_quarantine.py`, issue athenaeum#2075), `athenaeum receipts anchor` (`_cmd_receipts.py`, issue athenaeum#2040), `athenaeum reconcile` (`_cmd_reconcile.py`), `athenaeum recover-parked` (`_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair` (`_cmd_repair.py`; the lock is acquired under every mode — `--tag-indent`/`--value-quoting`/`--legacy-source-slugs`/`--backfill-sources`/`--bounce-fold`/`--contact-records`/`--all`), `athenaeum retire-pages` (`_cmd_retire.py`), `athenaeum schema migrate --apply` (`_cmd_schema.py`, issue athenaeum#2453), `athenaeum split-oversize` (`_cmd_split_oversize.py`, issue athenaeum#2078), or `athenaeum subject-population --from-report --apply` (`_cmd_subject_population.py`) — failed to acquire the run lock in `_acquire_or_exit` — **before any pipeline work started.** Nothing was committed and nothing was deferred to disk, so no clause of the `EXIT_GRACEFUL_PARTIAL` description above applies to it. | **Depends which producer.** `EXIT_GRACEFUL_PARTIAL`: **Yes** — nothing was killed, the next run continues from where this one stopped. `EXIT_LOCK_HELD`: **N/A** — no run happened, so there is nothing to resume; retry once the lock is free. |
+| `75` | `EXIT_GRACEFUL_PARTIAL` **or** `EXIT_LOCK_HELD` | **Two unrelated constants both evaluate to `75` — see "`75` also collides with `EXIT_LOCK_HELD`" below (issue athenaeum#1379).** (1) `EXIT_GRACEFUL_PARTIAL` (`src/athenaeum/librarian.py`): athenaeum's own internal wall-clock deadline tripped. Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. (2) `EXIT_LOCK_HELD` (`src/athenaeum/_cli_shared.py`): any of the `_cmd_*` modules that call `_acquire_or_exit` (a count is deliberately not given here — it drifted twice; the enumeration below is the list `tests/test_exit_codes_doc_parity.py` checks) — `athenaeum run` (`_cmd_run.py`), `athenaeum attribution place`/`athenaeum attribution ack-observe-report` (`_cmd_attribution.py`), `athenaeum audit` (`_cmd_audit.py`), `athenaeum dedupe` (`_cmd_curate.py`; `athenaeum claims` is read-only and never takes the lock), `athenaeum decay-sweep` (`_cmd_decay.py`), `athenaeum decisions challenge-coordinate` (`_cmd_decisions.py`, issue athenaeum#1994), `athenaeum decompose-page` (`_cmd_decompose_page.py`), `athenaeum description backfill --apply` (`_cmd_description.py`, issue athenaeum#2453), `athenaeum correct-notes` (`_cmd_correct_notes.py`), `athenaeum drain` (`_cmd_drain.py`), `athenaeum entity rename --apply` (`_cmd_query.py`, issue athenaeum#2488), `athenaeum import-memory` (`_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum reindex`/`athenaeum ingest`/`athenaeum session-end` (`_cmd_index.py`), `athenaeum decisions recompare --apply` (`_cmd_merges.py`, issue athenaeum#2456), `athenaeum ingest-answers`/`athenaeum ingest-merges`/`athenaeum reresolve-questions` (`_cmd_pending.py`), `athenaeum pii-restore` (`_cmd_pii_restore.py`), `athenaeum quarantine requeue --apply` (`_cmd_quarantine.py`, issue athenaeum#2075), `athenaeum receipts anchor` (`_cmd_receipts.py`, issue athenaeum#2040), `athenaeum reconcile` (`_cmd_reconcile.py`), `athenaeum recover-parked` (`_cmd_recover_parked.py`, issue athenaeum#2078), `athenaeum repair` (`_cmd_repair.py`; the lock is acquired under every mode — `--tag-indent`/`--value-quoting`/`--legacy-source-slugs`/`--backfill-sources`/`--bounce-fold`/`--contact-records`/`--all`), `athenaeum retire-pages` (`_cmd_retire.py`), `athenaeum schema migrate --apply` (`_cmd_schema.py`, issue athenaeum#2453), `athenaeum split-oversize` (`_cmd_split_oversize.py`, issue athenaeum#2078), or `athenaeum subject-population --from-report --apply` (`_cmd_subject_population.py`) — failed to acquire the run lock in `_acquire_or_exit` — **before any pipeline work started.** Nothing was committed and nothing was deferred to disk, so no clause of the `EXIT_GRACEFUL_PARTIAL` description above applies to it. | **Depends which producer.** `EXIT_GRACEFUL_PARTIAL`: **Yes** — nothing was killed, the next run continues from where this one stopped. `EXIT_LOCK_HELD`: **N/A** — no run happened, so there is nothing to resume; retry once the lock is free. |
 | `124` | `EXIT_EXTERNAL_KILL` | **An external kill signal (SIGTERM/SIGINT) was delivered to the process** — matching coreutils `timeout`(1) semantics, which itself exits 124 when it SIGTERMs a child that overran its wall clock. athenaeum's opt-in signal handler (`install_signal_handlers=True`, the CLI default) makes a best-effort partial-progress commit before re-raising this code, but the STOP REQUEST originated outside athenaeum's own deadline logic. | Best-effort — whatever was committed before the signal is resumable, but the commit itself is not guaranteed (a SIGKILL after the `timeout` grace period gives the handler no chance to run at all). |
 
 ## Why 75 and 124 are two different codes (issue athenaeum#897)
@@ -61,7 +61,8 @@ mutating command — any of the `_cmd_*` modules that call it:
 (`src/athenaeum/_cmd_decompose_page.py`, issue athenaeum#1914), `athenaeum description backfill --apply`
 (`src/athenaeum/_cmd_description.py`, issue athenaeum#2453), `athenaeum correct-notes`
 (`src/athenaeum/_cmd_correct_notes.py`), `athenaeum drain`
-(`src/athenaeum/_cmd_drain.py`), `athenaeum import-memory`
+(`src/athenaeum/_cmd_drain.py`), `athenaeum entity rename --apply`
+(`src/athenaeum/_cmd_query.py`, issue athenaeum#2488), `athenaeum import-memory`
 (`src/athenaeum/_cmd_import_memory.py`, issue athenaeum#2316), `athenaeum reindex`/`athenaeum ingest`/`athenaeum session-end`
 (`src/athenaeum/_cmd_index.py`), `athenaeum decisions recompare --apply`
 (`src/athenaeum/_cmd_merges.py`, issue athenaeum#2456),
@@ -223,13 +224,29 @@ partial progress committed, exactly as the table above describes.
 ## `athenaeum entity`
 
 A separate command family from `run()`'s cascade above — its own small
-integer space, not a continuation of the table at the top of this doc.
+integer space, not a continuation of the table at the top of this doc. This
+is the default READ mode's contract (no sub-action token, e.g. `athenaeum
+entity --uid X`); the nested `entity rename` sub-action (issue athenaeum#2488)
+has its own, further-distinct contract — see "`athenaeum entity rename`"
+immediately below.
 
 | Code | Name | Meaning |
 |---|---|---|
 | `0` | — | The uid resolved to a page; the record printed to stdout (redaction markers in place of withheld fields unless `--include-excluded`). |
 | `1` | `EXIT_NOT_FOUND` | The uid does not resolve to any page. |
+| `2` | — | Usage error: no `--uid` given (read mode only — see the "`2` as a usage error" convention above; issue athenaeum#2488 moved this check from argparse's own `required=True` into `cmd_entity` itself so the nested `rename` sub-action could have its own, independently required `--uid`). |
 | `70` | `EXIT_INTERNAL_ERROR` | The uid DID resolve, but something else in the read/serialize path failed (e.g. an unserializable frontmatter value) before a full record could be printed. |
+
+### `athenaeum entity rename`
+
+Follows the "Dry-run/apply commands (`0`/`1`/`2` ternary)" convention above,
+plus `75` (`EXIT_LOCK_HELD`) on `--apply` only — see that convention's own
+entry for `athenaeum entity rename` for the exact meaning of each code, and
+the `EXIT_LOCK_HELD` producer list above for the lock-contention case. Not a
+continuation of the plain `athenaeum entity` (read mode) table just above —
+the two sub-actions of one noun command deliberately use two different exit
+contracts, exactly as this doc's own rule for the "Other command-specific
+exit codes" section anticipates.
 
 ### Why `1` and `70` are two different codes (issue athenaeum#1270)
 
@@ -301,7 +318,11 @@ Commands following this convention: `athenaeum authority`, `athenaeum axiom`,
 `athenaeum push-metrics`, `athenaeum attribution`, `athenaeum decisions`,
 `athenaeum dedupe`, `athenaeum claims`, `athenaeum spend`,
 `athenaeum session-end` (its own `--references-only`/`--session` usage
-check), and `athenaeum subject-population` (`--from-report`/`--apply`
+check), `athenaeum entity` (a missing `--uid` in its default read mode —
+issue athenaeum#2488 moved this check out of argparse's own `required=True`
+and into `cmd_entity` itself, so the nested `entity rename` sub-action could
+have its own, independently required `--uid`; same exit code, `2`, either
+way), and `athenaeum subject-population` (`--from-report`/`--apply`
 combined incorrectly).
 
 ### `2` meaning "found something" (dry-run / lint convention)
@@ -324,8 +345,12 @@ error (apply attempted without git, an unreadable page, a lookup failure,
 ...); `2` is a dry run that found something that WOULD be changed if
 `--apply` were passed — this is the CI/sign-off signal. Members:
 `athenaeum repair` (every mode), `athenaeum decay-sweep`, `athenaeum
-retire-pages`, `athenaeum reconcile`, `athenaeum pii-restore`, and
-`athenaeum ingest --evaluate-only`
+retire-pages`, `athenaeum reconcile`, `athenaeum pii-restore`, `athenaeum
+entity rename` (issue athenaeum#2488 — `1` here means an unknown uid, an empty
+`--name`, an unparseable page, or a `--reslug` target colliding with a
+different existing page; a no-op rename, where the page already carries the
+requested name, is `0`, not `2` — it is not "a change that would be made",
+there is no change at all), and `athenaeum ingest --evaluate-only`
 (the one member with no `--apply` of its own — `2` means "a trigger fired;
 run `ingest --if-triggered` next", per `_cmd_ingest_evaluate_only`'s own
 docstring, which names `decay-sweep` and `repair` as the pattern it mirrors).
