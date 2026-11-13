@@ -223,11 +223,15 @@ def rebuild_recall_index(
     never fails the caller's mutating command (the git commit already
     landed).
     """
-    from athenaeum.config import resolve_extra_intake_roots
+    from athenaeum.config import resolve_extra_intake_roots, resolve_search_backend
     from athenaeum.search import build_fts5_index, build_vector_index
 
     wiki_root = knowledge_root / "wiki"
-    backend = getattr(args, "backend", None) or cfg.get("search_backend", "fts5")
+    # Issue athenaeum#2458: ONE resolution rule for `search_backend` —
+    # `resolve_search_backend` (yaml > shipped default), never an inline
+    # `.get(..., "fts5")` whose fallback fired on any config dict that did
+    # not come from `load_config`. An explicit `--backend` still wins.
+    backend = getattr(args, "backend", None) or resolve_search_backend(cfg)
     cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None)).resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
     cache_dir.mkdir(parents=True, exist_ok=True)

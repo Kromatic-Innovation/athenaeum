@@ -354,6 +354,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_cache_dir,
         resolve_extra_intake_roots,
         resolve_screening,
+        resolve_search_backend,
         resolve_serve_auth_allowed_identities,
         resolve_serve_auth_issuer,
         resolve_serve_auth_resource,
@@ -448,7 +449,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         serve_auth = None
 
-    backend = cfg.get("search_backend", "fts5")
+    # Issue athenaeum#2458: the MCP recall surface resolves the backend the
+    # same way every other surface does — `resolve_search_backend`.
+    backend = resolve_search_backend(cfg)
     # Issue athenaeum#521 (H9): route serve's cache dir through the shared resolver so
     # ATHENAEUM_CACHE_DIR (and --cache-dir) are honoured — previously hardcoded,
     # so recall served a stale/empty index when the compiler wrote elsewhere.

@@ -52,7 +52,12 @@ import json
 import sys
 from pathlib import Path
 
-from athenaeum.config import DEFAULT_CACHE_DIR, resolve_cache_dir
+from athenaeum.config import (
+    DEFAULT_CACHE_DIR,
+    load_config,
+    resolve_cache_dir,
+    resolve_search_backend,
+)
 
 
 def cmd_context(args: argparse.Namespace) -> int:
@@ -77,13 +82,24 @@ def cmd_context(args: argparse.Namespace) -> int:
     session_id = session_id or "unknown"
     cache_dir = resolve_cache_dir(Path(args.cache_dir) if args.cache_dir else None)
 
+    # Issue athenaeum#2458: an omitted `--backend` (now `default=None`)
+    # means "whatever `athenaeum.yaml` configured" — load the config and
+    # resolve it through `resolve_search_backend`, the same rule the
+    # `recall` CLI, the MCP server and the Codex adapter apply. An
+    # explicit `--backend` still wins. Previously `default="fts5"`, which
+    # made this subcommand disagree with a `search_backend: vector`
+    # deployment on every single invocation.
+    backend = args.backend
+    if backend is None:
+        backend = resolve_search_backend(load_config())
+
     envelope = build_context_for_turn(
         prompt,
         session_id,
         cache_dir=cache_dir,
         n=args.n,
         budget=args.budget,
-        search_backend=args.backend,
+        search_backend=backend,
         use_llm=not args.no_llm,
         llm_timeout=args.llm_timeout,
     )
@@ -116,8 +132,8 @@ def add_context_subparser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--backend",
         choices=("fts5", "vector"),
-        default="fts5",
-        help="Search backend (default: fts5)",
+        default=None,
+        help="Search backend (default: the configured `search_backend`)",
     )
     parser.add_argument(
         "--no-llm", action="store_true", help="Skip LLM term extraction, use the regex fallback"

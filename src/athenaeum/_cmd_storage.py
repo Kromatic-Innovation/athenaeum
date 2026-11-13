@@ -76,6 +76,7 @@ from athenaeum.config import (
     resolve_pii_hazard_classifier_mode,
     resolve_pii_hazard_classifier_timeout_secs,
     resolve_pii_hazard_classifier_weights_path,
+    resolve_search_backend,
 )
 from athenaeum.pending_merges_pii import scrub_pending_merges
 from athenaeum.pii import (
@@ -622,7 +623,9 @@ def _post_apply_index_step(
         backend_name, pages = _reindex(knowledge_root, config=config)
     except ImportError as exc:
         # e.g. the `vector` backend configured but chromadb not installed.
-        backend = config.get("search_backend") if config else "?"
+        # Issue athenaeum#2458: name the backend `reindex` actually tried to
+        # load, through the resolver it itself uses.
+        backend = resolve_search_backend(config)
         print(
             f"warning: reindex failed to load the '{backend}' backend ({exc}); "
             f"run `athenaeum reindex --path {knowledge_root}` manually so the "

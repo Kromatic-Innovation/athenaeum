@@ -61,6 +61,19 @@ def _no_env_killswitch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ATHENAEUM_DISABLED", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue athenaeum#2458: ``refresh`` now resolves its backend and its cap
+    ceiling off ``athenaeum.yaml``, so every test in this module would
+    otherwise read whatever ``~/knowledge/athenaeum.yaml`` the machine running
+    it happens to have. Point HOME at an empty tmp dir (no yaml at all, so the
+    resolvers return their shipped defaults) and let the tests that care about
+    a configured value write one under it explicitly.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("ATHENAEUM_RECALL_CAP_CEILING", raising=False)
+
+
 @pytest.fixture
 def cache(tmp_path: Path) -> Path:
     d = tmp_path / "cache"
@@ -197,7 +210,11 @@ def test_refresh_calls_build_context_with_empty_exclude(
     assert isinstance(call["exclude"], frozenset)
     assert call["use_llm"] is False
     assert call["n"] == 7
-    assert call["search_backend"] == "fts5"
+    # Issue athenaeum#2458: the backend is the CONFIGURED one
+    # (`resolve_search_backend`, shipped default `vector` with no yaml under
+    # the isolated HOME above), not the former hardcoded `fts5`. This is the
+    # Codex-user-visible behaviour change the issue calls out.
+    assert call["search_backend"] == "vector"
     assert call["args"] == (SEED, "codex-context-refresh")
 
 

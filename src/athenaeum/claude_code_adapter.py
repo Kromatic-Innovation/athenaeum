@@ -38,7 +38,10 @@ here:
    process env and forwarded to :func:`~athenaeum.context.build_context_for_turn`
    as its ``search_backend`` argument, mirroring the shell default/override
    at ``user-prompt-recall.sh:147``. The adapter previously always used the
-   function's ``"fts5"`` default, ignoring the knob entirely.
+   function's ``"fts5"`` default, ignoring the knob entirely. Since issue
+   athenaeum#2458 the fallback for an ABSENT ``SEARCH_BACKEND`` comes from
+   :func:`athenaeum.config.resolve_search_backend` rather than a second
+   copy of the default backend name.
 4. **Minimum prompt length.** A prompt shorter than 8 characters produces no
    output, mirroring ``user-prompt-recall.sh:711``
    (``[ -z "$PROMPT" ] || [ ${#PROMPT} -lt 8 ]``).
@@ -51,7 +54,10 @@ here:
 6. **Recall-cap ceiling.** :func:`_resolve_recall_cap_ceiling` mirrors the
    shell hook's
    ``CEILING="${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}"``
-   plus its non-numeric/non-positive-value guard, and the result is now
+   plus its non-numeric/non-positive-value guard -- since issue
+   athenaeum#2458 by DELEGATING all of that to
+   :func:`athenaeum.config.resolve_recall_cap_ceiling` rather than
+   re-implementing it (see that function's docstring here) -- and the result is now
    forwarded to :func:`~athenaeum.context.build_context_for_turn` as its
    ``n`` argument. Found by the athenaeum#1361 lane's own re-replay, not by
    athenaeum#1661: the adapter previously never passed ``n`` at all, so it
@@ -236,9 +242,10 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import (
-    RECALL_CAP_CEILING_DEFAULT,
     resolve_cache_dir,
     resolve_hook_budget_seconds,
+    resolve_recall_cap_ceiling,
+    resolve_search_backend,
 )
 
 #: Default periodic in-session anchor interval, in minutes (issue
@@ -391,15 +398,32 @@ def _resolve_recall_cap_ceiling() -> int:
     convenience unrelated to this ceiling — this adapter must never fall
     back to it, or every turn silently loses whatever the shell hook would
     have rendered past the third bullet.
+
+    **Issue athenaeum#2458: the number itself now comes from**
+    :func:`athenaeum.config.resolve_recall_cap_ceiling`, not from a second
+    hand-rolled env read with its own fallback literal. This function is
+    reduced to the ONE thing the resolver cannot know: that
+    ``RECALL_CAP_CEILING`` (no ``ATHENAEUM_`` prefix) is a hook-local
+    CACHE of the yaml value, written by ``session-start-recall.sh``
+    deliberately under that name so it can never shadow the resolver's
+    own env > yaml precedence for a downstream Python caller. So it is
+    handed to the resolver in the yaml POSITION (``recall.cap.ceiling``),
+    which reproduces today's
+    ``${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}``
+    precedence exactly, with the parse, the ``<= 0`` guard and the
+    default all owned by the resolver. The hook still never loads
+    ``athenaeum.yaml`` itself (see the module docstring).
     """
-    raw = os.environ.get("ATHENAEUM_RECALL_CAP_CEILING") or os.environ.get("RECALL_CAP_CEILING")
-    if not raw:
-        return RECALL_CAP_CEILING_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        return RECALL_CAP_CEILING_DEFAULT
-    return value if value > 0 else RECALL_CAP_CEILING_DEFAULT
+    cached = os.environ.get("RECALL_CAP_CEILING")
+    cached_config: dict[str, Any] | None = None
+    if cached:
+        try:
+            cached_value = int(cached)
+        except ValueError:
+            cached_value = 0
+        if cached_value > 0:
+            cached_config = {"recall": {"cap": {"ceiling": cached_value}}}
+    return resolve_recall_cap_ceiling(cached_config)
 
 
 def _auto_recall_enabled() -> bool:
@@ -789,7 +813,15 @@ def main(argv: list[str] | None = None) -> int:
                 prompt,
                 session_id,
                 cache_dir=cache_dir,
-                search_backend=os.environ.get("SEARCH_BACKEND", "vector"),
+                # Issue athenaeum#2458: `SEARCH_BACKEND` is the hook-local
+                # cache of the yaml `search_backend`, written by
+                # `session-start-recall.sh` (which resolves it through
+                # `resolve_search_backend`); the fallback when it is absent
+                # comes from that same resolver rather than from a second
+                # copy of the default name.
+                search_backend=(
+                    os.environ.get("SEARCH_BACKEND") or resolve_search_backend(None)
+                ),
                 n=_resolve_recall_cap_ceiling(),
             )
             text = envelope["render"]["text"]

@@ -521,11 +521,10 @@ def check_search_index(
     built (issue athenaeum#2298 AC1), reading the SAME ``search_backend``
     config key :func:`athenaeum._cmd_query.cmd_recall` resolves through.
     """
-    backend = (
-        str(config.get("search_backend", "vector"))
-        if isinstance(config, dict)
-        else "vector"
-    )
+    from athenaeum.config import resolve_search_backend
+
+    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`.
+    backend = resolve_search_backend(config if isinstance(config, dict) else None)
     fix = (
         "run `athenaeum reindex --path <knowledge-root>` to build it, or "
         "start a Claude Code session (the SessionStart hook builds it "

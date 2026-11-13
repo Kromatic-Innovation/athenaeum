@@ -155,6 +155,7 @@ from athenaeum.config import (
     resolve_quarantine_retry_delays_days,
     resolve_retire,
     resolve_rule_proposals_enabled,
+    resolve_search_backend,
     resolve_shape_rules_runtime_share,
     resolve_signal_mining_dry_run,
     resolve_signal_mining_enabled,
@@ -12701,7 +12702,10 @@ def reindex(
         config = load_config(knowledge_root)
     resolved_cache = _resolve_cache_dir(cache_dir)
     resolved_cache.mkdir(parents=True, exist_ok=True)
-    backend_name = backend or str(config.get("search_backend", "fts5"))
+    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`
+    # (yaml > shipped default) — the old inline `fts5` fallback fired for
+    # every library caller that hand-built a config dict.
+    backend_name = backend or resolve_search_backend(config)
     extra_roots = resolve_extra_intake_roots(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
     full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(
@@ -12811,7 +12815,10 @@ def _reindex_would_change(
     if not wiki_root.is_dir():
         return None
     resolved_cache = _resolve_cache_dir(cache_dir)
-    backend_name = backend or str(config.get("search_backend", "fts5"))
+    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`
+    # (yaml > shipped default) — the old inline `fts5` fallback fired for
+    # every library caller that hand-built a config dict.
+    backend_name = backend or resolve_search_backend(config)
     manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
     manifest_path = resolved_cache / manifest_name
     extra_roots = resolve_extra_intake_roots(knowledge_root, config)
@@ -13060,7 +13067,10 @@ def session_end(
         **run_kwargs,
     )
 
-    backend_name = backend or str(config.get("search_backend", "fts5"))
+    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`
+    # (yaml > shipped default) — the old inline `fts5` fallback fired for
+    # every library caller that hand-built a config dict.
+    backend_name = backend or resolve_search_backend(config)
     reindexed = False
     reindex_pages = 0
     reindex_would_change: int | None = None
