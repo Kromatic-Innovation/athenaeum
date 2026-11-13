@@ -114,15 +114,6 @@ from athenaeum.clusters import (
     write_cluster_report,
 )
 from athenaeum.compile_routing import (
-    # Re-exported deliberately, in the explicit ``as`` form so it reads as a
-    # re-export rather than an unused import. Issue athenaeum#1948 introduced
-    # this constant on `librarian`; athenaeum#1949 moved its definition down to
-    # `compile_routing` so BOTH Tier-3 write boundaries could share one
-    # reader. Keeping the name importable from here means that move is not a
-    # breaking change for anything already reading it off this module.
-    CORRESPONDENT_EMAIL_KEY as CORRESPONDENT_EMAIL_KEY,
-)
-from athenaeum.compile_routing import (
     PERSON_ENTITY_TYPE,
     CompileRouteRecord,
     CorrespondentRef,
@@ -500,9 +491,9 @@ DEFERRED_MANIFEST_NAME = "_deferred_work.md"
 # primitives moved to the :mod:`athenaeum.stuck_ledger` leaf so
 # ``status.py`` can read the SAME ledger without importing ``librarian.py``
 # (which would reopen the ``{librarian, drain, status}`` SCC athenaeum#640
-# dissolved). Re-exported here under their original names for back-compat —
-# every existing call site and test in this module is unchanged.
-STUCK_MANIFEST_NAME = stuck_ledger_mod.STUCK_MANIFEST_NAME
+# dissolved). Issue athenaeum#2443 removed the test-only back-compat
+# re-export this module kept under the old name; read
+# :data:`athenaeum.stuck_ledger.STUCK_MANIFEST_NAME` directly instead.
 
 # Consecutive-failure count at which a raw file is treated as stuck (skipped +
 # surfaced) rather than retried again. Resolved via
@@ -1288,7 +1279,9 @@ def tier0_bounce_verdict_mark(
     athenaeum#852 decided the wiki ``bounced:`` field
     (:data:`athenaeum.bounce_join.WIKI_BOUNCED_FIELD`) is written by "a
     producer outside athenaeum" and athenaeum only ever reads it, via
-    :func:`athenaeum.bounce_join.deliverability_for_page`. That held because
+    :func:`athenaeum.bounce_join.wiki_bounced_value`, reached from
+    :func:`athenaeum.bounce_divergence.compute_divergence` (and via this
+    module's own frontmatter reads, below). That held because
     every non-RFC verdict already had SOME producer. It no longer holds for
     one narrow class: voltaire's historical bounce-bio backfill normalizes
     the verifalia verdicts it recognizes into RFC 3463-conforming notes
