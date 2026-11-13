@@ -187,6 +187,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_import_memory",
         "add_import_memory_subparser",
     ),
+    "relate": ("athenaeum._cmd_relate", "add_relate_subparser"),
 }
 
 
@@ -239,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_reconcile import add_reconcile_subparser
     from athenaeum._cmd_recover_parked import add_recover_parked_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
+    from athenaeum._cmd_relate import add_relate_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
@@ -343,6 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_schedule_subparser(subparsers)
     # import-memory (issue athenaeum#2316)
     add_import_memory_subparser(subparsers)
+    # relate (issue athenaeum#2535)
+    add_relate_subparser(subparsers)
 
     return parser
 
