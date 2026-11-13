@@ -360,10 +360,17 @@ DURABLE_IDENTIFIER_FIELDS: frozenset[str] = frozenset(
 #: the separate slice can pick it up.
 NAME_FIELDS: tuple[str, ...] = ("name", "preferred_name")
 
-# A conservative email-shaped token — good enough to flag a body/narrative
-# line as "looks like inline contact data" without trying to be a fully
-# RFC 5322-correct validator (a lint, not a hard gate).
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+#: The email-shaped pattern string behind :data:`_EMAIL_RE` below, exposed
+#: PUBLICLY so a sibling module that needs "does this token look like an
+#: email" can share this module's definition without importing its private
+#: compiled pattern by name (issue athenaeum#2444: :mod:`athenaeum.pii_restore`
+#: used to carry its own byte-identical duplicate of this regex). Good
+#: enough to flag a body/narrative line as "looks like inline contact data"
+#: without trying to be a fully RFC 5322-correct validator (a lint, not a
+#: hard gate).
+EMAIL_PATTERN: str = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+
+_EMAIL_RE = re.compile(EMAIL_PATTERN)
 
 # A conservative phone-shaped token: 7+ digits allowing common separators
 # (spaces, dashes, dots, parens) and an optional leading '+' or '('.

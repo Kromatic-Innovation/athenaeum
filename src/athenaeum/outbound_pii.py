@@ -96,6 +96,14 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+# Single source of truth for email-key normalization: athenaeum.pii's PUBLIC
+# normalize_identifier (issue athenaeum#2444 — this module used to carry its own
+# byte-identical duplicate, `_normalize_email`). A public name, never a
+# private one: see this module's own "Migrated onto the sensitivity
+# registry" note below for why a private-name import of athenaeum.pii is
+# off the table here.
+from athenaeum.pii import normalize_identifier
+
 # Single source of truth for detection: the sensitivity registry's shipped
 # `email`/`phone` recognisers (issue athenaeum#992). Importing sensitivity here
 # creates no cycle — it does not import this module.
@@ -170,7 +178,7 @@ class Allowlist:
             if not token:
                 continue
             if "@" in token:
-                emails.add(_normalize_email(token))
+                emails.add(normalize_identifier(token))
             else:
                 digits = _normalize_phone(token)
                 if digits:
@@ -180,14 +188,10 @@ class Allowlist:
     def contains(self, finding: PiiFinding) -> bool:
         """True when *finding* names an address already known to the recipient."""
         if finding.kind == PII_KIND_EMAIL:
-            return _normalize_email(finding.value) in self.emails
+            return normalize_identifier(finding.value) in self.emails
         if finding.kind == PII_KIND_PHONE:
             return _normalize_phone(finding.value) in self.phones
         return False
-
-
-def _normalize_email(value: str) -> str:
-    return value.strip().lower()
 
 
 def _normalize_phone(value: str) -> str:

@@ -139,7 +139,8 @@ def test_apply_honours_configured_safe_email_exact(tmp_path: Path) -> None:
     """issue athenaeum#1284: pii.restore.safe_email_exact in athenaeum.yaml
     must actually be honoured end to end through the INSTALLED CLI, not
     just at the library layer -- this is the exact capability regression
-    the issue names against scripts/pii-restore.py."""
+    the issue names against the legacy repair script this module
+    superseded."""
     root = _build_fixture_repo(tmp_path)
     (root / "athenaeum.yaml").write_text(
         "storage:\n  mapping:\n    pii: excluded\n"
