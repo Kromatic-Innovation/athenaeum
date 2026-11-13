@@ -616,9 +616,24 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     config = load_config(knowledge_root)
 
     refuse_on_conflict = getattr(args, "refuse_on_pending_conflict", False)
-    conflicts = check_pending_conflicts(
-        raw_root, wiki_root, decision_id=args.id, decision_type=applier_type
-    )
+    try:
+        conflicts = check_pending_conflicts(
+            raw_root, wiki_root, decision_id=args.id, decision_type=applier_type
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort visibility only (issue
+        # athenaeum#2544): a stray unreadable file elsewhere in raw/answers/
+        # (e.g. invalid UTF-8 — `_load_decision_answer` reads it with
+        # `encoding="utf-8"` and that raises `UnicodeDecodeError`, not
+        # caught by its own `except OSError`) must never take down an
+        # otherwise-valid answer for THIS id — same "lookup is best-effort"
+        # posture decision_answers.py's own `_raised_at_for` already takes,
+        # and the same guard triage.submit_answer already has around its
+        # own check_pending_conflicts call.
+        conflicts = []
+        print(
+            f"warning: pending-conflict scan skipped ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
     if conflicts:
         conflict_descriptions = [
             f"{c.decision_type} answer at {c.path} ({c.resolved_at}): {c.verdict!r}"

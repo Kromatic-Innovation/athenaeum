@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 from athenaeum.decision_answers import (
+    _decision_is_open,
     check_pending_conflicts,
     render_decision_answer,
     scan_overlapping_merge_proposals,
@@ -284,3 +285,119 @@ class TestMergeSourceOverlap:
             raw_root, wiki_root, decision_id=pm_b.id, sources=pm_b.sources
         )
         assert overlapping == []
+
+
+class TestDecisionIsOpenArchivalPolarity:
+    """`_decision_is_open`'s `question`/`coordinate` branch used to treat
+    an `id_not_found` lookup against `_pending_questions.md` as OPEN —
+    but `id_not_found` is also exactly what a FULLY ARCHIVED decision
+    looks like once `ingest_answers` moves its block out to
+    `_pending_questions_archive.md` (confirmed empirically: `resolve_by_id`
+    only flips the checkbox in place; the archive move is a separate step
+    in the same `ingest-answers` tick). Getting this polarity wrong means
+    a long-settled decision's stale answer file would warn/refuse
+    forever."""
+
+    @staticmethod
+    def _seed_and_fully_archive_question(wiki_root: Path, raw_root: Path) -> str:
+        """A real `question` decision, answered and taken all the way
+        through archival (apply_decision_answers + ingest_answers), so its
+        id is no longer in `_pending_questions.md` at all. Returns the id."""
+        from athenaeum.answers import ingest_answers, parse_pending_questions
+        from athenaeum.decision_answers import apply_decision_answers
+        from athenaeum.runlock import RunLock
+
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        raw_root.mkdir(parents=True, exist_ok=True)
+        (raw_root / "sessions").mkdir(parents=True, exist_ok=True)
+        (raw_root / "sessions" / "x.md").write_text(
+            "---\nname: Session X\n---\nAcme Corp is Series A.\n", encoding="utf-8"
+        )
+        pending_path = wiki_root / "_pending_questions.md"
+        block = (
+            '## [2026-04-20] Entity: "Acme Corp" (from sessions/x.md)\n'
+            "- [ ] Is Acme still Series A?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: two conflicting statements.\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block, encoding="utf-8")
+        decision_id = parse_pending_questions(pending_path)[0].id
+
+        write_decision_answer(
+            raw_root,
+            wiki_root=wiki_root,
+            decision_id=decision_id,
+            decision_type="question",
+            verdict="Resolved: Acme is Series A.",
+        )
+        with RunLock(wiki_root) as lock:
+            report = apply_decision_answers(wiki_root, raw_root, lock=lock)
+        assert report.applied == 1
+
+        count = ingest_answers(pending_path, raw_root, client=None, config=None)
+        assert count == 1
+
+        # Sanity: really gone from the live queue, really present in the
+        # archive -- otherwise this fixture isn't testing what it claims.
+        assert decision_id not in {
+            pq.id for pq in parse_pending_questions(pending_path)
+        }
+        archive_path = wiki_root / "_pending_questions_archive.md"
+        assert archive_path.exists()
+        assert decision_id in {pq.id for pq in parse_pending_questions(archive_path)}
+
+        return decision_id
+
+    def test_archived_question_is_closed_not_open(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        raw_root = tmp_path / "raw"
+        decision_id = self._seed_and_fully_archive_question(wiki_root, raw_root)
+
+        assert _decision_is_open(wiki_root, "question", decision_id) is False
+
+    def test_archived_question_answer_file_does_not_surface_as_pending_conflict(
+        self, tmp_path: Path
+    ) -> None:
+        """The integration version of the same bug: the answer file
+        `apply_decision_answers` already wrote for the now-archived
+        decision (never deleted -- see module docstring) must not be
+        reported as an unapplied/pending conflict any more."""
+        wiki_root = tmp_path / "wiki"
+        raw_root = tmp_path / "raw"
+        decision_id = self._seed_and_fully_archive_question(wiki_root, raw_root)
+
+        found = scan_unapplied_answers(raw_root, wiki_root, decision_id=decision_id)
+        assert found == []
+
+        conflicts = check_pending_conflicts(
+            raw_root, wiki_root, decision_id=decision_id, decision_type="question"
+        )
+        assert conflicts == []
+
+    def test_open_question_is_still_open(self, tmp_path: Path) -> None:
+        """The counterpart: a question that has NOT been answered/archived
+        must still be reported open (this is the behavior the fix must
+        not regress)."""
+        from athenaeum.answers import parse_pending_questions
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        pending_path = wiki_root / "_pending_questions.md"
+        block = (
+            '## [2026-05-01] Entity: "Other Co" (from sessions/y.md)\n'
+            "- [ ] Is Other Co still private?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: unresolved.\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block, encoding="utf-8")
+        decision_id = parse_pending_questions(pending_path)[0].id
+
+        assert _decision_is_open(wiki_root, "question", decision_id) is True
+
+    def test_never_seen_anywhere_stays_on_the_safe_side(self, tmp_path: Path) -> None:
+        """Genuinely unknown (no live entry, no archive entry, not even a
+        `_pending_questions.md` file) is ambiguous, not proven closed --
+        must stay reported OPEN per this function's own safe-side rule."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        assert _decision_is_open(wiki_root, "question", "totally-unknown-id") is True

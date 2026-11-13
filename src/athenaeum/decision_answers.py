@@ -496,12 +496,45 @@ def _decision_is_open(wiki_root: Path, decision_type: str, decision_id: str) -> 
     has no cheap live lookup here and is conservatively reported OPEN: a
     false positive (surfacing a long-applied file as noise) is safe, a
     false negative (hiding a genuinely contradicting live answer) is not.
+
+    ``question``/``coordinate`` archival (found empirically, not merely
+    assumed): :func:`athenaeum.answers.resolve_by_id` only flips the
+    block's checkbox in place, so right after
+    :func:`apply_decision_answers` alone, :func:`preflight_question` still
+    reports ``already_answered`` for it — but the FULL ``ingest-answers``
+    tick runs :func:`athenaeum.answers.ingest_answers` immediately after,
+    which (when the block's source resolves — the common case for a real
+    question; a coordinate item's synthetic ``coordinate-batch:`` source
+    never resolves, so it is NEVER archived this way and stays
+    ``already_answered`` forever) MOVES the block out of
+    ``_pending_questions.md`` into ``_pending_questions_archive.md``
+    entirely. From that point on ``preflight_question`` reports
+    ``id_not_found`` for a decision that is in fact long since CLOSED, not
+    open — treating every ``id_not_found`` as open (as this function used
+    to) defeats the whole point of this check: it would warn/refuse on
+    settled decisions forever and train the caller to ignore the signal.
+    So ``id_not_found`` is resolved one level deeper: a hit in the archive
+    means closed; a miss there too is genuinely ambiguous (never existed,
+    or a typo) and stays on the SAFE side (reported open) per this
+    function's own stated tie-breaking rule above. ``merge``/``audit``
+    need no equivalent check: an already-resolved merge block is left
+    byte-for-byte in place by :func:`athenaeum.pending_merges.revalidate_pending_merges`
+    (only UNRESOLVED stale blocks are ever archived out), and the
+    calibration ledger :func:`preflight_audit` reads is append-only, so
+    neither ever loses a resolved id out from under this check.
     """
     if decision_type in ("question", "coordinate"):
-        _ok, error_code, _message = preflight_question(
-            wiki_root / "_pending_questions.md", decision_id
-        )
-        return error_code != "already_answered"
+        pending_path = wiki_root / "_pending_questions.md"
+        _ok, error_code, _message = preflight_question(pending_path, decision_id)
+        if error_code != "id_not_found":
+            return error_code != "already_answered"
+        archive_path = wiki_root / "_pending_questions_archive.md"
+        if archive_path.exists():
+            from athenaeum.answers import parse_pending_questions
+
+            if any(pq.id == decision_id for pq in parse_pending_questions(archive_path)):
+                return False  # genuinely archived — closed, not open
+        return True  # never seen anywhere — ambiguous, safe side: report it
     if decision_type == "merge":
         from athenaeum.pending_merges import parse_pending_merges
 

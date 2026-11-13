@@ -312,6 +312,54 @@ class TestPendingConflictWarnOrRefuse:
         assert len(list(answers_dir.glob("*.md"))) == 1
 
 
+class TestPendingConflictScanIsBestEffort:
+    """A stray unreadable file elsewhere in raw/answers/ must not take
+    down an otherwise-valid `decisions answer` call -- the pending-
+    conflict scan is a WARNING, not the write itself."""
+
+    def test_invalid_utf8_file_does_not_block_a_valid_answer(
+        self, knowledge_root: Path
+    ) -> None:
+        wiki_root = knowledge_root / "wiki"
+        decision_id = _seed_coordinate_item(wiki_root)
+        good_payload = json.dumps(
+            {"answers": [{"pair": "page-a+page-b", "dimensions": {"subject": {"page-a": "x"}}}]}
+        )
+
+        answers_dir = knowledge_root / "raw" / "answers"
+        answers_dir.mkdir(parents=True, exist_ok=True)
+        # A stray file with invalid UTF-8 bytes -- unrelated to the id
+        # being answered below, but still in the directory the
+        # pending-conflict scan walks.
+        (answers_dir / "20261101T000000Z-corrupt.md").write_bytes(
+            b"\xff\xfe not valid utf-8 \x80\x81"
+        )
+
+        rc, out, err = _run(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                decision_id,
+                "--type",
+                "coordinate",
+                "--answer",
+                json.dumps({"verdict": good_payload}),
+                "--json",
+            ]
+        )
+
+        assert rc == 0, err
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        # The warning was surfaced, not silently eaten.
+        assert "pending-conflict scan skipped" in err
+        # The real answer was still written, alongside the corrupt file.
+        assert len(list(answers_dir.glob("*.md"))) == 2
+
+
 class TestPendingAnswersCli:
     """AC4: a read-only CLI lists unapplied answer files for a decision id
     or a page, with timestamp and verdict."""
