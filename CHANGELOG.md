@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Merge-queue maintenance commands (`revalidate`, `recompare`, `scrub-pii`,
+  `propose-fold`, `provenance`) are now available under `athenaeum
+  decisions`; `recompare --apply` exits 75 when the run lock is held
+  (athenaeum#2456).
+
 ### Fixed
 
 - `athenaeum doctor` now ends its report with a short note when one or more

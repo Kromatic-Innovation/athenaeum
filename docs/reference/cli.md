@@ -40,7 +40,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page, or drop a whole ## section by its section_id. Default is APPLY: every bullet/section id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
 - [`athenaeum corrections-trust-dryrun`](#athenaeum-corrections-trust-dryrun) (command) — Experimental (may change or be removed without a deprecation cycle; the trust-graph design is under reconsideration). Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
-- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate.answer, budget, migrate.
+- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
 - [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
 - [`athenaeum decisions budget`](#athenaeum-decisions-budget) (command) — Report the five effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 - [`athenaeum decisions challenge-coordinate`](#athenaeum-decisions-challenge-coordinate) (command) — Challenge/revoke a previously answered coordinate decision: stale-marks every verdict whose basis names the given answer id, so it is re-compared next time.
@@ -48,8 +48,13 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions migrate`](#athenaeum-decisions-migrate) (command) — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
+- [`athenaeum decisions propose-fold`](#athenaeum-decisions-propose-fold) (command) — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
+- [`athenaeum decisions provenance`](#athenaeum-decisions-provenance) (command) — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
+- [`athenaeum decisions recompare`](#athenaeum-decisions-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
+- [`athenaeum decisions revalidate`](#athenaeum-decisions-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
+- [`athenaeum decisions scrub-pii`](#athenaeum-decisions-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum decompose-page`](#athenaeum-decompose-page) (command) — Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
 - [`athenaeum dedup-oversize-escalations`](#athenaeum-dedup-oversize-escalations) (command) — Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
 - [`athenaeum dedupe`](#athenaeum-dedupe) (group) — Find or merge duplicate wiki entries.
@@ -88,7 +93,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum merges next`](#athenaeum-merges-next) (command) — Show the oldest unresolved merge (single block).
 - [`athenaeum merges propose-fold`](#athenaeum-merges-propose-fold) (command) — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - [`athenaeum merges provenance`](#athenaeum-merges-provenance) (command) — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
-- [`athenaeum merges recompare`](#athenaeum-merges-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict.
+- [`athenaeum merges recompare`](#athenaeum-merges-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - [`athenaeum merges revalidate`](#athenaeum-merges-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - [`athenaeum merges scrub-pii`](#athenaeum-merges-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
@@ -522,7 +527,7 @@ Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + 
 
 ## `athenaeum decisions`
 
-One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate.answer, budget, migrate.
+One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
 
 Subcommands:
 
@@ -533,8 +538,13 @@ Subcommands:
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions migrate` — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
+- `athenaeum decisions propose-fold` — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
+- `athenaeum decisions provenance` — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
+- `athenaeum decisions recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
+- `athenaeum decisions revalidate` — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - `athenaeum decisions scan-retractions` — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
+- `athenaeum decisions scrub-pii` — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 
 ## `athenaeum decisions answer`
 
@@ -611,6 +621,31 @@ Show the oldest pending decision (single block).
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |
 
+## `athenaeum decisions propose-fold`
+
+Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | off (flag absent) | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
+| `--draft-file` | — | — | Override the merged draft PAGE TEXT (frontmatter + body) with this file's contents, for a genuine content merge. A file that starts with a `---` frontmatter block is stored verbatim and must carry the canonical page's own `uid:`, or it is refused. A file with no frontmatter block is a body-only override and inherits the canonical page's current frontmatter verbatim. Default: the canonical page's current text VERBATIM. |
+| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename identity-resolves to its `name:` slug: either `<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's own `uid:` frontmatter. When other live pages share that slug, a `<uid>-<slug>.md` canonical is keyed on its filename stem instead of being refused (as the nightly name-collision path does). |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--rationale` | — | — | Optional human rationale recorded on the proposal. |
+| `--source` | `[]` | — | A source page to fold away (repeatable). Each must be an existing wiki page and must not equal --into. |
+
+## `athenaeum decisions provenance`
+
+List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--canonical-slug` | — | — | Filter to records for this canonical target slug. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--merge-id` | — | — | Filter to the record for this merge id. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
 ## `athenaeum decisions raise-confirmation`
 
 File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
@@ -629,12 +664,44 @@ File a NEW agent-raised 'implemented X without Y, confirm?' item into the pendin
 | `--raiser` | — | — | Who/what narrowed scope (agent name, lane id,...). |
 | `--repo` | — | — | The owner/repo narrowed in. |
 
+## `athenaeum decisions recompare`
+
+Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | off (flag absent) | — | Append the computed verdicts to the verdict ledger. Default: dry-run — compare and report, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--limit` | `0` | — | Only re-run the first N unresolved proposals (default: 0 = all). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decisions revalidate`
+
+Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | off (flag absent) | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
 ## `athenaeum decisions scan-retractions`
 
 Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decisions scrub-pii`
+
+Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--allowlist` | — | — | Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`). A value with a reasoned entry there is not PII and is left untouched; an anchored regex `pattern` entry is honoured the same way. |
+| `--apply` | off (flag absent) | — | Redact the detected values in place. Default: dry-run — report only, write nothing. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -1072,7 +1139,7 @@ Subcommands:
 - `athenaeum merges next` — Show the oldest unresolved merge (single block).
 - `athenaeum merges propose-fold` — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - `athenaeum merges provenance` — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
-- `athenaeum merges recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict.
+- `athenaeum merges recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - `athenaeum merges revalidate` — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - `athenaeum merges scrub-pii` — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 
@@ -1131,7 +1198,7 @@ List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages 
 
 ## `athenaeum merges recompare`
 
-Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict.
+Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
