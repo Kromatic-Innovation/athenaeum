@@ -7894,12 +7894,12 @@ def tier4_escalate(
     open_oversize_entities: set[str] = set()
     # Issue athenaeum#2517: every id already on disk (answered or not), so a
     # brand-new block minted below (Path C) cannot collide with one. Grown
-    # as new blocks are minted so two items in THIS batch can't collide with
-    # each other either (see `seen_ids` below).
-    existing_question_ids: set[str] = set()
+    # as new blocks are minted (see the Path C mint call) so two items in
+    # THIS batch can't collide with each other either.
+    seen_ids: set[str] = set()
     if pending_path.exists():
         for pq in parse_pending_questions(pending_path):
-            existing_question_ids.add(pq.id)
+            seen_ids.add(pq.id)
             if pq.answered:
                 continue
             if pq.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES:
@@ -7909,7 +7909,6 @@ def tier4_escalate(
                 # First-seen wins — if the file already has duplicates from a
                 # pre-athenaeum#157 run, only the first is merged into.
                 open_index[key] = pq.raw_block
-    seen_ids: set[str] = set(existing_question_ids)
 
     today = date.today().isoformat()
     sections: list[str] = []
