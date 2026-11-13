@@ -267,6 +267,7 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
     read_starvation_streaks,
     write_run_summary_record,
 )
+from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
@@ -2637,6 +2638,18 @@ def process_one(
         if su_outcome.status == STRUCTURED_UPSERT_REFUSED:
             result.skipped.append(su_outcome.skipped_label)
             result.retain_raw = True
+            if su_outcome.field_group_misfits:
+                # Issue athenaeum#2197: a declared single-valued field-group
+                # misfit also raises, or grows, ONE schema-amendment
+                # proposal per (page type, field group) shape in the
+                # pending-decisions queue -- never a migration, never a
+                # config write (see athenaeum.schema_amendment_proposals's
+                # module docstring).
+                record_field_group_misfits(
+                    su_outcome.field_group_misfits,
+                    wiki_root=wiki_root,
+                    uid=su_outcome.uid,
+                )
         elif su_outcome.status == STRUCTURED_UPSERT_APPLIED:
             result.updated.append(su_outcome.uid)
         return result
