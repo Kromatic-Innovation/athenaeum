@@ -71,6 +71,7 @@ one-way edge kept deferred for best-effort isolation, not cycle-breaking.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -113,6 +114,25 @@ SKIP = "skip"
 # can tell "blocked on a human contradiction call" from "blocked on session
 # timing, retry next run" at a glance.
 HOLD_LIVE_SESSION = "hold_live_session"
+
+# Issue athenaeum#2497: recognizes the held-write-back stamp athenaeum.answers
+# (issue athenaeum#1804) appends to an ANSWERED block whose write-back could not
+# happen yet — ``**Write-back**: held — <refs> as of <ts>; ...``. Mirrors
+# ``athenaeum.answers._WRITEBACK_STATUS_RE`` (same anchoring, same captured
+# token) rather than importing it: that regex is private to ``answers.py``,
+# and this module's athenaeum#2497 file set excludes editing ``answers.py``.
+# Duplicated so the detection reads the exact field the writer stamps, not a
+# bare substring scan of the block.
+_WRITE_BACK_STATE_RE = re.compile(
+    r"^\s*\*\*Write-back\*\*:\s*(?P<state>\S+)", re.MULTILINE
+)
+
+# Issue athenaeum#2497: a line starting a new top-level sidecar record in both
+# ``_pending_questions.md`` and ``_pending_merges.md`` — each block's header is
+# a markdown level-2 heading (``## ...``). Used only to detect that some raw
+# text is block-SHAPED content neither sanctioned parser accounted for (a
+# block that failed to parse), never to split or re-parse a block's fields.
+_BLOCK_HEADER_SIGNAL_RE = re.compile(r"^## ", re.MULTILINE)
 
 
 @dataclass
@@ -290,8 +310,73 @@ def _move_eligibility(
     return True, ""
 
 
+def _write_back_is_held(raw_block: str) -> bool:
+    """True when ``raw_block`` carries a ``**Write-back**: held`` stamp.
+
+    Issue athenaeum#2497 / athenaeum#1804: an ANSWERED block whose write-back
+    could not happen yet (no source ref resolved) is left in
+    ``_pending_questions.md`` by :func:`athenaeum.answers.ingest_answers`
+    with a ``**Write-back**: held — ...`` line, specifically so a later run
+    can complete it once the source resolves. Reads the exact field the
+    writer stamps (see :data:`_WRITE_BACK_STATE_RE`'s docstring) rather than
+    a bare ``"held" in raw_block`` substring check, which would also match
+    the word appearing anywhere else in a human's free-text answer. A block
+    whose write-back genuinely completed, or that never carried this stamp
+    at all, returns False.
+    """
+    match = _WRITE_BACK_STATE_RE.search(raw_block)
+    return match is not None and match.group("state").lower() == "held"
+
+
+def _unaccounted_sidecar_text(sidecar_path: Path, parsed_raw_blocks: list[str]) -> str:
+    """Raw text in ``sidecar_path`` that no successfully-parsed block covers.
+
+    Issue athenaeum#2497: both sanctioned parsers (``parse_pending_questions`` /
+    ``parse_pending_merges``) silently DROP a block that fails to parse —
+    a malformed header, a missing required field — from their returned
+    list entirely, so that block's raw text (and any member it names) is
+    invisible to :func:`_unresolved_pending_text` even though the block is
+    still sitting in the file, genuinely unresolved, pending a human fix.
+    This recovers that text WITHOUT re-implementing either parser: it reads
+    the sidecar's raw text once, strips out every block the parser DID
+    successfully turn into a record (``parsed_raw_blocks``), and checks
+    whether what remains still looks like block content (a line starting
+    ``## ``, the level-2 heading both sidecars use for every record). A
+    remainder that looks like a stray block means something went unparsed;
+    the ENTIRE remainder is returned so :func:`_member_referenced_in_pending`
+    can substring-match a member against it, same as the old pre-athenaeum#2455
+    reader did for the whole file — restoring the "if in doubt, keep it"
+    floor for exactly the content the sanctioned parsers cannot see, without
+    touching either parser.
+
+    The condition is logged (not printed) so a malformed sidecar is visible
+    to whoever runs the retire pass, rather than silently changing which
+    members get held.
+
+    Returns ``""`` for a missing/unreadable file or when nothing is left
+    unaccounted for.
+    """
+    try:
+        text = sidecar_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    remainder = text
+    for block in parsed_raw_blocks:
+        remainder = remainder.replace(block, "", 1)
+    if not _BLOCK_HEADER_SIGNAL_RE.search(remainder):
+        return ""
+    log.warning(
+        "retire: %s has a block neither sanctioned parser could read "
+        "(malformed header or missing required field) — holding any member "
+        "it names conservatively until a human fixes it: %r",
+        sidecar_path,
+        remainder.strip()[:200],
+    )
+    return remainder
+
+
 def _unresolved_pending_text(wiki_root: Path) -> str:
-    """Concatenated raw-block text of UNRESOLVED pending-confirmation entries.
+    """Concatenated raw-block text of pending-confirmation entries still IN FLIGHT.
 
     Quine S1: the retire decision must also respect prior-run human
     confirmations still genuinely in flight. Issue athenaeum#2455: this used to
@@ -302,12 +387,30 @@ def _unresolved_pending_text(wiki_root: Path) -> str:
     parsers — :func:`athenaeum.answers.parse_pending_questions` and
     :func:`athenaeum.pending_merges.parse_pending_merges` (AGENTS.md names
     these the only sanctioned readers of their respective files; this was
-    the last hand-rolled reader) — and keeps only each UNRESOLVED entry's
-    own ``raw_block`` text (``PendingQuestion.answered is False`` /
-    ``PendingMerge.resolved is False``). A member referenced ONLY by a
-    resolved block no longer appears in this text, so it no longer holds
-    the member back (still conservative for anything genuinely open — "if
-    in doubt, keep it").
+    the last hand-rolled reader) — and keeps only each entry still IN
+    FLIGHT. A member referenced ONLY by a genuinely resolved block no
+    longer appears in this text, so it no longer holds the member back
+    (still conservative for anything genuinely open — "if in doubt, keep
+    it"). "In flight" is, as of athenaeum#2497, broader than "unanswered":
+
+    - Every UNANSWERED entry (``PendingQuestion.answered is False`` /
+      ``PendingMerge.resolved is False``) — unchanged from athenaeum#2455.
+    - An ANSWERED question whose write-back is HELD (issue athenaeum#1804's
+      ``**Write-back**: held — ...`` stamp, see :func:`_write_back_is_held`):
+      ``pq.answered`` is True, but the write-back this answer authorizes has
+      not happened yet because its source hasn't resolved. Treating this as
+      "resolved" and letting the member it names retire would destroy the
+      input the held write-back still needs to ever complete — an ANSWERED
+      question whose write-back genuinely COMPLETED (no ``held`` stamp, or
+      none at all) is NOT held; that is athenaeum#2455's behaviour and must
+      not regress.
+    - Any sidecar block that failed to parse at all (see
+      :func:`_unaccounted_sidecar_text`) — the old substring reader held
+      every member named anywhere in the raw file, including inside a
+      block too malformed for either sanctioned parser to read; the
+      sanctioned-parser cutover otherwise UNHOLDS those members by
+      omission, the opposite of this function's own "if in doubt, keep it"
+      stance.
 
     Both parsers already return ``[]`` for a missing sidecar (their own
     ``.exists()`` guard), so a missing file still contributes nothing here.
@@ -318,17 +421,27 @@ def _unresolved_pending_text(wiki_root: Path) -> str:
     parts: list[str] = []
     questions_path = wiki_root / "_pending_questions.md"
     try:
+        pending_questions = parse_pending_questions(questions_path)
         parts.extend(
             pq.raw_block
-            for pq in parse_pending_questions(questions_path)
-            if not pq.answered
+            for pq in pending_questions
+            if not pq.answered or _write_back_is_held(pq.raw_block)
+        )
+        parts.append(
+            _unaccounted_sidecar_text(
+                questions_path, [pq.raw_block for pq in pending_questions]
+            )
         )
     except OSError:
         pass
     merges_path = wiki_root / "_pending_merges.md"
     try:
-        parts.extend(
-            pm.raw_block for pm in parse_pending_merges(merges_path) if not pm.resolved
+        pending_merges = parse_pending_merges(merges_path)
+        parts.extend(pm.raw_block for pm in pending_merges if not pm.resolved)
+        parts.append(
+            _unaccounted_sidecar_text(
+                merges_path, [pm.raw_block for pm in pending_merges]
+            )
         )
     except OSError:
         pass

@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of held indefinitely — this changes which atoms retire on the next run
   (athenaeum#2455).
 
+- Retire now also holds a member named only by an ANSWERED question whose
+  write-back is held (`**Write-back**: held`, athenaeum#1804) or by a
+  sidecar block that fails to parse at all — athenaeum#2455's unresolved-only
+  filter dropped both, so their raw members became retirable while the
+  system still needed them (athenaeum#2497).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
