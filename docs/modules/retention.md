@@ -94,9 +94,10 @@ corpus is not in this repository.
   non-underscore `wiki/*.md` page (shallow scan), plus, when a page also
   carries `data_class`, the active retention pack
   (`erasure.retention_pack` / `erasure.retention_packs.<name>`).
-- **Auto-memory prune** reads every `wiki/auto-*.md` page's frontmatter and
-  body, plus `librarian.ephemeral_scopes` and `librarian.operational_markers`
-  (both default `[]` — off until an operator opts in).
+- **Ephemeral-intake classification** reads an auto-memory page's
+  frontmatter and body, plus `librarian.ephemeral_scopes` and
+  `librarian.operational_markers` (both default `[]` — off until an operator
+  opts in).
 - **The `preserve` disposition** reads `librarian.preserved_log_dir` and
   `librarian.preserved_log_adapter` (see "Config keys" below), plus whatever
   shape rule matched the raw file and its optional `correction:` block.
@@ -241,8 +242,6 @@ librarian:
   why (bucket + `valid_until`), when, and the recovering commit SHA — written
   *before* the archival commit, and a ledger-write failure aborts the sweep
   rather than being swallowed. Then a two-commit `git rm` of the kill-list.
-- **Auto-memory prune**, on `--apply`: a `git rm` of the kill-list in one
-  labeled commit. Refuses against a non-versioned store.
 - **The `preserve` disposition**: moves the raw file to
   `<preserved_dir>/<source>/<filename>` (suffixing a same-named collision
   rather than clobbering it), and, if the rule also carries a `correction:`
@@ -261,8 +260,7 @@ librarian:
 | Decay sweep aborts before `git rm` | The sweep ledger write fails — a page can never be archived without a durable record of why. |
 | A page is retained, not archived | `bucket: daily` with no `valid_until`, or one not yet passed (fail-open: absent `valid_until` means "currently valid"). |
 | A page is retained, not archived | Unreadable page content — retained for safety rather than assumed expired. |
-| Auto-memory prune leaves a page in place | It is not `type: auto-memory`, or `classify_ephemeral_page` finds no ephemeral/operational signal — a page mixing one throwaway origin scope with one real one is retained, not pruned. |
-| Auto-memory prune refuses to remove anything | The target store's `capabilities.versioned` is `False` — removal is git-only for recoverability. |
+| Ephemeral-intake classification reports no ephemeral signal | The page is not `type: auto-memory`, or `classify_ephemeral_page` finds no ephemeral/operational signal — a page mixing one throwaway origin scope with one real one classifies as retained. |
 | `preserve` disposition tallies `preserve-unconfigured`, raw file untouched | Neither `preserved_log_dir` nor `preserved_log_adapter` is configured — the feature is opt-in twice over (the area AND a matching rule). |
 | `preserved_log_dir` value ignored, with a warning | The value is absolute, or escapes the knowledge root via `..` — that key's contract is "a directory under the knowledge root"; an operator who needs to land outside it must use `preserved_log_adapter`. |
 | `preserve` raises `StorageConfigError` | `preserved_log_adapter` names an adapter that is not registered — never a silent fallback to the local directory. |
