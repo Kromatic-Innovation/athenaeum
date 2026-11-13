@@ -2226,6 +2226,22 @@ def process_batch_run(
                         target_type=merge_target_type,
                     )
                 if esc:
+                    # Issue athenaeum#2519: same durable write-back stamp as
+                    # the st.sync_merges loop below -- this is the OTHER
+                    # merge-escalation site in this transport, reached for
+                    # an action whose patch-mode (or full-echo fallback)
+                    # call actually went through the batch API
+                    # (``st.merge_ids`` / ``t3_results``), not the
+                    # synchronous ``st.sync_merges`` path. Same page_path/
+                    # meta/existing_body already unpacked above, no second
+                    # lookup needed.
+                    attach_contradiction_writeback_copy(
+                        esc,
+                        existing_path=page_path,
+                        wiki_root=wiki_root,
+                        observations=action.observations,
+                        existing_body=existing_body,
+                    )
                     escalations.append(esc)
                 if updated_body:
                     stamp_merge_provenance(meta, config=config)
