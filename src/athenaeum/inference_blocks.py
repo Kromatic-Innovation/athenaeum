@@ -31,9 +31,9 @@ header, since a linter needs to see broken blocks to report them.
 **Factoring rule:** this module owns PARSING of ``## Inference`` blocks only
 — pure string transforms with no I/O, no frontmatter validation
 (``memory_class: fact`` gating lives in :mod:`athenaeum.schemas`), and no
-basis re-evaluation or cascading. Issue athenaeum#2435 removed this module's
-``retract_inference_block`` (the issue athenaeum#433 retraction primitive):
-it never had a production caller (commit ``1cd081f9``).
+basis re-evaluation or cascading. Issue athenaeum#2435 removed this
+module's athenaeum#433 block-retraction primitive: it never had a
+production caller (commit ``1cd081f9``).
 
 **Layering:** L3 service. Module scope imports only stdlib (``hashlib``,
 ``re``, ``dataclasses``) — no athenaeum imports at all, so this module can be
