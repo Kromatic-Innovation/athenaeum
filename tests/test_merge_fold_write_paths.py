@@ -2126,7 +2126,12 @@ class TestWidenQuestionReadBack:
         ours = next(q for t, q in by_text.items() if "'subject'" in t)
         other = next(q for t, q in by_text.items() if "'memory-class'" in t)
         assert ours.answered is True
-        assert "Superseded" in "\n".join(ours.answer_lines)
+        # Issue athenaeum#2514 AC4 withdraws this one EARLIER — in the widen
+        # loop, the moment `subject` stops needing a human — so the note now
+        # comes from `_withdraw_stale_widen_question` rather than the
+        # end-of-fold "Superseded" sweep. What this case guards is unchanged:
+        # the question does not stay open.
+        assert "no longer needs an answer" in "\n".join(ours.answer_lines)
         # A question for a DIFFERENT proposal is untouched.
         assert other.answered is False
 
