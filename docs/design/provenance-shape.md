@@ -824,7 +824,7 @@ decay-sweep` CLI) periodically archives EXPIRED `bucket: daily` pages —
 `weekly` / `durable` / unbucketed pages are never touched. Makes ZERO LLM
 calls (no `client`/model parameter exists anywhere in the module). Mirrors
 the existing git-retire precedent exactly
-(`auto_memory_prune.apply_prune`'s refuse-without-`.git` gate,
+(`retire.py`'s refuse-without-`.git` gate,
 `pending_merges._apply_fold_into_existing`'s two-commit
 snapshot-then-`git rm` shape, issue athenaeum#947) — archival is git-rm removal
 (never an in-tree tombstone marker, which would need its own new filtering

@@ -17,13 +17,11 @@ once it stops being current:
   not yet passed) is retained. Removal is a two-commit `git rm` (a provenance
   snapshot, then the removal), never a bare `unlink` — the module refuses
   outright when `knowledge_root` is not a git repository.
-- **Auto-memory prune** (`athenaeum auto-memory prune`,
-  `athenaeum.auto_memory_prune`) — retires already-compiled
-  `wiki/auto-*.md` pages that `athenaeum.ephemeral.classify_ephemeral_page`
-  identifies as operational/throwaway (an explicit `ephemeral: true` flag,
-  every origin scope matching a configured ephemeral-scope glob, or a
-  multi-signal operational-marker match). Dry-run by default; `--apply`
-  `git rm`s the kill-list in one labeled commit.
+- **Ephemeral-intake classification** (`athenaeum.ephemeral.classify_ephemeral_page`)
+  — identifies operational/throwaway auto-memory content (an explicit
+  `ephemeral: true` flag, every origin scope matching a configured
+  ephemeral-scope glob, or a multi-signal operational-marker match) at
+  intake time, before it is ever compiled into a `wiki/auto-*.md` page.
 - **The `preserve` disposition** (`athenaeum.rules`, part of the shape-rules
   engine) — the log-retention mechanism for source documents that should
   never be compiled into wiki prose at all. The operator framing that drove

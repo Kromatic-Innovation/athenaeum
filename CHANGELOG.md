@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.deprecated_cli_surfaces_enabled` yaml key is now ignored with a
   warning.
 
+- Removed seven one-shot repair commands whose defects are fixed:
+  `auto-memory prune`, `prune-index`, `prune-code-entities`,
+  `dedup-oversize-escalations`, `storage prune-dispositions`, `storage
+  audit-h1-redaction`, `paste-cleanup` (athenaeum#2466). No deprecation period —
+  each repaired data left behind by one specific, now-fixed bug, so it had
+  nothing left to do for a current install. See `docs/guides/upgrading.md`
+  if you still need one of these against an older, pre-fix knowledge base.
+
 ### Changed
 
 - Docs: security docs now state that erasure is not yet available

@@ -129,12 +129,30 @@ The `--no-retire` CLI flag overrides the yaml toggle. When disabled, raw
 auto-memory is neither moved into the wiki nor `git rm`'d — it stays in
 the intake queue and is re-examined on every run.
 
-## I want to know about the other destructive-by-design command
+## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
-`athenaeum auto-memory prune --apply` is a second opt-in command that
-`git rm`s pages (operational `wiki/auto-*.md`), with the same git-only
-recovery story as move-then-retire. It's dry-run by default — see [Daily
-operation](daily-operation.md).
+Each of these commands existed to repair data left behind by one specific,
+now-fixed bug. Once the underlying defect was fixed, the command had nothing
+left to do for anyone running a current install — so it is removed outright
+in 0.24.0, with no deprecation period and no replacement:
+
+| Removed command |
+|---|
+| `athenaeum auto-memory prune` |
+| `athenaeum auto-memory prune-index` |
+| `athenaeum auto-memory prune-code-entities` |
+| `athenaeum dedup-oversize-escalations` |
+| `athenaeum storage prune-dispositions` |
+| `athenaeum storage audit-h1-redaction` |
+| `athenaeum paste-cleanup` |
+
+**If you are upgrading from an older release and still have the pre-fix data
+on disk** (for example, you skipped several releases, or your knowledge base
+predates the engine fix each command was written around), run the command you
+need on your *current, pre-upgrade* release before upgrading — each one is
+dry-run by default, so you can check first whether it finds anything to do.
+Once you upgrade, the command itself is gone; its one-time job cannot be run
+again from a newer release.
 
 ## See also
 
