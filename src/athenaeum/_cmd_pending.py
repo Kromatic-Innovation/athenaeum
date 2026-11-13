@@ -34,6 +34,8 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 if TYPE_CHECKING:
     from athenaeum.answers import PendingQuestion
 
+log = logging.getLogger(__name__)
+
 # Issue athenaeum#2518: recovers the canonical-side page id that
 # `verdict_effects._apply_duplicate` embeds in its fold question's
 # description ("... Proposed canonical side: a (some-page-id)."). This is
@@ -171,10 +173,19 @@ def _resolve_fold_question(
       ``merge_rejected_with:`` declaration on the canonical page — the
       existing mechanism that stops the comparator from re-raising the
       identical pair on its next run. No page content changes.
-    - ``"held"`` — reserved for a block this function cannot even attempt:
-      an unrecognized answer, a malformed pair key, or a page that no
-      longer exists under *wiki_root*. Never returned for a well-formed
-      "approve" or "reject" (issue athenaeum#2518 AC4).
+    - ``"held"`` — this function cannot even attempt the fold: an
+      unrecognized answer, a malformed pair key, a page that no longer
+      exists under *wiki_root*, the canonical page's `name:` frontmatter is
+      missing/unusable, its filename does not identity-resolve to its own
+      `name:`/`uid:` (issue athenaeum#748/#2082 drift guard), or
+      ANOTHER live page also identity-resolves to the same target slug
+      (:func:`athenaeum.pending_merges.find_fold_target_collisions` --
+      the ambiguity guard `merges propose-fold` applies at proposal time,
+      issue athenaeum#1635/#2118, reused here so this path cannot silently
+      target the wrong page). A well-formed "approve"/"reject" against
+      pages that are themselves well-formed and unambiguous never holds
+      (issue athenaeum#2518 AC4) -- these are the pre-write_pending_merge
+      preconditions, not that per-answer guarantee.
 
     Never raises — every failure path is converted to one of the four
     outcomes above.
@@ -184,110 +195,205 @@ def _resolve_fold_question(
     from athenaeum.pending_merges import (
         _make_id,
         filename_slug_by_uid,
+        find_fold_target_collisions,
         identity_slug,
         resolve_merge,
         write_pending_merge,
     )
     from athenaeum.verdicts import page_id_for_path
 
-    # "approve"/"accept"/"yes"/... -> "ratify"; "reject"/"decline"/... ->
-    # "reject"; anything else (including empty) -> None. Same closed
-    # ratify/reject grammar _apply_field_correction already uses — reused
-    # verbatim rather than re-deriving a second vocabulary.
-    answer_token = _parse_correction_answer(pq)
-    if answer_token is None:
-        return "held", "answer is not a recognized approve/reject token"
+    def _retire_refused_fold_proposal(merges_path: Path, merge_id: str, *, reason: str) -> None:
+        """Move *merge_id*'s still-OPEN block straight to the merges
+        archive after a safety-check refusal (issue athenaeum#2518 review
+        finding).
 
-    pair_key = pq.source.removeprefix("comparator:").strip()
-    ids = pair_key.split("+", 1)
-    if len(ids) != 2 or not all(ids):
-        return "held", f"malformed fold pair key: {pq.source!r}"
-    id_a, id_b = ids
+        Reuses :func:`athenaeum.pending_merges._archive_stale_merge_block`
+        verbatim -- the SAME archive-and-stamp mechanics ``resolve_merge``
+        itself already applies for its one permanent refusal
+        (``fold_source_already_tombstoned``) -- rather than inventing a
+        second way to retire a block. No-ops (never raises) when the block
+        is already resolved or already gone: that covers
+        ``fold_source_already_tombstoned`` itself, which
+        ``resolve_merge`` has ALREADY archived by the time it returns
+        ``ok=False``, so calling this unconditionally on every refusal
+        is safe.
+        """
+        from athenaeum.pending_merges import (
+            _archive_stale_merge_block,
+            _parse_block,
+            _split_blocks,
+        )
 
-    def _find_page(page_id: str) -> Path | None:
-        for candidate in sorted(wiki_root.rglob("*.md")):
-            if candidate.name.startswith("_"):
+        if not merges_path.exists():
+            return
+        text = merges_path.read_text(encoding="utf-8")
+        blocks = _split_blocks(text)
+        target_block: str | None = None
+        remaining: list[str] = []
+        for block_text in blocks:
+            pm = _parse_block(block_text)
+            if pm is not None and pm.id == merge_id and not pm.resolved:
+                target_block = block_text
                 continue
-            if page_id_for_path(candidate) == page_id:
-                return candidate
-        return None
+            remaining.append(block_text)
+        if target_block is None:
+            return
+        _archive_stale_merge_block(
+            merges_path,
+            target_block,
+            remaining_blocks=remaining,
+            reason=f"fold question refused: {reason}",
+        )
 
-    path_a = _find_page(id_a)
-    path_b = _find_page(id_b)
-    if path_a is None or path_b is None:
-        missing = id_a if path_a is None else id_b
-        return "held", f"fold page {missing!r} not found under {wiki_root}"
+    def _attempt() -> tuple[str, str]:
+        # "approve"/"accept"/"yes"/... -> "ratify"; "reject"/"decline"/... ->
+        # "reject"; anything else (including empty) -> None. Same closed
+        # ratify/reject grammar _apply_field_correction already uses — reused
+        # verbatim rather than re-deriving a second vocabulary.
+        answer_token = _parse_correction_answer(pq)
+        if answer_token is None:
+            return "held", "answer is not a recognized approve/reject token"
 
-    match = _FOLD_CANONICAL_RE.search(pq.description)
-    canonical_id = match.group("id") if match else id_a
-    canonical_path, other_path = (
-        (path_a, path_b) if canonical_id == id_a else (path_b, path_a)
-    )
+        pair_key = pq.source.removeprefix("comparator:").strip()
+        ids = pair_key.split("+", 1)
+        if len(ids) != 2 or not all(ids):
+            return "held", f"malformed fold pair key: {pq.source!r}"
+        id_a, id_b = ids
 
-    canonical_meta, _ = parse_frontmatter(canonical_path.read_text(encoding="utf-8"))
-    name = canonical_meta.get("name") if isinstance(canonical_meta, dict) else None
-    if not name or not str(name).strip():
-        return "held", f"canonical page {canonical_path} has no usable name: frontmatter"
-    merge_target_name = str(name)
-    # Issue athenaeum#748/#2082 drift guard, same identity check `merges
-    # propose-fold` applies at proposal time: the canonical's own filename
-    # must identity-resolve to its `name:`/`uid:` or `write_pending_merge`
-    # would derive the wrong write_kind.
-    if identity_slug(canonical_path, canonical_meta) != slugify(merge_target_name):
-        drift_slug = filename_slug_by_uid(canonical_path, canonical_meta)
-        if drift_slug is None:
+        def _find_page(page_id: str) -> Path | None:
+            for candidate in sorted(wiki_root.rglob("*.md")):
+                if candidate.name.startswith("_"):
+                    continue
+                if page_id_for_path(candidate) == page_id:
+                    return candidate
+            return None
+
+        path_a = _find_page(id_a)
+        path_b = _find_page(id_b)
+        if path_a is None or path_b is None:
+            missing = id_a if path_a is None else id_b
+            return "held", f"fold page {missing!r} not found under {wiki_root}"
+
+        match = _FOLD_CANONICAL_RE.search(pq.description)
+        canonical_id = match.group("id") if match else id_a
+        canonical_path, other_path = (
+            (path_a, path_b) if canonical_id == id_a else (path_b, path_a)
+        )
+
+        canonical_meta, _ = parse_frontmatter(canonical_path.read_text(encoding="utf-8"))
+        name = canonical_meta.get("name") if isinstance(canonical_meta, dict) else None
+        if not name or not str(name).strip():
+            return "held", f"canonical page {canonical_path} has no usable name: frontmatter"
+        merge_target_name = str(name)
+        # Issue athenaeum#748/#2082 drift guard, same identity check `merges
+        # propose-fold` applies at proposal time: the canonical's own filename
+        # must identity-resolve to its `name:`/`uid:` or `write_pending_merge`
+        # would derive the wrong write_kind.
+        if identity_slug(canonical_path, canonical_meta) != slugify(merge_target_name):
+            drift_slug = filename_slug_by_uid(canonical_path, canonical_meta)
+            if drift_slug is None:
+                return "held", (
+                    f"canonical page {canonical_path.name} identity does not "
+                    "resolve to its own name/uid frontmatter; refusing to guess "
+                    "the fold target"
+                )
+            merge_target_name = drift_slug
+
+        # Issue athenaeum#2518 review finding (HIGH): the ambiguity guard
+        # `merges propose-fold` applies at proposal time (`_cmd_merges.py` --
+        # refuse if ANOTHER live page also identity-resolves to this target
+        # slug, rather than let `resolve_target_page`/`resolve_merge` silently
+        # take an arbitrary first candidate) lives in that CLI caller, not
+        # inside `write_pending_merge`/`resolve_merge` themselves -- so this
+        # path skipped it entirely until this guard was added. Reusing
+        # `find_fold_target_collisions` (factored out of `_cmd_propose_fold`
+        # for exactly this reuse) gets the IDENTICAL detection rather than a
+        # second hand-rolled copy.
+        collisions = find_fold_target_collisions(
+            merge_target_name, wiki_root, canonical_path=canonical_path, other_paths=[other_path]
+        )
+        if collisions:
             return "held", (
-                f"canonical page {canonical_path.name} identity does not "
-                "resolve to its own name/uid frontmatter; refusing to guess "
-                "the fold target"
+                f"fold target {merge_target_name!r} is ambiguous: "
+                f"{canonical_path.name} and {', '.join(collisions)} both resolve "
+                "to it; refusing to guess which page is canonical"
             )
-        merge_target_name = drift_slug
 
-    sources = [str(canonical_path), str(other_path)]
-    merge_id = _make_id(sources, merge_target_name)
-    merges_path = wiki_root / "_pending_merges.md"
+        sources = [str(canonical_path), str(other_path)]
+        merge_id = _make_id(sources, merge_target_name)
+        merges_path = wiki_root / "_pending_merges.md"
+
+        try:
+            write_pending_merge(
+                merges_path,
+                merge_target_name=merge_target_name,
+                sources=sources,
+                rationale=(
+                    f'Fold question {pq.id} (athenaeum#2518): operator answered '
+                    f'"{answer_token}" via ingest-answers.'
+                ),
+                # The canonical page's current text, verbatim — a fold's value
+                # is alias bookkeeping + source tombstoning, never a body
+                # rewrite (same default `merges propose-fold` uses with no
+                # --draft-file).
+                draft_merged_body=canonical_path.read_text(encoding="utf-8"),
+                confidence=1.0,
+            )
+        except ValueError as exc:
+            return "held", f"could not queue fold proposal: {exc}"
+
+        decision: Literal["approve", "reject"] = (
+            "approve" if answer_token == "ratify" else "reject"
+        )
+        result = resolve_merge(
+            merges_path,
+            merge_id,
+            decision,
+            note=f"{decision} via fold question {pq.id} (athenaeum#2518)",
+            wiki_root=wiki_root,
+        )
+        if not result.get("ok"):
+            error_code = result.get("error_code")
+            if error_code == "already_resolved":
+                # Idempotent re-run posture (issue athenaeum#1804): a prior run
+                # already resolved this exact proposal — report the terminal
+                # outcome the decision implies rather than refusing again.
+                return ("folded" if decision == "approve" else "rejected"), (
+                    f"merge {merge_id} already resolved"
+                )
+            detail = f"{error_code}: {result.get('message')}"
+            # Issue athenaeum#2518 review finding (MEDIUM): `resolve_merge`
+            # refuses most safety checks (`no_git_repo`, `fold_target_missing`,
+            # `fold_widen_impossible`, `fold_narrows_coordinate`, ...) by
+            # returning BEFORE it ever rewrites `merges_path` -- the proposal
+            # `write_pending_merge` just queued above is left sitting open
+            # (unresolved) in `_pending_merges.md`. Left alone, that splits
+            # state: the fold QUESTION this run archives as "refused" would
+            # say the work is done while the queue still shows it pending, the
+            # exact stray-queue-noise athenaeum#2518 exists to remove. Retire it
+            # here with the refusal as its reason, mirroring the ONE existing
+            # refusal `resolve_merge` already archives itself
+            # (`fold_source_already_tombstoned`) -- `_retire_refused_fold_proposal`
+            # no-ops if the block is already gone (that one case), so this is
+            # safe to call unconditionally.
+            _retire_refused_fold_proposal(merges_path, merge_id, reason=detail)
+            return "refused", detail
+        if decision == "reject":
+            return "rejected", f"merge {merge_id} recorded; no pages changed"
+        return "folded", f"folded into {canonical_path.name} (merge {merge_id})"
 
     try:
-        write_pending_merge(
-            merges_path,
-            merge_target_name=merge_target_name,
-            sources=sources,
-            rationale=(
-                f'Fold question {pq.id} (athenaeum#2518): operator answered '
-                f'"{answer_token}" via ingest-answers.'
-            ),
-            # The canonical page's current text, verbatim — a fold's value
-            # is alias bookkeeping + source tombstoning, never a body
-            # rewrite (same default `merges propose-fold` uses with no
-            # --draft-file).
-            draft_merged_body=canonical_path.read_text(encoding="utf-8"),
-            confidence=1.0,
+        return _attempt()
+    except Exception as exc:  # mirrors _writeback_source's own "never
+        # raises" contract (issue athenaeum#2518 review finding,
+        # MEDIUM): an unreadable/corrupt/vanished-mid-run page file (OSError,
+        # UnicodeDecodeError) or any other surprise must not abort the REST
+        # of this ingest-answers batch -- it is converted to the same
+        # "held" outcome a recognized structural problem already gets.
+        log.exception(
+            "fold question %s: unexpected error resolving fold answer", pq.id
         )
-    except ValueError as exc:
-        return "held", f"could not queue fold proposal: {exc}"
-
-    decision: Literal["approve", "reject"] = (
-        "approve" if answer_token == "ratify" else "reject"
-    )
-    result = resolve_merge(
-        merges_path,
-        merge_id,
-        decision,
-        note=f"{decision} via fold question {pq.id} (athenaeum#2518)",
-        wiki_root=wiki_root,
-    )
-    if not result.get("ok"):
-        if result.get("error_code") == "already_resolved":
-            # Idempotent re-run posture (issue athenaeum#1804): a prior run
-            # already resolved this exact proposal — report the terminal
-            # outcome the decision implies rather than refusing again.
-            return ("folded" if decision == "approve" else "rejected"), (
-                f"merge {merge_id} already resolved"
-            )
-        return "refused", f"{result.get('error_code')}: {result.get('message')}"
-    if decision == "reject":
-        return "rejected", f"merge {merge_id} recorded; no pages changed"
-    return "folded", f"folded into {canonical_path.name} (merge {merge_id})"
+        return "held", f"unexpected error resolving fold question: {exc}"
 
 
 def cmd_ingest_answers(args: argparse.Namespace) -> int:

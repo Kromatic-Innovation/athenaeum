@@ -194,6 +194,69 @@ class TestFoldSafetyCheckRefusal:
         assert report.folds_refused == 1
         assert report.held == 0
 
+        # Review finding (MEDIUM, athenaeum#2518 PR #2557): the question is
+        # archived as "refused", so the merge proposal `_resolve_fold_question`
+        # queued for it must not be left open in `_pending_merges.md` —
+        # that would split state (queue shows pending work the question
+        # says is finished). It is retired to the merges archive instead.
+        merges_path = wiki / "_pending_merges.md"
+        proposals = parse_pending_merges(merges_path)
+        assert proposals == []  # no OPEN (or even resolved) block left behind
+        merges_archive = wiki / "_pending_merges_archive.md"
+        assert merges_archive.is_file()
+        assert "**Retired**:" in merges_archive.read_text(encoding="utf-8")
+        assert "no_git_repo" in merges_archive.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# AC3 (review finding, athenaeum#2518 PR #2557) — the ambiguity guard
+# `merges propose-fold` applies at proposal time also applies to a fold
+# QUESTION's answer, so resolve_merge can never silently target a different
+# live page than the one actually proposed as canonical.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldAmbiguousTarget:
+    def test_ambiguous_target_is_held_not_folded(
+        self, wiki: Path, raw_root: Path
+    ) -> None:
+        _setup_pages(wiki)
+        # A SECOND live page that also identity-resolves to "Canonical
+        # Page"'s slug (uid-prefixed form: `<uid>-<slug>.md`) -- the exact
+        # shape `find_identity_pages` flags as ambiguous. Before the
+        # `find_fold_target_collisions` guard was wired into
+        # `_resolve_fold_question`, this collider was never even looked
+        # for, so `resolve_target_page` would have silently picked whichever
+        # candidate came first instead of refusing.
+        (wiki / "collider-canonical-page.md").write_text(
+            "---\nname: Canonical Page\ntype: concept\nuid: collider\n---\ncollider\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki)
+        report = IngestAnswersReport()
+        count = _run(wiki, raw_root, answer="approve", report=report)
+
+        assert count == 0  # held, not archived
+        other_meta, _ = parse_frontmatter(
+            (wiki / "other-page.md").read_text(encoding="utf-8")
+        )
+        assert other_meta.get("status") != "folded"
+        collider_meta, _ = parse_frontmatter(
+            (wiki / "collider-canonical-page.md").read_text(encoding="utf-8")
+        )
+        assert collider_meta.get("status") != "folded"
+        canonical_text = (wiki / "canonical-page.md").read_text(encoding="utf-8")
+        assert "canonical body" in canonical_text  # untouched
+
+        pending_text = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "**Write-back**: held" in pending_text
+        assert "ambiguous" in pending_text
+        assert report.held == 1
+        assert report.folds_applied == 0
+        # No merge proposal was ever queued for this ambiguous target.
+        merges_path = wiki / "_pending_merges.md"
+        assert not merges_path.exists()
+
 
 # ---------------------------------------------------------------------------
 # AC4 — approve OR reject, never held
@@ -245,3 +308,42 @@ class TestFoldReject:
         assert report.held == 1
         assert report.folds_applied == 0
         assert report.folds_rejected == 0
+
+
+# ---------------------------------------------------------------------------
+# Review finding (MEDIUM, athenaeum#2518 PR #2557) — an unguarded file read
+# inside the fold-apply path must not raise and abort the rest of the
+# ingest-answers batch. `_resolve_fold_question`'s own docstring already
+# promises "never raises"; this proves the implementation actually keeps
+# that promise for an unreadable page, not just for the handled cases.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldUnreadablePage:
+    def test_corrupt_canonical_page_is_held_not_raised(
+        self, wiki: Path, raw_root: Path
+    ) -> None:
+        _write_page(wiki / "other-page.md", name="Other Page", body="other body")
+        # Invalid UTF-8 bytes -- `canonical_path.read_text(encoding="utf-8")`
+        # raises UnicodeDecodeError on this, which the fold-apply path must
+        # convert to a "held" outcome rather than let propagate out of
+        # `ingest_answers` and abort every other block in this same batch.
+        (wiki / "canonical-page.md").write_bytes(b"---\nname: Canonical Page\n---\n\xff\xfe")
+        init_git_repo(wiki)
+
+        report = IngestAnswersReport()
+        # Must not raise.
+        count = _run(wiki, raw_root, answer="approve", report=report)
+
+        assert count == 0
+        pending_path = wiki / "_pending_questions.md"
+        assert "**Write-back**: held" in pending_path.read_text(encoding="utf-8")
+        assert report.held == 1
+        assert report.folds_applied == 0
+        assert report.folds_refused == 0
+        # Nothing was queued or folded.
+        assert not (wiki / "_pending_merges.md").exists()
+        other_meta, _ = parse_frontmatter(
+            (wiki / "other-page.md").read_text(encoding="utf-8")
+        )
+        assert other_meta.get("status") != "folded"
