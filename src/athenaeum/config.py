@@ -9407,3 +9407,62 @@ def resolve_serve_auth_scopes(
                 if raw is not None:
                     return parse_scope_pair(raw, "serve.auth.scopes")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2472 -- `dedupe.strong_identifier_keys`. Appended here, at
+# the end of the file, per this module's own established convention (see
+# the `librarian.witness.*` block above) of giving a concurrently-landing
+# lane's resolver its own append point so two lanes' diffs don't collide on
+# the same hunk.
+# ---------------------------------------------------------------------------
+
+
+def resolve_strong_identifier_keys(config: dict[str, Any] | None) -> list[str] | None:
+    """Resolve ``dedupe.strong_identifier_keys`` -- person-dedupe's
+    strong-identifier + coalesced-namespace field names (issue athenaeum#2472).
+
+    Person dedupe's HIGH-confidence vendor-enrichment signal hard-coded
+    which frontmatter fields it treated as a strong identifier and which
+    namespace fields it coalesced on merge. Which enrichment vendor a
+    deployment uses is deployment policy, not engine behaviour, so those
+    field names are supplied entirely through ``athenaeum.yaml``::
+
+        dedupe:
+          strong_identifier_keys:
+            - apollo_id
+            - apollo_headline
+            - apollo_location
+            - apollo_employment_history
+            - current_title
+            - current_company
+
+    This is a deliberate, PERMANENT configurable default, not a temporary
+    flag: the current Apollo fields above are the shipped default and
+    documented example -- an unconfigured install reproduces today's
+    behaviour exactly (see
+    :data:`athenaeum.dedupe._DEFAULT_STRONG_IDENTIFIER_KEYS`, the one place
+    that default list lives; this module does not import it, so it stays
+    out of ``athenaeum.config``'s own import surface). The FIRST entry is
+    the field :func:`athenaeum.dedupe.find_duplicate_persons` matches two
+    pages on; every entry (including the first) is coalesced onto the
+    canonical page in :func:`athenaeum.dedupe.merge_duplicate_persons`.
+
+    Returns ``None`` when unset (key absent, ``dedupe`` missing or not a
+    mapping, or the value is not a list) so the caller applies its OWN
+    default -- unlike :func:`resolve_google_contact_keys`'s always-empty
+    default, this knob's shipped default is non-empty, so "unset" and
+    "explicitly emptied" must stay distinguishable here. An explicit empty
+    list (``strong_identifier_keys: []``) resolves to ``[]``, which the
+    caller takes literally: vendor strong-identifier matching and
+    namespace coalescing are both disabled, with no error.
+    """
+    if not isinstance(config, dict):
+        return None
+    section = config.get("dedupe")
+    if not isinstance(section, dict):
+        return None
+    raw = section.get("strong_identifier_keys")
+    if not isinstance(raw, list):
+        return None
+    return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
