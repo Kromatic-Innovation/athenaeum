@@ -13,11 +13,11 @@ from athenaeum.decisions import (
     age_days,
     confirmation_to_decision,
     coordinate_to_decision,
-    decision_time_minutes,
     list_pending_decisions,
     quarantine_to_decision,
     source_info,
 )
+from athenaeum.metrics import minutes_between
 from athenaeum.quarantine import quarantine_file
 
 
@@ -36,30 +36,30 @@ def test_age_days_unparseable() -> None:
 
 def test_decision_time_minutes_basic() -> None:
     # Issue athenaeum#1990.
-    assert decision_time_minutes("2026-10-01T00:00:00Z", "2026-10-01T00:30:00Z") == 30
+    assert minutes_between("2026-10-01T00:00:00Z", "2026-10-01T00:30:00Z") == 30
 
 
 def test_decision_time_minutes_date_only_raised_at() -> None:
     # Issue athenaeum#1990: a question's header-only created_at parses as
     # midnight UTC on that date, per the convention this helper states.
-    assert decision_time_minutes("2026-10-01", "2026-10-01T00:30:00Z") == 30
+    assert minutes_between("2026-10-01", "2026-10-01T00:30:00Z") == 30
 
 
 def test_decision_time_minutes_missing_raised_at() -> None:
     # Issue athenaeum#1990: missing/unparseable is excluded, never a
     # fabricated zero-minute duration.
-    assert decision_time_minutes("", "2026-10-01T00:30:00Z") is None
-    assert decision_time_minutes("not-a-date", "2026-10-01T00:30:00Z") is None
+    assert minutes_between("", "2026-10-01T00:30:00Z") is None
+    assert minutes_between("not-a-date", "2026-10-01T00:30:00Z") is None
 
 
 def test_decision_time_minutes_missing_answered_at() -> None:
-    assert decision_time_minutes("2026-10-01T00:00:00Z", "") is None
+    assert minutes_between("2026-10-01T00:00:00Z", "") is None
 
 
 def test_decision_time_minutes_negative_duration_excluded() -> None:
     # Issue athenaeum#1990: a malformed/clock-skewed pair where answered_at
     # precedes raised_at is excluded rather than returning a negative.
-    assert decision_time_minutes("2026-10-01T01:00:00Z", "2026-10-01T00:30:00Z") is None
+    assert minutes_between("2026-10-01T01:00:00Z", "2026-10-01T00:30:00Z") is None
 
 
 def test_fallback_title_strips_uid_prefix() -> None:

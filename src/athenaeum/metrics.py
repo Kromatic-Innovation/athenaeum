@@ -31,9 +31,9 @@ def percentile(values: list[float], pct: float) -> float:
 def parse_utc_timestamp(value: str) -> datetime | None:
     """Parse an ISO-8601 UTC timestamp, tolerating a bare ``YYYY-MM-DD`` date.
 
-    Issue athenaeum#1990: shared by :func:`athenaeum.decisions.
-    decision_time_minutes` and :mod:`athenaeum.decision_budget` so neither
-    forks a second date-parsing convention. A full
+    Issue athenaeum#1990: used internally by :func:`minutes_between`, the
+    shared implementation :mod:`athenaeum.decision_budget` calls directly,
+    so callers never fork a second date-parsing convention. A full
     ``YYYY-MM-DDThh:mm:ssZ`` timestamp parses to that instant. A bare date
     (e.g. the question queue's header-only ``created_at``, which carries no
     time-of-day) parses to midnight UTC on that date. Returns ``None`` when

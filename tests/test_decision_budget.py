@@ -26,7 +26,7 @@ from athenaeum.decision_budget import (
     record_decision_answered,
     record_overflow_shapes,
 )
-from athenaeum.decisions import decision_time_minutes
+from athenaeum.metrics import minutes_between
 from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
 
 _NOW = datetime(2026, 10, 7, tzinfo=timezone.utc)
@@ -230,7 +230,7 @@ def test_raised_at_answered_at_pairing_through_question_apply(tmp_path: Path) ->
     assert event["decision_id"] == qid
     assert event["raised_at"]
     assert event["answered_at"]
-    minutes = decision_time_minutes(event["raised_at"], event["answered_at"])
+    minutes = minutes_between(event["raised_at"], event["answered_at"])
     assert minutes is not None
     assert minutes >= 0
 
