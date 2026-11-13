@@ -3212,6 +3212,89 @@ class TestReservationLedgerPathMigration:
 # ---------------------------------------------------------------------------
 
 
+    # --- failure paths (Seer bug prediction on PR athenaeum#2511) ---
+
+    def test_an_unreadable_claim_is_handed_back_for_a_later_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read failure must not strand the records under `.migrating`.
+
+        Nothing has been appended at that point, so the claim can be
+        returned to the legacy path intact and retried. Without this, a
+        transient read error renames the file to a name no code path ever
+        looks at again and the records are invisible forever.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v": 1, "batch_id": "b1"}\n', encoding="utf-8")
+
+        def _boom(*_args: object, **_kwargs: object) -> str:
+            raise OSError("simulated read failure")
+
+        monkeypatch.setattr(Path, "read_text", _boom)
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        monkeypatch.undo()
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        # Handed back under its original name, with its record intact.
+        assert legacy.read_text(encoding="utf-8") == '{"v": 1, "batch_id": "b1"}\n'
+        assert not list(wiki_root.glob("*.migrating"))
+        # And the retry succeeds.
+        spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert not legacy.exists()
+        assert [r["batch_id"] for r in spend.read_reservation_ledger(
+            wiki_root, cache_dir=cache_dir
+        )] == ["b1"]
+
+    def test_a_failing_append_leaves_the_claim_in_place_and_does_not_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial append must NOT be retried, and must not break the caller.
+
+        Handing the claim back would duplicate whatever was already
+        appended, so it stays put under its `.migrating` name and is
+        logged. The resolver is on the read path of every ledger access, so
+        it degrades to "the cache dir is still the answer" rather than
+        raising.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v": 1, "batch_id": "b1"}\n', encoding="utf-8")
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("simulated append failure")
+
+        monkeypatch.setattr(spend, "append_line_durable", _boom)
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        monkeypatch.undo()
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        claims = list(wiki_root.glob("*.migrating"))
+        assert len(claims) == 1
+        assert claims[0].read_text(encoding="utf-8") == '{"v": 1, "batch_id": "b1"}\n'
+
+    def test_an_undecodable_byte_does_not_strand_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A corrupt byte migrates (replaced) rather than raising forever.
+
+        Readers of this ledger already skip an unparseable line, so moving
+        the file out of the knowledge root — which is the whole point of
+        issue athenaeum#2469 — beats stranding it there on one bad byte.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_bytes(b'{"v": 1, "batch_id": "b1"}\n\xff\xfe bad\n')
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert not list(wiki_root.glob("*.migrating"))
+        assert [r["batch_id"] for r in spend.read_reservation_ledger(
+            wiki_root, cache_dir=cache_dir
+        )] == ["b1"]
+
 class TestSpendReportsOutstandingReservations:
     def _report(self, target: Path, cache_dir: Path, *, as_json: bool) -> str:
         import contextlib

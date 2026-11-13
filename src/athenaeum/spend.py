@@ -309,7 +309,21 @@ def _migrate_legacy_ledger(legacy_path: Path, new_path: Path) -> None:
     unparseable line (see e.g.
     :func:`athenaeum.batch_state.read_reconcile_ledger`). A zero-byte file is
     excluded upfront by :func:`_has_migrated_content` and is left in place,
-    untouched.
+    untouched. For the same reason the read uses ``errors="replace"``: one
+    corrupt byte must not strand the whole file in the knowledge root
+    forever, which is precisely what this issue exists to prevent, and a
+    replaced character is a line those readers already skip.
+
+    **Failure paths** (raised as a bug prediction on PR athenaeum#2511).
+    The claimed file is never left under a name nothing looks at again when
+    that is avoidable: a read failure hands the claim BACK to *legacy_path*
+    intact, so a later call retries it. A failure part-way through the
+    append loop cannot be handed back — a retry would duplicate the lines
+    already written — so the claim stays put, intact and named, and is
+    logged loudly. Either way this function does not raise: it sits on the
+    read path of every ledger access, so a migration that cannot finish
+    degrades to "the cache dir is still the answer" rather than breaking
+    the caller.
     """
     if not _has_migrated_content(legacy_path):
         return
@@ -320,22 +334,58 @@ def _migrate_legacy_ledger(legacy_path: Path, new_path: Path) -> None:
         # Lost the race to another process, or nothing left to claim.
         return
     try:
-        text = claim_path.read_text(encoding="utf-8")
+        text = claim_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
+        # Nothing has been appended yet, so the claim can be handed back
+        # intact and a later call will retry it. Renaming it back is what
+        # keeps a transient read error from stranding the records under a
+        # `.migrating` name no code path ever looks at again.
         log.warning(
             "could not read the claimed legacy ledger %s during migration "
-            "(%s: %s) — leaving it at %s for the next attempt",
+            "(%s: %s) — returning it to %s for a later attempt",
             claim_path,
+            type(exc).__name__,
+            exc,
+            legacy_path,
+        )
+        try:
+            os.rename(claim_path, legacy_path)
+        except OSError as undo_exc:
+            log.warning(
+                "could not return the claimed legacy ledger %s to %s "
+                "(%s: %s) — its records are intact at %s and need moving by hand",
+                claim_path,
+                legacy_path,
+                type(undo_exc).__name__,
+                undo_exc,
+                claim_path,
+            )
+        return
+    try:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            append_line_durable(new_path, (line + "\n").encode("utf-8"))
+    except OSError as exc:
+        # A partial append has already happened, so the claim CANNOT be
+        # handed back — a retry would duplicate the lines already written.
+        # Leave it where it is, intact and named, and say so loudly. This
+        # resolver is on the read path of every ledger access, so it must
+        # not raise: a migration that cannot finish degrades to "the new
+        # path is still the answer", never to a broken caller.
+        log.warning(
+            "could not finish migrating %s into %s (%s: %s) — the remaining "
+            "records are intact at %s; it is left in place rather than "
+            "retried, because a retry would duplicate what was already "
+            "appended",
+            legacy_path,
+            new_path,
             type(exc).__name__,
             exc,
             claim_path,
         )
         return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        append_line_durable(new_path, (line + "\n").encode("utf-8"))
     try:
         claim_path.unlink()
     except OSError as exc:
