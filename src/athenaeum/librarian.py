@@ -137,14 +137,12 @@ from athenaeum.config import (
     resolve_authority_manifest_path,
     resolve_corrections_max_escalations_per_run,
     resolve_corrections_runtime_share,
-    resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
     resolve_intake_runtime_floor,
-    resolve_live_delta_enabled,
     resolve_model_rates,
     resolve_person_registry_root,
     resolve_pull_before_run,
@@ -2240,7 +2238,7 @@ def _apply_tier3_results(
     # Purely deterministic and offline -- no LLM call, no network, no metered
     # spend (athenaeum#1576 AC6). Existing ``related:`` rows (the oversize-split
     # ``split-from``/``split-into`` pairs) are preserved, never replaced.
-    stamp_related_edges(new_entities, relatedness_run_index(wiki_root, config=config))
+    stamp_related_edges(new_entities, relatedness_run_index(wiki_root))
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -3612,12 +3610,12 @@ def _compile_auto_memory(
 
     Delta cadence contract (issue athenaeum#463, slice D of athenaeum#460, supersedes the
     original athenaeum#370 PR2 D5 fallback): the deterministic ``client is None`` path
-    (session_end / ingest tier0, no LLM) is delta-eligible whenever
-    ``librarian.delta.enabled`` allows it, unconditionally. The nightly LLM
-    run — a live client — is now ALSO delta-eligible by default, gated by BOTH
-    ``librarian.delta.live_client`` (:func:`athenaeum.config.
-    resolve_live_delta_enabled`, default True) AND ``not full_compile_due``.
-    ``full_compile_due`` is ``True`` when the periodic whole-corpus
+    (session_end / ingest tier0, no LLM) is always delta-eligible
+    (athenaeum#2461 — the ``librarian.delta.enabled`` off switch was removed).
+    The nightly LLM run — a live client — is ALSO always delta-eligible
+    (athenaeum#2461 removed ``librarian.delta.live_client`` too), gated only
+    by ``not full_compile_due``. ``full_compile_due`` is ``True`` when the
+    periodic whole-corpus
     reconciliation cadence (:func:`athenaeum.config.
     resolve_full_compile_every_days`, default every 7 days — see :func:`run`'s
     ``full_compile_due`` computation) is due, or when the caller forces it
@@ -3666,12 +3664,10 @@ def _compile_auto_memory(
     double-count the same files. ``None`` (the default) skips it entirely.
 
     """
-    delta_enabled = resolve_delta_enabled(config)
-    live_delta_enabled = resolve_live_delta_enabled(config) and not full_compile_due
+    live_delta_enabled = not full_compile_due
     delta_eligible = (
         not dry_run
         and changed_paths is not None
-        and delta_enabled
         and (client is None or live_delta_enabled)
     )
     if changed_paths is not None and not delta_eligible and not dry_run:
@@ -3679,16 +3675,6 @@ def _compile_auto_memory(
             log.info(
                 "delta: periodic full-compile reconciliation due "
                 "(librarian.full_compile_every_days) — whole-corpus compile"
-            )
-        elif client is not None:
-            log.warning(
-                "delta: live LLM client delta disabled via "
-                "librarian.delta.live_client — whole-corpus compile so "
-                "contradiction escalations stay corpus-consistent"
-            )
-        elif not delta_enabled:
-            log.info(
-                "delta: disabled via librarian.delta.enabled — whole-corpus compile"
             )
 
     only_cluster_ids = _run_cluster_pass(
@@ -8064,13 +8050,11 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
     wiki-dedup's.
 
     Delegates entirely to :func:`athenaeum.name_collisions.resolve_name_collisions`,
-    gated by :func:`athenaeum.config.resolve_name_collision_scan_enabled`
-    (default ON — the scan itself is free) and, for the auto-merge subset
-    only, :func:`athenaeum.config.resolve_name_collision_automerge_enabled`
-    (default OFF — see that resolver's docstring for why). With the scan
-    flag off, this phase records ``{"reason": "disabled"}`` and does
-    nothing else — a disabled phase is distinguishable from one that ran
-    and found zero collisions.
+    which always runs (athenaeum#2461 removed the scan's off switch — the
+    scan itself is free, so there was no cost reason to keep one), gated
+    only, for the auto-merge subset, by
+    :func:`athenaeum.config.resolve_name_collision_automerge_enabled`
+    (default OFF — see that resolver's docstring for why).
 
     ``ctx.dry_run`` is threaded straight through to
     :func:`~athenaeum.name_collisions.resolve_name_collisions`, which scans
@@ -8079,7 +8063,7 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
 
     Appends a ``"name-collisions"`` :attr:`RunContext.run_profile` entry
     carrying ``collisions``/``unambiguous``/``ambiguous``/``merged``/
-    ``queued`` counts (or just ``reason`` when disabled/failed) — this flows
+    ``queued`` counts (or just ``reason`` when failed) — this flows
     automatically into both :func:`_render_run_summary` and
     :func:`athenaeum.run_summary_log.build_run_summary_ledger_record`
     (``record["phases"]["name-collisions"]``), same as every other phase's
@@ -8090,43 +8074,36 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
     _start = time.monotonic()
     _fields: dict[str, Any] = {"reason": "completed"}
     try:
-        from athenaeum.config import (
-            resolve_name_collision_automerge_enabled,
-            resolve_name_collision_scan_enabled,
-        )
+        from athenaeum.config import resolve_name_collision_automerge_enabled
         from athenaeum.name_collisions import resolve_name_collisions
 
-        if not resolve_name_collision_scan_enabled(ctx.config):
-            _fields = {"reason": "disabled"}
-        else:
-            auto_merge = resolve_name_collision_automerge_enabled(ctx.config)
-            # Local capture (not `ctx.now` inline in the lambda below): mypy
-            # cannot narrow a closed-over attribute access to non-Optional
-            # even behind an `is not None` guard at the call site.
-            _run_now = ctx.now
-            counts = resolve_name_collisions(
-                ctx.wiki_root,
-                auto_merge=auto_merge,
-                dry_run=ctx.dry_run,
-                # Issue athenaeum#1627: audit each page in a collision group
-                # before its merge proposal is written. Dry-run never
-                # reaches write_pending_merge (see resolve_name_collisions'
-                # own docstring), so these are unused on that path.
-                audit_client=ctx.resolve_audit_on_touch_client(),
-                audit_model=ctx.audit_on_touch_model,
-                audit_counters=ctx.audit_on_touch_counters,
-                audit_freshness_hours=resolve_audit_on_touch_freshness_hours(ctx.config),
-                audit_now=(lambda: _run_now) if _run_now is not None else None,
-            )
-            _fields = {"reason": "completed", **counts}
+        auto_merge = resolve_name_collision_automerge_enabled(ctx.config)
+        # Local capture (not `ctx.now` inline in the lambda below): mypy
+        # cannot narrow a closed-over attribute access to non-Optional
+        # even behind an `is not None` guard at the call site.
+        _run_now = ctx.now
+        counts = resolve_name_collisions(
+            ctx.wiki_root,
+            auto_merge=auto_merge,
+            dry_run=ctx.dry_run,
+            # Issue athenaeum#1627: audit each page in a collision group
+            # before its merge proposal is written. Dry-run never
+            # reaches write_pending_merge (see resolve_name_collisions'
+            # own docstring), so these are unused on that path.
+            audit_client=ctx.resolve_audit_on_touch_client(),
+            audit_model=ctx.audit_on_touch_model,
+            audit_counters=ctx.audit_on_touch_counters,
+            audit_freshness_hours=resolve_audit_on_touch_freshness_hours(ctx.config),
+            audit_now=(lambda: _run_now) if _run_now is not None else None,
+        )
+        _fields = {"reason": "completed", **counts}
     except Exception:
         log.exception("name-collision scan failed; continuing run")
         # Issue athenaeum#1170 code review: a phase that crashed must not read
         # as "completed" in the run summary / durable ledger -- _fields was
-        # still {"reason": "completed"} from initialization above (the
-        # `if not resolve_name_collision_scan_enabled` / else branch never
-        # ran), which made a genuine failure indistinguishable from a clean
-        # run that found zero collisions.
+        # still {"reason": "completed"} from initialization above, which
+        # made a genuine failure indistinguishable from a clean run that
+        # found zero collisions.
         _fields = {"reason": "failed"}
     finally:
         ctx.run_profile.append(("name-collisions", time.monotonic() - _start, _fields))
@@ -8155,7 +8132,7 @@ def _run_qualified_name_phase(ctx: RunContext) -> None:
 
     Appends a ``"qualified-names"`` :attr:`RunContext.run_profile` entry
     carrying ``splits``/``queued`` counts (or just ``reason`` when
-    disabled/failed), which flows into the run summary and the durable
+    failed), which flows into the run summary and the durable
     ledger record like every other phase's entry.
     """
     if not ctx.wiki_root.is_dir():
@@ -8163,16 +8140,12 @@ def _run_qualified_name_phase(ctx: RunContext) -> None:
     _start = time.monotonic()
     _fields: dict[str, Any] = {"reason": "completed"}
     try:
-        from athenaeum.config import resolve_qualified_name_scan_enabled
         from athenaeum.name_structure import propose_qualified_name_merges
 
-        if not resolve_qualified_name_scan_enabled(ctx.config):
-            _fields = {"reason": "disabled"}
-        else:
-            counts = propose_qualified_name_merges(
-                ctx.wiki_root, config=ctx.config, dry_run=ctx.dry_run
-            )
-            _fields = {"reason": "completed", **counts}
+        counts = propose_qualified_name_merges(
+            ctx.wiki_root, config=ctx.config, dry_run=ctx.dry_run
+        )
+        _fields = {"reason": "completed", **counts}
     except Exception:
         log.exception("qualified-name scan failed; continuing run")
         _fields = {"reason": "failed"}
