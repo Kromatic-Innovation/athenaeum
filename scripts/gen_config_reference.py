@@ -679,7 +679,7 @@ def _scan_env_vars_in_tree(root: Path) -> dict[str, list[str]]:
     in `docs/reference/configuration.md`" over the WHOLE tree, not just
     `config.py`. AC1 only asks this generator to document every `resolve_*`
     in `config.py`, which is a real subset: plenty of operator-facing env
-    vars are read by a resolver in a DIFFERENT module (`cross_scope.py`,
+    vars are read by a resolver in a DIFFERENT module (`fingerprint.py`,
     `clusters.py`, `batch_state.py`, ...), by the per-knob model-routing
     table, or directly by the CLI layer with no resolver at all. Rather than
     let generating this page regress the existing env-docs gate, every such
@@ -917,7 +917,7 @@ def _render(
         lines.append(
             "`ATHENAEUM_*` variables read somewhere in `src/` that are NOT sourced "
             "from a `config.py` `resolve_*` function — either a resolver in a "
-            "different module (e.g. `cross_scope.py`, `clusters.py`, "
+            "different module (e.g. `fingerprint.py`, `clusters.py`, "
             "`batch_state.py`), a per-knob model-routing variable, or a variable "
             "read directly outside the resolver layer. Listed here (rather than "
             "omitted) so this page stays the complete answer to \"what "

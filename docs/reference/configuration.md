@@ -1071,7 +1071,7 @@ QUEUE WAIT TIME (``answered_at`` minus ``raised_at``/``created_at``),
 not the human-effort-per-day 's own prose names — the two are not
 the same measurement, and this issue's PR description states that
 mismatch rather than silently comparing wait time against an effort
-bound. See `athenaeum.decisions.decision_time_minutes`.
+bound. See `athenaeum.metrics.minutes_between`.
 
 Precedence: ``ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P50_MAX`` env >
 yaml ``librarian.decisions_budget_decision_minutes_p50_max`` > ``30``.
@@ -1996,7 +1996,7 @@ entity intake. This is for a tool that writes its own OPERATIONAL
 artifacts into ``raw/<source>/`` (the same tree ``remember``-authored
 content uses): action logs, launchd logs, state dumps. Those match the
 ``*.md`` / ``*.jsonl`` glob and are not correction-batch envelopes, so
-without this knob they enter ``tier2_classify`` → ``tier3_write`` as if
+without this knob they enter ``tier2_classify`` → ``tier3_derive_actions`` as if
 they were memory content, and a multi-megabyte log gets read whole and
 handed to the classifier.
 
@@ -2463,7 +2463,7 @@ docstring for why the check moved from "once, after the whole file" to
 The original ``8`` default assumed an ordinary file costs roughly 1-3
 calls (tier-2 classify plus one tier-3 action or two). Measured reality
 on the live deployment (2026-08-15/16 nightly logs, api provider) put an
-ordinary file at **20-46 calls** — un-batched ``tier3_write`` spends one
+ordinary file at **20-46 calls** — un-batched ``tier3_derive_actions`` spends one
 call per entity action, and a file with several entities easily clears a
 dozen — so ``8`` sat 3-6x below the median file and rejected normal
 input rather than catching loopers. ``60`` covers the measured
@@ -3017,10 +3017,8 @@ source set a human rejected in ``_pending_merges.md`` /
 ``librarian.rejected_merge_cooldown_days`` is the decay: after this many
 days since the rejection the pair may be proposed again (the new
 proposal's rationale names the earlier rejection). ``0`` (the default)
-means a rejection never expires, mirroring
-``contradiction.not_a_conflict_ttl_days``'s "0 = no decay" convention.
-An approved-then-folded source set is never re-proposed regardless of
-this value.
+means a rejection never expires. An approved-then-folded source set is
+never re-proposed regardless of this value.
 
 Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
 non-negative ``int``) > default ``0``. Negative, non-integer and
@@ -4312,14 +4310,14 @@ Default: ``<knowledge_root>/wiki`` — the SAME directory
 backward compatibility: demotes ``type: person`` pages out of
 the general entity-index NAME keys (see
 `athenaeum.models.DEMOTED_NAME_MATCH_TYPES`), but does not itself
-move a single file — the one-time physical relocation of person pages in
-a live corpus is (blocked by). Until that
-relocation runs, every person page still lives under ``wiki/``, so this
-resolver has to keep pointing there for `athenaeum.person_registry.PersonRegistry`
-to find anything on an unmigrated corpus. Once physically moves
-person pages elsewhere, set ``person_registry.root`` (relative paths
-resolve against *knowledge_root*; an absolute path is used as-is) to
-repoint this WITHOUT a code change.
+move a single file — a person page keeps living wherever it already
+lives on disk, under ``wiki/`` by default, so this resolver has to keep
+pointing there for `athenaeum.person_registry.PersonRegistry`
+to find anything. An operator who relocates person pages out of
+``wiki/`` (a corpus-layout change this module does not perform itself)
+sets ``person_registry.root`` (relative paths resolve against
+*knowledge_root*; an absolute path is used as-is) to repoint this
+WITHOUT a code change.
 
 No env override: unlike a run-level budget knob, this is a structural
 corpus-layout fact an operator sets once (if ever), not a per-invocation
@@ -5744,7 +5742,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 
 ## Other environment variables
 
-`ATHENAEUM_*` variables read somewhere in `src/` that are NOT sourced from a `config.py` `resolve_*` function — either a resolver in a different module (e.g. `cross_scope.py`, `clusters.py`, `batch_state.py`), a per-knob model-routing variable, or a variable read directly outside the resolver layer. Listed here (rather than omitted) so this page stays the complete answer to "what `ATHENAEUM_*` variables exist" — the same guarantee `scripts/check_env_docs.py` enforces in both directions.
+`ATHENAEUM_*` variables read somewhere in `src/` that are NOT sourced from a `config.py` `resolve_*` function — either a resolver in a different module (e.g. `fingerprint.py`, `clusters.py`, `batch_state.py`), a per-knob model-routing variable, or a variable read directly outside the resolver layer. Listed here (rather than omitted) so this page stays the complete answer to "what `ATHENAEUM_*` variables exist" — the same guarantee `scripts/check_env_docs.py` enforces in both directions.
 
 | Env var | Referenced in |
 |---|---|
