@@ -64,6 +64,23 @@ never read and never written. Nothing is deleted or migrated automatically;
 if you want those old rows, merge the leftover file into the corresponding
 file in your cache directory yourself, then remove the old copy.
 
+## I want to know about the batch-reconcile and batch-reservation ledgers moving
+
+The batch-reconciliation ledger (`batch_reconcile.jsonl`) and the
+batch-spend-reservation ledger (`batch_reservations.jsonl`) now live in your
+cache directory instead of your knowledge directory.
+
+Unlike the ledgers in the section above, this move **is** handled for you
+automatically, and you do not need to do anything. The first time either
+ledger is used after you upgrade, if a file from before the move is still
+sitting at the old knowledge-directory location, athenaeum copies every
+record from it into the corresponding file in your cache directory and then
+removes the old file. This happens once per ledger; running it again, or
+starting two athenaeum processes at the same moment, is safe — neither loses
+a record nor duplicates one. You do not need to merge anything by hand, and
+there is nothing left behind in your knowledge directory to clean up
+afterward.
+
 ## I want to know which ledgers stopped being written, and where the old files are
 
 A cleanup audit found five internal ledgers written by live code but read

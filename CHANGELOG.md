@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of held indefinitely — this changes which atoms retire on the next run
   (athenaeum#2455).
 
+- The batch reconcile and spend reservation ledgers now live in the cache
+  directory and are moved there automatically on upgrade (athenaeum#2469).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
