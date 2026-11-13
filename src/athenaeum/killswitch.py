@@ -10,10 +10,26 @@ error-prone, and reversible only by remembering exactly what was edited (athenae
 
 The kill switch replaces that with a single state file
 (``$ATHENAEUM_CACHE_DIR/disabled``, default ``~/.cache/athenaeum/disabled``) plus
-an ``ATHENAEUM_DISABLED`` environment override that **every entry point checks** —
-the CLI (``session-end``), the MCP server tools, and the shell hooks (which read
-the same file directly with plain ``grep`` so they add no Python startup cost on
-the per-turn recall path).
+an ``ATHENAEUM_DISABLED`` environment override that **the entry points listed
+here check** — not every entry point in the codebase (issue athenaeum#2448 found
+``athenaeum run`` silently skipping it; the audit below is exact so that
+mistake is harder to repeat). The checked set today:
+
+- The CLI ``session-end`` and ``run`` commands (``aspect="compile"``) — the
+  expensive ``claude -p`` compile/contradiction-detection fan-out.
+- The MCP server's capture/resolve tools (``aspect="capture"``).
+- The per-turn recall path: the shell hooks in ``examples/claude-code/`` and
+  :mod:`athenaeum.context`'s inline ``_recall_disabled`` (``aspect="recall"``)
+  are REIMPLEMENTATIONS rather than importers of this module — they read the
+  state file directly (plain ``grep`` / a plain file read) so they add no
+  Python startup cost on the per-turn path, and must be kept in sync with
+  :func:`is_disabled` by convention rather than by import.
+- The Codex Tier-2 context adapter (:mod:`athenaeum.codex_adapter`,
+  ``aspect="recall"``).
+
+Other compile-class CLI commands — ``ingest``, ``drain``, ``index
+rebuild-index``, ``curate`` — do **not** check it (tracked separately per
+issue athenaeum#2448's "Out of scope"; do not assume they are covered).
 
 Two scopes:
 
@@ -37,10 +53,13 @@ with ``aspect="recall"`` in a few lines of ``bash``; keep the two in sync — th
 file format is deliberately trivial (presence ⇒ ``all`` unless the JSON/text
 says ``compile``) so a plain ``grep`` and this reader agree.
 
-**Contract:** one state file plus one env override that EVERY entry point
-(CLI, MCP tools, shell hooks) checks before doing background work —
-:func:`is_disabled` / :func:`current_state` are the single read path;
-:func:`disable` / :func:`enable` are the single write path.
+**Contract:** one state file plus one env override that the entry points
+listed above (CLI ``session-end``/``run``, MCP tools, the recall path) check
+before doing background work — :func:`is_disabled` / :func:`current_state`
+are the single read path; :func:`disable` / :func:`enable` are the single
+write path. Checking it is opt-in per call site, not automatic: a new
+compile-class or background entry point is NOT covered until it calls
+:func:`is_disabled` itself.
 
 **Factoring rule:** this module owns the on/off STATE and its resolution
 precedence (env > file > enabled); it does not itself gate any specific
