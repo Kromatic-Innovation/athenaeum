@@ -119,7 +119,9 @@ class TestRaisePendingQuestionUnit:
         assert result["error_code"] is None
         assert result["decision_id"]
         assert result["raw_block"] is not None
-        assert result["block"] == result["raw_block"]  # legacy alias
+        # athenaeum#2460: the legacy block/error aliases were removed.
+        assert "block" not in result
+        assert "error" not in result
 
         items = list_unanswered(pending)
         assert len(items) == 1
