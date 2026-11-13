@@ -198,6 +198,53 @@ empty list when unset -- a fresh install dedups on the generic
 ``google_contact`` key only, with no personal namespace literal in source.
 No seed in ``_DEFAULTS``.
 
+### `resolve_strong_identifier_keys`
+
+- **YAML path:** `dedupe.strong_identifier_keys`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** the shipped Apollo fields -- `apollo_id`, `apollo_headline`, `apollo_location`, `apollo_employment_history`, `current_title`, `current_company` (see `athenaeum.dedupe._DEFAULT_STRONG_IDENTIFIER_KEYS`); an explicit empty list (`[]`) disables vendor strong-identifier matching and merge-time coalescing entirely
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``dedupe.strong_identifier_keys`` -- person-dedupe's
+strong-identifier + coalesced-namespace field names.
+
+Person dedupe's HIGH-confidence vendor-enrichment signal hard-coded
+which frontmatter fields it treated as a strong identifier and which
+namespace fields it coalesced on merge. Which enrichment vendor a
+deployment uses is deployment policy, not engine behaviour, so those
+field names are supplied entirely through ``athenaeum.yaml``:
+```
+dedupe:
+  strong_identifier_keys:
+    - apollo_id
+    - apollo_headline
+    - apollo_location
+    - apollo_employment_history
+    - current_title
+    - current_company
+```
+
+This is a deliberate, PERMANENT configurable default, not a temporary
+flag: the current Apollo fields above are the shipped default and
+documented example -- an unconfigured install reproduces today's
+behaviour exactly (see
+`athenaeum.dedupe._DEFAULT_STRONG_IDENTIFIER_KEYS`, the one place
+that default list lives; this module does not import it, so it stays
+out of ``athenaeum.config``'s own import surface). The FIRST entry is
+the field `athenaeum.dedupe.find_duplicate_persons` matches two
+pages on; every entry (including the first) is coalesced onto the
+canonical page in `athenaeum.dedupe.merge_duplicate_persons`.
+
+Returns ``None`` when unset (key absent, ``dedupe`` missing or not a
+mapping, or the value is not a list) so the caller applies its OWN
+default -- unlike `resolve_google_contact_keys`'s always-empty
+default, this knob's shipped default is non-empty, so "unset" and
+"explicitly emptied" must stay distinguishable here. An explicit empty
+list (``strong_identifier_keys: []``) resolves to ``[]``, which the
+caller takes literally: vendor strong-identifier matching and
+namespace coalescing are both disabled, with no error.
+
 ## `dimensions`
 
 ### `resolve_dimensions`

@@ -30,6 +30,20 @@ wiki pages; see ``docs/design/bounce-surface-convergence.md`` for why that direc
 was chosen over propagating the mark into the corpus, and what the alternative
 would have cost.
 
+**Public API (issue athenaeum#2470).** :func:`deliverability_for_page`,
+:func:`join_identifier` and :class:`Deliverability` are re-exported from the
+package root (``from athenaeum import deliverability_for_page``) and
+documented, with their inputs, outputs and stability promise, in
+``docs/extending/authorized-reader-contract.md`` §6 — this module was finished
+but unused outside its own tests before that issue; those three names are now
+the supported way for a downstream consumer to ask "is this address
+deliverable" through athenaeum rather than re-reading page frontmatter
+directly. :class:`BounceJoin` — ``join_identifier``'s return type — and the
+private :func:`_uid_of` helper stay internal, builder's choice: the issue
+named exactly the three symbols above, and a narrower public surface is a
+smaller stability promise. ``BounceJoin`` is still reachable, just not
+promoted, via ``athenaeum.bounce_join.BounceJoin`` directly.
+
 **Evidence classes stay separate — this is the load-bearing property.** The
 two surfaces do not hold the same KIND of evidence. The pii mark exists only
 where :func:`athenaeum.pii.detect_hard_bounce_fact` matched, which requires an
@@ -161,6 +175,13 @@ class BounceJoin:
     ``uid`` with no wiki page (the entity page was merged away or never
     existed). :attr:`reached` says how far it got, and each attribute is
     ``None`` from the first break onward.
+
+    **Not re-exported from the package root (issue athenaeum#2470, builder's
+    choice).** This is :func:`join_identifier`'s return type, but athenaeum#2470
+    named only :func:`deliverability_for_page`, :func:`join_identifier` and
+    :class:`Deliverability` as the public surface, so this type stays
+    reachable only via ``athenaeum.bounce_join.BounceJoin`` — a caller that
+    needs the type for an annotation imports it from here directly.
     """
 
     identifier: str
@@ -195,6 +216,11 @@ def join_identifier(
     as_of: date | None = None,
 ) -> BounceJoin:
     """Walk the chain from an email identifier to the wiki page consumers hold.
+
+    **Public API** — also reachable as ``from athenaeum import
+    join_identifier`` (issue athenaeum#2470); see
+    ``docs/extending/authorized-reader-contract.md`` §6 for the stability
+    promise.
 
     Follows ``identifier -> person record -> uid -> wiki page``, stopping at
     the first missing link and reporting how far it got rather than raising:
@@ -249,6 +275,11 @@ def join_identifier(
 class Deliverability:
     """What a consumer holding a wiki page knows about an address's deliverability.
 
+    **Public API** — also reachable as ``from athenaeum import
+    Deliverability`` (issue athenaeum#2470); see
+    ``docs/extending/authorized-reader-contract.md`` §6 for the stability
+    promise.
+
     The two evidence classes are reported SEPARATELY and deliberately not
     collapsed into a single boolean (issue athenaeum#852):
 
@@ -289,6 +320,11 @@ def deliverability_for_page(
     as_of: date | None = None,
 ) -> list[Deliverability]:
     """The consumer entry point: what does THIS wiki page know about deliverability?
+
+    **Public API** — also reachable as ``from athenaeum import
+    deliverability_for_page`` (issue athenaeum#2470); see
+    ``docs/extending/authorized-reader-contract.md`` §6 for the stability
+    promise.
 
     Walks the chain backwards — page ``uid`` -> the person record carrying the
     same ``uid`` -> that record's addresses -> each address's pii mark — and

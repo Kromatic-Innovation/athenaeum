@@ -2969,31 +2969,26 @@ class TestDurableLedgerPath:
         assert decl.operational_scope == "store-durable"
         assert decl.location == "cache dir"
 
-    def test_reservation_ledger_path_keeps_its_own_independent_rule(
+    def test_reservation_ledger_path_now_also_always_resolves_cache_dir(
         self, tmp_path: Path
     ) -> None:
-        """``reservation_ledger_path`` (``batch_reservations.jsonl``) is a
-        DIFFERENT artifact, out of issue athenaeum#1601's scope, and was not
-        migrated. It keeps its own legacy-fallback rule, unaffected by
-        ``durable_ledger_path`` now always resolving to the cache dir — an
-        EMPTY new-path reservation ledger still must not strand a populated
-        legacy one, per issue athenaeum#1512."""
+        """``reservation_ledger_path`` (``batch_reservations.jsonl``) used to
+        be a DIFFERENT artifact, out of issue athenaeum#1601's scope, that
+        kept its own ``wiki_root``-preferring legacy-fallback rule. Issue
+        athenaeum#2469 brings it to the same always-cache-dir answer
+        ``durable_ledger_path`` already has — see ``TestReservationLedgerPathMigration``
+        below for the migration behaviour this function now also performs on
+        the way there."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        legacy = cache_dir / spend.RESERVATION_LEDGER_FILENAME
-        legacy.write_text('{"v":1}\n', encoding="utf-8")
-
         new_path = wiki_root / spend.RESERVATION_LEDGER_FILENAME
-        new_path.touch()
-        assert new_path.exists() and new_path.stat().st_size == 0
-
-        assert spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir) == legacy
-
-        # ...and a populated new path still wins, unchanged.
         new_path.write_text('{"v":1}\n', encoding="utf-8")
-        assert spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir) == new_path
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
 
     def test_explicit_cache_dir_now_does_isolate_this_function(self, tmp_path: Path) -> None:
         """Issue athenaeum#1512 defect 1 at the function level. Before issue
@@ -3075,6 +3070,138 @@ class TestDurableLedgerPath:
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#2469 — reservation_ledger_path's one-time migration off
+# wiki_root. Unlike durable_ledger_path (issue athenaeum#1601), which simply
+# abandons a leftover wiki_root file, this resolver actively moves every
+# record into the cache-dir file and removes the old one, via
+# spend._migrate_legacy_ledger.
+# ---------------------------------------------------------------------------
+
+
+class TestReservationLedgerPathMigration:
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        return wiki_root, cache_dir
+
+    def test_a_fresh_install_writes_only_to_the_cache_dir(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not (wiki_root / spend.RESERVATION_LEDGER_FILENAME).exists()
+
+    def test_b_a_legacy_ledger_is_migrated_with_every_record_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """Fails on today's code: before issue athenaeum#2469,
+        ``reservation_ledger_path`` just kept reading/writing the legacy
+        ``wiki_root`` file forever once it was populated — it never copied
+        anything into the cache dir and never removed the old file."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text(
+            '{"v":1,"state":"reserved","batch_id":"a"}\n'
+            '{"v":1,"state":"reserved","batch_id":"b"}\n',
+            encoding="utf-8",
+        )
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert resolved.read_text(encoding="utf-8").splitlines() == [
+            '{"v":1,"state":"reserved","batch_id":"a"}',
+            '{"v":1,"state":"reserved","batch_id":"b"}',
+        ]
+
+    def test_c_running_the_migration_twice_changes_nothing(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v":1,"state":"reserved","batch_id":"a"}\n', encoding="utf-8")
+
+        first = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        first_content = first.read_text(encoding="utf-8")
+
+        second = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert second == first
+        assert second.read_text(encoding="utf-8") == first_content
+        assert not legacy.exists()
+
+    def test_d_a_legacy_file_with_only_a_header_line_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """A legacy file that carries bytes but no parseable record (a
+        header/garbage line, or an entirely empty file) must not make the
+        resolver raise. Migration copies lines, never parses JSON, so a
+        header line is copied byte-for-byte rather than rejected."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text("# batch reservation ledger\n", encoding="utf-8")
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert resolved.read_text(encoding="utf-8") == "# batch reservation ledger\n"
+
+        # An entirely empty legacy file (no bytes at all) must be equally
+        # inert: _has_migrated_content excludes it, so it is left in place.
+        second = tmp_path / "second"
+        second.mkdir()
+        wiki_root2, cache_dir2 = self._roots(second)
+        empty_legacy = wiki_root2 / spend.RESERVATION_LEDGER_FILENAME
+        empty_legacy.write_text("", encoding="utf-8")
+
+        resolved2 = spend.reservation_ledger_path(wiki_root2, cache_dir=cache_dir2)
+
+        assert resolved2 == cache_dir2 / spend.RESERVATION_LEDGER_FILENAME
+        assert empty_legacy.exists()
+        assert empty_legacy.stat().st_size == 0
+
+    def test_two_concurrent_migration_attempts_do_not_duplicate_records(
+        self, tmp_path: Path
+    ) -> None:
+        """Simulates two processes racing the same legacy file: one wins the
+        atomic-rename claim, the other loses it. Both must complete without
+        raising, and the record must land in the cache-dir file exactly
+        once — never duplicated, never lost."""
+        import threading
+
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v":1,"state":"reserved","batch_id":"a"}\n', encoding="utf-8")
+        new_path = cache_dir / spend.RESERVATION_LEDGER_FILENAME
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def attempt() -> None:
+            barrier.wait()
+            try:
+                spend._migrate_legacy_ledger(legacy, new_path)
+            except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert not legacy.exists()
+        assert new_path.read_text(encoding="utf-8").splitlines() == [
+            '{"v":1,"state":"reserved","batch_id":"a"}',
+        ]
+
+
+# ---------------------------------------------------------------------------
 # Issue athenaeum#1147 AC9 — `athenaeum spend` surfaces committed-but-unbilled
 # batch spend.
 #
@@ -3084,6 +3211,89 @@ class TestDurableLedgerPath:
 # hand-trace the reservation ledger to find it.
 # ---------------------------------------------------------------------------
 
+
+    # --- failure paths (Seer bug prediction on PR athenaeum#2511) ---
+
+    def test_an_unreadable_claim_is_handed_back_for_a_later_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read failure must not strand the records under `.migrating`.
+
+        Nothing has been appended at that point, so the claim can be
+        returned to the legacy path intact and retried. Without this, a
+        transient read error renames the file to a name no code path ever
+        looks at again and the records are invisible forever.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v": 1, "batch_id": "b1"}\n', encoding="utf-8")
+
+        def _boom(*_args: object, **_kwargs: object) -> str:
+            raise OSError("simulated read failure")
+
+        monkeypatch.setattr(Path, "read_text", _boom)
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        monkeypatch.undo()
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        # Handed back under its original name, with its record intact.
+        assert legacy.read_text(encoding="utf-8") == '{"v": 1, "batch_id": "b1"}\n'
+        assert not list(wiki_root.glob("*.migrating"))
+        # And the retry succeeds.
+        spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert not legacy.exists()
+        assert [r["batch_id"] for r in spend.read_reservation_ledger(
+            wiki_root, cache_dir=cache_dir
+        )] == ["b1"]
+
+    def test_a_failing_append_leaves_the_claim_in_place_and_does_not_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial append must NOT be retried, and must not break the caller.
+
+        Handing the claim back would duplicate whatever was already
+        appended, so it stays put under its `.migrating` name and is
+        logged. The resolver is on the read path of every ledger access, so
+        it degrades to "the cache dir is still the answer" rather than
+        raising.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v": 1, "batch_id": "b1"}\n', encoding="utf-8")
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("simulated append failure")
+
+        monkeypatch.setattr(spend, "append_line_durable", _boom)
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+        monkeypatch.undo()
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        claims = list(wiki_root.glob("*.migrating"))
+        assert len(claims) == 1
+        assert claims[0].read_text(encoding="utf-8") == '{"v": 1, "batch_id": "b1"}\n'
+
+    def test_an_undecodable_byte_does_not_strand_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A corrupt byte migrates (replaced) rather than raising forever.
+
+        Readers of this ledger already skip an unparseable line, so moving
+        the file out of the knowledge root — which is the whole point of
+        issue athenaeum#2469 — beats stranding it there on one bad byte.
+        """
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_bytes(b'{"v": 1, "batch_id": "b1"}\n\xff\xfe bad\n')
+
+        resolved = spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        assert not legacy.exists()
+        assert not list(wiki_root.glob("*.migrating"))
+        assert [r["batch_id"] for r in spend.read_reservation_ledger(
+            wiki_root, cache_dir=cache_dir
+        )] == ["b1"]
 
 class TestSpendReportsOutstandingReservations:
     def _report(self, target: Path, cache_dir: Path, *, as_json: bool) -> str:

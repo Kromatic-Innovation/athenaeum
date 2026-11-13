@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.config import resolve_google_contact_keys
+from athenaeum.config import resolve_google_contact_keys, resolve_strong_identifier_keys
 from athenaeum.dedupe import (
     DuplicatePair,
     _merge_meta,
@@ -1530,3 +1530,304 @@ class TestDedupeApplyCliWiresTheOwner:
         )
         assert self._run_apply(knowledge_root, pairs_path) == 0
         assert "owner@example.com" in cpath.read_text(encoding="utf-8")
+
+
+class TestConfigDrivenStrongIdentifierKeys:
+    """Issue athenaeum#2472: person-dedupe's strong-identifier field (used to
+    MATCH two pages as a HIGH-confidence duplicate pair) and the namespace
+    fields coalesced onto the canonical page on merge are both config-driven
+    via ``dedupe.strong_identifier_keys``, instead of the hardcoded
+    ``apollo_id`` lookup / ``_APOLLO_KEYS`` set that used to live in
+    ``dedupe.py``.
+
+    This is a DELIBERATE, PERMANENT configurable default (not a temporary
+    flag): unset, it must reproduce today's shipped behaviour exactly via
+    the current Apollo fields. The exact field list below is a FIXTURE
+    pinning that pre-athenaeum#2472 hardcoded set -- not a reference to the live
+    ``_DEFAULT_STRONG_IDENTIFIER_KEYS`` constant -- so a silent drift in
+    the shipped default fails this test loudly rather than passing by
+    tautology.
+    """
+
+    # The exact fields that were hardcoded in `dedupe._APOLLO_KEYS` /
+    # `dedupe._load_persons` before athenaeum#2472 -- also the resolver's
+    # documented default.
+    TODAY_APOLLO_KEYS = (
+        "apollo_id",
+        "apollo_headline",
+        "apollo_location",
+        "apollo_employment_history",
+        "current_title",
+        "current_company",
+    )
+
+    # --- resolver ---
+
+    def test_resolver_unset_resolves_to_none(self) -> None:
+        # None (not []): unset must stay distinguishable from an explicit
+        # empty list, which is the (c) disable case.
+        assert resolve_strong_identifier_keys(None) is None
+        assert resolve_strong_identifier_keys({}) is None
+        assert resolve_strong_identifier_keys({"dedupe": {}}) is None
+        assert (
+            resolve_strong_identifier_keys({"dedupe": {"strong_identifier_keys": "x"}})
+            is None
+        )
+
+    def test_resolver_reads_and_cleans_list(self) -> None:
+        cfg = {
+            "dedupe": {"strong_identifier_keys": ["  crm_a ", "", "crm_b", None]}
+        }
+        assert resolve_strong_identifier_keys(cfg) == ["crm_a", "crm_b"]
+
+    def test_resolver_explicit_empty_list_is_not_none(self) -> None:
+        cfg = {"dedupe": {"strong_identifier_keys": []}}
+        result = resolve_strong_identifier_keys(cfg)
+        assert result == []
+        assert result is not None
+
+    # --- (a) default (no setting) is byte-identical to today ---
+
+    def test_a_no_setting_find_byte_identical_to_todays_apollo_keys(
+        self, tmp_path: Path
+    ) -> None:
+        def _build(root: Path) -> None:
+            _write_person(
+                root,
+                uid="aaaa1111",
+                name="Alice Smith",
+                apollo_id="apo-1",
+                extra={
+                    "apollo_headline": "Engineer",
+                    "current_title": "SWE",
+                    "current_company": "Acme",
+                },
+            )
+            _write_person(root, uid="aaaa2222", name="Alice S.", apollo_id="apo-1")
+
+        root_default = tmp_path / "wiki_default"
+        root_default.mkdir()
+        _build(root_default)
+        root_explicit = tmp_path / "wiki_explicit"
+        root_explicit.mkdir()
+        _build(root_explicit)
+
+        pairs_default = find_duplicate_persons(root_default)
+        pairs_explicit = find_duplicate_persons(
+            root_explicit, strong_identifier_keys=self.TODAY_APOLLO_KEYS
+        )
+        assert [(p.canonical_uid, p.absorbed_uid, p.match_signal) for p in pairs_default] == [
+            (p.canonical_uid, p.absorbed_uid, p.match_signal) for p in pairs_explicit
+        ]
+        assert pairs_default[0].match_signal == "apollo_id"
+
+    def test_a_no_setting_merge_byte_identical_to_todays_apollo_keys(
+        self, tmp_path: Path
+    ) -> None:
+        def _build(root: Path) -> tuple[Path, Path]:
+            c = _write_person(
+                root,
+                uid="bbbb1111",
+                name="Bob Jones",
+                apollo_id="apo-2",
+                extra={"apollo_headline": "Director"},
+            )
+            a = _write_person(
+                root,
+                uid="bbbb2222",
+                name="Bob J.",
+                apollo_id="apo-2",
+                extra={"current_company": "Globex"},
+            )
+            return c, a
+
+        root_default = tmp_path / "wiki_default"
+        root_default.mkdir()
+        c_default, a_default = _build(root_default)
+        root_explicit = tmp_path / "wiki_explicit"
+        root_explicit.mkdir()
+        c_explicit, a_explicit = _build(root_explicit)
+
+        pair = DuplicatePair(
+            canonical_uid="bbbb1111",
+            absorbed_uid="bbbb2222",
+            match_signal="apollo_id",
+            canonical_path=str(c_default),
+            absorbed_path=str(a_default),
+        )
+        merge_duplicate_persons([pair], apply=True, wiki_root=root_default)
+
+        pair_explicit = DuplicatePair(
+            canonical_uid="bbbb1111",
+            absorbed_uid="bbbb2222",
+            match_signal="apollo_id",
+            canonical_path=str(c_explicit),
+            absorbed_path=str(a_explicit),
+        )
+        merge_duplicate_persons(
+            [pair_explicit],
+            apply=True,
+            wiki_root=root_explicit,
+            strong_identifier_keys=self.TODAY_APOLLO_KEYS,
+        )
+
+        default_text = c_default.read_text(encoding="utf-8")
+        explicit_text = c_explicit.read_text(encoding="utf-8")
+        assert default_text == explicit_text
+        assert "current_company: Globex" in default_text
+
+    # --- (b) an invented field matches; apollo_id alone does not ---
+
+    def test_b_invented_field_matches_apollo_alone_does_not(
+        self, wiki_root: Path
+    ) -> None:
+        # Fails on today's code: before athenaeum#2472, `strong_identifier_keys`
+        # is not a parameter `find_duplicate_persons` accepts at all, and the
+        # matching signal is unconditionally the hardcoded `apollo_id` field.
+        _write_person(
+            wiki_root, uid="cccc1111", name="Carl A", extra={"crm_contact_id": "crm-9"}
+        )
+        _write_person(
+            wiki_root, uid="cccc2222", name="Carl B", extra={"crm_contact_id": "crm-9"}
+        )
+        _write_person(wiki_root, uid="dddd1111", name="Dana A", apollo_id="apo-z")
+        _write_person(wiki_root, uid="dddd2222", name="Dana B", apollo_id="apo-z")
+
+        pairs = find_duplicate_persons(
+            wiki_root, strong_identifier_keys=["crm_contact_id"]
+        )
+        matched = {frozenset((p.canonical_uid, p.absorbed_uid)) for p in pairs}
+        assert frozenset(("cccc1111", "cccc2222")) in matched
+        assert frozenset(("dddd1111", "dddd2222")) not in matched
+        crm_pair = next(
+            p
+            for p in pairs
+            if frozenset((p.canonical_uid, p.absorbed_uid))
+            == frozenset(("cccc1111", "cccc2222"))
+        )
+        assert crm_pair.match_signal == "crm_contact_id"
+
+    def test_b_invented_field_coalesces_apollo_fields_do_not(self) -> None:
+        canonical = {"crm_contact_id": "crm-1", "name": "Ada Lovelace"}
+        absorbed = {
+            "crm_contact_id": "crm-1",
+            "apollo_headline": "Should not carry",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(
+            canonical, absorbed, "abs-uid", strong_identifier_keys=["crm_contact_id"]
+        )
+        assert "apollo_headline" not in out
+
+    # --- (c) an empty list disables vendor strong identifiers without error ---
+
+    def test_c_empty_list_disables_matching_without_error(
+        self, wiki_root: Path
+    ) -> None:
+        _write_person(wiki_root, uid="eeee1111", name="Eve Alpha", apollo_id="apo-same")
+        _write_person(wiki_root, uid="eeee2222", name="Eve Beta", apollo_id="apo-same")
+        pairs = find_duplicate_persons(wiki_root, strong_identifier_keys=[])
+        assert pairs == []
+
+    def test_c_empty_list_disables_merge_coalesce_without_error(self) -> None:
+        canonical = {"apollo_id": "apo-1", "name": "Ada Lovelace"}
+        absorbed = {
+            "apollo_id": "apo-1",
+            "apollo_headline": "Headline",
+            "current_company": "Acme",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(canonical, absorbed, "abs-uid", strong_identifier_keys=[])
+        assert "apollo_headline" not in out
+        assert "current_company" not in out
+
+
+class TestDedupeCliWiresTheStrongIdentifierKeys:
+    """Issue athenaeum#2472: the CONFIGURED fields must reach the engine.
+
+    Exactly the shape of :class:`TestDedupeApplyCliWiresTheOwner` above, and
+    for the same reason it exists: ``dedupe.strong_identifier_keys`` is a
+    real deployment knob only if ``athenaeum curate dedupe`` resolves it and
+    passes it down. A resolver nothing calls is a setting an operator can
+    write in ``athenaeum.yaml`` and watch do nothing — the mechanism-without-
+    wiring defect issue athenaeum#1739 fixed for the owner guard.
+
+    These are wiring tests, not algorithm tests; the matching and coalescing
+    behaviour is pinned by :class:`TestConfigDrivenStrongIdentifierKeys`.
+    """
+
+    def _wiki(self, tmp_path: Path, config_text: str) -> tuple[Path, Path]:
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(config_text, encoding="utf-8")
+        return knowledge_root, wiki
+
+    def _run_find(self, knowledge_root: Path, out: Path) -> int:
+        import argparse
+
+        from athenaeum._cmd_curate import cmd_dedupe
+
+        return cmd_dedupe(
+            argparse.Namespace(
+                dedupe_target="persons",
+                wiki_root=knowledge_root / "wiki",
+                find=True,
+                apply=False,
+                out=out,
+                from_path=None,
+                wait=None,
+                force=False,
+            )
+        )
+
+    def test_find_honours_an_invented_configured_field(self, tmp_path: Path) -> None:
+        """Two pages sharing only ``crm_contact_id`` are a pair once configured."""
+        knowledge_root, wiki = self._wiki(
+            tmp_path,
+            "dedupe:\n  strong_identifier_keys:\n    - crm_contact_id\n",
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee01",
+            name="Ada Example",
+            emails=["ada@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee02",
+            name="Grace Example",
+            emails=["grace@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        out = tmp_path / "pairs.yaml"
+        assert self._run_find(knowledge_root, out) == 0
+        assert "c0ffee01" in out.read_text(encoding="utf-8")
+
+    def test_find_with_the_same_pages_and_no_setting_finds_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative control: without the setting, the CLI must NOT match.
+
+        Without this, the test above would pass just as well on code that
+        ignored the config and matched on every shared field.
+        """
+        knowledge_root, wiki = self._wiki(tmp_path, "search_backend: fts5\n")
+        _write_person(
+            wiki,
+            uid="c0ffee01",
+            name="Ada Example",
+            emails=["ada@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee02",
+            name="Grace Example",
+            emails=["grace@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        out = tmp_path / "pairs.yaml"
+        assert self._run_find(knowledge_root, out) == 0
+        assert "c0ffee01" not in out.read_text(encoding="utf-8")

@@ -300,6 +300,7 @@ class TestCuratedSetIsClosed:
             "resolve_person_registry_root",
             "resolve_spend_accounting_timezone",
             "resolve_index_globs",
+            "resolve_strong_identifier_keys",
         }
 
     def test_curated_entries_are_real_resolvers(self) -> None:

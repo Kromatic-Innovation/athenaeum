@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decisions`; `recompare --apply` exits 75 when the run lock is held
   (athenaeum#2456).
 
+- `deliverability_for_page`, `join_identifier` and `Deliverability` are now
+  public API for reading address deliverability (athenaeum#2470).
+- Person dedupe's strong-identifier fields are now configurable
+  (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
+  fields (athenaeum#2472).
+
 ### Fixed
 
 - `athenaeum doctor` now ends its report with a short note when one or more
@@ -72,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of held indefinitely — this changes which atoms retire on the next run
   (athenaeum#2455).
 
+- The batch reconcile and spend reservation ledgers now live in the cache
+  directory and are moved there automatically on upgrade (athenaeum#2469).
 - Retire now also holds a member named only by an ANSWERED question whose
   write-back is held (`**Write-back**: held`, athenaeum#1804) or by a
   sidecar block that fails to parse at all — athenaeum#2455's unresolved-only

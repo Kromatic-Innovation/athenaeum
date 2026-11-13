@@ -266,7 +266,9 @@ class TestPublicApiSurvivesLazyReExport:
             env={"PYTHONPATH": str(_REPO / "src"), "PATH": "/usr/bin:/bin"},
         )
         assert proc.returncode == 0, proc.stderr
-        assert int(proc.stdout.strip()) == 32
+        # 32 -> 35: issue athenaeum#2470 added `deliverability_for_page`,
+        # `join_identifier` and `Deliverability` to `__all__`.
+        assert int(proc.stdout.strip()) == 35
 
     def test_from_import_still_works_for_an_external_installer(self) -> None:
         """The criterion's counter-example: `from athenaeum import ingest`."""
