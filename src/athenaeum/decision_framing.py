@@ -463,31 +463,6 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "policy is the operator's call, not the drafter's."
         ),
     },
-    "page-split": {
-        # Issue athenaeum#2018 (athenaeum#719 Plan step 6): approving never
-        # performs the split itself (see athenaeum.page_split_proposals'
-        # module docstring) -- only records the approval. Reversible for
-        # the same reason "proposed-rule" is: undoing it costs nothing but
-        # a second answer, and nothing on disk has moved.
-        "reversibility": REVERSIBILITY_REVERSIBLE,
-        "routing": ROUTING_AUTHORITY,
-        "schema": _approve_reject_schema(
-            description="approve = authorize the split plan (a human still "
-            "triggers page_decompose.apply_report separately); reject = "
-            "discard the proposal.",
-        ),
-        "default_action": "reject (do not authorize the split)",
-        "default_consequences": (
-            "The page stays an aggregate; the recurring coordinate-"
-            "heterogeneity signal keeps producing candidates for it."
-        ),
-        "rationale": (
-            "The self-tuning loop flagged this page as heterogeneous "
-            "enough to split. Whether to act on that diagnosis is the "
-            "operator's call, not the drafter's -- and acting on it is "
-            "always a separate, explicit step even after approval."
-        ),
-    },
     "auto-apply-threshold": {
         # Issue athenaeum#2018 (athenaeum#719 Plan step 6): approving only
         # widens a config-resolved floor (see
@@ -839,7 +814,6 @@ _DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {
     "confirmation": "approve",  # default_action: "accept the narrowed scope"
     "merge": "reject",  # default_action: "reject (keep the pages separate)"
     "proposed-rule": "reject",  # default_action: "reject (do not adopt the rule)"
-    "page-split": "reject",  # default_action: "reject (do not authorize the split)"
     "auto-apply-threshold": "reject",  # default_action: "reject (keep current floor)"
     "dimension-proposal": "reject",  # default_action: "reject (do not register the dimension)"
 }
@@ -1083,11 +1057,9 @@ ANSWERABLE_AS: dict[str, str] = {
     # mechanical re-compare, which the free-text question path knows
     # nothing about. See `athenaeum.decision_answers._apply_coordinate_answer`.
     "coordinate": "coordinate",
-    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): dedicated appliers,
-    # each proposal-only -- see `athenaeum.decision_answers.
-    # _apply_page_split_proposal_answer` /
-    # `_apply_auto_apply_threshold_proposal_answer`.
-    "page-split": "page-split",
+    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): a dedicated applier,
+    # proposal-only -- see `athenaeum.decision_answers.
+    # _apply_auto_apply_threshold_proposal_answer`.
     "auto-apply-threshold": "auto-apply-threshold",
     # Issue athenaeum#2016: self-mapped -- the outbound queue tag and the
     # inbound applier's decision_type are the SAME string for this type

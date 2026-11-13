@@ -1989,25 +1989,6 @@ subclass, so ``page_size_threshold_chars: yes`` in yaml cannot silently
 become a threshold of 1); non-numeric, non-positive, missing, or bool
 values fall back to `DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
 
-### `resolve_page_split_proposals_heterogeneity_threshold`
-
-- **YAML path:** `librarian.page_split_proposals.heterogeneity_threshold`
-- **Environment variable:** `ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD`
-- **CLI flag:** —
-- **Default:** `5`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-``librarian.page_split_proposals.heterogeneity_threshold`` (default 5).
-
- (Plan step 6): the page-split proposal
-drafter's trigger. A page's
-`athenaeum.page_decompose.measure_coordinate_heterogeneity` --
-the count of DISTINCT resolved subject uids among its bullets -- must
-reach this many before `athenaeum.page_split_proposals.run_page_split_proposal_detection`
-drafts a proposal for it. A small default: a page already flagged as an
-aggregate by `athenaeum.page_decompose` naming even a handful of
-distinct subjects is worth surfacing, not something to wait on.
-
 ### `resolve_page_warn_bytes`
 
 - **YAML path:** `librarian.page_warn_bytes`

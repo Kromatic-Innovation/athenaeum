@@ -1045,6 +1045,25 @@ class TestLoadConfig:
             for r in caplog.records
         ), caplog.text
 
+    def test_removed_nested_page_split_proposals_heterogeneity_threshold_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#2465: ``librarian.page_split_proposals.
+        heterogeneity_threshold`` is a NESTED removed key, same shape as
+        ``librarian.delta.enabled`` above -- a stale yaml block setting it
+        must load without error and get the standard removed-key notice."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  page_split_proposals:\n    heterogeneity_threshold: 7\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["page_split_proposals"]["heterogeneity_threshold"] == 7
+        assert any(
+            "page_split_proposals.heterogeneity_threshold" in r.message
+            and "athenaeum#2465" in r.message
+            for r in caplog.records
+        ), caplog.text
+
     def test_removed_resolve_model_key_warns_loudly(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

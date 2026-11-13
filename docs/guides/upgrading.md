@@ -256,6 +256,26 @@ The matching environment variable `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`
 is gone too; setting it now has no effect and produces no warning, the same
 as every other removed environment variable.
 
+## I want to know what's gone: the page-split proposal decision type
+
+The page-split proposal decision type and its `librarian.page_split_
+proposals.heterogeneity_threshold` yaml key (and the matching
+`ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD` environment
+variable) are removed. Nothing ever drafted one of these proposals — the
+detector that would have raised them was never wired into the nightly
+run — so the type could never actually reach the decisions queue, and
+removing it changes no observed behavior.
+
+A stale `athenaeum.yaml` still setting the removed yaml key loads fine; the
+key is ignored and logged with the same warning every other removed key
+gets. If an existing `raw/answers/*.md` file answers a `page-split` item
+from before the upgrade, it is skipped with a logged warning rather than
+applied — the same fail-soft handling any other unrecognized decision type
+gets.
+
+This is unrelated to `split-oversize` and the deterministic heading-based
+page decomposition it drives, which are unaffected.
+
 ## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
 Each of these commands existed to repair data left behind by one specific,

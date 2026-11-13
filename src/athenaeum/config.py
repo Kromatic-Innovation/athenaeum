@@ -269,6 +269,11 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
         "Tier-4 decision-log suppression always uses the code default (0.83) "
         "now -- this key is no longer read and has no effect"
     ),
+    "librarian.page_split_proposals.heterogeneity_threshold": (
+        "removed in athenaeum#2465; the page-split proposal decision type "
+        "and its drafter had no producer that ever called it, so the "
+        "key is no longer read and has no effect"
+    ),
 }
 
 
@@ -7717,28 +7722,6 @@ def resolve_person_registry_root(knowledge_root: Path, config: dict[str, Any] | 
                 candidate = Path(raw).expanduser()
                 return candidate if candidate.is_absolute() else knowledge_root / candidate
     return knowledge_root / "wiki"
-
-
-def resolve_page_split_proposals_heterogeneity_threshold(config: dict[str, Any] | None) -> int:
-    """``librarian.page_split_proposals.heterogeneity_threshold`` (default 5).
-
-    Issue athenaeum#2018 (athenaeum#719 Plan step 6): the page-split proposal
-    drafter's trigger. A page's
-    :func:`athenaeum.page_decompose.measure_coordinate_heterogeneity` --
-    the count of DISTINCT resolved subject uids among its bullets -- must
-    reach this many before :func:`athenaeum.page_split_proposals.run_page_split_proposal_detection`
-    drafts a proposal for it. A small default: a page already flagged as an
-    aggregate by :mod:`athenaeum.page_decompose` naming even a handful of
-    distinct subjects is worth surfacing, not something to wait on.
-    """
-    return _resolve_corrections_int(
-        config,
-        "ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD",
-        "librarian",
-        "page_split_proposals",
-        "heterogeneity_threshold",
-        5,
-    )
 
 
 def _resolve_nested_rate(
