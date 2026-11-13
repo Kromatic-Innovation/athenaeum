@@ -196,8 +196,7 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
 )
 from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
-    find_unclaimed_raw_files,
-    raise_unclaimed_files,
+    run_intake_audit,
 )
 from athenaeum.merge import (
     RunDeadlineExceeded,
@@ -7135,41 +7134,25 @@ def _run_intake_audit_phase(ctx: RunContext) -> None:
     :func:`athenaeum.answers.raise_pending_question`, deduplicated
     (:mod:`athenaeum.intake_audit`'s fingerprint mechanism) so a steady
     backlog is surfaced once, not re-raised every run.
-    """
-    unclaimed = find_unclaimed_raw_files(ctx.raw_root, ctx.knowledge_root, ctx.config)
-    if not unclaimed:
-        ctx.intake_audit_summary = {
-            "unclaimed_files": 0,
-            "groups": 0,
-            "raised_groups": 0,
-            "raised_files": 0,
-            "already_open_groups": 0,
-        }
-        return
-    if ctx.dry_run:
-        # Same dry-run contract every deterministic phase honors: compute
-        # and report the counts, write nothing.
-        groups = {(u.reason, u.group_key) for u in unclaimed}
-        ctx.intake_audit_summary = {
-            "unclaimed_files": len(unclaimed),
-            "groups": len(groups),
-            "raised_groups": 0,
-            "raised_files": 0,
-            "already_open_groups": 0,
-        }
-        return
 
-    pending_path = ctx.wiki_root / "_pending_questions.md"
-    archive_path = ctx.wiki_root / "_pending_questions_archive.md"
-    summary = raise_unclaimed_files(
-        pending_path,
-        unclaimed,
+    Delegates the find-plus-raise work to
+    :func:`athenaeum.intake_audit.run_intake_audit` (issue athenaeum#2443);
+    this wrapper's own job is threading ``ctx``'s fields through, keeping
+    the ``ctx.intake_audit_summary`` assignment, and logging a non-zero
+    REAL (non-dry-run) result -- a dry run never logs, matching every other
+    deterministic phase's "compute and report counts, write and log
+    nothing" dry-run contract.
+    """
+    summary = run_intake_audit(
         raw_root=ctx.raw_root,
-        archive_path=archive_path,
+        wiki_root=ctx.wiki_root,
+        knowledge_root=ctx.knowledge_root,
+        config=ctx.config,
+        dry_run=ctx.dry_run,
         now=ctx.now,
     )
     ctx.intake_audit_summary = summary
-    if summary["unclaimed_files"]:
+    if not ctx.dry_run and summary["unclaimed_files"]:
         log.info(
             "intake-audit: %d unrecognised raw file(s) across %d group(s) -- "
             "raised %d new pending decision(s) (%d file(s)), %d group(s) "
