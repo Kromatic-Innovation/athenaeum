@@ -17,8 +17,7 @@ entirely, not merely excluded after the fact.
 ``test_import_graph_acyclic.py``'s ``ALLOWED_SCCS = []``):** design note §4.2
 inventories the knowledge-store git usage as TEN call sites across EIGHT
 modules (``librarian.py`` twice, plus ``rules.py``/``retire.py``/
-``auto_memory_prune.py``/``filename_entity_prune.py``/``memory_index.py``/
-``corrections.py``/``init.py``/``status.py``); a mechanical AST sweep (see
+``corrections.py``/``init.py``/``status.py`` and others); a mechanical AST sweep (see
 ``KNOWN_GIT_ARGV_MODULES`` below) finds two more the design note's own table
 missed (``decay_sweep.py``, ``pending_merges.py``) and resolves ``librarian.py``
 to three sites, not two (``git_push``/``git_pull``/``_capture_head``'s
@@ -78,13 +77,10 @@ OWN_REPO_GIT_MODULES = frozenset(
 #: :meth:`~athenaeum.store.FilesystemStore.snapshot`) are the ONE place this
 #: is now allowed to live.
 KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
-    "auto_memory_prune": 1,
     "corrections": 1,
     "decay_sweep": 1,
-    "filename_entity_prune": 1,
     "init": 3,
     "librarian": 3,  # git_push, git_pull, _capture_head's rev-parse — NOT snapshot
-    "memory_index": 1,
     "pending_merges": 2,
     "parked_recovery": 1,  # athenaeum#2078 AC5: `git show <commit>:<path>` reads
     # of the knowledge store's OWN history to restore consumed raw files --
@@ -100,11 +96,6 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     # + commit retirement of reconciled raw files (retire.py's shape) — both
     # go through the SAME single `_git` helper, so this is one AST literal
     # site, not two.
-    "retention_policy": 1,  # athenaeum#1418: the SAME `_git` helper shape as
-    # decay_sweep.py's (`subprocess.run(["git", *args], ...)`, one AST
-    # literal site) -- a scoped two-commit provenance-snapshot-then-
-    # truncating-rewrite sequence over one preserved-log file, not a
-    # whole-tree snapshot, so it does not fold onto FilesystemStore.snapshot.
     "retire": 1,
     "rules": 1,
     "status": 1,

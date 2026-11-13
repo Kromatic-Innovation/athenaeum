@@ -208,6 +208,12 @@ _DEFAULTS: dict[str, Any] = {
 # convention :func:`_env_number` established for malformed values -- same
 # "same typo/same stale-key, same visible outcome" goal, applied to keys
 # instead of values.
+#
+# A key containing a ``.`` (for example ``delta.enabled``) names a nested
+# key one level down -- ``section.subkey`` under ``librarian`` -- rather
+# than a top-level ``librarian`` key, for a removed switch that lived
+# alongside other subkeys of the same section that are still read (for
+# example ``librarian.delta.max_affected_clusters``).
 _REMOVED_LIBRARIAN_KEYS: dict[str, str] = {
     "merge_worthiness_gate_enabled": (
         "removed in athenaeum#1582 per the athenaeum#1251 measurement decision "
@@ -220,6 +226,32 @@ _REMOVED_LIBRARIAN_KEYS: dict[str, str] = {
         "athenaeum#1992); it only ever toggled their stderr deprecation "
         "warning, so with no deprecated surface left it is no longer read and "
         "has no effect"
+    ),
+    "relatedness_writer": (
+        "removed in athenaeum#2461; the compile-time related: edge writer is "
+        "now always on and this key is no longer read"
+    ),
+    "delta.enabled": (
+        "removed in athenaeum#2461; delta compilation is now always on and "
+        "this key is no longer read. Run `athenaeum compile --full` for a "
+        "whole-corpus compile instead"
+    ),
+    "delta.live_client": (
+        "removed in athenaeum#2461; the delta live client is now always on "
+        "and this key is no longer read"
+    ),
+    "name_collision_scan": (
+        "removed in athenaeum#2461; the nightly name-collision scan is now "
+        "always on and this key is no longer read"
+    ),
+    "qualified_name_scan": (
+        "removed in athenaeum#2461; the qualified-name scan is now always "
+        "on and this key is no longer read"
+    ),
+    "retention": (
+        "removed in athenaeum#2462; the enforcement module it configured was "
+        "unwired (no caller ever read it) and has been deleted -- this key "
+        "never had any effect"
     ),
 }
 
@@ -262,7 +294,13 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     librarian_cfg = result.get("librarian")
     if isinstance(librarian_cfg, dict):
         for removed_key, reason in _REMOVED_LIBRARIAN_KEYS.items():
-            if removed_key in librarian_cfg:
+            if "." in removed_key:
+                section, _, subkey = removed_key.partition(".")
+                section_cfg = librarian_cfg.get(section)
+                present = isinstance(section_cfg, dict) and subkey in section_cfg
+            else:
+                present = removed_key in librarian_cfg
+            if present:
                 logger.warning(
                     "Ignoring removed config key librarian.%s in %s: %s.",
                     removed_key,
@@ -902,6 +940,15 @@ def resolve_retire(config: dict[str, Any] | None) -> bool:
     off at the call site. No seed in ``_DEFAULTS`` (issue athenaeum#231) — the default
     lives here in code so it stays reachable. Non-bool yaml values fall through
     to the default (on).
+
+    This is a deliberate, kept-configurable default, not a candidate for
+    removal: an operator debugging what the compile pass just wrote, or who
+    is not yet confident in a fresh wiki and wants every compiled page's raw
+    source to stay inspectable in the intake queue, sets this ``false`` to
+    keep raw auto-memory around after it is compiled (nothing is moved into
+    the wiki or ``git rm``'d). See
+    [the upgrading guide's "I want to turn move-then-retire off"](../guides/upgrading.md)
+    for the full worked example.
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -931,6 +978,14 @@ def resolve_live_session_guard_enabled(config: dict[str, Any] | None) -> bool:
     CLI flag overrides to off at the call site. No seed in ``_DEFAULTS``
     (issue athenaeum#231) -- the default lives here in code so it stays
     reachable. Non-bool yaml values fall through to the default (on).
+
+    This is a deliberate, kept-configurable default: it exists so an
+    operator running athenaeum against a scope they KNOW has no live
+    session owner (for example a one-off batch import with no Claude Code
+    transcript ever written for that scope) can set this ``false`` to get
+    the pre-athenaeum#1728 retire behaviour back and stop files piling up
+    HELD for a session that will never close. Held files are always counted
+    and named in the run summary and ``--dry-run`` report regardless.
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -1360,56 +1415,6 @@ def resolve_wiki_dedupe_min_body_chars(config: dict[str, Any] | None) -> int:
                 if value > 0:
                     return value
     return 0
-
-
-def resolve_relatedness_writer_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the compile-time ``related:`` edge writer (issue athenaeum#1576).
-
-    When true, ``librarian._apply_tier3_results`` stamps ``related:`` rows
-    onto each newly-created page before it is written, using
-    :mod:`athenaeum.relatedness` -- mutual k-nearest-neighbour over
-    corpus-weighted distinctive-term overlap. See that module's docstring for
-    the signal, the measurement against issue athenaeum#1570's corpus, and
-    why the two cheaper deterministic signals and the MiniLM neighbourhood
-    were each measured and rejected.
-
-    DEFAULT True (active). Unlike the comparator master switch this does NOT
-    ship dark, for three reasons that were checked rather than assumed:
-    it makes no metered call and no network call at all (issue athenaeum#1576
-    AC6, satisfied by construction rather than by configuration); it only ever
-    APPENDS rows to pages this run is creating, so no existing page's bytes
-    change and the failure mode of a bad edge is a spurious breadcrumb rather
-    than lost content; and its precision was 1.000 at every parameter setting
-    measured across three corpus scales. An operator who wants it off sets
-    ``librarian.relatedness_writer: false``, and pages then compile exactly as
-    they did before athenaeum#1576.
-
-    Env ``ATHENAEUM_RELATEDNESS_WRITER`` > yaml ``librarian.relatedness_writer``
-    > this default. No seed in ``_DEFAULTS`` (athenaeum#231) so the code
-    default stays reachable. Truthiness follows the same spelling set as every
-    other boolean knob here; an unrecognized value falls through to the
-    default rather than silently reading as false.
-    """
-    raw_env = os.environ.get("ATHENAEUM_RELATEDNESS_WRITER")
-    if raw_env is not None:
-        lowered = raw_env.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("relatedness_writer")
-            if isinstance(raw, bool):
-                return raw
-            if isinstance(raw, str):
-                lowered = raw.strip().lower()
-                if lowered in {"1", "true", "yes", "on"}:
-                    return True
-                if lowered in {"0", "false", "no", "off"}:
-                    return False
-    return True
 
 
 def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
@@ -2036,31 +2041,6 @@ def resolve_name_similarity_threshold(config: dict[str, Any] | None) -> float:
     return default
 
 
-def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the delta-scoped-compile opt-in (athenaeum#370 PR2) from ``librarian.delta``.
-
-    When TRUE (the default), the deterministic ``client=None`` compile path
-    (session_end / ingest tier0) may scope the cluster + merge passes to only
-    the changed files and their affected clusters instead of re-clustering and
-    re-merging the whole auto-memory corpus. This is a pure SPEED optimization
-    that is proven byte-equivalent to the whole-corpus path
-    (``tests/test_delta_compile_equivalence.py``); the nightly LLM ``run`` (a
-    live client with cross-scope contradiction detection) always stays
-    whole-corpus regardless of this flag. Set ``librarian.delta.enabled: false``
-    to force the whole-corpus path everywhere. ``bool`` yaml values are honored;
-    anything else falls through to the TRUE default.
-    """
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            delta_cfg = cfg.get("delta")
-            if isinstance(delta_cfg, dict):
-                raw = delta_cfg.get("enabled")
-                if isinstance(raw, bool):
-                    return raw
-    return True
-
-
 def resolve_delta_max_affected_clusters(config: dict[str, Any] | None) -> int:
     """Resolve the delta closure's affected-cluster cap (athenaeum#370 PR2, default 8).
 
@@ -2102,33 +2082,6 @@ def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
                 if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
                     return raw
     return default
-
-
-def resolve_live_delta_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the live-client delta-scoped-compile opt-in from
-    ``librarian.delta.live_client`` (issue athenaeum#463, slice D of athenaeum#460).
-
-    When TRUE (the default), the nightly LLM ``run`` (a live client) MAY also
-    take the delta-scoped cluster + merge path — previously (athenaeum#370 PR2) delta
-    was gated to the deterministic ``client is None`` path ONLY (fallback
-    trigger D5). The live-client delta path is additionally gated by
-    ``full_compile_due`` (the periodic whole-corpus reconciliation, see
-    :func:`athenaeum.config.resolve_full_compile_every_days`) regardless of
-    this flag — see :func:`athenaeum.librarian._compile_auto_memory`. Set
-    ``librarian.delta.live_client: false`` to keep the nightly run
-    whole-corpus-only (the pre-athenaeum#463 behaviour) even when a live client is
-    present. ``bool`` yaml values are honored; anything else falls through to
-    the TRUE default.
-    """
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            delta_cfg = cfg.get("delta")
-            if isinstance(delta_cfg, dict):
-                raw = delta_cfg.get("live_client")
-                if isinstance(raw, bool):
-                    return raw
-    return True
 
 
 def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
@@ -2384,178 +2337,6 @@ def resolve_raw_retention_max_source_bytes(config: dict[str, Any] | None) -> int
                 if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
                     return raw
     return None
-
-
-# ---------------------------------------------------------------------------
-# Retention POLICY for preserved source logs (issue athenaeum#1418): unlike
-# the detect-only raw_retention resolvers directly above (which only ever
-# REPORT a crossed threshold on raw/<source>/ intake), these three resolvers
-# configure an ENFORCEABLE bound on a source index the operator has already
-# chosen to keep whole -- a file living under `preserved_log_dir` /
-# `preserved_log_adapter` (issue athenaeum#837/#1132), never raw intake. The
-# mechanism that reads these three -- oldest-first truncation, the
-# ledger-before-mutation discipline, the citation-preservation safety check
-# -- lives in :mod:`athenaeum.retention_policy`, which this module must not
-# import (L2 stays below the L4 domain modules that consume it).
-#
-# Per-family shape (``librarian.retention.families.<family>.*`` overrides
-# ``librarian.retention.defaults.*``):
-#
-#   librarian:
-#     retention:
-#       defaults:
-#         policy: truncate-top      # truncate-top | never-truncate | librarian-decides
-#         max_bytes: 1048576
-#         destination: in-repo      # in-repo | adapter:<name> | pii-vault
-#       families:
-#         conversation-index:
-#           policy: never-truncate
-#
-# DEFAULT-NONE at the top level (issue athenaeum#231): a fresh install, or any
-# deployment that has never written a ``librarian.retention`` block at all,
-# gets ``resolve_retention_policy() is None`` for every family -- AC1's
-# "empty/absent config yields today's behaviour unchanged", because a caller
-# that sees ``None`` back must not truncate anything (today, nothing does).
-# Once an operator writes so much as ``librarian.retention: {}``, the family
-# resolves to the STATED default (``truncate-top`` at 1 MiB, ``in-repo``) --
-# an explicit opt-in the operator can then narrow per family. This is also
-# what makes AC3 hold structurally rather than by convention: ``None``
-# ("no policy configured") and the string ``"never-truncate"`` ("operator
-# explicitly chose unbounded") can never collide, because they are two
-# different Python values, not two spellings of one flag.
-# ---------------------------------------------------------------------------
-
-_VALID_RETENTION_POLICIES = ("truncate-top", "never-truncate", "librarian-decides")
-_DEFAULT_RETENTION_POLICY = "truncate-top"
-_DEFAULT_RETENTION_MAX_BYTES = 1_048_576
-_DEFAULT_RETENTION_DESTINATION = "in-repo"
-
-
-def _retention_block(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Shared lookup: ``librarian.retention`` as a dict, or ``None``.
-
-    ``None`` here is the load-bearing "operator has not touched this system
-    at all" signal every resolver below branches on first.
-    """
-    if not isinstance(config, dict):
-        return None
-    cfg = config.get("librarian")
-    if not isinstance(cfg, dict):
-        return None
-    retention = cfg.get("retention")
-    return retention if isinstance(retention, dict) else None
-
-
-def _retention_family_and_defaults(
-    config: dict[str, Any] | None, family: str
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Return ``(family_block, defaults_block)``, both coerced to ``{}`` when
-    absent/malformed, or ``None`` when ``librarian.retention`` itself is
-    absent (the AC1 no-op case -- distinguished from "present but both
-    sub-blocks are empty", which still opts into the stated defaults).
-    """
-    retention = _retention_block(config)
-    if retention is None:
-        return None
-    families = retention.get("families")
-    family_block = families.get(family) if isinstance(families, dict) else None
-    defaults_block = retention.get("defaults")
-    return (
-        family_block if isinstance(family_block, dict) else {},
-        defaults_block if isinstance(defaults_block, dict) else {},
-    )
-
-
-def resolve_retention_policy(config: dict[str, Any] | None, family: str) -> str | None:
-    """Resolve *family*'s retention policy (issue athenaeum#1418) from
-    ``librarian.retention.families.<family>.policy`` >
-    ``librarian.retention.defaults.policy`` > the stated default
-    ``"truncate-top"`` -- but ONLY once ``librarian.retention`` exists at
-    all; absent that block entirely, returns ``None`` (AC1).
-
-    Returns one of ``"truncate-top"``, ``"never-truncate"``,
-    ``"librarian-decides"``, or ``None``. A value outside that vocabulary --
-    at either the family or defaults level -- WARNs and falls through to the
-    next level, same malformed-value-falls-through idiom as every other
-    resolver in this module; it is never allowed to silently disable
-    enforcement by being mistaken for ``None``.
-    """
-    resolved = _retention_family_and_defaults(config, family)
-    if resolved is None:
-        return None
-    family_block, defaults_block = resolved
-    for block, level in ((family_block, f"families.{family}"), (defaults_block, "defaults")):
-        raw = block.get("policy")
-        if raw is None:
-            continue
-        if isinstance(raw, str) and raw in _VALID_RETENTION_POLICIES:
-            return raw
-        logger.warning(
-            "librarian.retention.%s.policy %r is not one of %s -- ignoring "
-            "(issue athenaeum#1418)",
-            level,
-            raw,
-            _VALID_RETENTION_POLICIES,
-        )
-    return _DEFAULT_RETENTION_POLICY
-
-
-def resolve_retention_max_bytes(config: dict[str, Any] | None, family: str) -> int:
-    """Resolve *family*'s truncation bound in bytes (issue athenaeum#1418) from
-    ``librarian.retention.families.<family>.max_bytes`` >
-    ``librarian.retention.defaults.max_bytes`` > the stated default
-    ``1048576`` (1 MiB, "sized for a git-tracked file" per the issue).
-
-    Resolvable independent of :func:`resolve_retention_policy` -- a caller
-    enforcing ``truncate-top`` needs this regardless of how the policy
-    itself resolved. ``bool`` (an ``int`` subclass) and non-int /
-    non-positive values -- at either level -- fall through, same as every
-    other numeric resolver here.
-    """
-    resolved = _retention_family_and_defaults(config, family)
-    if resolved is None:
-        return _DEFAULT_RETENTION_MAX_BYTES
-    family_block, defaults_block = resolved
-    for block in (family_block, defaults_block):
-        raw = block.get("max_bytes")
-        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-            return raw
-    return _DEFAULT_RETENTION_MAX_BYTES
-
-
-def resolve_retention_destination(config: dict[str, Any] | None, family: str) -> str:
-    """Resolve *family*'s retention destination (issue athenaeum#1418) from
-    ``librarian.retention.families.<family>.destination`` >
-    ``librarian.retention.defaults.destination`` > the stated default
-    ``"in-repo"``.
-
-    Returns ``"in-repo"``, ``"pii-vault"``, or ``"adapter:<name>"`` verbatim
-    (the adapter name is validated by the caller that resolves it to an
-    actual root -- :mod:`athenaeum.retention_policy` -- via
-    :func:`athenaeum.storage.available_adapters`, mirroring the `preserve`
-    disposition's fail-loud-on-unknown-adapter contract; this resolver only
-    reads the operator's string, same division of labor as
-    :func:`resolve_preserved_log_adapter`). A value matching neither
-    ``"in-repo"``, ``"pii-vault"`` nor the ``"adapter:"`` prefix -- at either
-    level -- WARNs and falls through.
-    """
-    resolved = _retention_family_and_defaults(config, family)
-    if resolved is None:
-        return _DEFAULT_RETENTION_DESTINATION
-    family_block, defaults_block = resolved
-    for block, level in ((family_block, f"families.{family}"), (defaults_block, "defaults")):
-        raw = block.get("destination")
-        if raw is None:
-            continue
-        if isinstance(raw, str) and (raw in ("in-repo", "pii-vault") or raw.startswith("adapter:")):
-            return raw
-        logger.warning(
-            "librarian.retention.%s.destination %r is not 'in-repo', "
-            "'pii-vault', or 'adapter:<name>' -- ignoring (issue athenaeum#1418)",
-            level,
-            raw,
-        )
-    return _DEFAULT_RETENTION_DESTINATION
 
 
 def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
@@ -3432,6 +3213,15 @@ def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
     ``True``. Any env value other than a falsey token (``0`` / ``false`` /
     ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
     through to the default. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+
+    This is a deliberate, kept-configurable default, and turning it off is a
+    real tradeoff rather than a free cleanup: ``drain.run_drain``'s MANDATORY
+    cumulative dollar ceiling is computed by re-reading this ledger, so
+    setting this ``false`` disables the cumulative spend ceilings entirely —
+    every run reports its own cost but nothing bounds the running total
+    across runs. The only legitimate reason to turn it off is a deployment
+    that tracks spend some other way (for example a provider-side budget
+    alert) and does not want a second, redundant on-disk ledger.
     """
     env = os.environ.get("ATHENAEUM_SPEND_LEDGER_ENABLED")
     if env is not None:
@@ -4475,8 +4265,7 @@ def resolve_decay_horizon_days(bucket: str, config: dict[str, Any] | None = None
     accident.
 
     ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
-    two horizon families to resolve), not a value read out of *config* — the
-    same shape :func:`resolve_retention_policy` uses for its retention family.
+    two horizon families to resolve), not a value read out of *config*.
     """
     if bucket == "daily":
         return _resolve_decay_horizon_knob(
@@ -5409,13 +5198,8 @@ search_backend: vector
 #   (the athenaeum#378 spend ledger) and emits a WARNING naming the `athenaeum drain`
 #   remedy only when the projection EXCEEDS this many days; below it stays
 #   silent. Precedence: this key, then 3. bool/non-positive fall through.
-# name_collision_scan: nightly deterministic name-collision detector opt-out
-#   (issue athenaeum#1170). DEFAULT TRUE -- the scan is a glob + a dict grouping
-#   (no LLM, no vectors, no network), so there is no cost reason to ship it
-#   off. See resolve_name_collision_scan_enabled. bool values only; anything
-#   else falls through to true.
 # name_collision_automerge: auto-merge the UNAMBIGUOUS subset of collisions
-#   the scan above finds (issue athenaeum#1170). DEFAULT FALSE, deliberately --
+#   the nightly name-collision scan finds (issue athenaeum#1170). DEFAULT FALSE, deliberately --
 #   issue athenaeum#1170 was split from the one-time destructive repair sweep
 #   over collisions ALREADY PRESENT in the operator's live corpus (issue
 #   athenaeum#1246, ~operator-gated and blocked by this issue); shipping
@@ -5453,7 +5237,6 @@ search_backend: vector
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
 #   drain_warn_days: 3
-#   name_collision_scan: true
 #   name_collision_automerge: false
 
 # LLM provider selection (issue athenaeum#330). Chooses the backend the librarian
@@ -7301,59 +7084,6 @@ def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
-def resolve_name_collision_scan_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the nightly name-collision scan opt-out (issue athenaeum#1170). DEFAULT ON.
-
-    Gates :func:`athenaeum.librarian._run_name_collision_phase` /
-    :func:`athenaeum.name_collisions.resolve_name_collisions` — a
-    deterministic, zero-cost, exact-``name:``-match scan over ``wiki/*.md``
-    (no LLM, no vectors, no network). Unlike :func:`resolve_comparator_enabled`'s
-    expensive comparator pass, there is no cost reason to ship this off by
-    default; ``librarian.name_collision_scan: false`` exists only as an
-    operator escape hatch. Mirrors :func:`resolve_delta_enabled`'s shape:
-    yaml ``librarian.name_collision_scan`` (a plain ``bool``) overrides the
-    ``True`` default; anything else (missing, non-bool) falls through to
-    ``True``.
-    """
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("name_collision_scan")
-            if isinstance(raw, bool):
-                return raw
-    return True
-
-
-def resolve_qualified_name_scan_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the qualified-name entity-split scan opt-out (issue athenaeum#1577). DEFAULT ON.
-
-    Gates :func:`athenaeum.librarian._run_qualified_name_phase` /
-    :func:`athenaeum.name_structure.propose_qualified_name_merges` — the
-    ``name`` / ``name (qualifier)`` scan, which like
-    :func:`resolve_name_collision_scan_enabled`'s exact-match sibling is a
-    glob plus a regex: no LLM, no vectors, no network, so there is no cost
-    reason to ship it off. ``librarian.qualified_name_scan: false`` is an
-    operator escape hatch, nothing more.
-
-    There is deliberately NO auto-merge counterpart to
-    :func:`resolve_name_collision_automerge_enabled` here. An exact ``name:``
-    collision where every non-canonical page provably adds nothing CAN be
-    folded unattended; a parenthetical qualifier is a weaker signal whose
-    live-corpus hits split roughly evenly between one-entity-twice and
-    genuinely-narrower-scope (see :mod:`athenaeum.name_structure`'s module
-    docstring for the measured populations). Issue athenaeum#1577 AC2 pins
-    "queued, never auto-applied" as an invariant, so the knob that could
-    break it does not exist rather than defaulting off.
-    """
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("qualified_name_scan")
-            if isinstance(raw, bool):
-                return raw
-    return True
-
-
 def resolve_rejected_merge_cooldown_days(config: dict[str, Any] | None) -> int:
     """Resolve how long a HUMAN merge rejection suppresses re-proposal (issue athenaeum#2077).
 
@@ -7387,9 +7117,7 @@ def resolve_name_collision_automerge_enabled(config: dict[str, Any] | None) -> b
     Gates only the UNAMBIGUOUS-collision auto-merge branch of
     :func:`athenaeum.name_collisions.resolve_name_collisions` — with this
     off (the default), every collision the nightly scan finds still writes
-    a proposal block to ``_pending_merges.md`` (see
-    :func:`resolve_name_collision_scan_enabled`), it just never
-    self-approves.
+    a proposal block to ``_pending_merges.md``, it just never self-approves.
 
     This default is a deliberate, reasoned choice, not an oversight: issue
     athenaeum#1170 was split on 2026-08-31 from the one-time destructive

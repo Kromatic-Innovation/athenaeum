@@ -165,7 +165,7 @@ plausible path to the 6h default threshold, not a formal proof.
   same fix. The inner timeout defaults to 900s (well under 6h) but
   ``KNOWLEDGE_REBUILD_TIMEOUT`` is operator-configurable, so this is wired
   rather than left latent behind a larger outer timeout.
-* ``_cmd_index.py`` (``reindex``/``rebuild-index``) — **No; bounded.**
+* ``_cmd_index.py`` (``reindex``) — **No; bounded.**
   Deterministic FTS5/local-embedding index build, no LLM/network call —
   bounded by corpus size, not wall-clock-open-ended.
 * ``_cmd_drain.py`` (``drain``) — **Yes** (athenaeum#1230 fix). The SAME class

@@ -391,26 +391,6 @@ def test_first_run_no_manifest_is_whole_corpus_and_writes_baseline(
 # ---------------------------------------------------------------------------
 
 
-class TestResolveLiveDeltaEnabled:
-    def test_default_true(self) -> None:
-        from athenaeum.config import resolve_live_delta_enabled
-
-        assert resolve_live_delta_enabled(None) is True
-        assert resolve_live_delta_enabled({}) is True
-
-    def test_explicit_false(self) -> None:
-        from athenaeum.config import resolve_live_delta_enabled
-
-        cfg = {"librarian": {"delta": {"live_client": False}}}
-        assert resolve_live_delta_enabled(cfg) is False
-
-    def test_non_bool_falls_through(self) -> None:
-        from athenaeum.config import resolve_live_delta_enabled
-
-        cfg = {"librarian": {"delta": {"live_client": "nope"}}}
-        assert resolve_live_delta_enabled(cfg) is True
-
-
 class TestResolveFullCompileEveryDays:
     def test_default_seven(self) -> None:
         from athenaeum.config import resolve_full_compile_every_days

@@ -5,39 +5,28 @@ The librarian was minting durable wiki entities from source-code artifacts
 A wiki page describing a file's PAST state is actively harmful: an agent recalls
 it, treats it as current, and spends a session disproving it against the working
 tree. This is a WRITE-side class exclusion applied at entity creation — filenames
-are an unbounded set a stopword list (athenaeum#662) cannot enumerate — and a companion
-sweep retires the ones already on disk via the existing git-rm retire path.
+are an unbounded set a stopword list (athenaeum#662) cannot enumerate.
+
+The companion one-shot sweep that used to retire already-on-disk
+filename-derived pages (``athenaeum.filename_entity_prune``, AC3) was removed
+once the backlog it existed to clear was gone (athenaeum#2466) — this write-side
+creation gate is the part that stays live.
 
 Covers:
   - the predicate (AC1 file-shaped names excluded; AC2 genuine names survive);
   - the shared creation gate both transports use;
   - configurability (AC4: allowlist wins, toggle off, extension extend);
-  - the retire sweep (AC3);
   - independence from athenaeum#662's stopword mechanism (AC5).
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
-from athenaeum.filename_entity_prune import (
-    apply_filename_entity_prune,
-    build_filename_entity_report,
-)
 from athenaeum.models import ClassifiedEntity
 from athenaeum.tiers import (
     is_code_artifact_name,
     partition_code_artifact_classifications,
     resolve_junk_match_names,
 )
-
-
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
-    )
-
 
 # ---------------------------------------------------------------------------
 # is_code_artifact_name — AC1 (excluded) and AC2 (genuine survives)
@@ -158,120 +147,3 @@ class TestIndependentFrom662:
         assert "skill.md" not in junk
         assert is_code_artifact_name("skill.md")
 
-
-# ---------------------------------------------------------------------------
-# Retire sweep — AC3 (existing filename-derived pages retired via git rm)
-# ---------------------------------------------------------------------------
-
-
-def _wiki(tmp_path: Path) -> Path:
-    kr = tmp_path / "knowledge"
-    wiki = kr / "wiki"
-    wiki.mkdir(parents=True)
-
-    # Two filename-derived entity pages (the confirmed shapes) + a genuine one.
-    (wiki / "919f0485-skill-md.md").write_text(
-        "---\nname: skill.md\ntype: concept\n---\nA page minted from a filename.\n",
-        encoding="utf-8",
-    )
-    (wiki / "c56ac256-project-registry-yaml.md").write_text(
-        "---\nname: project-registry.yaml\ntype: concept\n---\nAnother filename.\n",
-        encoding="utf-8",
-    )
-    (wiki / "a1-reach.md").write_text(
-        "---\nname: Reach\ntype: organization\n---\nA genuine company.\n",
-        encoding="utf-8",
-    )
-    # Index/queue files (``_``-prefixed) must never be touched.
-    (wiki / "_pending_questions.md").write_text("- open q\n", encoding="utf-8")
-
-    _git(kr, "init", "-b", "develop")
-    _git(kr, "config", "user.email", "t@example.com")
-    _git(kr, "config", "user.name", "Prune Test")
-    _git(kr, "add", "-A")
-    _git(kr, "commit", "-m", "seed")
-    return kr
-
-
-class TestFilenameEntityPrune:
-    def test_report_kills_only_filename_derived_pages(self, tmp_path: Path) -> None:
-        kr = _wiki(tmp_path)
-        report = build_filename_entity_report(kr / "wiki")
-        killed = sorted(c.path.name for c in report.kill)
-        assert killed == ["919f0485-skill-md.md", "c56ac256-project-registry-yaml.md"]
-        # The genuine entity is retained; the _-prefixed queue file is not an
-        # entity page and is never scanned.
-        retained = [p.name for p, _ in report.retained]
-        assert "a1-reach.md" in retained
-        assert "_pending_questions.md" not in killed
-
-    def test_apply_git_rms_kill_list_and_is_recoverable(self, tmp_path: Path) -> None:
-        kr = _wiki(tmp_path)
-        report = build_filename_entity_report(kr / "wiki")
-        report = apply_filename_entity_prune(kr, report)
-
-        assert report.committed is True
-        assert not (kr / "wiki" / "919f0485-skill-md.md").exists()
-        assert not (kr / "wiki" / "c56ac256-project-registry-yaml.md").exists()
-        assert (kr / "wiki" / "a1-reach.md").exists()
-
-        show = _git(kr, "show", "--stat", "--format=%s", "HEAD")
-        assert "retire 2 filename-derived entity page(s) (athenaeum#680)" in show.stdout
-        # git-recoverable: the removed page survives in history.
-        prior = _git(kr, "show", "HEAD~1:wiki/919f0485-skill-md.md")
-        assert "skill.md" in prior.stdout
-
-    def test_allowlist_spares_a_page(self, tmp_path: Path) -> None:
-        kr = _wiki(tmp_path)
-        cfg = {"librarian": {"code_artifact_allowlist": ["skill.md"]}}
-        report = build_filename_entity_report(kr / "wiki", config=cfg)
-        killed = sorted(c.path.name for c in report.kill)
-        assert killed == ["c56ac256-project-registry-yaml.md"]
-
-    def test_refuses_without_git(self, tmp_path: Path) -> None:
-        kr = tmp_path / "no-git"
-        (kr / "wiki").mkdir(parents=True)
-        (kr / "wiki" / "u-skill-md.md").write_text(
-            "---\nname: skill.md\n---\nx\n", encoding="utf-8"
-        )
-        report = build_filename_entity_report(kr / "wiki")
-        report = apply_filename_entity_prune(kr, report)
-        assert report.committed is False
-        assert any("refusing to prune" in e for e in report.errors)
-        assert (kr / "wiki" / "u-skill-md.md").exists()
-
-    def test_refuses_against_fake_declaring_no_recovery_capability(
-        self, tmp_path: Path
-    ) -> None:
-        """issue athenaeum#978 (S3, Tier A AC5): even with a REAL git repo
-        present, an injected store fake declaring neither ``versioned`` nor
-        ``purgeable`` (design note §4.4 R1) makes the gate refuse — proving
-        it is driven by the declared capability, not by probing
-        ``knowledge_root / ".git"`` directly."""
-        from tests.store_fakes import NoRecoveryStore
-
-        kr = _wiki(tmp_path)
-        report = build_filename_entity_report(kr / "wiki")
-        report = apply_filename_entity_prune(kr, report, store=NoRecoveryStore())
-        assert report.committed is False
-        assert any("refusing to prune" in e for e in report.errors)
-        assert (kr / "wiki" / "919f0485-skill-md.md").exists()
-        assert (kr / "wiki" / "c56ac256-project-registry-yaml.md").exists()
-
-    def test_empty_report_is_noop(self, tmp_path: Path) -> None:
-        kr = tmp_path / "knowledge"
-        (kr / "wiki").mkdir(parents=True)
-        (kr / "wiki" / "a1-reach.md").write_text(
-            "---\nname: Reach\n---\nx\n", encoding="utf-8"
-        )
-        _git(kr, "init", "-b", "develop")
-        _git(kr, "config", "user.email", "t@example.com")
-        _git(kr, "config", "user.name", "T")
-        _git(kr, "add", "-A")
-        _git(kr, "commit", "-m", "seed")
-        head = _git(kr, "rev-parse", "HEAD").stdout.strip()
-        report = apply_filename_entity_prune(
-            kr, build_filename_entity_report(kr / "wiki")
-        )
-        assert report.committed is False
-        assert _git(kr, "rev-parse", "HEAD").stdout.strip() == head

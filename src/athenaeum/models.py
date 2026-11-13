@@ -922,7 +922,7 @@ def tombstone_target(meta: Mapping[str, object] | None) -> str | None:
 # (``resolutions.enact_resolution`` — see ``docs/design/provenance-shape.md`` §8.4).
 # Slice 3 (this change) threads the ``as_of`` parameter out to an operator-facing
 # ``--as-of DATE`` recall view (``search.build_index`` / ``query`` + the CLI
-# ``recall`` / ``rebuild-index`` commands) — a read-only historical rewind
+# ``recall`` / ``reindex`` commands) — a read-only historical rewind
 # through the upper bound + athenaeum#191 tombstones. The lower bound (``valid_from``)
 # stays ungated (it would collide with athenaeum#324's disjoint detector — see
 # :func:`is_inactive_memory`). See ``docs/design/provenance-shape.md`` §8.

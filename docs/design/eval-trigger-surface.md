@@ -87,7 +87,7 @@ model is asked, how its answer is read, or what is done with that answer:
 
 | Class | Concrete members today |
 | --- | --- |
-| R1 Prompt text | every constant in `src/athenaeum/prompt_registry.py:PROMPT_META`; every file under `src/athenaeum/prompts/`; inline prompts outside the registry (e.g. the propose prompt in `src/athenaeum/paste_cleanup.py`) |
+| R1 Prompt text | every constant in `src/athenaeum/prompt_registry.py:PROMPT_META`; every file under `src/athenaeum/prompts/`; inline prompts outside the registry (e.g. `src/athenaeum/memory_class_backfill.py`'s inline classify prompt) |
 | R2 Routing | `src/athenaeum/config.py:resolve_model` and the `DEFAULT_*_MODEL` constants; per-module `_get_*_model` wrappers (`tiers.py`, `resolutions.py`, `contradictions.py`, `claim_kind.py`, `decay_bucket.py`, `query_topics.py`, `rule_proposals.py`); `src/athenaeum/provider.py:resolve_max_tokens` and `resolve_thinking`; `prompt_registry.py:_META_ROWS` (knob and `max_tokens` per prompt) |
 | R3 Request building | every function that encloses a model call (e.g. `tiers.py` calls through `_timed_llm_call(lambda: client.messages.create(**params), ...)`; `batch.py` through `client.messages.batches.create`), plus named builders such as `rule_proposals.py:build_rule_proposal_request_params` |
 | R4 Response handling | named parsers such as `tiers.py:parse_merge_ops_response`, and the call-site functions themselves (truncation fallbacks, retries, verdict mapping usually live there) |
@@ -146,10 +146,10 @@ convention:
   function is an attribute chain ending in `.messages.create` or
   `.messages.batches.create`. The enclosing top-level function or method must be
   designated (or its file whole-file listed). This closes a gap the current
-  oracle misses: `paste_cleanup.py` and `memory_class_backfill.py` call
-  `client.messages.create` but do not mention `LLMBackend`, so
-  `tests/test_llm_surface.py:_llm_backend_importers` never requires them, and
-  neither is on the surface today.
+  oracle misses: `memory_class_backfill.py` calls `client.messages.create`
+  but does not mention `LLMBackend`, so
+  `tests/test_llm_surface.py:_llm_backend_importers` never requires it, and
+  it is not on the surface today.
 - **D2 prompts.** Every `PROMPT_META` row must appear as `path::CONSTANT`
   (replaces `_prompt_registry_modules`' whole-module requirement).
 - **D3 routing seam.** `config.py::resolve_model`, every module-level
@@ -280,8 +280,9 @@ change it.
 - **One list, two readers:** `.github/llm-surface.txt` stays the single source
   for both the gate and the rot check.
 - **Prompt text is content** (workspace policy): this design indexes prompts
-  wherever they live and does not move them. `paste_cleanup.py`'s inline
-  prompt is surfaced by D1 regardless of whether it is later moved to a file.
+  wherever they live and does not move them. `memory_class_backfill.py`'s
+  inline prompt is surfaced by D1 regardless of whether it is later moved to
+  a file.
 
 ## 7. Agent workflow rule: dispatch once, at the final reviewed head
 

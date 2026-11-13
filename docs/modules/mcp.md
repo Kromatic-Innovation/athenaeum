@@ -260,7 +260,7 @@ hidden state changes, and judged NOT disqualifying:
   tool reads back.
 - `enumerate_entities` and `read_entity` (when given a `cache_dir`) refresh a
   persisted search-index / entity-index cache file under that directory —
-  the same derived, rebuildable plumbing `recall`/`rebuild-index` already
+  the same derived, rebuildable plumbing `recall`/`reindex` already
   maintain, never user-authored content.
 
 One tool's side effect WAS disqualifying: `scan_retraction_cascade` durably

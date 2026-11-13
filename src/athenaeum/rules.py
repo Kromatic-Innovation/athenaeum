@@ -1781,16 +1781,19 @@ def prune_shape_rule_dispositions(
 # not redundant -- see that function's docstring for why retention alone
 # does not undo a ledger that grew before this issue's fixes ever ran.
 #
-# **Not run automatically anywhere in this codebase.** This is a live-store
-# mutation an operator invokes once, deliberately, via
-# `athenaeum storage prune-dispositions --apply` (`_cmd_storage.py`) -- see
-# that command for why: the target file lives under `~/knowledge`, not this
-# repo, and a prune racing the nightly's own concurrent appends is exactly
-# the hazard athenaeum#1274's own proposal names ("not something to do
-# mid-ingest"). The CLI wraps this function in
-# :class:`athenaeum.runlock.RunLock`; this function itself does no locking
-# -- it is a pure transform over a text blob, unit-testable without a live
-# store or a lock.
+# **Not run automatically anywhere in this codebase.** This was a live-store
+# mutation an operator invoked once, deliberately, via the now-removed
+# `athenaeum storage prune-dispositions --apply` CLI (athenaeum#2466 retired the
+# one-shot command once the backlog it existed to clear was gone; this
+# function itself -- the writer re-keying fix athenaeum#1274 shipped -- stays,
+# since the shape-rule engine still relies on it being correct even with no
+# CLI wrapper left to invoke it by hand). The target file lives under
+# `~/knowledge`, not this repo, and a prune racing the nightly's own
+# concurrent appends was exactly the hazard athenaeum#1274's own proposal
+# named ("not something to do mid-ingest") -- the retired CLI wrapped this
+# function in :class:`athenaeum.runlock.RunLock`; this function itself does
+# no locking -- it is a pure transform over a text blob, unit-testable
+# without a live store or a lock.
 #
 # **What counts as "positive."** Default-deny on deletion: the ONLY
 # disposition value this function ever drops is the literal string

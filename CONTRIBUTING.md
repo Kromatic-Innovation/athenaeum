@@ -85,7 +85,7 @@ What the suite assumes:
 
 If the suite is red, check this list before anything else:
 
-- `tests/test_cli.py` — `TestServe` / `TestRebuildIndex` need the vector
+- `tests/test_cli.py` — `TestServe` / `TestReindex` need the vector
   backend, and `TestServe` is sensitive to ambient `KNOWLEDGE_*` variables.
 - `tests/test_search.py` — `TestReindexUnderLiveServer` and eleven
   `pytest.importorskip("chromadb")` sites need the `[vector]` extra.
