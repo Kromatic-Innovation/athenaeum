@@ -31,6 +31,7 @@ from unittest.mock import patch
 import pytest
 
 from athenaeum.decisions import list_pending_decisions
+from athenaeum.intake_audit import raise_unclaimed_files
 from athenaeum.librarian import (
     _LIBRARIAN_ROUTED_KNOBS,
     _ROUTED_KNOB_PHASE_LABELS,
@@ -1176,6 +1177,71 @@ class TestRunIntakeAuditPhase:
         assert ctx.intake_audit_summary is not None
         assert ctx.intake_audit_summary["unclaimed_files"] == 0
         assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+
+class TestRunIntakeAuditPhaseEquivalence:
+    """athenaeum#2443 AC2: pins ``_run_intake_audit_phase``'s behaviour
+    BEFORE it is changed to delegate to
+    :func:`athenaeum.intake_audit.run_intake_audit`, so the refactor is
+    proven behaviour-preserving rather than merely assumed so -- same
+    ``intake_audit_summary`` and same raised pending-question text, on both
+    a zero-unclaimed-files fixture and a multi-file one."""
+
+    def test_raise_unclaimed_files_empty_list_matches_phases_early_return(
+        self, tmp_path: Path
+    ) -> None:
+        """The phase's current zero-unclaimed early return hard-codes an
+        all-zero summary rather than calling ``raise_unclaimed_files``.
+        Confirm the two are equivalent BEFORE relying on that for the
+        refactor: an empty ``unclaimed`` list must make
+        ``raise_unclaimed_files`` take its own early-return branch and
+        produce the identical all-zero dict, writing nothing."""
+        pending_path = tmp_path / "wiki" / "_pending_questions.md"
+        summary = raise_unclaimed_files(pending_path, [], raw_root=tmp_path / "raw")
+        assert summary == {
+            "unclaimed_files": 0,
+            "groups": 0,
+            "raised_groups": 0,
+            "raised_files": 0,
+            "already_open_groups": 0,
+        }
+        assert not pending_path.exists()
+
+    def test_no_unclaimed_files_pins_summary(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        _run_intake_audit_phase(ctx)
+        assert ctx.intake_audit_summary == {
+            "unclaimed_files": 0,
+            "groups": 0,
+            "raised_groups": 0,
+            "raised_files": 0,
+            "already_open_groups": 0,
+        }
+        assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+    def test_two_unclaimed_files_pin_summary_and_pending_blocks(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path)
+        (ctx.raw_root / "daily-activity").mkdir(parents=True)
+        (ctx.raw_root / "daily-activity" / "a.bak").write_text("{}\n")
+        (ctx.raw_root / "daily-activity" / "b.bak").write_text("{}\n")
+
+        _run_intake_audit_phase(ctx)
+
+        assert ctx.intake_audit_summary == {
+            "unclaimed_files": 2,
+            "groups": 1,
+            "raised_groups": 1,
+            "raised_files": 2,
+            "already_open_groups": 0,
+        }
+        pending = ctx.wiki_root / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text()
+        assert "unmatched extension" in text
+        assert "a.bak" in text
+        assert "b.bak" in text
 
 
 # ---------------------------------------------------------------------------

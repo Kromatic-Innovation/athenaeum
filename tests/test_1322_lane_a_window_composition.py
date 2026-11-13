@@ -33,7 +33,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from athenaeum.librarian import STUCK_MANIFEST_NAME, run
+from athenaeum.librarian import run
+from athenaeum.stuck_ledger import STUCK_MANIFEST_NAME
 
 # ---------------------------------------------------------------------------
 # Harness (mirrors tests/test_entity_changed_paths.py's, with multiple sources)

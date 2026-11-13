@@ -71,8 +71,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from athenaeum.librarian import STUCK_MANIFEST_NAME, run
+from athenaeum.librarian import run
 from athenaeum.status import format_status, status
+from athenaeum.stuck_ledger import STUCK_MANIFEST_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures" / "athenaeum_1597"
 

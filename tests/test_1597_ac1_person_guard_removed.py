@@ -131,8 +131,9 @@ class TestAC1PersonGuardRemovalDrainsTheEntityPhase:
     ) -> None:
         import anthropic as anthropic_mod
 
-        from athenaeum.librarian import STUCK_MANIFEST_NAME, run
+        from athenaeum.librarian import run
         from athenaeum.run_summary_log import parse_run_summary_text
+        from athenaeum.stuck_ledger import STUCK_MANIFEST_NAME
 
         root = _seed_root(tmp_path)
         mock_client = _mock_client()
