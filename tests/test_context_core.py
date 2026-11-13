@@ -1273,6 +1273,63 @@ def test_resolve_parent_names_no_op_for_a_page_with_no_parent(tmp_path: Path) ->
     assert c.parent_name == ""
 
 
+def test_resolve_parent_names_skips_undecodable_page_but_resolves_the_rest(
+    tmp_path: Path,
+) -> None:
+    """Issue athenaeum#2538: ``UnicodeDecodeError`` is a ``ValueError``
+    subclass, not an ``OSError`` -- a page whose bytes are not valid UTF-8
+    must not abort the whole per-turn context build (this runs on the
+    per-turn recall hook path), it must just be skipped like any other
+    unreadable candidate. ~140 other sites in ``src/athenaeum`` already
+    catch ``(OSError, UnicodeDecodeError)`` together; this is the same
+    convention applied here."""
+    from athenaeum.context import Candidate, _resolve_parent_names
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "company-acme.md").write_text(
+        "---\nuid: company-acme\ntype: company\nname: Acme Corp\n---\n\nBody.\n"
+    )
+    (wiki_root / "company-globex.md").write_text(
+        "---\nuid: company-globex\ntype: company\nname: Globex Corp\n---\n\nBody.\n"
+    )
+    # Undecodable: a lone UTF-16 BOM-like byte sequence that is not valid
+    # UTF-8 on its own.
+    (wiki_root / "broken.md").write_bytes(b"\xff\xfe\x00\x01garbage")
+    (wiki_root / "finance.md").write_text(
+        "---\nuid: finance\ntype: company\nname: Finance Desk\n"
+        "parent: company-acme\n---\n\nBody.\n"
+    )
+    (wiki_root / "legal.md").write_text(
+        "---\nuid: legal\ntype: company\nname: Legal Desk\n"
+        "parent: company-globex\n---\n\nBody.\n"
+    )
+
+    candidates = [
+        Candidate(
+            filename="broken.md", name="Broken Page", description="",
+            backend="fts5", relevance=1.0, audience="",
+        ),
+        Candidate(
+            filename="finance.md", name="Finance Desk", description="",
+            backend="fts5", relevance=1.0, audience="",
+        ),
+        Candidate(
+            filename="legal.md", name="Legal Desk", description="",
+            backend="fts5", relevance=1.0, audience="",
+        ),
+    ]
+
+    # Must not raise UnicodeDecodeError -- that is the defect this test
+    # catches when run against the unfixed `except OSError:` site.
+    _resolve_parent_names(candidates, wiki_root)
+
+    broken, finance, legal = candidates
+    assert broken.parent_name == ""
+    assert finance.parent_name == "Acme Corp"
+    assert legal.parent_name == "Globex Corp"
+
+
 def test_build_context_bullet_names_parent_when_wiki_root_supplied(tmp_path: Path) -> None:
     wiki_root = tmp_path / "wiki"
     wiki_root.mkdir()
