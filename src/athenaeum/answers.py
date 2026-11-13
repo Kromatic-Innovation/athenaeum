@@ -2108,11 +2108,11 @@ def raise_pending_question(
         ``resolve_question`` will use for this item, computed the same way
         :func:`_make_id` computes it for any other block — ``None`` on
         failure), and ``raw_block`` (the rendered block text, ``None`` on
-        failure). ``block`` / ``error`` are legacy-shaped aliases (mirroring
-        :func:`resolve_by_id`) for ``raw_block`` / ``message``-on-failure
-        respectively. Never raises — every failure mode is a structured
+        failure). Never raises — every failure mode is a structured
         refusal, matching every other mutating MCP-facing helper in this
-        module.
+        module. (The legacy ``block`` / ``error`` aliases this dict used to
+        carry for ``raw_block`` / ``message``-on-failure, mirroring
+        :func:`resolve_by_id`, were removed in athenaeum#2460.)
     """
     if kind not in ("question", "confirmation"):
         msg = f'kind must be "question" or "confirmation", got {kind!r}'
@@ -2122,8 +2122,6 @@ def raise_pending_question(
             "message": msg,
             "decision_id": None,
             "raw_block": None,
-            "block": None,
-            "error": msg,
         }
 
     confirmation_values = {
@@ -2151,8 +2149,6 @@ def raise_pending_question(
                     "message": msg,
                     "decision_id": None,
                     "raw_block": None,
-                    "block": None,
-                    "error": msg,
                 }
 
     q = question.strip()
@@ -2187,8 +2183,6 @@ def raise_pending_question(
             "message": msg,
             "decision_id": None,
             "raw_block": None,
-            "block": None,
-            "error": msg,
         }
     ctx = ctx_arg
     if not ctx:
@@ -2203,8 +2197,6 @@ def raise_pending_question(
             "message": msg,
             "decision_id": None,
             "raw_block": None,
-            "block": None,
-            "error": msg,
         }
 
     when = now or datetime.now(timezone.utc)
@@ -2263,9 +2255,6 @@ def raise_pending_question(
         "message": "ok",
         "decision_id": decision_id,
         "raw_block": block,
-        # legacy-shaped aliases:
-        "block": block,
-        "error": None,
     }
 
 
@@ -2286,10 +2275,10 @@ def resolve_by_id(
     - ``message`` (str): human-readable status / failure text.
     - ``resolved_block`` (str | None): the rewritten block on success;
       ``None`` otherwise.
-    - ``block`` (str | None): legacy alias for ``resolved_block`` kept
-      for backward compatibility with early callers.
-    - ``error`` (str | None): legacy alias for ``message`` on failure,
-      kept for backward compatibility.
+
+    (The legacy ``block`` / ``error`` aliases this dict used to carry for
+    ``resolved_block`` / ``message``-on-failure were removed in
+    athenaeum#2460.)
     """
     if not pending_path.exists():
         msg = f"pending questions file not found: {pending_path}"
@@ -2298,8 +2287,6 @@ def resolve_by_id(
             "error_code": "file_missing",
             "message": msg,
             "resolved_block": None,
-            "block": None,
-            "error": msg,
         }
 
     text = pending_path.read_text(encoding="utf-8")
@@ -2311,8 +2298,6 @@ def resolve_by_id(
             "error_code": "id_not_found",
             "message": msg,
             "resolved_block": None,
-            "block": None,
-            "error": msg,
         }
 
     new_block_text: str | None = None
@@ -2337,8 +2322,6 @@ def resolve_by_id(
                 "error_code": "already_answered",
                 "message": msg,
                 "resolved_block": None,
-                "block": None,
-                "error": msg,
             }
 
         updated = _rewrite_block_as_answered(pq.raw_block, answer, answered_at=answered_at)
@@ -2352,8 +2335,6 @@ def resolve_by_id(
             "error_code": "id_not_found",
             "message": msg,
             "resolved_block": None,
-            "block": None,
-            "error": msg,
         }
 
     primary_parts = ["# Pending Questions", *rewritten_blocks]
@@ -2365,8 +2346,6 @@ def resolve_by_id(
         "error_code": None,
         "message": "ok",
         "resolved_block": new_block_text,
-        "block": new_block_text,
-        "error": None,
     }
 
 

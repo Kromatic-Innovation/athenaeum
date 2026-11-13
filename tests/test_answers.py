@@ -579,8 +579,11 @@ class TestResolveById:
 
         result = resolve_by_id(pending_path, qid, "They closed Series B in March 2026.")
         assert result["ok"] is True
-        assert "[x]" in result["block"]
-        assert "Series B" in result["block"]
+        assert "[x]" in result["resolved_block"]
+        assert "Series B" in result["resolved_block"]
+        # athenaeum#2460: the legacy block/error aliases are gone.
+        assert "block" not in result
+        assert "error" not in result
 
         # File on disk now has the flipped checkbox + answer.
         text = pending_path.read_text()
@@ -2337,5 +2340,6 @@ def test_resolve_by_id_success_returns_structured_fields(pending_path: Path) -> 
     assert result["message"] == "ok"
     assert result["resolved_block"] is not None
     assert "[x]" in result["resolved_block"]
-    # Legacy aliases retained for backward compat.
-    assert result["block"] == result["resolved_block"]
+    # athenaeum#2460: the legacy block/error aliases were removed.
+    assert "block" not in result
+    assert "error" not in result

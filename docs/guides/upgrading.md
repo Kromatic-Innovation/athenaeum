@@ -176,12 +176,52 @@ This is unrelated to the live raw-intake retention reporting the librarian
 pipeline still runs (the size-threshold check that WARNs when a raw source
 tree crosses its configured bound) — that stays exactly as it was.
 
-## I want to know about the other destructive-by-design command
+## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
-`athenaeum auto-memory prune --apply` is a second opt-in command that
-`git rm`s pages (operational `wiki/auto-*.md`), with the same git-only
-recovery story as move-then-retire. It's dry-run by default — see [Daily
-operation](daily-operation.md).
+Each of these commands existed to repair data left behind by one specific,
+now-fixed bug. Once the underlying defect was fixed, the command had nothing
+left to do for anyone running a current install — so it is removed outright
+in 0.24.0, with no deprecation period and no replacement:
+
+| Removed command |
+|---|
+| `athenaeum auto-memory prune` |
+| `athenaeum auto-memory prune-index` |
+| `athenaeum auto-memory prune-code-entities` |
+| `athenaeum dedup-oversize-escalations` |
+| `athenaeum storage prune-dispositions` |
+| `athenaeum storage audit-h1-redaction` |
+| `athenaeum paste-cleanup` |
+
+**If you are upgrading from an older release and still have the pre-fix data
+on disk** (for example, you skipped several releases, or your knowledge base
+predates the engine fix each command was written around), run the command you
+need on your *current, pre-upgrade* release before upgrading — each one is
+dry-run by default, so you can check first whether it finds anything to do.
+Once you upgrade, the command itself is gone; its one-time job cannot be run
+again from a newer release.
+
+## I want to know what changed in the MCP decision-queue tool responses
+
+The `resolve_question`, `resolve_merge`, `review_audit_item`, and
+`raise_decision` MCP tool responses (and the matching `athenaeum` Python
+helpers, `answers.resolve_by_id` and `answers.raise_pending_question`) no
+longer carry a handful of legacy keys that duplicated other fields:
+
+- **`error`** is gone everywhere it appeared. Read **`message`** instead —
+  `error` was always an exact copy of it (or `None` on success).
+- **`block`** is gone from `resolve_question` and `resolve_merge`. Read
+  **`resolved_block`** instead — on these two tools it was, and still is,
+  always `None`: both defer the actual question/merge rewrite to the next
+  `ingest-answers` tick, so neither ever rewrites anything synchronously.
+- **`block`** is gone from `raise_decision` (and the underlying
+  `answers.raise_pending_question`). Read **`raw_block`** instead — `block`
+  was always an exact copy of it (the newly rendered queue block on
+  success, `None` on failure).
+
+Nothing else changed: `ok`, `error_code`, `message`, `deferred`,
+`answer_file`, `decision_id`, `raw_block`, and `resolved_block` (where it
+already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
 
 ## See also
 

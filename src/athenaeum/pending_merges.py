@@ -1464,7 +1464,7 @@ def _find_git_repo(wiki_root: Path) -> Path | None:
     ``_apply_fold_into_existing`` / ``resolve_merge`` are only ever handed
     ``wiki_root`` (conventionally ``<knowledge_root>/wiki``) — never the
     containing ``knowledge_root`` itself. Other modules that gate destructive
-    writes on git (:func:`athenaeum.auto_memory_prune.apply_prune`,
+    writes on git (:func:`athenaeum.decay_sweep.apply_sweep`,
     :func:`athenaeum.corrections.retire_batch`) are handed ``knowledge_root``
     directly and can just check ``(knowledge_root / ".git").exists()``; that
     idiom is not available here without threading a brand-new parameter
@@ -2268,7 +2268,7 @@ def _apply_fold_into_existing(
     # operator's OTHER pre-staged/modified content elsewhere in the
     # knowledge repo can never be swept into this commit under a misleading
     # "provenance snapshot" message (the exact concern
-    # ``auto_memory_prune.apply_prune`` documents for its own commit).
+    # ``decay_sweep.apply_sweep`` documents for its own commit).
     # Commits only when something is ACTUALLY staged (`git diff --cached
     # --quiet` returncode != 0) — the common case where the target/sources
     # are already fully committed from a prior run is a legitimate no-op,
@@ -2789,7 +2789,7 @@ def resolve_merge(
                 }
             # Issue athenaeum#947: removal must be git-only for recoverability
             # (README.md's "a bad merge is a `git revert` away" guarantee) —
-            # mirrors ``auto_memory_prune.apply_prune``'s refuse-don't-degrade
+            # mirrors ``decay_sweep.apply_sweep``'s refuse-don't-degrade
             # gate. This fires BEFORE any mutation whatsoever (before the
             # draft body overwrites the target below) and must NOT flip the
             # checkbox, same shape as the ``fold_target_missing`` check above.
