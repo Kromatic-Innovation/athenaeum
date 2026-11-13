@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warned about. No deprecation period — operator ruling on cleanup epic
   athenaeum#2447 (athenaeum#2467).
 
+- Removed the `rebuild-index` alias; use `athenaeum reindex` (athenaeum#2459).
+  The alias printed no deprecation warning, so there was no transition
+  period to preserve; see `docs/guides/upgrading.md` for anyone whose cron
+  job or wrapper still calls it.
+
 - Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
   key and its `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` environment-variable
   override, along with the rest of the C4 contradiction-detector code left
@@ -122,6 +127,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_never_ingest_refusals.jsonl` under the cache dir) is left alone —
   ignored, not read, not deleted; see `docs/guides/upgrading.md`
   (athenaeum#2468).
+
+- MCP responses no longer include the legacy `block`, `error` and
+  `resolved_block` keys on `resolve_question`, `resolve_merge`,
+  `review_audit_item`, `raise_decision`, and the kill-switch/forbidden
+  refusals they share; read `message` (and `resolved_block` / `raw_block`
+  where those already carried real data) instead — see
+  `docs/guides/upgrading.md` (athenaeum#2460).
+
+- Removed seven one-shot repair commands whose defects are fixed:
+  `auto-memory prune`, `prune-index`, `prune-code-entities`,
+  `dedup-oversize-escalations`, `storage prune-dispositions`, `storage
+  audit-h1-redaction`, `paste-cleanup` (athenaeum#2466). No deprecation period —
+  each repaired data left behind by one specific, now-fixed bug, so it had
+  nothing left to do for a current install. See `docs/guides/upgrading.md`
+  if you still need one of these against an older, pre-fix knowledge base.
+
+- Tier-4 dedup, the relatedness writer, delta compile, the delta live
+  client and the name-collision and qualified-name scans are now always on;
+  their off switches are removed (athenaeum#2461). Removed:
+  `ATHENAEUM_TIER4_DEDUP`; `librarian.relatedness_writer` and
+  `ATHENAEUM_RELATEDNESS_WRITER`; `librarian.delta.enabled`;
+  `librarian.delta.live_client`; `librarian.name_collision_scan`;
+  `librarian.qualified_name_scan`. A stale yaml key still setting one of
+  the four removed yaml keys is ignored with a warning, same as every
+  other removed key; the two removed env vars now have no effect. Anyone
+  who set `librarian.delta.enabled: false` to force a whole-corpus compile
+  should run `athenaeum run --full-compile` instead. `librarian.retire`,
+  `librarian.live_session_guard`, `spend.ledger_enabled` and
+  `recall.hybrid` are unaffected and remain configurable — see
+  `docs/reference/configuration.md`.
+
+- Removed the unwired `retention_policy` module and the
+  `librarian.retention` key, which had no effect (athenaeum#2462). The
+  module landed with no caller and never shipped a CLI, MCP or librarian
+  hook; a stale `librarian.retention` yaml key is now ignored with a
+  warning, same as every other removed key. The live raw-retention
+  reporting in `librarian.py` is unaffected.
 
 ### Changed
 

@@ -932,7 +932,7 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         source_ref="pii.py:1312 SUPERSESSION_LOG_FILENAME (design note §5.2 table row 7)",
     ),
     # Issue athenaeum#2468 removed the "llm-schema-observations-ledger" entry
-    # that used to sit here (llm_schemas.py's OBSERVATIONS_FILENAME): nothing
+    # that used to sit here (``_llm_schema_observations.jsonl``): nothing
     # outside that module's own tests ever read the ledger, so the writer,
     # its readers, and this registry row were all removed together.
     ArtifactDeclaration(
@@ -997,7 +997,7 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     # Issue athenaeum#2468 removed the "never-ingest-refusals-ledger" entry
-    # that used to sit here (never_ingest.py's REFUSALS_FILENAME): nothing
+    # that used to sit here (``_never_ingest_refusals.jsonl``): nothing
     # outside that module's own tests ever read the ledger, so the writer,
     # its reader, and this registry row were all removed together. The
     # never-ingest refusal DECISION itself is unchanged.

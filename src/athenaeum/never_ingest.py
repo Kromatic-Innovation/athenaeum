@@ -17,7 +17,7 @@ rung: :func:`check_and_refuse` logs an INFO line naming the class and detail
 so the "intake disposition" the issue's AC names is never silent.
 
 Issue athenaeum#2468 removed this module's durable, ids-only JSONL ledger
-(formerly :data:`REFUSALS_FILENAME`, under the cache dir) — nothing outside
+(formerly ``_never_ingest_refusals.jsonl`` under the cache dir) — nothing outside
 this module's own tests ever read it. The refusal DECISION (excluding the
 file from this run's compilation) is unchanged; only the append-only record
 of it is gone.
@@ -118,13 +118,6 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
-
-#: Former filename under the cache dir for the never-ingest refusal ledger
-#: (issue athenaeum#2468 stopped writing it -- nothing outside this module's
-#: own tests ever read it). Kept only as a documented historical constant so
-#: ``docs/guides/upgrading.md`` and a stray pre-upgrade file on disk can both
-#: be traced back to one name; no code resolves a path from it anymore.
-REFUSALS_FILENAME = "_never_ingest_refusals.jsonl"
 
 #: Which intake pipeline produced a refusal (issue athenaeum#968). Both tiers
 #: are enforced at their own COMPILE choke point, never at discovery:
@@ -412,7 +405,6 @@ def filter_never_ingest(
 
 
 __all__ = [
-    "REFUSALS_FILENAME",
     "NEVER_INGEST_TIER_AUTO_MEMORY",
     "NEVER_INGEST_TIER_ENTITY",
     "NeverIngestMatch",

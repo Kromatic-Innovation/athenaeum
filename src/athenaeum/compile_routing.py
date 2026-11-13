@@ -110,13 +110,6 @@ CORRESPONDENT_NAME_KEY = "correspondent_name"
 #: different kind of write and is not what athenaeum#1949 observed.
 PERSON_ENTITY_TYPE = "person"
 
-#: Former ledger filename, under the resolved cache dir (issue athenaeum#2468
-#: stopped writing it -- nothing outside this module's own tests ever read
-#: it). Kept only as a documented historical constant so
-#: ``docs/guides/upgrading.md`` and a stray pre-upgrade file on disk can both
-#: be traced back to one name; no code resolves a path from it anymore.
-COMPILE_ROUTE_LEDGER_FILENAME = "_compile_route_records.jsonl"
-
 #: ``divergence`` values used in :func:`classify_route`'s escalation text.
 #: ``prevented`` -- the write was refused and never reached disk; ``logged``
 #: -- the write was applied and the divergence logged. Which one applies is
@@ -437,7 +430,7 @@ def classify_route(
 
 #: Issue athenaeum#2468 removed the durable compile-route ledger this module
 #: used to write (``CompileRouteRecord``/``record_compile_route``, formerly
-#: under ``COMPILE_ROUTE_LEDGER_FILENAME`` in the cache dir) and its reader
+#: at ``_compile_route_records.jsonl`` in the cache dir) and its reader
 #: (``read_compile_routes``) -- nothing outside this module's own tests ever
 #: read it. :func:`classify_route`'s routing GUARD (preventing or logging a
 #: misroute) is unchanged; only the durable per-file row is gone.

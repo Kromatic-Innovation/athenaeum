@@ -8,7 +8,7 @@ python scripts/gen_config_reference.py
 
 Every `resolve_*` function in `athenaeum.config` appears below, grouped by the top-level `athenaeum.yaml` section it reads (or under **Other** when it reads no yaml key of its own). `athenaeum.yaml` lives at the knowledge root (`<knowledge_root>/athenaeum.yaml`, default `~/knowledge/athenaeum.yaml`). An em dash (—) means that layer does not exist for a given knob.
 
-Defaults were captured by actually invoking each resolver with no config and no `ATHENAEUM_*` environment variables set, except for a small, explicit set of resolvers whose signature takes a required non-config argument (a model knob, a retention family, a recall backend) or whose return value is a filesystem path relative to a knowledge root — those are hand-annotated because invoking them generically would either be meaningless (no single "the" default) or bake this generator's own machine into a committed file.
+Defaults were captured by actually invoking each resolver with no config and no `ATHENAEUM_*` environment variables set, except for a small, explicit set of resolvers whose signature takes a required non-config argument (a model knob, a decay bucket, a recall backend) or whose return value is a filesystem path relative to a knowledge root — those are hand-annotated because invoking them generically would either be meaningless (no single "the" default) or bake this generator's own machine into a committed file.
 
 ## Models
 
@@ -166,8 +166,7 @@ resolver can never turn a live page into an already-expired one by
 accident.
 
 ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
-two horizon families to resolve), not a value read out of *config* — the
-same shape `resolve_retention_policy` uses for its retention family.
+two horizon families to resolve), not a value read out of *config*.
 
 ## `dedupe`
 
@@ -1268,50 +1267,6 @@ expected to be smaller per the effort-budget bounds, so a
 slightly higher rate still keeps the absolute review volume small).
 Clamped to ``[0.0, 1.0]``.
 
-### `resolve_delta_enabled`
-
-- **YAML path:** `librarian.delta`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the delta-scoped-compile opt-in (PR2) from ``librarian.delta``.
-
-When TRUE (the default), the deterministic ``client=None`` compile path
-(session_end / ingest tier0) may scope the cluster + merge passes to only
-the changed files and their affected clusters instead of re-clustering and
-re-merging the whole auto-memory corpus. This is a pure SPEED optimization
-that is proven byte-equivalent to the whole-corpus path
-(``tests/test_delta_compile_equivalence.py``); the nightly LLM ``run`` (a
-live client with cross-scope contradiction detection) always stays
-whole-corpus regardless of this flag. Set ``librarian.delta.enabled: false``
-to force the whole-corpus path everywhere. ``bool`` yaml values are honored;
-anything else falls through to the TRUE default.
-
-### `resolve_live_delta_enabled`
-
-- **YAML path:** `librarian.delta.live_client`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the live-client delta-scoped-compile opt-in from
-``librarian.delta.live_client`` (slice D of).
-
-When TRUE (the default), the nightly LLM ``run`` (a live client) MAY also
-take the delta-scoped cluster + merge path — previously (PR2) delta
-was gated to the deterministic ``client is None`` path ONLY (fallback
-trigger D5). The live-client delta path is additionally gated by
-``full_compile_due`` (the periodic whole-corpus reconciliation, see
-`athenaeum.config.resolve_full_compile_every_days`) regardless of
-this flag — see `athenaeum.librarian._compile_auto_memory`. Set
-``librarian.delta.live_client: false`` to keep the nightly run
-whole-corpus-only (the pre- behaviour) even when a live client is
-present. ``bool`` yaml values are honored; anything else falls through to
-the TRUE default.
-
 ### `resolve_delta_max_affected_clusters`
 
 - **YAML path:** `librarian.delta.max_affected_clusters`
@@ -1603,6 +1558,14 @@ false`` turns it off, and the ``athenaeum run --no-live-session-guard``
 CLI flag overrides to off at the call site. No seed in ``_DEFAULTS``
  -- the default lives here in code so it stays
 reachable. Non-bool yaml values fall through to the default (on).
+
+This is a deliberate, kept-configurable default: it exists so an
+operator running athenaeum against a scope they KNOW has no live
+session owner (for example a one-off batch import with no Claude Code
+transcript ever written for that scope) can set this ``false`` to get
+the pre- retire behaviour back and stop files piling up
+HELD for a session that will never close. Held files are always counted
+and named in the run summary and ``--dry-run`` report regardless.
 
 ### `resolve_live_session_guard_quiet_window_seconds`
 
@@ -1909,9 +1872,7 @@ Resolve the name-collision auto-merge opt-in. DEFAULT OFF.
 Gates only the UNAMBIGUOUS-collision auto-merge branch of
 `athenaeum.name_collisions.resolve_name_collisions` — with this
 off (the default), every collision the nightly scan finds still writes
-a proposal block to ``_pending_merges.md`` (see
-`resolve_name_collision_scan_enabled`), it just never
-self-approves.
+a proposal block to ``_pending_merges.md``, it just never self-approves.
 
 This default is a deliberate, reasoned choice, not an oversight: was split on 2026-08-31 from the one-time destructive
 repair sweep over collisions ALREADY PRESENT in the operator's live
@@ -1931,27 +1892,6 @@ already made recoverable).
 Precedence: yaml ``librarian.name_collision_automerge`` (a plain
 ``bool``) overrides the ``False`` default; anything else (missing,
 non-bool) falls through to ``False``.
-
-### `resolve_name_collision_scan_enabled`
-
-- **YAML path:** `librarian.name_collision_scan`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the nightly name-collision scan opt-out. DEFAULT ON.
-
-Gates `athenaeum.librarian._run_name_collision_phase` /
-`athenaeum.name_collisions.resolve_name_collisions` — a
-deterministic, zero-cost, exact-``name:``-match scan over ``wiki/*.md``
-(no LLM, no vectors, no network). Unlike `resolve_comparator_enabled`'s
-expensive comparator pass, there is no cost reason to ship this off by
-default; ``librarian.name_collision_scan: false`` exists only as an
-operator escape hatch. Mirrors `resolve_delta_enabled`'s shape:
-yaml ``librarian.name_collision_scan`` (a plain ``bool``) overrides the
-``True`` default; anything else (missing, non-bool) falls through to
-``True``.
 
 ### `resolve_non_intake_sources`
 
@@ -2268,34 +2208,6 @@ Resolve the post-run push remote from ``librarian.push_remote``.
 Defaults to ``origin`` — the conventional name the knowledge repo's
 remote will carry on every operator we ship to. A non-string or empty
 yaml value falls through to the default.
-
-### `resolve_qualified_name_scan_enabled`
-
-- **YAML path:** `librarian.qualified_name_scan`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the qualified-name entity-split scan opt-out. DEFAULT ON.
-
-Gates `athenaeum.librarian._run_qualified_name_phase` /
-`athenaeum.name_structure.propose_qualified_name_merges` — the
-``name`` / ``name (qualifier)`` scan, which like
-`resolve_name_collision_scan_enabled`'s exact-match sibling is a
-glob plus a regex: no LLM, no vectors, no network, so there is no cost
-reason to ship it off. ``librarian.qualified_name_scan: false`` is an
-operator escape hatch, nothing more.
-
-There is deliberately NO auto-merge counterpart to
-`resolve_name_collision_automerge_enabled` here. An exact ``name:``
-collision where every non-canonical page provably adds nothing CAN be
-folded unattended; a parenthetical qualifier is a weaker signal whose
-live-corpus hits split roughly evenly between one-entity-twice and
-genuinely-narrower-scope (see `athenaeum.name_structure`'s module
-docstring for the measured populations). AC2 pins
-"queued, never auto-applied" as an invariant, so the knob that could
-break it does not exist rather than defaulting off.
 
 ### `resolve_quarantine_bound_relax_factor`
 
@@ -2998,103 +2910,6 @@ Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
 non-negative ``int``) > default ``0``. Negative, non-integer and
 boolean values fall through to the default. No seed in ``_DEFAULTS``
 
-### `resolve_relatedness_writer_enabled`
-
-- **YAML path:** `librarian.relatedness_writer`
-- **Environment variable:** `ATHENAEUM_RELATEDNESS_WRITER`
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the compile-time ``related:`` edge writer.
-
-When true, ``librarian._apply_tier3_results`` stamps ``related:`` rows
-onto each newly-created page before it is written, using
-`athenaeum.relatedness` -- mutual k-nearest-neighbour over
-corpus-weighted distinctive-term overlap. See that module's docstring for
-the signal, the measurement against 's corpus, and
-why the two cheaper deterministic signals and the MiniLM neighbourhood
-were each measured and rejected.
-
-DEFAULT True (active). Unlike the comparator master switch this does NOT
-ship dark, for three reasons that were checked rather than assumed:
-it makes no metered call and no network call at all (AC6, satisfied by construction rather than by configuration); it only ever
-APPENDS rows to pages this run is creating, so no existing page's bytes
-change and the failure mode of a bad edge is a spurious breadcrumb rather
-than lost content; and its precision was 1.000 at every parameter setting
-measured across three corpus scales. An operator who wants it off sets
-``librarian.relatedness_writer: false``, and pages then compile exactly as
-they did before.
-
-Env ``ATHENAEUM_RELATEDNESS_WRITER`` > yaml ``librarian.relatedness_writer``
-> this default. No seed in ``_DEFAULTS`` so the code
-default stays reachable. Truthiness follows the same spelling set as every
-other boolean knob here; an unrecognized value falls through to the
-default rather than silently reading as false.
-
-### `resolve_retention_destination`
-
-- **YAML path:** `librarian.retention.families.<family>.destination` > `librarian.retention.defaults.destination`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `'in-repo'`
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s retention destination from
-``librarian.retention.families.<family>.destination`` >
-``librarian.retention.defaults.destination`` > the stated default
-``"in-repo"``.
-
-Returns ``"in-repo"``, ``"pii-vault"``, or ``"adapter:<name>"`` verbatim
-(the adapter name is validated by the caller that resolves it to an
-actual root -- `athenaeum.retention_policy` -- via
-`athenaeum.storage.available_adapters`, mirroring the `preserve`
-disposition's fail-loud-on-unknown-adapter contract; this resolver only
-reads the operator's string, same division of labor as
-`resolve_preserved_log_adapter`). A value matching neither
-``"in-repo"``, ``"pii-vault"`` nor the ``"adapter:"`` prefix -- at either
-level -- WARNs and falls through.
-
-### `resolve_retention_max_bytes`
-
-- **YAML path:** `librarian.retention.families.<family>.max_bytes` > `librarian.retention.defaults.max_bytes`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `1048576` (1 MiB)
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s truncation bound in bytes from
-``librarian.retention.families.<family>.max_bytes`` >
-``librarian.retention.defaults.max_bytes`` > the stated default
-``1048576`` (1 MiB, "sized for a git-tracked file" per the issue).
-
-Resolvable independent of `resolve_retention_policy` -- a caller
-enforcing ``truncate-top`` needs this regardless of how the policy
-itself resolved. ``bool`` (an ``int`` subclass) and non-int /
-non-positive values -- at either level -- fall through, same as every
-other numeric resolver here.
-
-### `resolve_retention_policy`
-
-- **YAML path:** `librarian.retention.families.<family>.policy` > `librarian.retention.defaults.policy`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `'truncate-top'`
-- **Precedence:** per-family `athenaeum.yaml` > shared-defaults `athenaeum.yaml` > code default
-
-Resolve *family*'s retention policy from
-``librarian.retention.families.<family>.policy`` >
-``librarian.retention.defaults.policy`` > the stated default
-``"truncate-top"`` -- but ONLY once ``librarian.retention`` exists at
-all; absent that block entirely, returns ``None`` (AC1).
-
-Returns one of ``"truncate-top"``, ``"never-truncate"``,
-``"librarian-decides"``, or ``None``. A value outside that vocabulary --
-at either the family or defaults level -- WARNs and falls through to the
-next level, same malformed-value-falls-through idiom as every other
-resolver in this module; it is never allowed to silently disable
-enforcement by being mistaken for ``None``.
-
 ### `resolve_retire`
 
 - **YAML path:** `librarian.retire`
@@ -3112,6 +2927,15 @@ turns it off, and the ``athenaeum run --no-retire`` CLI flag overrides to
 off at the call site. No seed in ``_DEFAULTS`` — the default
 lives here in code so it stays reachable. Non-bool yaml values fall through
 to the default (on).
+
+This is a deliberate, kept-configurable default, not a candidate for
+removal: an operator debugging what the compile pass just wrote, or who
+is not yet confident in a fresh wiki and wants every compiled page's raw
+source to stay inspectable in the intake queue, sets this ``false`` to
+keep raw auto-memory around after it is compiled (nothing is moved into
+the wiki or ``git rm``'d). See
+[the upgrading guide's "I want to turn move-then-retire off"](../guides/upgrading.md)
+for the full worked example.
 
 ### `resolve_reversible_verdict_auto_apply_enabled`
 
@@ -5365,6 +5189,15 @@ content or credentials), so the cost is negligible. Precedence:
 ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
 through to the default. No seed in ``_DEFAULTS``.
 
+This is a deliberate, kept-configurable default, and turning it off is a
+real tradeoff rather than a free cleanup: ``drain.run_drain``'s MANDATORY
+cumulative dollar ceiling is computed by re-reading this ledger, so
+setting this ``false`` disables the cumulative spend ceilings entirely —
+every run reports its own cost but nothing bounds the running total
+across runs. The only legitimate reason to turn it off is a deployment
+that tracks spend some other way (for example a provider-side budget
+alert) and does not want a second, redundant on-disk ledger.
+
 ### `resolve_spend_ledger_path`
 
 - **YAML path:** `spend.ledger_path`
@@ -5727,7 +5560,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLASSIFY_MAX_TOKENS` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/_cmd_paste_cleanup.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
+| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/config.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
@@ -5789,12 +5622,10 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |
-| `ATHENAEUM_TIER4_DEDUP` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_TOPIC_LLM_PROVIDER` | `src/athenaeum/_cmd_lifecycle.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MAX_TOKENS` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
-| `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/_cmd_paste_cleanup.py` |
 | `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` | `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

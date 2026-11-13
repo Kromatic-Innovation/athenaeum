@@ -32,6 +32,14 @@ yaml key is ignored with a warning, like every other removed key. See
 [Answering pending decisions](decisions.md) for the full
 `athenaeum decisions` surface.
 
+## I want to know about the removed `rebuild-index` alias
+
+`athenaeum rebuild-index` is removed. It was an undocumented back-compat
+alias for `athenaeum reindex` — same command, same flags, same output —
+and never printed a deprecation warning, so there is no warning to watch
+for. If a cron job, wrapper script, or hook calls `athenaeum
+rebuild-index`, change it to call `athenaeum reindex` instead.
+
 `athenaeum run` doesn't just add to your knowledge base — once a
 non-contradictory cluster has been compiled into its canonical
 `wiki/auto-<topic>.md` entry, the move-then-retire pass **moves** each
@@ -181,12 +189,91 @@ The `--no-retire` CLI flag overrides the yaml toggle. When disabled, raw
 auto-memory is neither moved into the wiki nor `git rm`'d — it stays in
 the intake queue and is re-examined on every run.
 
-## I want to know about the other destructive-by-design command
+## I want to know what's gone: Tier-4 dedup and five default-on librarian switches
 
-`athenaeum auto-memory prune --apply` is a second opt-in command that
-`git rm`s pages (operational `wiki/auto-*.md`), with the same git-only
-recovery story as move-then-retire. It's dry-run by default — see [Daily
-operation](daily-operation.md).
+Tier-4 pending-question dedup, the compile-time relatedness writer, delta
+compile, the delta live client, and the nightly name-collision and
+qualified-name scans were each on by default with an off switch. All six
+switches are removed; the on behaviour now runs unconditionally:
+
+| Removed switch | What it gated |
+|---|---|
+| `ATHENAEUM_TIER4_DEDUP` | Collapsing duplicate pending-question escalations by source-memory pair |
+| `librarian.relatedness_writer` / `ATHENAEUM_RELATEDNESS_WRITER` | The compile-time `related:` edge writer |
+| `librarian.delta.enabled` | Delta-scoped (vs. whole-corpus) compile on the deterministic path |
+| `librarian.delta.live_client` | Delta-scoped compile on the nightly LLM run |
+| `librarian.name_collision_scan` | The nightly exact-name-collision scan |
+| `librarian.qualified_name_scan` | The nightly `name (qualifier)` entity-split scan |
+
+A stale `athenaeum.yaml` still setting one of the four removed yaml keys
+above loads fine — the key is ignored and logged with the same warning
+every other removed key gets. Setting either removed environment variable
+now has no effect.
+
+If you previously set `librarian.delta.enabled: false` (or
+`librarian.delta.live_client: false`) to force a whole-corpus compile
+instead of a delta-scoped one, run `athenaeum run --full-compile` to get
+the same whole-corpus compile for that run.
+
+## I want to know what's gone: the retention module and key
+
+The retention-policy enforcement module and its `librarian.retention` yaml
+key are removed. Neither ever shipped a caller — no CLI command, no MCP
+tool, and no hook in the librarian pipeline read it — so there is no
+behaviour change to anything that was actually running. A stale
+`athenaeum.yaml` still setting `librarian.retention` loads fine; the key is
+ignored and logged with the same warning every other removed key gets.
+
+This is unrelated to the live raw-intake retention reporting the librarian
+pipeline still runs (the size-threshold check that WARNs when a raw source
+tree crosses its configured bound) — that stays exactly as it was.
+
+## I want to know about seven one-shot repair commands that are gone in 0.24.0
+
+Each of these commands existed to repair data left behind by one specific,
+now-fixed bug. Once the underlying defect was fixed, the command had nothing
+left to do for anyone running a current install — so it is removed outright
+in 0.24.0, with no deprecation period and no replacement:
+
+| Removed command |
+|---|
+| `athenaeum auto-memory prune` |
+| `athenaeum auto-memory prune-index` |
+| `athenaeum auto-memory prune-code-entities` |
+| `athenaeum dedup-oversize-escalations` |
+| `athenaeum storage prune-dispositions` |
+| `athenaeum storage audit-h1-redaction` |
+| `athenaeum paste-cleanup` |
+
+**If you are upgrading from an older release and still have the pre-fix data
+on disk** (for example, you skipped several releases, or your knowledge base
+predates the engine fix each command was written around), run the command you
+need on your *current, pre-upgrade* release before upgrading — each one is
+dry-run by default, so you can check first whether it finds anything to do.
+Once you upgrade, the command itself is gone; its one-time job cannot be run
+again from a newer release.
+
+## I want to know what changed in the MCP decision-queue tool responses
+
+The `resolve_question`, `resolve_merge`, `review_audit_item`, and
+`raise_decision` MCP tool responses (and the matching `athenaeum` Python
+helpers, `answers.resolve_by_id` and `answers.raise_pending_question`) no
+longer carry a handful of legacy keys that duplicated other fields:
+
+- **`error`** is gone everywhere it appeared. Read **`message`** instead —
+  `error` was always an exact copy of it (or `None` on success).
+- **`block`** is gone from `resolve_question` and `resolve_merge`. Read
+  **`resolved_block`** instead — on these two tools it was, and still is,
+  always `None`: both defer the actual question/merge rewrite to the next
+  `ingest-answers` tick, so neither ever rewrites anything synchronously.
+- **`block`** is gone from `raise_decision` (and the underlying
+  `answers.raise_pending_question`). Read **`raw_block`** instead — `block`
+  was always an exact copy of it (the newly rendered queue block on
+  success, `None` on failure).
+
+Nothing else changed: `ok`, `error_code`, `message`, `deferred`,
+`answer_file`, `decision_id`, `raw_block`, and `resolved_block` (where it
+already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
 
 ## See also
 

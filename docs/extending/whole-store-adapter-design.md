@@ -313,7 +313,7 @@ three of them are incremental:
 | W5 | **Auto-memory intake discovery** | `intake.discover_auto_memory_files`, `src/athenaeum/intake.py:115`; unconditional `read_text` per file at `intake.py:177` | No |
 | W6 | **`_index.md` rebuild** | `librarian.rebuild_index`, `librarian.py:451`; full read of every page at `librarian.py:460` | No |
 | W7 | **Dedupe person load** | `dedupe._load_persons`, `src/athenaeum/dedupe.py:288` | No |
-| W8 | **~14 further full walks** — duplicate-topic lint (`authority.py:385`), status (`status.py:140`), registry build (`registry.py:147`), wiki-dedupe candidates (`wiki_dedupe.py:168`), repair (`repair.py:85`), entity load (`models.py:2286`), excluded-surface sweeps (`pii.py:1008`, `pii.py:1823`), bounce divergence (`bounce_divergence.py:288`), pending merges (`pending_merges.py:754`), corrections (`corrections.py:1518`), auto-memory prune (`auto_memory_prune.py:68`) | No |
+| W8 | **~13 further full walks** — duplicate-topic lint (`authority.py:385`), status (`status.py:140`), registry build (`registry.py:147`), wiki-dedupe candidates (`wiki_dedupe.py:168`), repair (`repair.py:85`), entity load (`models.py:2286`), excluded-surface sweeps (`pii.py:1008`, `pii.py:1823`), bounce divergence (`bounce_divergence.py:288`), pending merges (`pending_merges.py:754`), corrections (`corrections.py:1518`) | No |
 
 **The caveat on W4 is the important one.** `delta.py` narrows the *expensive*
 (LLM) work to affected clusters, but the discovery walk that produces its
@@ -452,7 +452,7 @@ Only the first is in scope:
 | | Git on the **knowledge store** | Git on **athenaeum's own repo** |
 |---|---|---|
 | What | snapshot, push/pull, retire/prune commits, `init` bootstrap | deploy-SHA stamping, version reporting |
-| Where | `librarian.py:495`, `librarian.py:621`, `rules.py:957`, `retire.py:568`, `auto_memory_prune.py:113`, `filename_entity_prune.py:130`, `memory_index.py:180`, `corrections.py:1780`, `init.py:129`, `status.py:201` | `push_metrics.py:637`, `scripts/write_build_sha.py`, `deploy_check.py` |
+| Where | `librarian.py:495`, `librarian.py:621`, `rules.py:957`, `retire.py:568`, `corrections.py:1780`, `init.py:129`, `status.py:201` | `push_metrics.py:637`, `scripts/write_build_sha.py`, `deploy_check.py` |
 | Takes | an explicit `knowledge_root` argument | resolves `Path(__file__).parents[N]` or a deploy tree |
 
 They never intersect in code, and this design touches only the left column.
@@ -463,10 +463,8 @@ All of it is `subprocess.run(["git", …])`; there is no GitPython dependency.
 Every operation that removes user data falls into one of three tiers:
 
 - **Tier A — hard-gated on `.git`, refuses without it.** The move-then-retire
-  pass (`retire.py:568-583`, which downgrades every `MOVE` to `SKIP`),
-  `auto-memory prune` (`auto_memory_prune.py:136-143`),
-  `prune-filename-entities` (`filename_entity_prune.py:130`), and `prune-index`
-  (`memory_index.py:196-199`). These fail safe.
+  pass (`retire.py:568-583`, which downgrades every `MOVE` to `SKIP`). These
+  fail safe.
 - **Tier B — silently degrades to a plain `unlink()` off-git.** Shape-rule
   retirement (`rules.py:989`, handler at `992-993`) and field-correction batch retirement
   (`corrections.py:1830-1833`). Documented as a best-effort fallback for test

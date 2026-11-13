@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `auto-memory`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -18,10 +18,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum authority`](#athenaeum-authority) (group) — Authority manifest: detect + convert memories that duplicate a live source (skill file, code path, config) into pointer stubs.
 - [`athenaeum authority convert`](#athenaeum-authority-convert) (command) — Convert ONE page into a one-line pointer stub for a given manifest source. Default is dry-run; --apply writes the file. Scoped to a single --page; never walks the corpus.
 - [`athenaeum authority lint`](#athenaeum-authority-lint) (command) — List wiki pages that duplicate a manifest-listed authoritative source. READ-ONLY — never mutates wiki/.
-- [`athenaeum auto-memory`](#athenaeum-auto-memory) (group) — Operate on compiled wiki/auto-*.md pages.
-- [`athenaeum auto-memory prune`](#athenaeum-auto-memory-prune) (command) — Prune operational/ephemeral wiki/auto-*.md pages. Default is dry-run (prints kill-list + retained-list with reasons); --apply git rm's the kill-list in one commit and rebuilds the recall index.
-- [`athenaeum auto-memory prune-code-entities`](#athenaeum-auto-memory-prune-code-entities) (command) — Retire wiki entity pages minted from filenames/paths — a page whose entity name is a code artifact (has a source/config extension or a path separator). Default is dry-run; --apply git rm's the kill-list in one commit.
-- [`athenaeum auto-memory prune-index`](#athenaeum-auto-memory-prune-index) (command) — Prune dangling pointers from <scope>/MEMORY.md indexes. A pointer is dangling when its target.md no longer exists on disk. Default is dry-run; --apply rewrites the indexes in one commit.
 - [`athenaeum axiom`](#athenaeum-axiom) (group) — Axiom governance: explicit human-approved promotion/demotion of memory_class: axiom pages, plus the assignment audit.
 - [`athenaeum axiom demote`](#athenaeum-axiom-demote) (command) — Record a human-approved axiom demotion for a wiki page slug.
 - [`athenaeum axiom list`](#athenaeum-axiom-list) (command) — Assignment audit: every slug's current status + full promote/demote history (when/why/by-whom).
@@ -56,7 +52,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 - [`athenaeum decisions scrub-pii`](#athenaeum-decisions-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum decompose-page`](#athenaeum-decompose-page) (command) — Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
-- [`athenaeum dedup-oversize-escalations`](#athenaeum-dedup-oversize-escalations) (command) — Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
 - [`athenaeum dedupe`](#athenaeum-dedupe) (group) — Find or merge duplicate wiki entries.
 - [`athenaeum dedupe persons`](#athenaeum-dedupe-persons) (command) — Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / exact-name match). Default --find prints a YAML report; --apply consumes the report and merges.
 - [`athenaeum dedupe wiki-pages`](#athenaeum-dedupe-wiki-pages) (command) — Cluster concept/reference/principle wiki pages and propose merges for near-duplicate topics. Writes idempotent proposals to wiki/_pending_merges.md; --dry-run previews without writing.
@@ -88,7 +83,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum memory-class`](#athenaeum-memory-class) (group) — Memory-taxonomy class maintenance: backfill the memory_class: frontmatter axis across the wiki.
 - [`athenaeum memory-class backfill`](#athenaeum-memory-class-backfill) (command) — Assign memory_class: to pages that lack it — deterministic type-rule map, plus an optional classifier pass over the residual. Dry-run unless --apply. Never overwrites an existing value and never mints 'axiom'.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
-- [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum provenance`](#athenaeum-provenance) (group) — Read-only provenance-ledger lookups. `adapter --uid <uid>` prints which adapter/source produced a compiled page, from the adapter-provenance ledger.
 - [`athenaeum provenance adapter`](#athenaeum-provenance-adapter) (command) — Print the adapter-provenance ledger row(s) recorded for one compiled page uid -- source, source_object_id, raw_ref, and the captured adapter fields -- or say none were recorded.
@@ -104,7 +98,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum quarantine`](#athenaeum-quarantine) (command) — Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
 - [`athenaeum query-topics`](#athenaeum-query-topics) (command) — Extract substantive search topics from a prompt (Haiku). Used by the UserPromptSubmit hook to rewrite queries before FTS5/vector search. Prints one topic per line to stdout; empty output means fall back to the caller's built-in extractor.
 - [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
-- [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
 - [`athenaeum receipts`](#athenaeum-receipts) (group) — Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock; `attest-readout` reports witnessed hits and every provenance miss as an incident, read-only. Output is partitions, line ranges, counts and enum labels only, never receipt content.
 - [`athenaeum receipts anchor`](#athenaeum-receipts-anchor) (command) — Anchor every receipt partition that changed since its own last anchor and the witness chain head, upgrade pending OpenTimestamps proofs, and mirror the anchor records into wiki/_witness_anchors/ so they leave the machine with the pushed knowledge repo. Takes the run lock; needs no signing key. The nightly run does this itself at the end of its run.
@@ -132,11 +125,9 @@ python scripts/gen_cli_reference.py
 - [`athenaeum status`](#athenaeum-status) (command) — Show knowledge base status
 - [`athenaeum stopwords`](#athenaeum-stopwords) (command) — Print the stopword list (one word per line). Used by the example UserPromptSubmit hook's regex fallback to stay in sync with the FTS5 query filter.
 - [`athenaeum storage`](#athenaeum-storage) (group) — Storage-surface operator tasks (migrate a page's PII off-corpus).
-- [`athenaeum storage audit-h1-redaction`](#athenaeum-storage-audit-h1-redaction) (command) — Read-only audit: report pages whose H1 heading line carries the inline-redaction marker, classified into a defect population (marker consumed the whole heading subject) and a non-defect population (marker replaced one inline token inside an otherwise-intact title). Never writes.
 - [`athenaeum storage lint-mapping`](#athenaeum-storage-lint-mapping) (command) — storage.mapping completeness lint + the deferred (read_policy, adapter) pair check: every sensitivity class the scanned corpus carries must have a live storage.mapping entry naming a real adapter; exit non-zero on a gap. Advisory-only D4 policy-mismatch findings are also reported but never fail the gate on their own.
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
-- [`athenaeum storage prune-dispositions`](#athenaeum-storage-prune-dispositions) (command) — One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-disposition records only (AC3/AC4). Dry-run by default: reports the disposition histogram and projected size. --apply writes.
 - [`athenaeum subject-population`](#athenaeum-subject-population) (command) — Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
 - [`athenaeum test-mcp`](#athenaeum-test-mcp) (command) — Smoke-test MCP remember/recall against a synthetic knowledge dir
@@ -257,51 +248,6 @@ List wiki pages that duplicate a manifest-listed authoritative source. READ-ONLY
 |---|---|---|---|
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-
-## `athenaeum auto-memory`
-
-Operate on compiled wiki/auto-*.md pages.
-
-Subcommands:
-
-- `athenaeum auto-memory prune` — Prune operational/ephemeral wiki/auto-*.md pages. Default is dry-run (prints kill-list + retained-list with reasons); --apply git rm's the kill-list in one commit and rebuilds the recall index.
-- `athenaeum auto-memory prune-code-entities` — Retire wiki entity pages minted from filenames/paths — a page whose entity name is a code artifact (has a source/config extension or a path separator). Default is dry-run; --apply git rm's the kill-list in one commit.
-- `athenaeum auto-memory prune-index` — Prune dangling pointers from <scope>/MEMORY.md indexes. A pointer is dangling when its target.md no longer exists on disk. Default is dry-run; --apply rewrites the indexes in one commit.
-
-## `athenaeum auto-memory prune`
-
-Prune operational/ephemeral wiki/auto-*.md pages. Default is dry-run (prints kill-list + retained-list with reasons); --apply git rm's the kill-list in one commit and rebuilds the recall index.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | git rm the kill-list in one labeled commit and rebuild the recall index. Without this flag the command is a dry-run. |
-| `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
-| `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
-## `athenaeum auto-memory prune-code-entities`
-
-Retire wiki entity pages minted from filenames/paths — a page whose entity name is a code artifact (has a source/config extension or a path separator). Default is dry-run; --apply git rm's the kill-list in one commit.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | git rm the kill-list in one labeled commit. Without this flag the command is a dry-run. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
-## `athenaeum auto-memory prune-index`
-
-Prune dangling pointers from <scope>/MEMORY.md indexes. A pointer is dangling when its target.md no longer exists on disk. Default is dry-run; --apply rewrites the indexes in one commit.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Rewrite the affected MEMORY.md indexes in one labeled commit. Without this flag the command is a dry-run. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum axiom`
 
@@ -715,16 +661,6 @@ Redistribute an aggregate page's per-entity facts onto the company/person pages 
 | `--subject-until` | — | — | Regex marking the end of each bullet's subject. The subject is the bullet's leading span up to the first match; a bullet the regex does not match is reported unresolved rather than guessed at. Supplied at run time so a page's sentence template never has to be recorded in this repo. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
-## `athenaeum dedup-oversize-escalations`
-
-Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
 ## `athenaeum dedupe`
 
 Find or merge duplicate wiki entries.
@@ -1130,28 +1066,6 @@ Scan outbound-destined text for PII (emails/phones) before it ships; flag findin
 | `--redact` | off (flag absent) | — | Strip mode: print the text with each finding replaced by a redaction placeholder (to stdout) instead of reporting findings. |
 | `--text` | — | — | Text to scan, given inline. Mutually exclusive with --file; if neither is given, text is read from stdin. |
 
-## `athenaeum paste-cleanup`
-
-Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--from-report` | — | — | Replay a prior --json report's verdicts instead of running a fresh proposer/verifier pass -- no LLM client is built. Mutually exclusive with --model/--verify-rule/--sample/--limit (--verify-model is allowed together with --resume-verification). --uids further restricts the replayed set. The report's version must match this build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay summary and writes nothing. Combine with --resume-verification to finish verifying bullets a spend ceiling left pending instead of just replaying as-is. A report entry's operator_claim, when present, is written verbatim by --apply in preference to the model's own claim AND verdict -- there is no separate flag for this; edit the report JSON directly. |
-| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
-| `--limit` | — | — | Consider at most N pages this pass. |
-| `--mechanical-dry-run` | off (flag absent) | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
-| `--model` | — | — | Override the proposer model (default: the 'classify' knob's resolved model). |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--resume-verification` | off (flag absent) | — | Requires --from-report. Resumes the verifier pass over the loaded report's bullets that a spend ceiling left verify_attempted=False, WITHOUT re-running the proposer pass -- builds only the 'verify' LLM client. Runs before --apply, so --from-report --resume-verification --apply resumes then applies in one invocation. |
-| `--sample` | — | — | Consider a stratified random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
-| `--seed` | `0` | — | Seed for --sample (default: 0). |
-| `--uids` | — | — | Path to a file listing one page uid per line; consider exactly those pages. |
-| `--verify-model` | — | — | Override the verifier model (default: the 'verify' knob's resolved model). |
-| `--verify-rule` | `sampled` | sampled, all | 'sampled' verifies every low-confidence proposal plus a fixed 10%% stable sample of the rest; 'all' verifies every proposal ('s own AC: use 'all' when measured agreement is below 90%%). |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
 ## `athenaeum pii-restore`
 
 Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
@@ -1348,19 +1262,6 @@ Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets
 | `--reason` | — | — | Free-text reason recorded in the sentinel, for `--status` and for the log line `ingest --if-triggered` emits when it finds an active quiesce. Required (together with --for) unless --release or --status is given. |
 | `--release` | off (flag absent) | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Refuses (exit 1) when an ACTIVE sentinel belongs to a different --holder, unless --force is given. Mutually exclusive with --status and with --for/--reason; --holder and --force ARE allowed alongside it. |
 | `--status` | off (flag absent) | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason/--holder/--force. |
-
-## `athenaeum rebuild-index`
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--as-of` | — | — | : build an as-of index reflecting the wiki as it stood on this date (pages outside their [valid_from, valid_until] window then are excluded). Always a full build; point --cache-dir at a scratch directory so the live index is not overwritten, then `recall --cache-dir <that>`. Unset = today (the normal live index). |
-| `--backend` | — | fts5, vector | Override configured backend (default: read from athenaeum.yaml) |
-| `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--full` | off (flag absent) | — | Wipe and fully rebuild instead of applying only the changed/added/deleted delta. Use for seeding or after an embedding-model change; default is incremental. |
-| `--incremental` | off (flag absent) | — | Apply only the changed/added/deleted hash-diff delta. This is the DEFAULT; the flag makes it explicit. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum recall`
 
@@ -1724,20 +1625,9 @@ Storage-surface operator tasks (migrate a page's PII off-corpus).
 
 Subcommands:
 
-- `athenaeum storage audit-h1-redaction` — Read-only audit: report pages whose H1 heading line carries the inline-redaction marker, classified into a defect population (marker consumed the whole heading subject) and a non-defect population (marker replaced one inline token inside an otherwise-intact title). Never writes.
 - `athenaeum storage lint-mapping` — storage.mapping completeness lint + the deferred (read_policy, adapter) pair check: every sensitivity class the scanned corpus carries must have a live storage.mapping entry naming a real adapter; exit non-zero on a gap. Advisory-only D4 policy-mismatch findings are also reported but never fail the gate on their own.
 - `athenaeum storage lint-pii` — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - `athenaeum storage migrate-pii` — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
-- `athenaeum storage prune-dispositions` — One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-disposition records only (AC3/AC4). Dry-run by default: reports the disposition histogram and projected size. --apply writes.
-
-## `athenaeum storage audit-h1-redaction`
-
-Read-only audit: report pages whose H1 heading line carries the inline-redaction marker, classified into a defect population (marker consumed the whole heading subject) and a non-defect population (marker replaced one inline token inside an otherwise-intact title). Never writes.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
-| `--wiki-root` | — | — | Wiki directory to scan (default: <knowledge-root>/wiki). |
 
 ## `athenaeum storage lint-mapping`
 
@@ -1775,17 +1665,6 @@ Move archival contact data (emails/phones) off entity pages to the excluded surf
 | `--rename-name-email` | off (flag absent) | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
 | `--rename-only` | off (flag absent) | — | Run ONLY the name-is-an-email rename slice; skip the body-text contact-data migration entirely. Implies --rename-name-email. Use this when the body-migration pass would act on findings you do not want migrated — e.g. while the phone axis still carries detector false positives, where a full --all --apply would redact real prose (; the failure mode spent two restore passes repairing). |
 | `--rename-to` | — | — | Operator-supplied display name for a --page rename. refuses to GUESS a name from an ambiguous local-part, but offered no way to supply one — so the deferred population had no route through the tool and could only be hand-edited, which skips the excluded record, the slug rename and the inbound-link rewrite. This is a human asserting the name, so it bypasses the confidence gate by design. Requires --page and --rename-name-email (or --rename-only). |
-
-## `athenaeum storage prune-dispositions`
-
-One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-disposition records only (AC3/AC4). Dry-run by default: reports the disposition histogram and projected size. --apply writes.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Write the pruned ledger (atomic replace). Without this flag the command is a dry-run that prints the histogram and projected size and writes nothing. Refuses to write (exit 1, nothing written) if a re-parse of the constructed output does not carry exactly the positive-row count the scan pass promised. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum subject-population`
 

@@ -289,11 +289,13 @@ def test_d5_live_client_full_compile_due_forces_whole_corpus(
     assert seen["only_cluster_ids"] is None
 
 
-def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
+def test_delta_live_client_key_removed_no_longer_forces_whole_corpus(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """``librarian.delta.live_client: false`` keeps the pre-athenaeum#463 whole-corpus-
-    only behaviour for a live client.
+    """athenaeum#2461: ``librarian.delta.live_client`` is removed; a stale config
+    still setting it to ``false`` must have no effect — the live-client delta
+    path stays eligible (mirrors ``test_d5_live_client_delta_eligible_by_default``
+    except the config also sets the removed key).
     """
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
@@ -307,7 +309,30 @@ def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
 
     config = load_config(root)
     files = discover_auto_memory_files(root, config=config)
-    seen = _capture_compile(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def fake_cluster(
+        files,
+        kr,
+        *,
+        config=None,
+        dry_run=False,
+        changed_paths=None,
+        out_embedder_counts=None,
+    ):
+        seen["cluster_changed_paths"] = changed_paths
+        return {"alpha-new"}
+
+    def fake_collision(kr, cfg, ids):
+        return False
+
+    def fake_merge(kr, **kwargs):
+        seen["only_cluster_ids"] = kwargs.get("only_cluster_ids")
+        return []
+
+    monkeypatch.setattr(lib, "_run_cluster_pass", fake_cluster)
+    monkeypatch.setattr(lib, "_delta_slug_collision", fake_collision)
+    monkeypatch.setattr(lib, "merge_clusters_to_wiki", fake_merge)
     lib._compile_auto_memory(
         files,
         root,
@@ -316,8 +341,69 @@ def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
         client=_FakeClient(),
         changed_paths={p},
     )
-    assert seen["cluster_changed_paths"] is None
-    assert seen["only_cluster_ids"] is None
+    # The removed key has no effect — delta still engages.
+    assert seen["cluster_changed_paths"] == {p}
+    assert seen["only_cluster_ids"] == {"alpha-new"}
+
+
+def test_delta_enabled_key_removed_no_longer_forces_whole_corpus(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """athenaeum#2461: ``librarian.delta.enabled`` is removed; a stale config
+    still setting it to ``false`` must have no effect on the deterministic
+    ``client=None`` path — delta stays engaged (mirrors
+    ``test_delta_engages_on_client_none`` except the config also sets the
+    removed key).
+    """
+    root = tmp_path
+    (root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
+        "librarian:\n  delta:\n    enabled: false\n"
+    )
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
+    p = _write_am(root, "alpha", "project_x.md", "content")
+    from athenaeum.config import load_config
+    from athenaeum.librarian import discover_auto_memory_files
+
+    config = load_config(root)
+    files = discover_auto_memory_files(root, config=config)
+
+    seen: dict[str, object] = {}
+
+    def fake_cluster(
+        files,
+        kr,
+        *,
+        config=None,
+        dry_run=False,
+        changed_paths=None,
+        out_embedder_counts=None,
+    ):
+        seen["cluster_changed_paths"] = changed_paths
+        return {"alpha-new"}
+
+    def fake_collision(kr, cfg, ids):
+        return False
+
+    def fake_merge(kr, **kwargs):
+        seen["only_cluster_ids"] = kwargs.get("only_cluster_ids")
+        return []
+
+    monkeypatch.setattr(lib, "_run_cluster_pass", fake_cluster)
+    monkeypatch.setattr(lib, "_delta_slug_collision", fake_collision)
+    monkeypatch.setattr(lib, "merge_clusters_to_wiki", fake_merge)
+
+    lib._compile_auto_memory(
+        files,
+        root,
+        config=config,
+        dry_run=False,
+        client=None,
+        changed_paths={p},
+    )
+    # The removed key has no effect — delta still engages.
+    assert seen["cluster_changed_paths"] == {p}
+    assert seen["only_cluster_ids"] == {"alpha-new"}
 
 
 def test_delta_engages_on_client_none(tmp_path: Path, monkeypatch) -> None:

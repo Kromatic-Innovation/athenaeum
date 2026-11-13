@@ -2410,7 +2410,7 @@ def process_batch_run(
             # contract -- so a write-boundary behaviour added to one belongs on
             # both or on neither.
             stamp_related_edges(
-                new_entities, relatedness_run_index(wiki_root, config=config)
+                new_entities, relatedness_run_index(wiki_root)
             )
             written_entities: list[WikiEntity] = []
             for entity in new_entities:

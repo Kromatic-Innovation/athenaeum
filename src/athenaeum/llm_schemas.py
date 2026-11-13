@@ -124,11 +124,9 @@ SCHEMA_MISMATCH_MARKER = "llm-schema-mismatch"
 #: ``CHANGELOG.md``) -- nothing outside this module's own tests ever read
 #: it. :func:`observe` / :func:`observe_parse_failure` still emit the greppable
 #: WARNING marker (:data:`SCHEMA_MISMATCH_MARKER`) on every mismatch; only the
-#: durable per-observation record is gone. Kept only as a documented
-#: historical constant so ``docs/guides/upgrading.md`` and a stray pre-upgrade
-#: file on disk can both be traced back to one name; no code resolves a path
-#: from it anymore.
-OBSERVATIONS_FILENAME = "_llm_schema_observations.jsonl"
+#: durable per-observation record is gone. The file it used to write was
+#: ``_llm_schema_observations.jsonl`` under the cache dir; a stray pre-upgrade
+#: copy is simply ignored.
 
 #: The four mismatch classes athenaeum#724 requires so athenaeum#608's
 #: reject-vs-degrade question can be answered per class without re-reading raw

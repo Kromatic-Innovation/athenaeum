@@ -255,7 +255,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
     frontmatter), newlines collapsed to spaces. Used by validation
     harnesses and operator debugging scripts that can't rely on an MCP
     session. Reads ``search_backend`` + extra intake roots from
-    ``athenaeum.yaml`` the same way ``serve`` and ``rebuild-index`` do,
+    ``athenaeum.yaml`` the same way ``serve`` and ``reindex`` do,
     so results match what the MCP ``recall`` tool would return.
 
     **``--with-pii`` (issues athenaeum#885/#886) re-derives the layer ordering
