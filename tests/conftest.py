@@ -256,6 +256,27 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 
 
+@pytest.fixture(autouse=True)
+def _reset_malformed_block_warned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset ``answers._MALFORMED_BLOCK_WARNED`` before every test (athenaeum#2516).
+
+    The dedupe set is deliberately module-level/process-lifetime (so a
+    long-lived caller — the MCP server answering many `decisions
+    count`/`decisions list` calls — warns once per distinct malformed block
+    rather than once per parse). Left unreset, it would carry warned keys
+    from one test into the next whenever two tests happen to feed
+    `_parse_block` byte-identical malformed content (several fixtures across
+    ``test_answers.py``/``test_cli.py``/``test_decisions_pagination.py`` use
+    the same ``"## Not a real header"`` fixture text), silently suppressing
+    an assertion the LATER test actually wants to see. Importing lazily
+    (inside the fixture body, not at module scope) avoids a hard import-time
+    dependency from this shared conftest onto ``athenaeum.answers``.
+    """
+    from athenaeum import answers as answers_module
+
+    monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
+
+
 def _default_selection(request: pytest.FixtureRequest) -> bool:
     """True unless the test is marked ``eval``, ``live``, ``embedding`` or
     ``calibration`` (issue athenaeum#1091; ``calibration`` athenaeum#2287 -- the

@@ -135,6 +135,82 @@ class TestParsePendingQuestions:
         err = capsys.readouterr().err
         assert "malformed header" in err
 
+    def test_malformed_block_warns_once_across_many_parses_in_one_process(
+        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Issue athenaeum#2516: the real trigger is a long-lived process
+        # (the MCP server, or any caller) parsing the SAME file many times
+        # — one malformed block otherwise re-prints its warning once per
+        # parse, flooding stderr with thousands of identical lines. Drive N
+        # REAL parses in this one test process (not a mock) and assert the
+        # warning fires exactly once total, not once per parse.
+        content = (
+            "# Pending Questions\n\n"
+            "## Not a real header\n"
+            "- [ ] some question\n"
+            "**Conflict type**: ambiguous\n"
+            "**Description**: desc\n"
+        )
+        pending_path.write_text(content)
+
+        for _ in range(50):
+            parsed = parse_pending_questions(pending_path)
+            assert parsed == []
+
+        err = capsys.readouterr().err
+        assert err.count("malformed header") == 1
+
+    def test_distinct_malformed_blocks_each_warn_once(
+        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Two malformed blocks with genuinely different content must each
+        # still get their own warning — the dedupe key is content-derived,
+        # not a single global "already warned" flag.
+        content = (
+            "# Pending Questions\n\n"
+            "## Not a real header one\n"
+            "- [ ] some question\n"
+            "**Conflict type**: ambiguous\n"
+            "**Description**: desc one\n"
+            "\n---\n\n"
+            "## Not a real header two\n"
+            "- [ ] another question\n"
+            "**Conflict type**: ambiguous\n"
+            "**Description**: desc two\n"
+        )
+        pending_path.write_text(content)
+
+        for _ in range(3):
+            parsed = parse_pending_questions(pending_path)
+            assert parsed == []
+
+        err = capsys.readouterr().err
+        assert err.count("malformed header") == 2
+        assert "Not a real header one" in err
+        assert "Not a real header two" in err
+
+    def test_malformed_block_warning_names_block_index(
+        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # AC: the warning must name where the block sits (here, its 1-based
+        # position among the file's blocks) so the operator can find it.
+        # The malformed block is second in the file.
+        content = (
+            "# Pending Questions\n\n"
+            + _block(entity="Acme Corp")
+            + "\n---\n\n"
+            + "## Not a real header\n"
+            + "- [ ] some question\n"
+            + "**Conflict type**: ambiguous\n"
+            + "**Description**: desc\n"
+        )
+        pending_path.write_text(content)
+        parsed = parse_pending_questions(pending_path)
+        assert len(parsed) == 1
+
+        err = capsys.readouterr().err
+        assert "block #2" in err
+
     def test_recovers_checkbox_less_block_with_description(
         self, pending_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
