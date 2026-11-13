@@ -15,6 +15,44 @@ from athenaeum import push_metrics
 from athenaeum.cli import main as cli_main
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#2452:
+    ``test_unsupported_confidence_reports_a_named_error_not_a_traceback``
+    omits ``--path``, so ``_cmd_push_metrics_score_used``'s
+    ``wiki_root=_resolve_wiki_root(args)`` falls back to
+    ``_cmd_push_metrics.DEFAULT_KNOWLEDGE_ROOT`` (``--path``'s argparse
+    default, bound in THIS module — unlike ``_cmd_repair.py``, which no
+    longer binds the name; see ``tests/test_repair.py``'s equivalent
+    fixture). ``push_metrics._pushed_page_texts`` then lists
+    ``wiki_root.iterdir()`` looking for a filename matching the test's
+    (single-character) push id by PREFIX — on a real, populated
+    ``~/knowledge/wiki`` that lists hundreds of unrelated real pages, one of
+    them matches the prefix purely by coincidence, and the subsequent
+    ``.read_text()`` on it trips the athenaeum#2183 default-root-open guard.
+    On an empty/isolated default the directory listing itself raises
+    ``OSError`` (caught, returns ``{}``), so the test's actual intent — an
+    unsupported ``--confidence`` value reported as a named CLI error rather
+    than an uncaught traceback — is never reached with a populated real
+    wiki_root in the loop. This sibling test in the same class,
+    ``test_scores_against_real_heuristic``, already learned this lesson
+    (passes ``--path`` explicitly); this autouse fixture covers the one
+    that didn't, the same way as every other per-file fix in this issue.
+    `TestSampleForLabelling`'s tests never consult `args.path` at all
+    (`sample-for-labelling` has no wiki_root dependency), so this redirect
+    cannot affect them.
+    """
+    from athenaeum import _cmd_push_metrics
+
+    monkeypatch.setattr(
+        _cmd_push_metrics,
+        "DEFAULT_KNOWLEDGE_ROOT",
+        tmp_path / "unused-default-knowledge-root",
+    )
+
+
 def _run(argv: list[str]) -> tuple[int, str]:
     buf = io.StringIO()
     with redirect_stdout(buf):
