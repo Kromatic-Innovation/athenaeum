@@ -1740,3 +1740,94 @@ class TestConfigDrivenStrongIdentifierKeys:
         out = _merge_meta(canonical, absorbed, "abs-uid", strong_identifier_keys=[])
         assert "apollo_headline" not in out
         assert "current_company" not in out
+
+
+class TestDedupeCliWiresTheStrongIdentifierKeys:
+    """Issue athenaeum#2472: the CONFIGURED fields must reach the engine.
+
+    Exactly the shape of :class:`TestDedupeApplyCliWiresTheOwner` above, and
+    for the same reason it exists: ``dedupe.strong_identifier_keys`` is a
+    real deployment knob only if ``athenaeum curate dedupe`` resolves it and
+    passes it down. A resolver nothing calls is a setting an operator can
+    write in ``athenaeum.yaml`` and watch do nothing — the mechanism-without-
+    wiring defect issue athenaeum#1739 fixed for the owner guard.
+
+    These are wiring tests, not algorithm tests; the matching and coalescing
+    behaviour is pinned by :class:`TestConfigDrivenStrongIdentifierKeys`.
+    """
+
+    def _wiki(self, tmp_path: Path, config_text: str) -> tuple[Path, Path]:
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(config_text, encoding="utf-8")
+        return knowledge_root, wiki
+
+    def _run_find(self, knowledge_root: Path, out: Path) -> int:
+        import argparse
+
+        from athenaeum._cmd_curate import cmd_dedupe
+
+        return cmd_dedupe(
+            argparse.Namespace(
+                dedupe_target="persons",
+                wiki_root=knowledge_root / "wiki",
+                find=True,
+                apply=False,
+                out=out,
+                from_path=None,
+                wait=None,
+                force=False,
+            )
+        )
+
+    def test_find_honours_an_invented_configured_field(self, tmp_path: Path) -> None:
+        """Two pages sharing only ``crm_contact_id`` are a pair once configured."""
+        knowledge_root, wiki = self._wiki(
+            tmp_path,
+            "dedupe:\n  strong_identifier_keys:\n    - crm_contact_id\n",
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee01",
+            name="Ada Example",
+            emails=["ada@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee02",
+            name="Grace Example",
+            emails=["grace@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        out = tmp_path / "pairs.yaml"
+        assert self._run_find(knowledge_root, out) == 0
+        assert "c0ffee01" in out.read_text(encoding="utf-8")
+
+    def test_find_with_the_same_pages_and_no_setting_finds_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative control: without the setting, the CLI must NOT match.
+
+        Without this, the test above would pass just as well on code that
+        ignored the config and matched on every shared field.
+        """
+        knowledge_root, wiki = self._wiki(tmp_path, "search_backend: fts5\n")
+        _write_person(
+            wiki,
+            uid="c0ffee01",
+            name="Ada Example",
+            emails=["ada@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        _write_person(
+            wiki,
+            uid="c0ffee02",
+            name="Grace Example",
+            emails=["grace@example.invalid"],
+            extra={"crm_contact_id": "CRM-1"},
+        )
+        out = tmp_path / "pairs.yaml"
+        assert self._run_find(knowledge_root, out) == 0
+        assert "c0ffee01" not in out.read_text(encoding="utf-8")

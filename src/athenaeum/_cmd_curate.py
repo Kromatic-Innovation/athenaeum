@@ -174,10 +174,28 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         if not wiki_root.is_dir():
             print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
             return 1
-        from athenaeum.config import load_config, resolve_owner
+        from athenaeum.config import (
+            load_config,
+            resolve_owner,
+            resolve_strong_identifier_keys,
+        )
 
-        owner = resolve_owner(load_config(wiki_root.parent))
-        pairs = find_duplicate_persons(wiki_root, owner=owner)
+        cfg = load_config(wiki_root.parent)
+        owner = resolve_owner(cfg)
+        # Issue athenaeum#2472: the configured strong-identifier fields have to
+        # REACH the engine from the CLI. The same wiring defect issue
+        # athenaeum#1739 fixed for the owner guard applies here -- a resolver
+        # nothing calls is a setting the deployment cannot actually use.
+        # ``None`` means unset, so the engine keeps its own shipped default;
+        # an explicit ``[]`` is passed through and taken literally.
+        sid_keys = resolve_strong_identifier_keys(cfg)
+        pairs = (
+            find_duplicate_persons(wiki_root, owner=owner)
+            if sid_keys is None
+            else find_duplicate_persons(
+                wiki_root, owner=owner, strong_identifier_keys=sid_keys
+            )
+        )
         report = pairs_to_yaml(pairs)
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +215,7 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         load_config,
         resolve_google_contact_keys,
         resolve_owner,
+        resolve_strong_identifier_keys,
     )
 
     cfg = load_config(wiki_root.parent)
@@ -211,11 +230,16 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         owner = resolve_owner(cfg)
         from athenaeum.contact_record_fold import resolve_contacts_root
 
+        # Issue athenaeum#2472, as on the --find path above: ``None`` leaves the
+        # engine's shipped default in place, an explicit ``[]`` disables vendor
+        # strong identifiers, and a configured list replaces them.
+        sid_keys = resolve_strong_identifier_keys(cfg)
         merge_report = merge_duplicate_persons(
             pairs,
             apply=True,
             wiki_root=wiki_root,
             google_contact_keys=gc_keys,
+            **({} if sid_keys is None else {"strong_identifier_keys": sid_keys}),
             owner=owner,
             # Issue athenaeum#2184: fold each absorbed uid's contact record.
             # None (no fold) when `pii` is not mapped to an excluded surface.
