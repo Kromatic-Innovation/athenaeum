@@ -194,7 +194,7 @@ class TestFoldSafetyCheckRefusal:
         assert report.folds_refused == 1
         assert report.held == 0
 
-        # Review finding (MEDIUM, athenaeum#2518 PR #2557): the question is
+        # Review finding (MEDIUM, athenaeum#2518, review on athenaeum#2557): the question is
         # archived as "refused", so the merge proposal `_resolve_fold_question`
         # queued for it must not be left open in `_pending_merges.md` —
         # that would split state (queue shows pending work the question
@@ -209,7 +209,7 @@ class TestFoldSafetyCheckRefusal:
 
 
 # ---------------------------------------------------------------------------
-# AC3 (review finding, athenaeum#2518 PR #2557) — the ambiguity guard
+# AC3 (review finding, athenaeum#2518, review on athenaeum#2557) — the ambiguity guard
 # `merges propose-fold` applies at proposal time also applies to a fold
 # QUESTION's answer, so resolve_merge can never silently target a different
 # live page than the one actually proposed as canonical.
@@ -311,7 +311,7 @@ class TestFoldReject:
 
 
 # ---------------------------------------------------------------------------
-# Review finding (MEDIUM, athenaeum#2518 PR #2557) — an unguarded file read
+# Review finding (MEDIUM, athenaeum#2518, review on athenaeum#2557) — an unguarded file read
 # inside the fold-apply path must not raise and abort the rest of the
 # ingest-answers batch. `_resolve_fold_question`'s own docstring already
 # promises "never raises"; this proves the implementation actually keeps
