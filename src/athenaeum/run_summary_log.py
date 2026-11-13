@@ -56,7 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,7 +226,65 @@ def entity_phase_wall_clock_per_file(
 #: schema-age one. Only a v3+ record whose ``refusal`` key IS present
 #: speaks to the verdict at all, via that dict's own ``tripped`` field --
 #: see :func:`refusal_in_record`, the one place all three cases are read.
-RUN_SUMMARY_LEDGER_VERSION = 3
+#: v4 (issue athenaeum#2536) adds the optional ``page_recompile`` key --
+#: the oversized-page backlog counts (see
+#: :func:`build_page_recompile_entry`). Purely additive and omitted when
+#: the caller has nothing to report, so a v3 reader that ignores unknown
+#: keys is unaffected; the bump exists for the same reason the v3 one did,
+#: so a reader can tell "this record predates the field" from "this run had
+#: nothing to say about it".
+RUN_SUMMARY_LEDGER_VERSION = 4
+
+#: The ONE field a ``page_recompile`` ledger entry must carry (issue
+#: athenaeum#2536 AC6 -- "at least ``backlog``"). An entry without it is
+#: not written at all: a backlog entry that cannot say how big the backlog
+#: is carries no information.
+PAGE_RECOMPILE_REQUIRED_FIELD = "backlog"
+
+#: The COUNT fields carried from a status ``page_recompile`` block into the
+#: durable ledger entry, in output order. Deliberately counts only -- the
+#: status block's ``pages`` / ``blocked_pages`` NAME lists are dropped
+#: here, matching ``athenaeum recompile candidates``'s own counts-only
+#: posture (athenaeum#2534 AC8): a nightly ledger that accumulates one row
+#: per run has no business growing a durable, per-run copy of every
+#: oversized page's filename.
+PAGE_RECOMPILE_LEDGER_FIELDS = (
+    "backlog",
+    "flagged",
+    "over_ceiling",
+    "blocked",
+    "blocked_by_reason",
+    "threshold_chars",
+    "ceiling_chars",
+)
+
+
+def build_page_recompile_entry(
+    block: "Mapping[str, Any] | None",
+) -> dict[str, Any] | None:
+    """Project a status page-recompile block down to the ledger entry
+    (issue athenaeum#2536 AC6), or ``None`` when there is nothing to write.
+
+    Takes a plain mapping rather than
+    :class:`athenaeum.page_recompile.CandidateScan`: this module is an L2
+    leaf (see the module docstring's layering note) and must not import the
+    L4 scan to stay one. The caller --
+    :meth:`athenaeum.librarian.RunContext.emit_run_summary`, from the block
+    :func:`athenaeum.status.build_page_recompile_backlog` already built for
+    the status surface -- is the one that has both.
+
+    Returns ``None`` for a missing block or one without
+    :data:`PAGE_RECOMPILE_REQUIRED_FIELD`, so a run whose backlog scan
+    failed or never ran omits the key entirely rather than writing a
+    hollow, falsely-healthy ``{"backlog": 0}`` -- the same "omit, don't
+    report a zero you did not measure" rule the status block's own
+    not-available fields follow.
+    """
+    if not block or block.get(PAGE_RECOMPILE_REQUIRED_FIELD) is None:
+        return None
+    return {
+        field: block[field] for field in PAGE_RECOMPILE_LEDGER_FIELDS if field in block
+    }
 
 #: Ledger filename under the cache dir (mirrors ``athenaeum.spend.LEDGER_FILENAME``).
 RUN_SUMMARY_LEDGER_FILENAME = "run_summary.jsonl"
@@ -256,6 +314,7 @@ def build_run_summary_ledger_record(
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
     refusal: dict[str, Any] | None = None,
+    page_recompile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one durable ledger record from a ``run()`` profile.
 
@@ -301,6 +360,16 @@ def build_run_summary_ledger_record(
     a deliberate trade of that stability for an honest three-state record;
     the version bump already signals the shape changed. See
     :func:`refusal_in_record` for the reader that consumes all three states.
+
+    *page_recompile* (issue athenaeum#2536, schema v4) is the optional
+    oversized-page backlog entry -- at minimum ``{"backlog": N}``, normally
+    the full count set :data:`PAGE_RECOMPILE_LEDGER_FIELDS` names. Build it
+    with :func:`build_page_recompile_entry`, which already returns ``None``
+    for "nothing measured"; ``None``/empty omits the key, following the
+    ``economics``/``alerts`` "omit, don't null" convention rather than the
+    ``refusal`` three-state one (an unmeasured backlog and an empty one are
+    told apart by the key's presence, and there is no third state to
+    record).
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
     phases: dict[str, dict[str, Any]] = {}
@@ -318,6 +387,8 @@ def build_run_summary_ledger_record(
         record["alerts"] = alerts
     if refusal:
         record["refusal"] = refusal
+    if page_recompile:
+        record["page_recompile"] = page_recompile
     return record
 
 
@@ -330,6 +401,7 @@ def write_run_summary_record(
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
     refusal: dict[str, Any] | None = None,
+    page_recompile: dict[str, Any] | None = None,
 ) -> bool:
     """Append one durable run-summary record. Best-effort (issue athenaeum#1102 AC2).
 
@@ -342,15 +414,21 @@ def write_run_summary_record(
     is a deliberate, narrower gate (an empty record carries no aggregable
     information). Returns ``True`` when a record was written.
 
-    *economics* / *alerts* (issue athenaeum#1184) and *refusal* (issue
-    athenaeum#1283) pass straight through to
-    :func:`build_run_summary_ledger_record` — see its docstring.
+    *economics* / *alerts* (issue athenaeum#1184), *refusal* (issue
+    athenaeum#1283) and *page_recompile* (issue athenaeum#2536) pass
+    straight through to :func:`build_run_summary_ledger_record` — see its
+    docstring.
     """
     if not profile:
         return False
     try:
         record = build_run_summary_ledger_record(
-            profile, ts=ts, economics=economics, alerts=alerts, refusal=refusal
+            profile,
+            ts=ts,
+            economics=economics,
+            alerts=alerts,
+            refusal=refusal,
+            page_recompile=page_recompile,
         )
         target = (
             ledger_path

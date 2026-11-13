@@ -85,6 +85,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approve/reject's suppression. Available through `resolve_merge` and the
   unified decision-answer path (athenaeum#2539).
 
+- `athenaeum status` prints a page-recompile backlog block in the chars
+  vocabulary the split machinery itself uses
+  (`librarian.page_size_threshold_chars`,
+  `librarian.oversize_hard_ceiling_chars`): how many active pages are
+  flagged `needs_split: true` or over the threshold, how many are over the
+  hard ceiling, and how many are blocked, with a count per reason. Built
+  from the athenaeum#2534 candidate scan, so status and the splitter no
+  longer disagree about which pages are oversized, and from the SAME single
+  walk of the wiki the byte-based scan already performed. Page names are
+  never printed by default; `athenaeum status --verbose` lists them.
+  "Plans awaiting approval", "applied in the last 7 days" and "nights since
+  progress" print as `not available` — never as `0` — until the plan ledger
+  and the nightly phase exist. The durable run-summary ledger carries the
+  same counts under a `page_recompile` key (schema v4), and the new
+  `athenaeum status --json` emits the whole snapshot, backlog block
+  included, as JSON (athenaeum#2536).
+
+### Deprecated
+
+- The byte-based `Oversized pages (warn/flag)` status line and its
+  `librarian.page_warn_bytes` / `librarian.page_flag_bytes` knobs are
+  deprecated and will be removed in 0.25.0: they measure frontmatter + body
+  in bytes against their own thresholds and know nothing of `needs_split`.
+  Use the chars-based page-recompile backlog block instead (athenaeum#2536).
+
 ### Fixed
 
 - Merge proposals a human rejected, and proposals `athenaeum decisions

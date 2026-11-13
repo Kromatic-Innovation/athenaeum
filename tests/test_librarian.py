@@ -2065,9 +2065,14 @@ class TestRunIntegration:
         def _boom(*args, **kwargs):
             raise RuntimeError("scan blew up")
 
-        # run() does a function-local import of scan_page_sizes, so patching
-        # the attribute on the module is picked up at call time.
-        monkeypatch.setattr(status_mod, "scan_page_sizes", _boom)
+        # run() does a function-local import of the page-size walk, so
+        # patching the attribute on the module is picked up at call time.
+        # ``scan_page_backlog`` since athenaeum#2536 (``scan_page_sizes``
+        # before it): the guardrail now takes BOTH the byte buckets it warns
+        # on and the chars-based recompile backlog from that one walk, so it
+        # is the single function whose failure this degrade path must
+        # swallow.
+        monkeypatch.setattr(status_mod, "scan_page_backlog", _boom)
         caplog.set_level(logging.WARNING, logger="athenaeum")
 
         exit_code = run(
