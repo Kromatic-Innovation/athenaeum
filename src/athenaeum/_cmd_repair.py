@@ -35,8 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 
 if TYPE_CHECKING:
     from athenaeum.repair import RepairReport
@@ -267,7 +266,7 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config, resolve_owner_asserter
     from athenaeum.repair import backfill_sources
 
-    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     auto_memory_root = knowledge_root / "raw" / "auto-memory"
     if not auto_memory_root.is_dir():
         print(f"Auto-memory root not found: {auto_memory_root}", file=sys.stderr)
@@ -343,7 +342,7 @@ def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.pii import contacts_surface_root, fold_orphaned_bounce_marks
 
-    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     cfg = load_config(knowledge_root)
     contacts_root = (
         args.contacts_root.expanduser().resolve()
@@ -414,7 +413,7 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
         plan_contact_record_repair,
     )
 
-    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     cfg = load_config(knowledge_root)
     contacts_root = (
         args.contacts_root.expanduser().resolve()
