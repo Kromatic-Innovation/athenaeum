@@ -415,6 +415,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The startup pricing preflight now also covers the `page_recompile` and
+  `verify` model knobs, because it is derived from the registered knob set.
+  **Behaviour change for operators with a custom `pricing:` section** (which
+  REPLACES the code-default table rather than overlaying it): that table must
+  now price `claude-sonnet-5`, the default both new knobs resolve to, or
+  `athenaeum run` refuses to start — even though the nightly run itself never
+  calls either knob (athenaeum#2537).
+
 - Docs: security docs now state that erasure is not yet available
   (athenaeum#2454).
 
