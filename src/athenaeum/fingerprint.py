@@ -18,11 +18,11 @@ Two pieces:
   NOT change the fingerprint; a *material* edit to either claim DOES — which
   is exactly the desired re-escalation trigger.
 
-- The JSONL cache helpers (:func:`record_resolution`, :func:`load_resolved`,
-  :func:`is_resolved`) over ``raw/_resolved_contradictions.jsonl``. One JSON
-  object per line, appended on every resolution (human OR auto). The
-  ``resolved_by`` field ("human" | "auto") is load-bearing for sibling athenaeum#199
-  (only human verdicts auto-apply there) — record it accurately.
+- The JSONL cache helpers (:func:`record_resolution`,
+  :func:`load_resolved_records`) over ``raw/_resolved_contradictions.jsonl``.
+  One JSON object per line, appended on every resolution (human OR auto).
+  The ``resolved_by`` field ("human" | "auto") is load-bearing for sibling
+  athenaeum#199 (only human verdicts auto-apply there) — record it accurately.
 
 The module deliberately has NO heavy imports so both the escalation path
 (:mod:`athenaeum.tiers`) and the resolution path (:mod:`athenaeum.answers`,
@@ -50,7 +50,6 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -190,8 +189,7 @@ def record_resolution(
     # docstring) — mirrors the existing deferred ``athenaeum.search`` import
     # in :func:`find_resolved_record`. :func:`athenaeum.store.now_iso` is the
     # single shared rendering of the UTC-ISO timestamp rule (issue
-    # athenaeum#1348); its second-precision output is exactly what
-    # ``_RESOLVED_AT_FORMAT`` below parses back.
+    # athenaeum#1348).
     from athenaeum.store import now_iso
 
     record = {
@@ -221,40 +219,10 @@ def record_resolution(
         )
 
 
-def load_resolved(knowledge_root: Path) -> set[str]:
-    """Return the set of resolved fingerprints from the JSONL cache.
-
-    Missing file → empty set (no suppression). Malformed lines are skipped
-    so a single corrupt row cannot disable the whole cache.
-    """
-    path = _cache_path(knowledge_root)
-    resolved: set[str] = set()
-    if not path.exists():
-        return resolved
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - filesystem edge
-        log.warning("fingerprint: failed to read resolved cache (%s)", exc)
-        return resolved
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        fp = obj.get("fingerprint")
-        if isinstance(fp, str) and fp:
-            resolved.add(fp)
-    return resolved
-
-
 def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
     """Return a ``fingerprint -> record`` map collapsed by precedence (athenaeum#199).
 
-    Unlike :func:`load_resolved` (which only needs the set of resolved
-    fingerprints for athenaeum#198 suppression), the auto-apply lane (athenaeum#199) needs the
+    The auto-apply lane (athenaeum#199) needs the
     full record per fingerprint — ``resolved_by`` (only ``"human"`` verdicts
     auto-apply), ``action`` (the authoritative verdict to enact; a legacy or
     external ``verdict``-only record is tolerated as a read-time fallback),
@@ -300,13 +268,6 @@ def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
             continue
         records[fp] = obj
     return records
-
-
-def is_resolved(knowledge_root: Path, fingerprint: str) -> bool:
-    """True when ``fingerprint`` is present in the resolved cache."""
-    if not fingerprint:
-        return False
-    return fingerprint in load_resolved(knowledge_root)
 
 
 def extract_passages(description: str) -> list[str]:
@@ -423,128 +384,6 @@ def resolve_resolved_similarity_threshold(
         except (TypeError, ValueError):
             pass
     return _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
-
-
-# ---------------------------------------------------------------------------
-# Read-time decay of stale auto not_a_conflict suppressions
-# (issue athenaeum#251 — DEPRECATED by athenaeum#262)
-# ---------------------------------------------------------------------------
-
-_ENV_NOT_A_CONFLICT_TTL_DAYS = "ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS"
-# Code default 0 == disabled (no decay; current behavior). Per the athenaeum#231
-# rule this is NOT seeded into config._DEFAULTS — it resolves through the
-# env > yaml > code-default chain below.
-_DEFAULT_NOT_A_CONFLICT_TTL_DAYS = 0
-
-# The suppress verdict value. Re-declared locally (not imported from
-# :mod:`athenaeum.resolutions`) so this module keeps its no-heavy-imports
-# contract; the literal is locked in resolutions.SUPPRESS_ACTION and must
-# stay in sync.
-_SUPPRESS_VERDICT = "not_a_conflict"
-
-# Resolved-at timestamp format stamped by :func:`record_resolution`. This is
-# the exact second-precision rendering :func:`athenaeum.store.now_iso`
-# produces (issue athenaeum#1348) — the two must stay in sync, since this is
-# the sole consumer that parses the value back with ``datetime.strptime``.
-_RESOLVED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-
-
-def resolve_not_a_conflict_ttl_days(config: dict[str, Any] | None = None) -> int:
-    """Resolve the auto-suppression TTL (days) from env > yaml > default.
-
-    Issue athenaeum#251. Precedence mirrors
-    :func:`athenaeum.resolutions.resolve_max_per_run`: the env var
-    ``ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS`` wins over
-    ``contradiction.not_a_conflict_ttl_days`` in the yaml, which wins over
-    the code default ``0`` (disabled). Per the athenaeum#231 rule the key is NOT
-    seeded in ``config._DEFAULTS``. Negative, non-numeric, or boolean
-    values fall back to the default. ``0`` disables decay entirely (current
-    behavior — an auto suppression never expires).
-    """
-    env = os.environ.get(_ENV_NOT_A_CONFLICT_TTL_DAYS)
-    if env is not None:
-        try:
-            value = int(env)
-            if value >= 0:
-                _warn_deprecated_suppression_knob(
-                    "not_a_conflict_ttl_days", _ENV_NOT_A_CONFLICT_TTL_DAYS
-                )
-                return value
-        except (TypeError, ValueError):
-            pass
-    if isinstance(config, dict):
-        cfg = config.get("contradiction")
-        if isinstance(cfg, dict):
-            raw = cfg.get("not_a_conflict_ttl_days")
-            # bool is an int subclass — ``not_a_conflict_ttl_days: yes`` in
-            # yaml must not silently become a ttl of 1 (mirrors
-            # resolve_max_per_run).
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-                _warn_deprecated_suppression_knob(
-                    "not_a_conflict_ttl_days", _ENV_NOT_A_CONFLICT_TTL_DAYS
-                )
-                return raw
-    return _DEFAULT_NOT_A_CONFLICT_TTL_DAYS
-
-
-def is_stale_auto_suppression(
-    record: dict[str, Any],
-    ttl_days: int,
-    now: datetime,
-) -> bool:
-    """Return True when an AUTO ``not_a_conflict`` record has decayed.
-
-    Issue athenaeum#251. A stale record is treated as ABSENT when building the
-    confirmation-pass skip set, so the pair re-enters the Opus confirmation
-    path — but the row itself is NEVER mutated (append-only contract).
-
-    Returns True only when ALL hold:
-
-    * ``ttl_days > 0`` (0 == disabled; current no-decay behavior).
-    * ``resolved_by`` is ``"auto"`` or ``"human-unverified"`` (athenaeum#2041) —
-      human verdicts NEVER decay.
-    * ``(action or verdict) == "not_a_conflict"`` — enacting auto verdicts
-      (``keep_*`` / ``correct_*`` / ``forget_*`` / ``deprecate_both``) NEVER
-      decay; only suppressions do.
-    * ``resolved_at`` parses as ``%Y-%m-%dT%H:%M:%SZ`` AND is older than
-      ``ttl_days`` before ``now``.
-
-    Fail-safe: a missing or unparseable ``resolved_at`` returns False (the
-    record keeps suppressing) so legacy/external undated rows are never
-    expired — but an unparseable value (as opposed to a merely missing one)
-    is no longer SILENT (issue athenaeum#1348): it logs a warning naming the
-    offending value, since a value in the wrong format would otherwise
-    suppress forever with no visible symptom beyond "this never expires".
-
-    ``now`` is INJECTED — the helper reads no wall-clock — so callers can
-    freeze a single run-start timestamp and tests stay deterministic.
-    """
-    if ttl_days <= 0:
-        return False
-    # athenaeum#2041: an unverified-human record decays like an auto one.
-    if record.get("resolved_by") not in ("auto", RESOLVED_BY_HUMAN_UNVERIFIED):
-        return False
-    if (record.get("action") or record.get("verdict")) != _SUPPRESS_VERDICT:
-        return False
-    raw = record.get("resolved_at")
-    if not isinstance(raw, str) or not raw:
-        return False
-    try:
-        resolved_at = datetime.strptime(raw, _RESOLVED_AT_FORMAT)
-    except ValueError:
-        log.warning(
-            "fingerprint: resolved_at %r does not match expected format %r — "
-            "treating as not expired (issue athenaeum#1348)",
-            raw,
-            _RESOLVED_AT_FORMAT,
-        )
-        return False
-    # record_resolution stamps UTC without an offset; compare in UTC. If the
-    # caller's ``now`` is tz-aware, normalize the parsed value to match.
-    if now.tzinfo is not None:
-        resolved_at = resolved_at.replace(tzinfo=timezone.utc)
-    age = now - resolved_at
-    return age > timedelta(days=ttl_days)
 
 
 # ---------------------------------------------------------------------------

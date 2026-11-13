@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
+  key and its `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` environment-variable
+  override, along with the rest of the C4 contradiction-detector code left
+  behind in `merge.py`, `fingerprint.py`, `merge_type_gate.py` and
+  `inference_blocks.py` after the detector's retirement
+  (athenaeum#1256). No user-visible behaviour changes (athenaeum#2435).
+
 ## [0.23.5] - 2026-11-12
 
 **Summary.** 0.23.5 is a roll-up of three workstreams built on `develop` since

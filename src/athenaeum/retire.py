@@ -217,12 +217,6 @@ def _move_eligibility(
     lane is wired up. This is a known, operator-accepted state (issue
     athenaeum#1946), not a bug in this function.
 
-    A cluster carrying a live ``contradictions_detected`` flag (a residual/
-    legacy signal; C4 no longer sets this) is still held defensively — this
-    can only ever turn eligible=False, never override a genuine hold into a
-    move, so keeping the check costs nothing and is a belt-and-suspenders
-    safety net should any upstream path ever set it again.
-
     Args:
         entry: The cluster's :class:`MergedWikiEntry`.
         wiki_root: The SAME root the ledger is read from
@@ -243,9 +237,6 @@ def _move_eligibility(
     Returns:
         ``(True, "")`` when eligible, else ``(False, <loud reason>)``.
     """
-    if entry.contradictions_detected:
-        return False, "contradiction flagged — queued for human confirmation"
-
     if len(members) < 2:
         # Genuinely zero candidate pairs (a true singleton, or fewer than
         # two members resolved this run) — vacuously eligible. This check

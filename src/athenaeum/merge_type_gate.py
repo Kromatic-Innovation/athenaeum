@@ -34,10 +34,6 @@ never trips the new gate) while still catching the concrete case athenaeum#433
 targets: an explicitly-typed ``fact`` page clustering with an explicitly-
 typed ``guideline`` page.
 
-Inference-block retraction (the third athenaeum#433 deliverable) lives in
-:mod:`athenaeum.inference_blocks` (:func:`retract_inference_block`)
-alongside the parser it retracts blocks parsed by, not here.
-
 Enforcement contract, stated plainly: this module IS the gate — no cross-class
 merge may reach a write path without first calling
 :func:`cross_class_precheck` and honoring a non-``None`` rejection (routing to
@@ -70,7 +66,6 @@ from typing import Any
 from athenaeum.config import (
     resolve_max_merge_sources,
     resolve_min_merge_confidence,
-    resolve_min_merge_mean_similarity,
 )
 from athenaeum.models import parse_frontmatter
 
@@ -280,56 +275,36 @@ def _merge_proposal_suppression_reason(
     n_sources: int,
     confidence: float,
     config: dict[str, Any] | None,
-    mean_similarity: float = 1.0,
-    min_pairwise: float = 1.0,
-    cluster_threshold: float = 0.0,
 ) -> str | None:
     """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
 
-    Issue athenaeum#400 introduced the size cap + opt-in confidence floor here. Issue athenaeum#421
-    tightens the mechanical guardrails so the resolver stops emitting garbage the
-    reasoning/human tiers would only have to reject. Every gate is checked BEFORE
-    the proposal is written, so a suppressed cluster never reaches
-    ``wiki/_pending_merges.md`` and is not re-emitted on the next run:
+    Issue athenaeum#400 introduced the size cap + opt-in confidence floor here. Every
+    gate is checked BEFORE the proposal is written, so a suppressed cluster
+    never reaches ``wiki/_pending_merges.md`` and is not re-emitted on the
+    next run:
 
     * size cap — ``librarian.max_merge_sources`` (default **5**, active, athenaeum#421):
       a proposal folding more than N sources is not the pairwise/small-group
       refinement a merge proposal is for.
-    * complete-linkage — ``min_pairwise < cluster_threshold`` (athenaeum#421): single-
-      linkage only guarantees each member is transitively CONNECTED at the
-      threshold, so one weak ``cosine >= threshold`` bridge can chain dissimilar
-      members into a giant component (the 1,711-page incident). A genuine merge
-      is a complete-linkage clique — EVERY pair clears the threshold — so a
-      cluster whose minimum pairwise cosine falls below the clustering threshold
-      is a chain, not a merge, and is suppressed. ``cluster_threshold <= 0``
-      (the default when a caller does not supply it) disables this arm.
-    * mean-similarity floor — ``librarian.min_merge_mean_similarity`` (default
-      **0.6**, ACTIVE, athenaeum#421): a proposal whose cluster mean pairwise cosine is
-      below the floor is too incohesive to be worth a human's review.
     * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
       a proposal below the resolver-confidence floor is not confident enough.
 
     The cross-scope cohesion floor (:func:`_is_low_cohesion_cross_scope`) is a
     separate, upstream gate on DURABLE wiki pages and is unchanged.
 
-    Suppression is deterministic in the cluster's shape (source count + mean and
-    min pairwise similarity + confidence), so the same over-cluster is
-    suppressed on every run without any new sidecar state.
+    Issue athenaeum#2435 removed this function's complete-linkage
+    (``min_pairwise < cluster_threshold``) and mean-similarity-floor arms:
+    its only caller, :func:`athenaeum.pending_merges.revalidate_pending_merges`,
+    never supplied ``min_pairwise``/``mean_similarity``/``cluster_threshold``
+    — a queued ``_pending_merges.md`` block carries no cohesion data for a
+    caller to pass — so both arms always evaluated against their permissive
+    defaults and could never fire. Suppression is now deterministic in the
+    cluster's shape (source count + confidence only), so the same
+    over-cluster is suppressed on every run without any new sidecar state.
     """
     max_sources = resolve_max_merge_sources(config)
     if max_sources > 0 and n_sources > max_sources:
         return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
-    if cluster_threshold > 0.0 and min_pairwise < cluster_threshold:
-        return (
-            f"single-linkage chain: min pairwise {min_pairwise:.4f} < "
-            f"cluster_threshold {cluster_threshold:.4f} (not complete-linkage)"
-        )
-    min_mean = resolve_min_merge_mean_similarity(config)
-    if min_mean > 0.0 and mean_similarity < min_mean:
-        return (
-            f"low cohesion: mean pairwise {mean_similarity:.4f} < "
-            f"min_merge_mean_similarity={min_mean:.4f}"
-        )
     min_conf = resolve_min_merge_confidence(config)
     if min_conf > 0.0 and confidence < min_conf:
         return f"low confidence: {confidence:.4f} < min_merge_confidence={min_conf:.4f}"
