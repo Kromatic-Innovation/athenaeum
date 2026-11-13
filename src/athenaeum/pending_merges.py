@@ -80,7 +80,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -244,6 +244,21 @@ class PendingMerge:
     # derivation — those still use ``merge_target_name`` — this is a pure
     # display override.
     display_name: str = ""
+    # Issue athenaeum#2514 AC2: the ``**Retired**:`` / ``**Archived**:``
+    # disposition a queue-hygiene sweep stamps on a block it moves to
+    # ``_pending_merges_archive.md`` without any human decision, split into
+    # its timestamp and its reason. ``""``/``""`` for every live block and
+    # for any block a human actually resolved (that disposition is carried
+    # by ``decision``/``answered_at`` instead).
+    archived_at: str = ""
+    archive_reason: str = ""
+    # Issue athenaeum#2514 AC2: the
+    # :func:`athenaeum.prior_rulings.source_content_digest` of this
+    # proposal's source pages AS THEY WERE when the sweep archived it —
+    # what makes "has a source page changed since the archive?" answerable
+    # without a clock. ``""`` for a live block and for anything archived
+    # before this field existed.
+    source_digest: str = ""
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
@@ -266,14 +281,24 @@ def _withdraw_stale_widen_question(
 ) -> None:
     """Resolve (not re-raise) an EARLIER ``fold_widen_impossible`` pending
     question this exact fold previously raised against *dimension_name* —
-    issue athenaeum#2071: once the IDENTITY-coordinate case below applies the
-    fold automatically, the question athenaeum#2069 raised asking a human
-    "what should the canonical's value be?" is now stale (the answer
-    already landed on disk). Reuses :func:`athenaeum.answers.resolve_by_id`
+    issue athenaeum#2071: once the fold settles that dimension on its own,
+    the question athenaeum#2069 raised asking a human "what should the
+    canonical's value be?" is now stale (the answer already landed on
+    disk). Reuses :func:`athenaeum.answers.resolve_by_id`
     — the SAME flip-checkbox-and-archive-on-next-tick path a human
     answering by hand goes through — rather than inventing a second
     "withdraw" mechanism; a block this resolves gets archived on the next
     ``ingest-answers`` run exactly like any other answered question.
+
+    Issue athenaeum#2514 AC4: called PER DIMENSION, from inside the widen
+    loop, the moment that dimension stops needing a human — not once at
+    the end of a fold that succeeded. A fold refused on dimension B left
+    dimension A's already-moot question open forever, because the only
+    withdrawal ran after every refusal point; 12 such questions, made
+    stale by athenaeum#2083 on 2026-10-22, were still open three weeks
+    later. Whether the FOLD applies is a different question from whether
+    THIS dimension still needs an answer, and only the second one decides
+    this.
 
     Matches by ``entity == target_slug`` and the dimension name embedded in
     the question text (the exact phrasing the pending-decision branch below
@@ -315,12 +340,11 @@ def _withdraw_stale_widen_question(
             pending_path,
             pq.id,
             (
-                f"Resolved automatically (athenaeum#2071): the fold now "
-                f"applies with the canonical's {dimension_name!r} coordinate "
-                f"set to {resolved_value!r} — opaque-identifier dimension, "
-                "folded sources' ids preserved as aliases on the canonical. "
-                "No human adjudication needed for a name-collision-scan "
-                "approval."
+                f"Resolved automatically (athenaeum#2071, athenaeum#2514): "
+                f"the fold of proposal {proposal_id} settles the canonical's "
+                f"{dimension_name!r} coordinate as {resolved_value!r} without "
+                "a human — this question no longer needs an answer, whether "
+                "or not the fold itself goes on to apply."
             ),
         )
 
@@ -697,6 +721,122 @@ def _split_blocks(text: str) -> list[str]:
     )
 
 
+#: Issue athenaeum#2514 AC2: the block line a queue-hygiene sweep stamps an
+#: archived proposal with, so :func:`athenaeum.prior_rulings.load_prior_rulings`
+#: can later ask "have the source pages changed since this was archived?"
+#: without consulting a clock. Named here because this module owns the
+#: block format; the value it carries is computed by
+#: :func:`source_content_digest` just below.
+SOURCE_DIGEST_LINE_PREFIX = "**Source digest**:"
+
+
+def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
+    """The live file *source* names, or ``None`` when it names none.
+
+    A stored source is normally an absolute path captured when the proposal
+    was written, so a moved checkout invalidates it; the page's FILENAME
+    under *wiki_root* is therefore tried as well -- the same basename-keyed
+    fallback :func:`athenaeum.prior_rulings.source_key` relies on, and for
+    the same reason (the wiki is flat, so the basename is the stable
+    identity). A relative source is resolved against *wiki_root* too, which
+    :func:`_classify_source` already documents as a real stored shape.
+    """
+    direct = Path(source).expanduser()
+    if not direct.is_absolute():
+        direct = Path(wiki_root).expanduser() / direct
+    if direct.is_file():
+        return direct
+    candidate = Path(wiki_root).expanduser() / Path(source).name
+    return candidate if candidate.is_file() else None
+
+
+def source_content_digest(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    page_digests: dict[Path, str] | None = None,
+) -> str:
+    """A stable fingerprint of what every page in *sources* CONTAINS.
+
+    Order-independent (sources fold in basename order) and
+    location-independent (only the basename, never the stored absolute
+    path, enters the hash), so it survives a moved checkout exactly as
+    :func:`athenaeum.prior_rulings.source_key` does. A source naming no live
+    file contributes the digest of empty bytes, so a page that disappears --
+    or one that later reappears -- is itself a change.
+
+    Deliberately content-based rather than clock-based (issue athenaeum#2514):
+    a modification time is rewritten by a fresh clone and by any tool that
+    rewrites a file byte-identically, so it answers "was this file touched",
+    not "did this page change". The second question is the one the archived
+    ruling asks.
+
+    *page_digests* is an optional caller-owned memo of per-page digests,
+    keyed by resolved path. :func:`athenaeum.prior_rulings.load_prior_rulings`
+    passes one because the same page recurs across archived blocks by
+    construction -- the driving case is a single pair re-proposed and
+    re-archived on 19 consecutive nights. Pass ``None`` (the default) for a
+    one-shot call; a caller that reuses a memo across two different instants
+    would be comparing one instant's bytes against another's, so the memo is
+    deliberately the caller's to scope rather than module state.
+    """
+    parts: list[bytes] = []
+    for source in sorted(set(sources), key=lambda s: Path(s).name):
+        path = resolve_source_path(source, wiki_root=wiki_root)
+        digest = page_digests.get(path) if page_digests is not None and path else None
+        if digest is None:
+            data = b""
+            if path is not None:
+                try:
+                    data = path.read_bytes()
+                except OSError:  # pragma: no cover - raced deletion
+                    data = b""
+            digest = hashlib.sha256(data).hexdigest()
+            if page_digests is not None and path is not None:
+                page_digests[path] = digest
+        parts.append(
+            Path(source).name.encode("utf-8") + b"\x00" + digest.encode("ascii")
+        )
+    return hashlib.sha256(b"\x00".join(parts)).hexdigest()
+
+
+def _archive_trailer(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    disposition: Literal["Retired", "Archived"],
+    ts: str,
+    detail: str,
+) -> str:
+    """The trailer EVERY archive writer appends to a block it moves out of
+    the live sidecar: a source digest, then the disposition line.
+
+    One renderer rather than four f-strings (issue athenaeum#2514 review).
+    The digest is a property of the ARCHIVE FORMAT, not of one writer:
+    :func:`_parse_block` reads ``**Retired**:`` and ``**Archived**:``
+    generically into :attr:`PendingMerge.archived_at`, so
+    :func:`athenaeum.prior_rulings.load_prior_rulings` mints an ``archived``
+    ruling for a block from ANY of these writers. A writer that skipped the
+    digest would therefore mint a ruling nothing can ever prove stale —
+    permanent suppression of that source set, with no recovery even after a
+    source page changes. Routing all four through here is what makes
+    "an archive binds until a source page changes" true of every archive
+    this code writes, rather than only of the queue-hygiene sweep.
+
+    NOT used by :func:`ingest_resolved_merges`, which archives blocks a
+    HUMAN resolved. Those carry a ``**Decision**:`` line, so
+    ``load_prior_rulings`` reads them as the human ruling they are and never
+    reaches the archived-ruling branch at all; a digest there would be
+    inert bytes.
+
+    *detail* is the caller's own reason text (``gate: ...``,
+    ``satisfied: ...``, a retirement reason) and may be empty.
+    """
+    digest = source_content_digest(sources, wiki_root=wiki_root)
+    tail = f" — {detail}" if detail else ""
+    return f"{SOURCE_DIGEST_LINE_PREFIX} {digest}\n**{disposition}**: {ts}{tail}\n"
+
+
 def _parse_block(block_text: str) -> PendingMerge | None:
     lines = block_text.splitlines()
     if not lines:
@@ -734,6 +874,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     auto_applied = False
     embedder = ""
     display_name = ""
+    archived_at = ""
+    archive_reason = ""
+    source_digest = ""
 
     in_sources = False
     in_draft = False
@@ -810,6 +953,24 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             answered_at = s.removeprefix("**Answered at**:").strip()
             continue
+        if s.startswith(SOURCE_DIGEST_LINE_PREFIX):
+            in_sources = False
+            source_digest = s.removeprefix(SOURCE_DIGEST_LINE_PREFIX).strip()
+            continue
+        if s.startswith("**Retired**:") or s.startswith("**Archived**:"):
+            # Issue athenaeum#2514 AC2: a queue-hygiene disposition, not a
+            # human decision. Both spellings are the same fact to a reader
+            # (the block is in the archive and nobody answered it); only
+            # the reason text after the em dash differs, and a bare
+            # ``**Archived**: <ts>`` (the shape ingest_resolved_merges
+            # writes) simply carries no reason.
+            in_sources = False
+            prefix = "**Retired**:" if s.startswith("**Retired**:") else "**Archived**:"
+            raw_disposition = s.removeprefix(prefix).strip()
+            archived_at, _, archive_reason = raw_disposition.partition(" — ")
+            archived_at = archived_at.strip()
+            archive_reason = archive_reason.strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -845,6 +1006,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         embedder=embedder,
         display_name=display_name,
         answered_at=answered_at,
+        archived_at=archived_at,
+        archive_reason=archive_reason,
+        source_digest=source_digest,
     )
 
 
@@ -1643,6 +1807,56 @@ def _json_safe_coordinate(value: Any) -> Any:
     return value
 
 
+def _backfill_stub_canonical_coordinates(
+    prior_meta: dict[str, Any],
+    source_metas_in_order: list[dict[str, Any]],
+    *,
+    registry: DimensionRegistry,
+    human_approved: bool,
+) -> dict[str, Any]:
+    """Give a STUB canonical the separator coordinates its sources carry,
+    in place, and report what was filled (issue athenaeum#2514 AC3).
+
+    A stub is a canonical page with NO frontmatter whatsoever — either none
+    at all (the live corpus's five ``## From wiki/...`` pages) or an empty
+    ``{}`` block (the sixth). Both parse to an empty mapping, which is the
+    whole predicate: this never touches a canonical that carries any
+    frontmatter, so a page that deliberately omits ONE coordinate still
+    falls through to the pending-question path that exists to ask about it.
+
+    *source_metas_in_order* is consulted in order and the FIRST entry
+    carrying a concrete value for a dimension wins — the folded sources
+    first (they are the real evidence) and the proposal's own draft last.
+    Values round-trip through :func:`athenaeum.dimensions.coordinate_value` /
+    :func:`parsed_coordinate` / :func:`_write_coordinate`, the same pair the
+    widen loop itself uses, so no second frontmatter-key mapping exists to
+    drift.
+
+    HUMAN-APPROVED folds only, matching the athenaeum#2115 AC3 rule this
+    unblocks: the approval is what rules the pages to be the same thing, and
+    without it a backfill would be inventing a coordinate for a page no
+    human has looked at.
+    """
+    if not human_approved or prior_meta:
+        return {}
+    filled: dict[str, Any] = {}
+    for dimension in registry:
+        if not dimension.separates:
+            continue
+        for meta in source_metas_in_order:
+            value = (
+                parsed_coordinate(dimension, meta)
+                if dimension.kind == DimensionKind.INTERVAL
+                else coordinate_value(dimension, meta)
+            )
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            _write_coordinate(prior_meta, dimension, value)
+            filled[dimension.name] = value
+            break
+    return filled
+
+
 #: Phrase every ``fold_widen_impossible`` question carries (issue
 #: athenaeum#2069), shared by the raiser, the stale-question withdrawal and the
 #: answer read-back (issue athenaeum#2115) so the three cannot drift.
@@ -2008,6 +2222,29 @@ def _apply_fold_into_existing(
     if not isinstance(draft_meta, dict):
         draft_meta = {}
     widened_draft_meta = dict(draft_meta)
+    # Issue athenaeum#2514 AC3: a STUB canonical — no frontmatter at all, or
+    # an empty ``{}`` block — carries no coordinate on any dimension, so the
+    # athenaeum#2115 AC3 rule below ("a human approve is the identity
+    # ruling, so the canonical keeps its own class") has nothing to keep and
+    # falls straight through to raising the widen question again. Six of the
+    # eleven folds athenaeum#2115 was meant to unblock were stuck exactly
+    # there. Backfill from the folded sources FIRST, here in the preflight,
+    # so the repair reaches a fold that has never applied — the only kind
+    # that can be stuck.
+    backfilled_coordinates = _backfill_stub_canonical_coordinates(
+        prior_meta,
+        [source_metas[s] for s in folded_sources] + [draft_meta],
+        registry=registry,
+        human_approved=human_approved,
+    )
+    if backfilled_coordinates:
+        log.info(
+            "fold-stub-canonical-backfill proposal=%s canonical=%s coordinates=%s "
+            "— canonical page had no frontmatter to widen from",
+            pm.id,
+            target_slug,
+            sorted(backfilled_coordinates),
+        )
     coordinates_widened: dict[str, Any] = {}
     # Issue athenaeum#2071: dimension names resolved via the IDENTITY-kind
     # branch just below — the narrowing-invariant loop that follows this one
@@ -2028,14 +2265,23 @@ def _apply_fold_into_existing(
     #     human-approved fold, with the sources' differing values recorded.
     answered_dimensions: dict[str, tuple[str, str]] = {}
     kept_dimensions: dict[str, dict[str, Any]] = {}
+    # Issue athenaeum#2514 AC4: set per iteration, for the dimensions this
+    # fold settles WITHOUT a human. Any widen question still open on such a
+    # dimension is moot the instant it is set — see the withdrawal at the
+    # bottom of this loop for why that cannot wait for the fold to apply.
+    settled_without_human = False
     for dimension in registry:
         if not dimension.separates:
             continue
+        settled_without_human = False
         metas_in_order = [prior_meta, draft_meta] + [
             source_metas[s] for s in folded_sources
         ]
         try:
             widened_value = _widen_over_metas(dimension, metas_in_order)
+            # Every side agreed, or widened cleanly into one covering
+            # coordinate: nothing here for a human to adjudicate.
+            settled_without_human = True
         except CoordinateWidenImpossible as exc:
             if widen_path_eligible and dimension.kind == DimensionKind.IDENTITY:
                 # An opaque per-page identifier (``subject`` is the only
@@ -2070,6 +2316,7 @@ def _apply_fold_into_existing(
                     widened_value = chosen
                     identity_resolved_dimensions[dimension.name] = chosen
                     identity_aliases.extend(v for v in concrete_values if v != chosen)
+                    settled_without_human = True
                 else:
                     # Every side the widen saw is the sentinel/null —
                     # CoordinateWidenImpossible requires two concrete,
@@ -2093,6 +2340,7 @@ def _apply_fold_into_existing(
                 # hard refusal, and a canonical with NO class falls through
                 # to the question below.
                 widened_value = canonical_class
+                settled_without_human = True
                 kept_dimensions[dimension.name] = {
                     "kept": canonical_class,
                     "differing": sorted(
@@ -2106,6 +2354,7 @@ def _apply_fold_into_existing(
                 }
             elif widen_path_eligible and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
+                settled_without_human = True
             elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
                 # Issue athenaeum#2115: the closed answer set — every
@@ -2208,6 +2457,23 @@ def _apply_fold_into_existing(
         if widened_value != current_value:
             _write_coordinate(widened_draft_meta, dimension, widened_value)
             coordinates_widened[dimension.name] = _json_safe_coordinate(widened_value)
+        if settled_without_human:
+            # Issue athenaeum#2514 AC4: withdraw HERE, per dimension, not
+            # after the fold completes. "Does this dimension still need a
+            # human?" is answered now and is independent of whether the
+            # fold goes on to apply — the end-of-function withdrawal only
+            # ever ran for a fold that applied, so a fold refused on a
+            # LATER dimension stranded this one's question indefinitely.
+            # Idempotent and best-effort (see the helper): a dimension with
+            # no open question is a no-op, and an ANSWERED question is left
+            # alone for the answer read-back to consume.
+            _withdraw_stale_widen_question(
+                wiki_root / "_pending_questions.md",
+                target_slug,
+                dimension.name,
+                widened_value,
+                pm.id,
+            )
 
     for dimension in registry:
         if not dimension.separates:
@@ -2465,18 +2731,15 @@ def _apply_fold_into_existing(
                 *commit_b_rel_paths,
             )
 
-    # Issue athenaeum#2071: now that the fold has actually succeeded, resolve
-    # any STALE `fold_widen_impossible` pending question a prior
-    # (pre-athenaeum#2071) ingest-answers tick raised against one of the
-    # dimensions this fold just resolved automatically — done here, after
-    # every refusal point above, so a fold that ends up refused for an
-    # UNRELATED reason never withdraws a question that is still live.
-    if identity_resolved_dimensions:
-        pending_path = wiki_root / "_pending_questions.md"
-        for dim_name, resolved_value in identity_resolved_dimensions.items():
-            _withdraw_stale_widen_question(
-                pending_path, target_slug, dim_name, resolved_value, pm.id
-            )
+    # Issue athenaeum#2071's post-success withdrawal of the IDENTITY-resolved
+    # dimensions' stale questions used to live here. Issue athenaeum#2514 AC4
+    # moved it into the widen loop itself, which runs strictly earlier and
+    # covers a superset of the same dimensions — its premise ("a fold that
+    # ends up refused for an UNRELATED reason never withdraws a question
+    # that is still live") was exactly backwards: a question on a dimension
+    # this fold has already settled is not live, and keeping it open was
+    # what stranded 12 of them for three weeks.
+    #
     # Issue athenaeum#2115 AC4: the fold applied, so EVERY still-open widen
     # question naming this proposal (any dimension) is moot — withdraw it as
     # superseded. Answered ones are left alone (their answer was consumed).
@@ -2523,7 +2786,22 @@ def _archive_stale_merge_block(
     untouched) rather than re-deriving them here.
     """
     ts = now_iso(now)
-    archived_block = f"{block_text}\n\n**Retired**: {ts} — {reason}\n"
+    # Issue athenaeum#2514 review: this writer stamps the same source digest
+    # the queue-hygiene sweep does. Without it this archive would bind the
+    # proposers forever (see `_archive_trailer`). A tombstoned source is a
+    # permanent refusal TODAY, but "permanent" is a fact about the pages,
+    # not about this block: un-tombstoning a source changes its bytes, the
+    # digest stops matching, and the pair becomes askable again. Encoding
+    # the permanence in an unprovable archive instead would make it
+    # irreversible, which is a stronger claim than the refusal supports.
+    archived_pm = _parse_block(block_text)
+    archived_block = block_text + "\n\n" + _archive_trailer(
+        archived_pm.sources if archived_pm is not None else [],
+        wiki_root=merges_path.parent,
+        disposition="Retired",
+        ts=ts,
+        detail=reason,
+    )
 
     primary_parts = ["# Pending Merges", *remaining_blocks]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
@@ -2531,7 +2809,7 @@ def _archive_stale_merge_block(
 
     _withdraw_widen_questions_for_proposals(
         merges_path.parent / "_pending_questions.md",
-        [pm.id for pm in [_parse_block(block_text)] if pm is not None],
+        [archived_pm.id] if archived_pm is not None else [],
         "was archived",
     )
 
@@ -3619,9 +3897,18 @@ def revalidate_pending_merges(
                             )
                         )
                         satisfied_blocks.append(
-                            f"{block_text}\n\n**Archived**: {ts} — satisfied: "
-                            f"all sources already folded into "
-                            f"{own_target_path.stem!r}\n"
+                            block_text
+                            + "\n\n"
+                            + _archive_trailer(
+                                pm.sources,
+                                wiki_root=wiki_root,
+                                disposition="Archived",
+                                ts=ts,
+                                detail=(
+                                    "satisfied: all sources already folded "
+                                    f"into {own_target_path.stem!r}"
+                                ),
+                            )
                         )
                         continue
 
@@ -3641,8 +3928,21 @@ def revalidate_pending_merges(
                 reason=reason,
             )
         )
+        # Issue athenaeum#2514 AC2: record WHAT the sources contained at the
+        # moment of the archive. Without it the archive is a ruling nobody
+        # can tell has gone stale, so the proposers could only ever ignore
+        # it -- which is exactly why a sweep that archived 17 proposals was
+        # followed by a night that re-proposed every one of them.
         retired_blocks.append(
-            f"{block_text}\n\n**Retired**: {ts} — gate: {reason}\n"
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=wiki_root,
+                disposition="Retired",
+                ts=ts,
+                detail=f"gate: {reason}",
+            )
         )
 
     result.kept = len(remaining)
@@ -3797,7 +4097,24 @@ def withdraw_pending_merges_for_retired_pages(
                 id=pm.id, merge_target_name=pm.merge_target_name, reason=full_reason
             )
         )
-        withdrawn_blocks.append(f"{block_text}\n\n**Retired**: {ts} — {full_reason}\n")
+        # Issue athenaeum#2514 review: digest-stamped like every other
+        # archive writer. A retired page is usually gone for good, so the
+        # digest will keep matching and this archive will keep binding --
+        # which is the right outcome. But "usually" is not "always": a page
+        # restored from the retirement is a genuine source change, and that
+        # should make the proposal askable again rather than leave it
+        # suppressed by an archive nobody can disprove.
+        withdrawn_blocks.append(
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=merges_path.parent,
+                disposition="Retired",
+                ts=ts,
+                detail=full_reason,
+            )
+        )
 
     result.kept = len(remaining)
 
