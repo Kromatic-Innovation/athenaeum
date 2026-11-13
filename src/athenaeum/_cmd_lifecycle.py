@@ -102,8 +102,9 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
     disable_parser.add_argument(
         "--compile",
         action="store_true",
-        help="Granular: stop only the expensive compile/detect pass "
-        "(session-end contradiction detection); leave recall on.",
+        help="Granular: stop only the expensive compile/detect pass -- "
+        "'athenaeum session-end' and 'athenaeum run' both no-op -- leave "
+        "recall on.",
     )
     disable_parser.add_argument(
         "--reason",
@@ -367,8 +368,8 @@ def cmd_disable(args: argparse.Namespace) -> int:
     )
     if scope == killswitch.SCOPE_COMPILE:
         print(
-            "athenaeum disabled (compile): the session-end compile/detect pass "
-            "is off; recall stays on."
+            "athenaeum disabled (compile): the compile/detect pass is off for "
+            "both 'session-end' and 'run'; recall stays on."
         )
     else:
         print(

@@ -12,6 +12,7 @@ down.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _positive_int
@@ -218,6 +219,47 @@ def cmd_run(args: argparse.Namespace) -> int:
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, run
 
     configure_logging(verbose=getattr(args, "verbose", False))
+
+    # Kill switch (athenaeum#379, athenaeum#2448): `run` performs the same
+    # expensive, unattended `claude -p` compile/detect fan-out `session-end`
+    # does -- honour the disabled flag BEFORE `load_config` or the run lock,
+    # mirroring `cmd_session_end`'s placement (src/athenaeum/_cmd_index.py),
+    # and emitting the identical JSON no-op shape with `"command": "run"`.
+    #
+    # This also covers --dry-run, deliberately: session-end's own kill-switch
+    # check already fires unconditionally regardless of --dry-run (see the
+    # quiesce-gate comment right below it in cmd_session_end, which notes
+    # "--dry-run mutates nothing either way so it gets no exemption here" --
+    # the same reasoning applies to the kill switch one gate up). A disabled
+    # compile scope means "don't even simulate the pipeline", not merely
+    # "don't write its output" -- and the check is free either way, so there
+    # is no cost argument for carving out an exemption here that session-end
+    # does not grant itself.
+    #
+    # `run` has no `--cache-dir` flag (unlike `session-end`/`disable`), so
+    # resolve_cache_dir's own env/default precedence (ATHENAEUM_CACHE_DIR,
+    # then ~/.cache/athenaeum) is what callers get -- same as every other
+    # `getattr(args, "cache_dir", None)` call site in this codebase.
+    import json
+
+    from athenaeum.killswitch import current_state, is_disabled
+
+    cache_dir = getattr(args, "cache_dir", None)
+    if is_disabled("compile", cache_dir=cache_dir):
+        state = current_state(cache_dir)
+        print(
+            json.dumps(
+                {
+                    "command": "run",
+                    "noop": True,
+                    "reason": "disabled",
+                    "scope": state.scope,
+                    "source": state.source,
+                }
+            )
+        )
+        sys.stdout.flush()
+        return 0
 
     knowledge_root = args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT
     raw_root = args.raw_root or (knowledge_root / "raw")
