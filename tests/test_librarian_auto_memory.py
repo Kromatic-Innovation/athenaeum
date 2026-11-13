@@ -1727,17 +1727,32 @@ class TestRetireDegradedDetection:
 
 
 class TestRetirePendingQueueCrosscheck:
-    """Quine S1: never retire raw referenced by an open pending entry."""
+    """Quine S1 / athenaeum#2455: only an UNRESOLVED pending entry holds a member.
 
-    def test_member_in_pending_questions_is_held(self, retire_root: Path) -> None:
+    Issue athenaeum#2455 replaced ``retire.py``'s hand-rolled substring reader
+    (``_open_pending_text`` / ``_member_in_pending``, which concatenated the
+    WHOLE ``_pending_questions.md`` + ``_pending_merges.md`` text and
+    substring-checked a member ref against it — so a member named anywhere,
+    including inside a long-RESOLVED block, was held back forever) with the
+    sanctioned parsers (AGENTS.md: ``parse_pending_merges()`` /
+    ``parse_pending_questions()``), filtered to unresolved entries only.
+    """
+
+    def test_member_in_unresolved_pending_question_is_held(
+        self, retire_root: Path
+    ) -> None:
         from athenaeum.merge import merge_clusters_to_wiki
         from athenaeum.retire import HOLD, run_retire_pass
 
-        # Simulate a prior-run open pending entry referencing this member.
+        # Simulate a prior-run open pending entry referencing this member —
+        # a well-formed, UNCHECKED (unresolved) question block, matching the
+        # real writer shape (`_HEADER_RE` + a `- [ ]` checkbox).
         pending = retire_root / "wiki" / "_pending_questions.md"
         pending.write_text(
             "# Pending Questions\n\n"
-            "## Conflict (from wiki/auto-foo.md)\n\n"
+            '## [2026-01-01] Entity: "Berlin address" (from wiki/auto-home.md)\n'
+            "- [ ] Is this still accurate?\n"
+            "**Conflict type**: contradiction\n"
             "Members involved: "
             "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n",
             encoding="utf-8",
@@ -1753,6 +1768,112 @@ class TestRetirePendingQueueCrosscheck:
         assert any(
             d.disposition == HOLD and "pending" in d.reason for d in report.dispositions
         )
+
+    def test_member_in_unresolved_pending_merge_is_held(
+        self, retire_root: Path
+    ) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.pending_merges import render_block
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        member = _raw_file(retire_root)
+        # Real writer shape for `_pending_merges.md`: `**Sources**:` lists
+        # the ABSOLUTE source path, unlike the question sidecar's
+        # `<scope>/<filename>` ref.
+        block = render_block(
+            merge_target_name="Berlin address merge",
+            sources=[str(member)],
+            rationale="duplicate intake",
+            draft_merged_body="Tristan lives in Berlin, Germany.",
+            confidence=0.9,
+            created_at="2026-01-01",
+        )
+        merges = retire_root / "wiki" / "_pending_merges.md"
+        merges.write_text("# Pending Merges\n\n" + block + "\n", encoding="utf-8")
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        assert member.exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert any(
+            d.disposition == HOLD and "pending" in d.reason for d in report.dispositions
+        )
+
+    def test_member_named_only_in_resolved_blocks_is_not_held(
+        self, retire_root: Path
+    ) -> None:
+        """A member named ONLY by resolved entries is no longer held.
+
+        This is exactly the case the pre-athenaeum#2455 substring reader got
+        wrong: it concatenated the whole sidecar (resolved blocks included)
+        and substring-checked against that text, so a member named only in a
+        long-resolved question AND a long-resolved merge proposal was held
+        forever. Against that code this assertion fails (the member stays
+        HELD, ``report.moved == []``); it passes once the retire decision is
+        read from the sanctioned parsers filtered to unresolved entries only.
+        """
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.pending_merges import render_block
+        from athenaeum.retire import MOVE, run_retire_pass
+
+        member = _raw_file(retire_root)
+
+        # A resolved (checked) question block naming this member.
+        pending = retire_root / "wiki" / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            '## [2025-01-01] Entity: "Old resolved question" '
+            "(from wiki/auto-home.md)\n"
+            "- [x] Is this still accurate?\n"
+            "**Conflict type**: contradiction\n"
+            "Members involved: "
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n"
+            "**Answer**: yes, confirmed long ago.\n",
+            encoding="utf-8",
+        )
+
+        # A resolved (checked) merge proposal also naming this member.
+        resolved_block = render_block(
+            merge_target_name="Old resolved merge",
+            sources=[str(member)],
+            rationale="duplicate intake",
+            draft_merged_body="Tristan lives in Berlin, Germany.",
+            confidence=0.9,
+            created_at="2025-01-01",
+        ).replace("- [ ]", "- [x]", 1)
+        merges = retire_root / "wiki" / "_pending_merges.md"
+        merges.write_text(
+            "# Pending Merges\n\n" + resolved_block + "\n", encoding="utf-8"
+        )
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        assert not member.exists()
+        assert len(report.moved) == 1
+        assert report.committed is True
+        assert any(d.disposition == MOVE for d in report.dispositions)
+        wiki = retire_root / "wiki"
+        assert next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")).exists()
+
+    def test_missing_sidecars_hold_nothing(self, retire_root: Path) -> None:
+        """A missing (or unreadable) sidecar still contributes "nothing held"."""
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        # retire_root carries neither sidecar file — both sanctioned parsers
+        # treat "missing" as `[]`, same as the old reader's "" default.
+        assert not (retire_root / "wiki" / "_pending_questions.md").exists()
+        assert not (retire_root / "wiki" / "_pending_merges.md").exists()
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        assert not _raw_file(retire_root).exists()
+        assert len(report.moved) == 1
+        assert report.committed is True
 
 
 class TestRetireDroppedSection:

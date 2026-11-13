@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a distinct reason when the breach signal cannot be read at all
   (athenaeum#2449).
 
+- Retire now ignores resolved pending entries when deciding whether a
+  member is held: `retire.py`'s pending-queue crosscheck read
+  `_pending_merges.md` / `_pending_questions.md` by substring-matching the
+  raw file text, so a member named anywhere in either sidecar — including
+  inside a long-RESOLVED block — stayed held back from retirement forever.
+  It now reads both sidecars through the sanctioned parsers
+  (`parse_pending_merges()` / `parse_pending_questions()`) filtered to
+  UNRESOLVED entries only. **Behaviour change:** a member referenced only
+  by a resolved question or merge proposal is now retire-eligible instead
+  of held indefinitely — this changes which atoms retire on the next run
+  (athenaeum#2455).
+
 ### Removed
 
 - Removed the already-unread `contradiction.not_a_conflict_ttl_days` config
