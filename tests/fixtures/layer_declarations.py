@@ -150,6 +150,11 @@ MODULE_LAYER: dict[str, int] = {
     # decision_provider.py's DecisionBackend. Sibling L3.
     "yesno": 3,
     "delta": 3,
+    # Issue athenaeum#2609: the drop ledger. Own module docstring states
+    # "Layering: L3 (service)" -- imports store.py (L1) and pii.py (L3, the
+    # excerpt-masking detectors), both at or below; imported by librarian.py
+    # (L4) and _cmd_drops.py (L5), both strictly above.
+    "drops": 3,
     "erasure": 3,
     "fingerprint": 3,
     "inference_blocks": 3,
@@ -388,6 +393,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_dimensions": 5,
     "_cmd_doctor": 5,  # issue athenaeum#2298
     "_cmd_drain": 5,
+    "_cmd_drops": 5,  # issue athenaeum#2609
     "_cmd_enumerate": 5,
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,

@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `recompile`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `drops`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `recompile`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -65,6 +65,9 @@ python scripts/gen_cli_reference.py
 - [`athenaeum disable`](#athenaeum-disable) (command) — Turn athenaeum's background work off (compile, detectors, recall, notifications). Reversible with 'athenaeum enable'.
 - [`athenaeum doctor`](#athenaeum-doctor) (command) — Read-only health check of an athenaeum install — package version, interpreter, MCP registration, hooks, LLM key mode, search index, last compile time. Exits non-zero on any failed check.
 - [`athenaeum drain`](#athenaeum-drain) (command) — Supervised API+batch drain of the raw-intake backlog (cost-guarded)
+- [`athenaeum drops`](#athenaeum-drops) (group) — Inspect and recover from the drop ledger -- raw files the last run consumed without creating or updating anything. 'list' shows recent drops; 'restore <ref>' re-queues one as raw intake.
+- [`athenaeum drops list`](#athenaeum-drops-list) (command) — List recorded drops, newest first.
+- [`athenaeum drops restore`](#athenaeum-drops-restore) (command) — Re-queue a dropped raw file's recorded content as fresh raw intake.
 - [`athenaeum enable`](#athenaeum-enable) (command) — Undo 'athenaeum disable' — restore all background work.
 - [`athenaeum entity`](#athenaeum-entity) (group) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
 - [`athenaeum entity rename`](#athenaeum-entity-rename) (command) — Rename a wiki page by uid: sets name:, records the previous name in aliases: (deduplicated), refreshes the recall index, and writes a provenance record. Dry-run by default; --apply writes.
@@ -831,6 +834,41 @@ Supervised API+batch drain of the raw-intake backlog (cost-guarded)
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki directory (default: <knowledge-root>/wiki). |
 | `--yes` | off (flag absent) | — | Proceed without the interactive cost confirmation (required to run non-interactively — the drain incurs real API spend). |
+
+## `athenaeum drops`
+
+Inspect and recover from the drop ledger -- raw files the last run consumed without creating or updating anything. 'list' shows recent drops; 'restore <ref>' re-queues one as raw intake.
+
+Subcommands:
+
+- `athenaeum drops list` — List recorded drops, newest first.
+- `athenaeum drops restore` — Re-queue a dropped raw file's recorded content as fresh raw intake.
+
+## `athenaeum drops list`
+
+List recorded drops, newest first.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the drop ledger (default: ~/.cache/athenaeum). |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--limit` | `20` | — | Show at most N drops (default: 20; 0 = unlimited). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum drops restore`
+
+Re-queue a dropped raw file's recorded content as fresh raw intake.
+
+**Positional arguments:**
+
+- `ref` — The dropped raw file's ref (source/filename).
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the drop ledger (default: ~/.cache/athenaeum). |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum enable`
 

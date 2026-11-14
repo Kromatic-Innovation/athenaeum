@@ -996,6 +996,39 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
             "without relocation"
         ),
     ),
+    ArtifactDeclaration(
+        name="drop-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "drops.py:DROP_LEDGER_FILENAME '_drops.jsonl' (issue athenaeum#2609) — "
+            "one row per raw file the entity loop consumed without creating or "
+            "updating anything (ref, capped+PII-masked excerpt, drop stage, "
+            "reason, run id, timestamp). Durable and not reconstructible — once a "
+            "dropped raw file is deleted (the default ``librarian.drop_action`` — "
+            "or re-evaluated past the ``athenaeum.never_ingest`` manifest's own "
+            "window), this ledger is the only record the content ever existed —"
+            " same shape as push-records-ledger/push-references-ledger above, not"
+            " itself named in design note §5.2's table, so classified without "
+            "relocation"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="drop-quarantine",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "drops.py:DROP_QUARANTINE_DIRNAME 'drop-quarantine' (issue "
+            "athenaeum#2609) — holds a dropped raw file's ORIGINAL bytes "
+            "verbatim when ``librarian.drop_action: quarantine`` is set (the "
+            "non-default alternative to today's delete), so ``athenaeum drops "
+            "restore`` can recover more than the drop ledger's own capped "
+            "excerpt. Sibling of drop-ledger immediately above; same "
+            "classification reasoning"
+        ),
+    ),
     # Issue athenaeum#2468 removed the "never-ingest-refusals-ledger" entry
     # that used to sit here (``_never_ingest_refusals.jsonl``): nothing
     # outside that module's own tests ever read the ledger, so the writer,

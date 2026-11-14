@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from athenaeum import batch_state, pii_attribution, push_state, spend, zero_yield
+from athenaeum import drops as drops_mod
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
 from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
@@ -138,6 +139,8 @@ from athenaeum.config import (
     resolve_corrections_runtime_share,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
+    resolve_drop_action,
+    resolve_drop_log,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
@@ -188,6 +191,7 @@ from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
     run_intake_audit,
 )
+from athenaeum.logconf import run_id_var
 from athenaeum.merge import (
     RunDeadlineExceeded,
     derive_topic_slug,
@@ -5594,6 +5598,23 @@ class RunContext:
     total_skipped: int = 0
     total_degraded: int = 0
     total_truncated: int = 0
+    #: Issue athenaeum#2609: raw files this run's entity loop consumed without
+    #: creating or updating anything -- one :mod:`athenaeum.drops` ledger
+    #: row each, when ``drop_log_enabled`` (below) is True. Rendered on the
+    #: entity-phase run-summary segment as ``drops=<N>`` (or ``drops=disabled``
+    #: when the off switch is set), regardless of value -- unlike the
+    #: render-only-when-nonzero convention most other counters here follow,
+    #: a drop count of 0 is itself the healthy signal this issue's AC asks
+    #: the run summary to keep reporting, never silently omitted.
+    total_drops: int = 0
+    #: Issue athenaeum#2609: resolved once per run from
+    #: ``athenaeum.config.resolve_drop_log`` (env > ``librarian.drop_log``
+    #: yaml > True). ``None`` until the entity phase resolves it.
+    drop_log_enabled: bool | None = None
+    #: Issue athenaeum#2609: resolved once per run from
+    #: ``athenaeum.config.resolve_drop_action`` -- ``"delete"`` (default) or
+    #: ``"quarantine"``. ``None`` until the entity phase resolves it.
+    drop_action: str | None = None
     #: Issue athenaeum#1196: NEW entity writes refused this run by the
     #: write-boundary type guard (``wiki_write_guard.guard_entity_write_type``)
     #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES``. Folded
@@ -9282,6 +9303,19 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     never_ingest_manifest = load_authority_manifest(
                         resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
                     )
+                    # Issue athenaeum#2609: resolve the drop-ledger off switch and
+                    # the delete-vs-quarantine disposition ONCE per run (mirrors
+                    # never_ingest_manifest immediately above) rather than
+                    # per-file -- both are run-wide settings, not per-file state.
+                    ctx.drop_log_enabled = resolve_drop_log(ctx.config)
+                    ctx.drop_action = resolve_drop_action(ctx.config)
+                    if not ctx.drop_log_enabled:
+                        log.info(
+                            "drop logging disabled (librarian.drop_log / "
+                            "ATHENAEUM_DROP_LOG) -- no drop-ledger rows will be "
+                            "written this run (issue athenaeum#2609)"
+                        )
+                    _drops_cache_dir = _resolve_cache_dir(None)
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
@@ -9862,9 +9896,60 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     if result.skipped
                                     else "never-ingest",
                                 )
+                                # Issue athenaeum#2609: a never-ingest refusal is
+                                # the one drop cause this loop can name
+                                # precisely -- record it even though the raw
+                                # file itself is RETAINED (never-ingest's own
+                                # contract), because the content still
+                                # produced no page this run. Every re-run that
+                                # re-refuses the same content writes another
+                                # row -- see drops.py's module docstring for
+                                # why that duplication is the honest record,
+                                # not noise to suppress.
+                                if ctx.drop_log_enabled:
+                                    drops_mod.record_drop(
+                                        _drops_cache_dir,
+                                        raw_ref=raw.ref,
+                                        content=raw.content,
+                                        stage=drops_mod.DROP_STAGE_NEVER_INGEST,
+                                        reason=result.skipped[-1]
+                                        if result.skipped
+                                        else None,
+                                        run_id=run_id_var.get(),
+                                        now=ctx.now,
+                                    )
+                                    ctx.total_drops += 1
                         elif not ctx.dry_run:
-                            raw.path.unlink()
-                            log.info("  Deleted: %s", raw.path)
+                            # Issue athenaeum#2609: this file created/updated
+                            # nothing -- a drop, not a success -- reusing the
+                            # SAME heartbeat predicate (`_entity_made_change`)
+                            # computed above for the entity-heartbeat tick, so
+                            # the two can never disagree about which files
+                            # count as dropped.
+                            _is_drop = not _entity_made_change
+                            if _is_drop and ctx.drop_log_enabled:
+                                _drop_stage = (
+                                    drops_mod.DROP_STAGE_OTHER
+                                    if result.skipped
+                                    else drops_mod.DROP_STAGE_CLASSIFY
+                                )
+                                _drop_reason = result.skipped[-1] if result.skipped else None
+                                drops_mod.record_drop(
+                                    _drops_cache_dir,
+                                    raw_ref=raw.ref,
+                                    content=raw.content,
+                                    stage=_drop_stage,
+                                    reason=_drop_reason,
+                                    run_id=run_id_var.get(),
+                                    now=ctx.now,
+                                )
+                                ctx.total_drops += 1
+                            if _is_drop and ctx.drop_action == "quarantine":
+                                drops_mod.quarantine_raw_file(_drops_cache_dir, raw)
+                                log.info("  Quarantined (dropped): %s", raw.path)
+                            else:
+                                raw.path.unlink()
+                                log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1
                             # Issue athenaeum#1295: per-source twin of
                             # `processed_count` above, read back once the loop
@@ -9903,6 +9988,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # window-holdout ledger alongside, same cross-run
                         # durability contract as the stuck ledger above.
                         _write_never_ingest_holdouts(ctx.wiki_root, ni_holdout_ledger)
+                    # Issue athenaeum#2609: the pointer the run summary's
+                    # `drops=N` token cannot itself carry (that line is a
+                    # strict key=value grep target) -- named here once, after
+                    # the loop, rather than per-drop, so a healthy run with no
+                    # drops stays quiet.
+                    if ctx.total_drops:
+                        log.info(
+                            "  %d file(s) dropped this run (created/updated "
+                            "nothing) -- see 'athenaeum drops list' "
+                            "(issue athenaeum#2609)",
+                            ctx.total_drops,
+                        )
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
                 # not "Done" (not a crash — the deferred files are picked up by
@@ -10122,6 +10219,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # still reads as `uid_bound=0` rather than an absent key.
                     "uid_bound": ctx.total_uid_bound,
                     "files": ctx.processed_count,
+                    # Issue athenaeum#2609: rendered unconditionally (same
+                    # convention as files/uid_bound above) -- a drop count of
+                    # 0 is the healthy signal this issue's AC asks to keep
+                    # reporting, never silently omitted the way degraded/
+                    # truncated below are. The literal string "disabled"
+                    # (never "0") when librarian.drop_log/ATHENAEUM_DROP_LOG
+                    # turned drop logging off this run, so a reader cannot
+                    # mistake "nobody was watching" for "nothing was dropped".
+                    # See drops.py's module docstring for the stage vocabulary
+                    # `athenaeum drops list` lets an operator inspect.
+                    "drops": ctx.total_drops if ctx.drop_log_enabled else "disabled",
                     # Issue athenaeum#1184: fan-out — see RunContext.total_matched's
                     # docstring for scope (synchronous path only).
                     "matched": ctx.total_matched,

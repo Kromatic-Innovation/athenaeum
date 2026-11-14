@@ -1473,6 +1473,62 @@ directly under ``librarian`` (a run-cadence advisory, not a delta/merge
 knob). ``bool`` and non-positive / non-int values fall through to the
 default.
 
+### `resolve_drop_action`
+
+- **YAML path:** `librarian.drop_action`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'delete'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve what happens to a dropped raw file's bytes on disk from ``librarian.drop_action``.
+
+One of `VALID_DROP_ACTIONS`: ``"delete"`` (today's behaviour, and
+the DEFAULT — unlinked exactly as before this issue) or ``"quarantine"``
+(moved into a quarantine directory under the cache dir, so the ORIGINAL
+bytes — not just the drop ledger's capped excerpt — survive for
+``athenaeum drops restore`` to recover verbatim). This key does not
+change WHETHER a drop ledger row is written — only what happens to the
+file; see `resolve_drop_log` for the separate off switch.
+
+No env override (only the off switch above gets one; this is a local
+disk-hygiene choice an operator makes once, not something a CI/cron
+invocation needs to flip per-run). A non-string or out-of-vocabulary
+yaml value RAISES `ValueError` rather than silently falling back
+— mirroring `resolve_screening`'s posture for its own closed
+``action`` vocabulary — so a typo'd ``librarian.drop_action: qurantine``
+is loud, not a silent no-op that only surfaces the next time something
+needs restoring. No seed in ``_DEFAULTS``.
+
+### `resolve_drop_log`
+
+- **YAML path:** `librarian.drop_log`
+- **Environment variable:** `ATHENAEUM_DROP_LOG`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the drop-ledger off switch.
+
+Every raw file the entity loop consumes without creating or updating
+anything (a Tier-2 classify response that dropped every entity, an
+observation-filter-shaped empty classify, a never-ingest refusal, or any
+other all-skip outcome) gets one row in the drop ledger
+(`athenaeum.drops`) by default — ON, because a silent drop with no
+record at all is exactly the gap this issue closes. Precedence:
+``ATHENAEUM_DROP_LOG`` env > ``librarian.drop_log`` yaml > ``True``. Any
+env value other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+case-insensitive) is truthy; a non-bool yaml value falls through to the
+default. No seed in ``_DEFAULTS`` — mirrors
+`resolve_ingestion_gate_enabled`'s shape.
+
+When this resolves ``False``, the entity loop writes NO drop rows at
+all this run, and the run summary's ``drops=`` token renders the literal
+``disabled`` instead of a count (see
+`athenaeum.librarian._render_run_summary`'s entity-phase fields) —
+deliberately never ``drops=0``, which would read as "nothing was
+dropped" rather than "nobody was watching".
+
 ### `resolve_ephemeral_scopes`
 
 - **YAML path:** `librarian.ephemeral_scopes`

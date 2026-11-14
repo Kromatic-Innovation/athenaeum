@@ -123,6 +123,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_recover_parked_subparser",
     ),
     "quarantine": ("athenaeum._cmd_quarantine", "add_quarantine_subparser"),
+    "drops": ("athenaeum._cmd_drops", "add_drops_subparser"),
     "receipts": ("athenaeum._cmd_receipts", "add_receipts_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
@@ -217,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_dimensions import add_dimensions_subparser
     from athenaeum._cmd_doctor import add_doctor_subparser
     from athenaeum._cmd_drain import add_drain_subparser
+    from athenaeum._cmd_drops import add_drops_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_explain_routing import add_explain_routing_subparser
     from athenaeum._cmd_fold_lint import add_fold_lint_subparser
@@ -275,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
     add_recover_parked_subparser(subparsers)  # recover-parked (issue athenaeum#2078)
     add_quarantine_subparser(subparsers)  # quarantine requeue (issue athenaeum#2075)
+    add_drops_subparser(subparsers)  # drops list|restore (issue athenaeum#2609)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_corrections_trust_dryrun_subparser(subparsers)  # corrections-trust-dryrun (athenaeum#2331)
