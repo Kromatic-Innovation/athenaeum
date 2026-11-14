@@ -407,6 +407,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test guards the published tool description against the wording coming
   back (athenaeum#2543).
 
+- Answering a coordinate item's `subject` dimension with the SAME value on
+  both sides no longer leaves `scope` to be rediscovered by a later
+  comparator sweep and re-raised as a fresh "same scope?" item a day later:
+  `_apply_coordinate_answer` now makes one model judgement of scope
+  sameness in the same apply pass, writing the scope coordinate when the
+  judgement is clear and raising the scope item immediately (recording
+  model vs. human provenance) when it is unclear or the model call fails
+  or is unavailable (athenaeum#2515).
+
 - `_parse_block`'s "skipping pending-question block with malformed header"
   warning now fires at most once per distinct malformed block per process,
   instead of once per parse — a long-lived caller (the MCP server serving

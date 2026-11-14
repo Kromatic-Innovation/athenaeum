@@ -59,6 +59,7 @@ src/athenaeum/claim_kind.py::classify_claim_kind
 src/athenaeum/comparator.py::content_relation
 src/athenaeum/contradictions.py::detect_contradictions
 src/athenaeum/decay_bucket.py::classify_decay_bucket
+src/athenaeum/decision_answers.py::_judge_scope_sameness
 src/athenaeum/memory_class_backfill.py::classify_residual
 src/athenaeum/name_collisions.py::resolve_name_collisions
 src/athenaeum/page_description.py::describe_pages

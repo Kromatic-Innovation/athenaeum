@@ -8,6 +8,13 @@ one ``build_llm_client(cfg)`` call site each was updated to
 ``build_llm_client(cfg, knob="resolve")``. Covered narrowly here: the client
 factory is called with the right knob, before any pending-sidecar content is
 read (so an empty knowledge dir is enough — no live LLM, no lock contention).
+
+Issue athenaeum#2515: ``cmd_ingest_answers`` now builds a SECOND client on the
+``classify`` knob too, for the one narrow scope-sameness judgement a
+``coordinate`` decision answer can trigger
+(:func:`athenaeum.decision_answers._apply_coordinate_answer`) — the
+``TestIngestAnswersProviderRouting`` test below now captures every call
+rather than just the last one, since there are two.
 """
 
 from __future__ import annotations
@@ -30,11 +37,10 @@ class TestIngestAnswersProviderRouting:
     ) -> None:
         from athenaeum._cmd_pending import cmd_ingest_answers
 
-        captured: dict = {}
+        calls: list[dict] = []
 
         def _fake_build_llm_client(config, **kwargs):
-            captured["config"] = config
-            captured["kwargs"] = kwargs
+            calls.append({"config": config, "kwargs": kwargs})
             return None  # offline fallback -- ingest_answers degrades cleanly
 
         monkeypatch.setattr(provider, "build_llm_client", _fake_build_llm_client)
@@ -42,7 +48,31 @@ class TestIngestAnswersProviderRouting:
         rc = cmd_ingest_answers(_args(tmp_path))
 
         assert rc == 0
-        assert captured["kwargs"].get("knob") == "resolve"
+        knobs = [call["kwargs"].get("knob") for call in calls]
+        assert "resolve" in knobs
+
+    def test_build_llm_client_also_called_with_classify_knob(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2515: the coordinate-answer scope-sameness judge
+        rides the ``classify`` knob — this is the wiring that makes a real
+        client reach :func:`athenaeum.decision_answers._apply_coordinate_answer`
+        in production instead of it always seeing ``client=None``."""
+        from athenaeum._cmd_pending import cmd_ingest_answers
+
+        calls: list[dict] = []
+
+        def _fake_build_llm_client(config, **kwargs):
+            calls.append({"config": config, "kwargs": kwargs})
+            return None
+
+        monkeypatch.setattr(provider, "build_llm_client", _fake_build_llm_client)
+
+        rc = cmd_ingest_answers(_args(tmp_path))
+
+        assert rc == 0
+        knobs = [call["kwargs"].get("knob") for call in calls]
+        assert "classify" in knobs
 
 
 class TestReresolveQuestionsProviderRouting:
