@@ -25,6 +25,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record pinned to the page's content hash. `athenaeum recompile show
   <plan id>` prints it. Shadow only: no page is written (athenaeum#2537).
 
+- `athenaeum recompile apply (--uid <uid> | --plan <id>)` applies a
+  `structure-only` recompile plan: writes the recompiled parent (its cited
+  summary, then its `parent` units verbatim, then a Sub-pages section) and
+  new sub-pages for each `child`/`merge` group, under the run lock (exits
+  75 on contention) and refusing a plan whose pinned content hash no longer
+  matches the live page. The parent keeps its identity — frontmatter stays
+  byte-identical outside `updated`/`description`/`related`/`needs_split`,
+  and a plan that would leave the parent nothing but links is refused
+  (`librarian.page_recompile.min_parent_chars`, default 200). Sub-pages get
+  new uids, are named `<Parent name> (<Sub-topic>)`, inherit access/tags/
+  coordinates (never wider access than the parent), and are linked both
+  ways through `page_relations.py` (`via: split`). Every unit is accounted
+  for exactly once across the parent, every sub-page, confirmed duplicates
+  and merged groups, checked before any write and again after re-reading
+  the written pages; a `merge` group's citations, footnote definitions and
+  length are validated and a `verify`-knob call confirms each merged
+  sentence is supported before anything is written —
+  `librarian.page_recompile.merge_near_duplicates` (default on) turns
+  merging off, re-planning a `merge` group as separate `child` placements
+  instead. The write is all-or-nothing: every sub-page lands before the
+  parent, written last, under a journal that a killed process's next run
+  rolls back; the apply appends one ledger record (pre/post content hash
+  and the pre-image git blob id per touched page, created uids, units per
+  destination, and each merged group's original unit ids/hashes) and makes
+  exactly one snapshot commit, so a merged section's originals stay
+  reachable. `name_structure`'s qualified-name scan no longer proposes
+  folding a `via: split` sub-page back into its parent while their combined
+  size is above `librarian.page_recompile.rejoin_fraction` (default 0.5)
+  of the page-size threshold (athenaeum#2540).
+
 - `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
   rename primitive: dry-run by default, `--apply` sets `name:`, appends the
   previous name to `aliases:` (deduplicated), rebuilds the recall index,
