@@ -561,6 +561,36 @@ class TestAC5UnitConservationAndByteIdentity:
         assert outcome.ok, outcome.issues
         assert outcome.post_write_issues == ()
 
+    def test_conservation_passes_when_the_childs_leading_heading_is_deeper_than_target_level(
+        self, wiki: Path
+    ) -> None:
+        """The child unit's own heading is ``### Pricing`` (deeper than
+        :func:`athenaeum.page_recompile_apply.renormalise_heading`'s
+        ``target_level=2``), so the body actually written to the sub-page
+        carries a re-levelled ``## Pricing`` -- athenaeum#2540's one
+        permitted structural edit. The post-write re-read check must
+        compare against that SAME re-levelled text, not the raw unit text,
+        or a perfectly correct apply is flagged with a spurious
+        ``post-write-unit-missing`` issue."""
+        body = (
+            _LEAD + "\n\n"
+            "### Pricing\n\n"
+            "Widgets cost ten pounds each, with a volume discount above one "
+            "thousand units ordered in a single purchase.[^src-2]\n\n"
+            "## Beta Corp\n\n"
+            "Beta Corp is a separate company that resells Acme widgets under "
+            "its own brand across the same market.[^src-3]\n\n"
+            "[^src-1]: **Source:** doc-a\n"
+            "[^src-2]: **Source:** doc-b\n"
+            "[^src-3]: **Source:** doc-c\n"
+        )
+        _write_page(wiki, uid="page0001", name="Acme", body=body)
+        _simple_plan(wiki, body=body)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+        assert outcome.ok, outcome.issues
+        assert outcome.post_write_issues == ()
+
 
 class TestAC5FootnoteLabelCollisionGuard:
     """AC5 permits footnote-label renumbering-on-collision as an allowed

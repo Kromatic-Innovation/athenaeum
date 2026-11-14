@@ -1123,7 +1123,7 @@ def write_apply(
         if reread_text != sp.text:
             post_issues.append(PlanIssue("post-write-byte-mismatch", sp.uid))
         for unit_id in sp.child_unit_ids:
-            if units_by_id_for_postcheck[unit_id].text not in reread_body:
+            if renormalise_heading(units_by_id_for_postcheck[unit_id].text) not in reread_body:
                 post_issues.append(PlanIssue("post-write-unit-missing", unit_id))
         marker_check = check_marker_resolution(reread_body)
         if not marker_check.ok:
