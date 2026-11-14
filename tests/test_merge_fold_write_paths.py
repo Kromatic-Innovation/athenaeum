@@ -532,6 +532,54 @@ class TestReferenceRewriteAndAliases:
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["aliases"] == ["already-there", "old-a"]
 
+    def test_fold_carries_merge_rejected_with_from_both_sides(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2546 AC2 ("carried through folds"): when C folds into A,
+        A keeps its OWN merge_rejected_with AND C's is merged into it, with
+        self-references (C naming A, the page it is folding into) dropped.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target,
+            name="Canonical",
+            body="old\n",
+            extra={"merge_rejected_with": '["unrelated-rejection"]'},
+        )
+        src_c = wiki / "old-c.md"
+        _write_wiki_page(
+            src_c,
+            name="Old C",
+            body="c\n",
+            # A self-reference (naming the page it is about to fold into)
+            # must be stripped, not carried forward as a self-link.
+            extra={"merge_rejected_with": '["c-own-rejection", "Canonical"]'},
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_c)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        rejected = meta.get("merge_rejected_with")
+        assert isinstance(rejected, list)
+        assert set(rejected) == {"unrelated-rejection", "c-own-rejection"}
+        assert "Canonical" not in rejected
+        assert "old-c" not in rejected
+
     def test_aliases_deduped_on_second_merge(self, tmp_path: Path) -> None:
         """A second fold that re-folds an already-aliased slug must not
         duplicate the aliases: entry."""

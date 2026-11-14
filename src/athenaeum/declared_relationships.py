@@ -35,6 +35,7 @@ convention for a stated boundary (matches ``athenaeum.dimensions``'s own
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from athenaeum.models import slugify
@@ -53,7 +54,7 @@ DECLARED_MERGE_REJECTION = "declared-merge-rejection"
 
 @dataclass(frozen=True)
 class DeclaredRelationshipFacts:
-    """The four frontmatter facts one side of a pair carries (athenaeum#167).
+    """The five frontmatter facts one side of a pair carries (athenaeum#167).
 
     ``name`` is this side's own declared slug (frontmatter ``name:``).
     ``refines`` and ``merge_rejected_with`` are the raw ``name:`` slug
@@ -61,12 +62,22 @@ class DeclaredRelationshipFacts:
     the ``name`` key out of each ``supersedes:`` record (mirrors
     :meth:`athenaeum.models.AutoMemoryFile.supersedes_names` — this
     primitive only ever needs the name, never ``as_of``/``reason``).
+
+    ``aliases`` (issue athenaeum#2546) is this side's OWN ``aliases:``
+    frontmatter — the identity trail the athenaeum#2488 rename primitive and
+    the fold write path both append to (a rename appends the previous
+    ``name:``; a fold appends the folded-away sources' slugs). Only read by
+    :func:`declared_relationship`'s ``merge_rejected_with`` branch, so a
+    link recorded against a page's OLD name, or against a page later
+    folded into this one, still resolves. Defaults to ``[]`` so every
+    pre-athenaeum#2546 caller that never passes it is unaffected.
     """
 
     name: str
     refines: list[str] = field(default_factory=list)
     supersedes_names: list[str] = field(default_factory=list)
     merge_rejected_with: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
 
 
 def declared_relationship(
@@ -97,7 +108,14 @@ def declared_relationship(
         from both of the above and must never be conflated with
         ``"declared-refinement"``: a refinement is an adjudicated
         specialization claim, a rejection is only "these are not the same
-        claim". ``None`` when no declaration applies.
+        claim". This branch (only) matches against each side's full
+        identity — its own slug UNION its ``aliases:`` slugs (issue
+        athenaeum#2546) — so a rejection recorded against a page's name
+        before a rename (athenaeum#2488), or against a page since folded
+        into one of ``a``/``b``, still fires: the rename/fold primitives
+        both append the old identity to ``aliases:``, so it is still
+        reachable from here without rewriting every historical link.
+        ``None`` when no declaration applies.
     """
     a_name = (a.name or "").strip()
     b_name = (b.name or "").strip()
@@ -128,6 +146,67 @@ def declared_relationship(
         return DECLARED_SUPERSESSION
     if b_slug in a_refines or a_slug in b_refines:
         return DECLARED_REFINEMENT
-    if b_slug in a_rejected or a_slug in b_rejected:
+    # Issue athenaeum#2546: identity-extended (alias-aware) match, so a
+    # rename or a prior fold cannot silently drop a rejection — see the
+    # docstring above. Empty when a side carries no aliases, so this is a
+    # strict superset of the pre-athenaeum#2546 ``{a_slug}``/``{b_slug}``-only
+    # check and changes nothing for any page that has never been renamed
+    # or folded.
+    a_identity = {a_slug} | {slugify(x) for x in a.aliases}
+    b_identity = {b_slug} | {slugify(x) for x in b.aliases}
+    if b_identity & a_rejected or a_identity & b_rejected:
         return DECLARED_MERGE_REJECTION
     return None
+
+
+def merge_rejection_conflict(
+    pages: Sequence[DeclaredRelationshipFacts],
+) -> tuple[int, int] | None:
+    """First pair of *pages* (by index) linked by ``merge_rejected_with``.
+
+    Issue athenaeum#2546: the shared check behind "honoured everywhere" —
+    the wiki-page clusterer, ``propose-fold`` and the fold-apply path in
+    :mod:`athenaeum.pending_merges` all need to refuse a candidate group
+    that would unite two mutually-rejected pages, directly or (since this
+    reuses :func:`declared_relationship`'s alias-extended identity) through
+    a fold chain. Rather than re-derive the pairwise check, this just calls
+    :func:`declared_relationship` over every combination and reports the
+    first pair whose rationale is :data:`DECLARED_MERGE_REJECTION` —
+    O(n^2) in the (always small — a merge candidate group, never the whole
+    corpus) size of *pages*.
+
+    Returns ``None`` when no two pages conflict.
+    """
+    n = len(pages)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if declared_relationship(pages[i], pages[j]) == DECLARED_MERGE_REJECTION:
+                return i, j
+    return None
+
+
+def unresolved_merge_rejected_with(
+    pages: Sequence[DeclaredRelationshipFacts],
+) -> list[tuple[str, str]]:
+    """``(page_name, entry)`` for every ``merge_rejected_with`` entry that
+    names no page in *pages* (issue athenaeum#2546 — the ``athenaeum doctor``
+    dangling-link check).
+
+    A page's OWN name and ``aliases:`` slugs both count as a live resolution
+    target (matching :func:`declared_relationship`'s identity-extended
+    match), so a link recorded against a page's pre-rename name, or a page
+    since folded into another, is NOT reported as dangling — only an entry
+    that resolves to nothing at all in *pages* is.
+    """
+    known: set[str] = set()
+    for p in pages:
+        name_slug = slugify((p.name or "").strip())
+        if name_slug:
+            known.add(name_slug)
+        known.update(slugify(a) for a in p.aliases)
+    out: list[tuple[str, str]] = []
+    for p in pages:
+        for entry in p.merge_rejected_with:
+            if slugify(entry) not in known:
+                out.append((p.name, entry))
+    return out

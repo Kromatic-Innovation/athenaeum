@@ -1547,6 +1547,30 @@ def _add_aliases_to_frontmatter(meta: dict, new_aliases: list[str]) -> dict:
     return out
 
 
+def _add_merge_rejected_with_to_frontmatter(meta: dict, new_entries: list[str]) -> dict:
+    """Return ``meta`` with ``new_entries`` unioned into ``merge_rejected_with:``.
+
+    Issue athenaeum#2546 ("carried through folds"): the sibling of
+    :func:`_add_aliases_to_frontmatter` for the OTHER field a fold must
+    carry forward — a never-merge link is adjudicated per claim, not per
+    file, so it must survive the file that held it folding away. Same
+    dedup-by-slug, order-preserving append; non-list/absent existing value
+    is treated as empty.
+    """
+    existing_raw = meta.get("merge_rejected_with")
+    existing = [str(r) for r in existing_raw] if isinstance(existing_raw, list) else []
+    existing_slugs = {slugify(r) for r in existing}
+    merged = list(existing)
+    for entry in new_entries:
+        if slugify(entry) not in existing_slugs:
+            existing_slugs.add(slugify(entry))
+            merged.append(entry)
+    out = dict(meta)
+    if merged:
+        out["merge_rejected_with"] = merged
+    return out
+
+
 def _purge_vector_ids(
     slugs: list[str],
     *,
@@ -2595,6 +2619,27 @@ def _apply_fold_into_existing(
     new_meta = _add_aliases_to_frontmatter(
         carried_meta, folded_slugs + identity_aliases
     )
+    # Issue athenaeum#2546 AC2 ("carried through folds"): the canonical
+    # keeps its OWN merge_rejected_with (read from prior_meta -- the draft
+    # body just overwritten into target_path in step 1 may carry none at
+    # all), and any merge_rejected_with a folded-away source held is
+    # merged into it too. Self-references are stripped: an entry naming
+    # the canonical itself, or naming one of THIS SAME fold's other
+    # sources, is moot the instant both land on the one surviving page --
+    # a page cannot be recorded as rejecting a merge with itself.
+    prior_rejected_raw = prior_meta.get("merge_rejected_with")
+    carried_rejections = (
+        [str(r) for r in prior_rejected_raw] if isinstance(prior_rejected_raw, list) else []
+    )
+    for src in folded_sources:
+        src_rejected_raw = source_metas[src].get("merge_rejected_with")
+        if isinstance(src_rejected_raw, list):
+            carried_rejections.extend(str(r) for r in src_rejected_raw)
+    self_identity_slugs = {target_slug} | {slugify(s) for s in folded_slugs}
+    carried_rejections = [
+        r for r in carried_rejections if slugify(r) not in self_identity_slugs
+    ]
+    new_meta = _add_merge_rejected_with_to_frontmatter(new_meta, carried_rejections)
     if new_meta != target_meta:
         final_target_text = render_frontmatter(new_meta) + target_body
         atomic_write_text(target_path, final_target_text)
@@ -3425,35 +3470,41 @@ def resolve_merge(
         # store (out of scope here).
         src_a = Path(target_pm.sources[0])
         src_b = Path(target_pm.sources[1])
-        # Prefer source B's frontmatter `name:` so renames / custom slugs
-        # round-trip; fall back to the filename stem (minus conventional
-        # prefix) only when the frontmatter is missing/unreadable.
-        other_name: str | None = None
-        if src_b.is_file():
-            try:
-                b_text = src_b.read_text(encoding="utf-8")
-                b_meta, _ = parse_frontmatter(b_text)
-                if isinstance(b_meta, dict):
-                    raw_name = b_meta.get("name")
-                    if isinstance(raw_name, str) and raw_name.strip():
-                        other_name = raw_name.strip()
-            except (OSError, UnicodeDecodeError):
-                other_name = None
-        if other_name is None:
-            other_stem = src_b.stem
-            for prefix in (
-                "feedback_",
-                "project_",
-                "reference_",
-                "user_",
-                "recall_",
-            ):
-                if other_stem.startswith(prefix):
-                    other_stem = other_stem[len(prefix) :]
-                    break
-            other_name = other_stem
+
+        def _frontmatter_name_or_stem(path: Path) -> str:
+            """Prefer the page's own frontmatter ``name:`` so renames /
+            custom slugs round-trip; fall back to the filename stem (minus
+            a conventional raw-intake prefix) only when the frontmatter is
+            missing/unreadable."""
+            if path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    meta, _ = parse_frontmatter(text)
+                    if isinstance(meta, dict):
+                        raw_name = meta.get("name")
+                        if isinstance(raw_name, str) and raw_name.strip():
+                            return raw_name.strip()
+                except (OSError, UnicodeDecodeError):
+                    pass
+            stem = path.stem
+            for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
+                if stem.startswith(prefix):
+                    return stem[len(prefix) :]
+            return stem
+
+        other_name = _frontmatter_name_or_stem(src_b)
+        self_name = _frontmatter_name_or_stem(src_a)
+        warnings: list[str] = []
+        # Issue athenaeum#2546 AC1: write the honest, non-directional
+        # declaration onto BOTH sources, each naming the other — not only
+        # source A as athenaeum#715 originally did. `declared_relationship`
+        # already suppressed the pair from either side carrying the link
+        # alone, but a fold-carry (`_apply_fold_write` below) only reads the
+        # SURVIVING side's own frontmatter, so whichever of A/B later gets
+        # folded away must have carried its own copy for the other's link
+        # to be there to carry forward.
         if not src_a.is_file():
-            warning = (
+            warnings.append(
                 "merge_rejection_write_failed: source A unavailable or unwritable; "
                 "merge will re-propose on next run"
             )
@@ -3461,10 +3512,25 @@ def resolve_merge(
             try:
                 _add_merge_rejection_declaration(src_a, other_name)
             except OSError:
-                warning = (
+                warnings.append(
                     "merge_rejection_write_failed: source A unavailable or "
                     "unwritable; merge will re-propose on next run"
                 )
+        if not src_b.is_file():
+            warnings.append(
+                "merge_rejection_write_failed: source B unavailable or unwritable; "
+                "merge will re-propose on next run"
+            )
+        else:
+            try:
+                _add_merge_rejection_declaration(src_b, self_name)
+            except OSError:
+                warnings.append(
+                    "merge_rejection_write_failed: source B unavailable or "
+                    "unwritable; merge will re-propose on next run"
+                )
+        if warnings:
+            warning = "; ".join(warnings)
 
     primary_parts = ["# Pending Merges", *rewritten]
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
