@@ -43,10 +43,11 @@ from athenaeum.config import (
     resolve_page_recompile_never_auto_types,
 )
 from athenaeum.page_recompile import find_recompile_candidates
-from athenaeum.page_recompile_apply import APPLY_KIND
+from athenaeum.page_recompile_apply import APPLY_KIND, ApplyOutcome
 from athenaeum.page_recompile_nightly import PageRecompileRunSummary, run_nightly_page_recompile
 from athenaeum.page_recompile_plan import (
     invalid_plan_skip_reason,
+    page_content_hash,
     read_page_recompile_ledger,
 )
 from athenaeum.page_recompile_queue import applied_last_7_days, list_pending_page_recompile_plans
@@ -488,3 +489,161 @@ class TestAC9Documentation:
         # Marked a Changed entry, not merely Added -- the AC's own wording.
         changed_section = unreleased.split("### Changed")[1]
         assert "athenaeum#2549" in changed_section
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2580 Finding 1: an exception from `write_apply` must not abort
+# the whole phase -- it is caught, logged, counted, and the run moves on,
+# the same contract the queueing path already honours and the function's
+# own docstring already promises for every OTHER per-page failure.
+# ---------------------------------------------------------------------------
+
+
+class TestFinding1AutoApplyExceptionDoesNotAbortTheRun:
+    def test_an_exception_is_caught_and_every_candidate_is_still_reached(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(wiki, count=2)
+        calls: list[str] = []
+
+        def _raiser(*_args: Any, **kwargs: Any) -> ApplyOutcome:
+            calls.append(str(kwargs.get("plan_id")))
+            raise RuntimeError("boom: simulated write_apply crash")
+
+        monkeypatch.setattr("athenaeum.page_recompile_apply.write_apply", _raiser)
+
+        summary = _run(wiki, config=_config())
+
+        # Both candidates were planned AND reached the (crashing) apply
+        # call -- the first exception did not take the rest of the run
+        # down with it.
+        assert summary.planned == 2
+        assert len(calls) == 2
+        assert summary.applied == 0
+        assert summary.apply_refused == 0  # a RAISE is not a refusal
+        assert len(summary.errors) == 2
+        assert all("RuntimeError" in error for error in summary.errors)
+        # Not silently swallowed into a false "applied" either.
+        assert list_pending_page_recompile_plans(wiki) == []
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2580 Finding 2: a deterministic apply-time refusal must not be
+# re-planned (and re-refused, and re-spent) every single night. Counted as
+# its own `apply_refused` figure -- NOT folded into `invalid` -- and
+# suppressed the same way an invalid plan already is.
+# ---------------------------------------------------------------------------
+
+
+def _refusing_write_apply(reason: str, uid: str) -> Any:
+    """A stand-in for ``write_apply`` that always refuses, so this test
+    exercises the PHASE's handling of a refusal without needing a real
+    ``compute_apply`` structural defect to provoke one."""
+
+    def _refuser(_wiki_root: Path, *, plan_id: str, **_kwargs: Any) -> ApplyOutcome:
+        return ApplyOutcome(ok=False, reason=reason, plan_id=plan_id, uid=uid)
+
+    return _refuser
+
+
+class TestFinding2DeterministicApplyRefusalIsSuppressed:
+    def test_a_refusal_counts_apply_refused_not_invalid_and_is_not_queued(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        uids = _seed(wiki, count=1)
+        monkeypatch.setattr(
+            "athenaeum.page_recompile_apply.write_apply",
+            _refusing_write_apply("target already has a parent", uids[0]),
+        )
+
+        summary = _run(wiki, config=_config())
+
+        assert summary.applied == 0
+        assert summary.apply_refused == 1
+        # NOT double-counted: this candidate already incremented `planned`
+        # (the drafted plan really was valid), and `invalid` feeds the
+        # same per-run budget check `planned` does.
+        assert summary.invalid == 0
+        assert summary.queued == 0
+        assert list_pending_page_recompile_plans(wiki) == []
+
+    def test_the_refused_page_is_skipped_until_its_content_hash_changes(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        uids = _seed(wiki, count=1)
+        monkeypatch.setattr(
+            "athenaeum.page_recompile_apply.write_apply",
+            _refusing_write_apply("target already has a parent", uids[0]),
+        )
+
+        first = _run(wiki, config=_config())
+        assert first.apply_refused == 1
+        assert invalid_plan_skip_reason(wiki, uid=uids[0], body=_BODY) != ""
+
+        # Second run, same bytes, same deterministic refusal in force: no
+        # model call at all -- the page is skipped instead of being
+        # replanned (and re-refused, and re-spending a
+        # max_auto_applies_per_run slot) for nothing.
+        second_client = _StubClient()
+        second = _run(wiki, client=second_client, config=_config())
+        assert second.apply_refused == 0
+        assert second.skipped_invalid == 1
+        assert second_client.call_count == 0
+
+        # Editing the page clears the suppression -- the hash no longer
+        # matches, so it is replanned (and, since the fake refuser still
+        # refuses unconditionally, refused again, freshly, over the NEW
+        # hash).
+        edited = _BODY.replace(
+            "across the same market.[^src-3]",
+            "across several neighbouring markets.[^src-3]",
+        )
+        assert edited != _BODY
+        _write_page(wiki, uid=uids[0], name="Acme 0", body=edited)
+        third = _run(wiki, client=_client_for(edited), config=_config())
+        assert third.skipped_invalid == 0
+        assert third.apply_refused == 1
+
+    def test_a_later_valid_plan_record_clears_an_earlier_refusal(self, wiki: Path) -> None:
+        """The ledger is append-only and read in ORDER, across BOTH kinds
+        together: a later ``PLAN_KIND`` record whose own plan is valid,
+        over the SAME content hash, clears an earlier
+        ``APPLY_REFUSAL_KIND`` suppression -- the newest word on a given
+        hash governs, regardless of which kind wrote it. (The nightly
+        phase's own skip check would never reach this later-record state
+        in one run -- it refuses to re-plan a page the earlier record
+        already suppresses -- so this is a direct ledger-level test of
+        :func:`invalid_plan_skip_reason` itself, the same layer
+        ``tests/test_page_recompile_apply.py``'s ``_record_plan`` already
+        operates at.)"""
+        from athenaeum.page_recompile_plan import record_apply_refusal
+        from tests.test_page_recompile_apply import _record_plan
+
+        uid = "page0000"
+        chash = page_content_hash(_BODY)
+
+        record_apply_refusal(
+            wiki,
+            plan_id="stale-refusal",
+            uid=uid,
+            content_hash=chash,
+            reason="target already has a parent",
+        )
+        assert invalid_plan_skip_reason(wiki, uid=uid, body=_BODY) != ""
+
+        ids = _unit_ids(_BODY)
+        _record_plan(
+            wiki,
+            uid=uid,
+            body=_BODY,
+            assignments=[
+                {"unit": ids[0], "disposition": "parent"},
+                {"unit": ids[1], "disposition": "child:g1"},
+                {"unit": ids[2], "disposition": "parent"},
+            ],
+            groups=[
+                {"key": "g1", "name": "Pricing", "description": "x", "confidence": 0.9}
+            ],
+        )
+
+        assert invalid_plan_skip_reason(wiki, uid=uid, body=_BODY) == ""

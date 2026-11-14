@@ -126,6 +126,7 @@ from athenaeum.page_recompile_plan import (
     SCOPE_STRUCTURE_ONLY,
     invalid_plan_skip_reason,
     page_content_hash,
+    record_apply_refusal,
 )
 from athenaeum.page_recompile_queue import (
     build_plan_outline,
@@ -228,6 +229,22 @@ class PageRecompileRunSummary:
     #: spent this run. Neither applied nor queued -- it waits for a later
     #: run, when the bound resets.
     skipped_auto_apply_budget: int = 0
+    #: Issue athenaeum#2580 (a Seer finding on this slice's own PR): an
+    #: auto-apply-eligible plan that ``write_apply`` refused at write time
+    #: (:func:`~athenaeum.page_recompile_apply.compute_apply`'s deeper
+    #: validation catching something the planner's own checks did not --
+    #: for example a ``move`` target that already has a parent).
+    #: Deliberately its OWN counter, not folded into :attr:`invalid`: this
+    #: candidate already incremented :attr:`planned` (the DRAFTED plan
+    #: really was valid), and the per-run page budget check above reads
+    #: ``planned + invalid`` -- also counting it ``invalid`` here would
+    #: charge the same candidate against that budget twice. The page is
+    #: also suppressed going forward
+    #: (:func:`~athenaeum.page_recompile_plan.record_apply_refusal` /
+    #: :func:`~athenaeum.page_recompile_plan.invalid_plan_skip_reason`), so
+    #: a run where this count does not grow means the backlog is not stuck
+    #: re-spending on the same deterministic refusal.
+    apply_refused: int = 0
     #: Model calls this phase made, measured off the run-level usage counter.
     api_calls: int = 0
     #: Page-body characters planned over.
@@ -249,6 +266,7 @@ class PageRecompileRunSummary:
             "invalid": self.invalid,
             "applied": self.applied,
             "applied_plans": list(self.applied_plans),
+            "apply_refused": self.apply_refused,
             "skipped_budget": self.skipped_budget,
             "skipped_deadline": self.skipped_deadline,
             "skipped_suppressed": self.skipped_suppressed,
@@ -511,23 +529,44 @@ def run_nightly_page_recompile(
                 # been spent.
                 summary.skipped_auto_apply_budget += 1
                 continue
-            outcome = write_apply(
-                wiki_root,
-                plan_id=result.plan_id,
-                # The SAME client already built for the `page_recompile`
-                # knob, reused for the merge-verify call `write_apply` may
-                # make -- exactly how `plan_page` already reuses it for
-                # its OWN internal verify step (see this module's
-                # docstring). No *verdict* is ever passed: a structure-only
-                # plan does not need one (`write_apply` only consults
-                # *verdict* for a cross-page plan), so this call forges
-                # nothing and the athenaeum#2548 approval interlock is
-                # never touched.
-                client=client,
-                config=config,
-                ledger_path=ledger_path,
-                now=now,
-            )
+            try:
+                outcome = write_apply(
+                    wiki_root,
+                    plan_id=result.plan_id,
+                    # The SAME client already built for the `page_recompile`
+                    # knob, reused for the merge-verify call `write_apply`
+                    # may make -- exactly how `plan_page` already reuses it
+                    # for its OWN internal verify step (see this module's
+                    # docstring). No *verdict* is ever passed: a
+                    # structure-only plan does not need one (`write_apply`
+                    # only consults *verdict* for a cross-page plan), so
+                    # this call forges nothing and the athenaeum#2548
+                    # approval interlock is never touched.
+                    client=client,
+                    config=config,
+                    ledger_path=ledger_path,
+                    now=now,
+                )
+            except Exception as exc:  # noqa: BLE001 - the plan is already
+                # recorded; a defect in the WRITE must not lose the run,
+                # exactly as the queueing failure just below already
+                # guards (issue athenaeum#2580, a Seer finding on this
+                # slice's own PR: `write_apply` does filesystem writes, a
+                # git snapshot commit and possibly a model verify call --
+                # any of which can raise -- and this function's own
+                # docstring promises "a page the planner could not plan is
+                # counted invalid... and the pass moves on"; this was the
+                # one path that promise did not yet cover).
+                log.warning(
+                    "page-recompile: auto-apply of plan %s raised (%s): %s",
+                    result.plan_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                summary.errors.append(
+                    f"{candidate.uid}: auto-apply raised {type(exc).__name__}"
+                )
+                continue
             if outcome.ok:
                 summary.applied += 1
                 summary.applied_plans.append(
@@ -539,18 +578,32 @@ def run_nightly_page_recompile(
                     }
                 )
             else:
-                # The plan is already recorded (as `planned`); a write-time
-                # refusal (a race on the content hash, a post-validation
-                # issue `compute_apply` catches that the planner's own
-                # checks did not) is reported and the run moves on, the
-                # same "already counted, do not also lose the run" rule the
-                # queueing failure just below follows.
+                # Issue athenaeum#2580: a write-time refusal from
+                # `compute_apply`'s deeper validation can be a
+                # DETERMINISTIC dead end for these exact bytes (the
+                # issue's own example: a `move` target that already has a
+                # parent) -- not a transient hiccup, so it must not be
+                # re-planned, and the model re-called, on every
+                # subsequent run. Suppressed the same way an invalid plan
+                # already is (`record_apply_refusal` /
+                # `invalid_plan_skip_reason`), pinned to this page's
+                # CURRENT content hash so an edit lifts the suppression on
+                # its own.
                 log.warning(
-                    "page-recompile: auto-apply of plan %s failed: %s",
+                    "page-recompile: auto-apply of plan %s refused: %s",
                     result.plan_id,
                     outcome.reason,
                 )
                 summary.errors.append(f"{candidate.uid}: auto-apply refused: {outcome.reason}")
+                summary.apply_refused += 1
+                record_apply_refusal(
+                    wiki_root,
+                    plan_id=result.plan_id,
+                    uid=candidate.uid,
+                    content_hash=page_content_hash(body),
+                    reason=outcome.reason,
+                    ledger_path=ledger_path,
+                )
             continue
 
         if not queues_items or dry_run:
@@ -587,13 +640,14 @@ def run_nightly_page_recompile(
         or summary.queued
         or summary.invalid
         or summary.applied
+        or summary.apply_refused
         or summary.skipped_budget
         or summary.skipped_already_queued
     ):
         log.info(
             "page-recompile: mode=%s backlog=%d budget=%d%s planned=%d queued=%d "
-            "applied=%d invalid=%d skipped_budget=%d skipped_suppressed=%d "
-            "skipped_invalid=%d skipped_already_queued=%d "
+            "applied=%d apply_refused=%d invalid=%d skipped_budget=%d "
+            "skipped_suppressed=%d skipped_invalid=%d skipped_already_queued=%d "
             "skipped_auto_apply_budget=%d skipped_deadline=%d calls=%d",
             mode,
             summary.backlog,
@@ -602,6 +656,7 @@ def run_nightly_page_recompile(
             summary.planned,
             summary.queued,
             summary.applied,
+            summary.apply_refused,
             summary.invalid,
             summary.skipped_budget,
             summary.skipped_suppressed,
