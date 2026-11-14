@@ -55,8 +55,9 @@ def add_recompile_subparser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "recompile",
         help="Page-recompile maintenance pass (issues athenaeum#2534, "
-        "athenaeum#2537): a read-only candidate scan, a shadow-only "
-        "planner, and a plan viewer. Writes no page.",
+        "athenaeum#2537, athenaeum#2540, athenaeum#2541): a read-only "
+        "candidate scan, a shadow-only planner, a plan viewer, and the "
+        "applier and its undo, which DO write pages.",
     )
     parser.set_defaults(func=_cmd_recompile_dispatch)
     sub = parser.add_subparsers(dest="recompile_target")
