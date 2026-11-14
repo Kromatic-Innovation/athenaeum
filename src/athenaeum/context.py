@@ -723,7 +723,7 @@ def _resolve_parent_names(candidates: list[Candidate], wiki_root: Path | None) -
         page_path = wiki_root / c.filename
         try:
             text = page_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         meta, _body = parse_frontmatter(text)
         if not meta:
