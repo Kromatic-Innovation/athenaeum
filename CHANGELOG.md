@@ -39,10 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applies the plan through the recompile applier under the run lock;
   `reject` writes nothing and skips the page until its content hash changes;
   an answer against a page that changed since the plan was drafted is not
-  applied, drops out of the queue, and the page is re-planned. The run
-  summary reports `planned`, `queued`, `invalid`, `skipped_budget` and
-  `backlog`, spend is attributed per knob, and `athenaeum status` now fills
-  "plans awaiting approval" and "nights since progress" (athenaeum#2547).
+  applied, drops out of the queue, and the page is re-planned. A page that
+  already has an unanswered item pinned to its current content is skipped
+  before any model call, so it neither re-spends nor consumes a page-budget
+  slot the rest of the backlog needs. The run summary reports `planned`,
+  `queued`, `invalid`, `skipped_budget` and `backlog`, spend is attributed
+  per knob, and `athenaeum status` now fills "plans awaiting approval" and
+  "nights since progress" (athenaeum#2547).
 
 - `athenaeum recompile plan --uid <uid>` plans the recompilation of one
   oversized page — a model labels its units on the `classify` knob (cached by

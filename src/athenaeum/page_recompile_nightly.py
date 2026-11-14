@@ -86,6 +86,7 @@ from athenaeum.config import (
     resolve_page_size_threshold_chars,
 )
 from athenaeum.page_recompile import RecompileCandidate, find_recompile_candidates
+from athenaeum.page_recompile_plan import page_content_hash
 from athenaeum.page_recompile_queue import (
     build_plan_outline,
     list_pending_page_recompile_plans,
@@ -156,6 +157,13 @@ class PageRecompileRunSummary:
     skipped_suppressed: int = 0
     #: Candidates not planned because ``max_open_items`` was already reached.
     skipped_open_items: int = 0
+    #: Candidates skipped because THIS page already has an unanswered plan
+    #: pinned to its current content. Distinct from
+    #: :attr:`skipped_open_items`, which is the queue-wide cap: this one is
+    #: per page, and without it a handful of unanswered pages would consume
+    #: the whole page budget every night and the rest of the backlog would
+    #: never advance.
+    skipped_already_queued: int = 0
     #: Model calls this phase made, measured off the run-level usage counter.
     api_calls: int = 0
     #: Page-body characters planned over.
@@ -179,6 +187,7 @@ class PageRecompileRunSummary:
             "skipped_deadline": self.skipped_deadline,
             "skipped_suppressed": self.skipped_suppressed,
             "skipped_open_items": self.skipped_open_items,
+            "skipped_already_queued": self.skipped_already_queued,
             "api_calls": self.api_calls,
             "input_chars": self.input_chars,
         }
@@ -261,10 +270,20 @@ def run_nightly_page_recompile(
         return summary
 
     queues_items = mode in _QUEUEING_MODES
+    # uid -> the content hash an unanswered plan for that page is pinned to.
+    # Read ONCE, before the loop: it cannot change under us (this phase runs
+    # under the run lock and is the only writer of queued items here), and
+    # re-reading the ledger per candidate would be a quadratic read over a
+    # file that grows with every plan ever drafted.
+    open_plan_hashes: dict[str, str] = {}
     if queues_items:
-        open_items = len(
-            list_pending_page_recompile_plans(wiki_root, ledger_path=ledger_path)
-        )
+        pending = list_pending_page_recompile_plans(wiki_root, ledger_path=ledger_path)
+        for record in pending:
+            uid = str(record.get("uid") or "")
+            pinned = record.get("content_hash")
+            if uid and isinstance(pinned, str) and pinned:
+                open_plan_hashes[uid] = pinned
+        open_items = len(pending)
         max_open = resolve_page_recompile_max_open_items(config)
         if open_items >= max_open:
             # No model call at all: drafting a plan that cannot be raised is
@@ -324,6 +343,20 @@ def run_nightly_page_recompile(
         )
         if suppressed:
             summary.skipped_suppressed += 1
+            continue
+        # This page already has an unanswered plan pinned to exactly these
+        # bytes, so re-planning it would spend a plan and a verify call to
+        # arrive at the identical plan id -- and would burn a slot of the
+        # page budget that a page further down the backlog needs. Checked
+        # BEFORE any model call, so an unanswered page costs nothing on
+        # every subsequent night.
+        #
+        # A CHANGED page is deliberately re-planned rather than skipped: its
+        # new content hash makes a new plan, and the old item -- pinned to
+        # bytes the page no longer holds -- is one no answer could have
+        # applied anyway (it resolves as `stale` when answered).
+        if open_plan_hashes.get(candidate.uid) == page_content_hash(body):
+            summary.skipped_already_queued += 1
             continue
 
         summary.input_chars += candidate.chars
@@ -392,11 +425,17 @@ def run_nightly_page_recompile(
         summary.queued += 1
 
     summary.api_calls = max(0, _api_calls(usage) - calls_at_start)
-    if summary.planned or summary.queued or summary.invalid or summary.skipped_budget:
+    if (
+        summary.planned
+        or summary.queued
+        or summary.invalid
+        or summary.skipped_budget
+        or summary.skipped_already_queued
+    ):
         log.info(
             "page-recompile: mode=%s backlog=%d budget=%d%s planned=%d queued=%d "
-            "invalid=%d skipped_budget=%d skipped_suppressed=%d skipped_deadline=%d "
-            "calls=%d",
+            "invalid=%d skipped_budget=%d skipped_suppressed=%d "
+            "skipped_already_queued=%d skipped_deadline=%d calls=%d",
             mode,
             summary.backlog,
             budget,
@@ -406,6 +445,7 @@ def run_nightly_page_recompile(
             summary.invalid,
             summary.skipped_budget,
             summary.skipped_suppressed,
+            summary.skipped_already_queued,
             summary.skipped_deadline,
             summary.api_calls,
         )

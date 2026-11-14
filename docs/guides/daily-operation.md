@@ -199,6 +199,12 @@ The larger opening budget is not a second knob you have to remember to change:
 it applies automatically while the corpus still holds an over-ceiling page and
 drops to the steady budget on the first run where none does.
 
+A page that already has an unanswered item pinned to its current content is
+skipped before any model call, so an item you have not got to yet costs
+nothing on later nights and does not consume a slot the rest of the backlog
+needs. Edit that page and it is re-planned: the item was pinned to bytes the
+page no longer holds, so no answer to it could have been applied anyway.
+
 The pass takes no reserved share of the run's wall-clock budget. It runs last,
 so it simply uses what the earlier phases left, is skipped entirely when the
 run deadline has already tripped, and re-checks the deadline between pages.

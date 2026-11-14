@@ -1129,6 +1129,212 @@ class TestAC8Answers:
         assert outcome.error_code in ("already_resolved", "superseded")
 
 
+class TestAC8MergeCarryingPlanIsVerifiable:
+    """Async-reviewer finding on this PR, HIGH: ``write_apply`` records a
+    ``merge-verify-unavailable`` issue and refuses the WHOLE plan when it is
+    given no client, so approving any plan carrying a ``merge`` group -- the
+    planner's default behaviour -- would always have been refused. AC8 says
+    approve applies the plan through the applier, not "applies the subset of
+    plans that merge nothing"."""
+
+    def _queue_merge_plan(self, wiki: Path) -> str:
+        """Queue an item whose outline reports a merged group, without
+        needing the planner to produce a merge: the client decision is read
+        off the OUTLINE, which is the contract under test."""
+        from athenaeum.page_recompile_plan import (
+            MergedSection,
+            PlanGroup,
+            RecompilePlan,
+            append_plan_record,
+            page_content_hash,
+        )
+        from athenaeum.page_recompile_queue import queue_plan_for_approval
+
+        _seed(wiki, count=1)
+        ids = _unit_ids(_BODY)
+        plan = RecompilePlan(
+            uid="page0000",
+            content_hash=page_content_hash(_BODY),
+            dispositions=tuple((unit_id, "merge:g1") for unit_id in ids),
+            groups=(PlanGroup(key="g1", name="G1", description="d", confidence=1.0),),
+            # The merged text must carry EVERY citation from the merged
+            # units, or `compute_apply` refuses on `merge-dropped-citation`
+            # before it ever reaches the verify gate this class is about.
+            merges=(
+                MergedSection(
+                    group="g1",
+                    text=(
+                        "Acme builds widgets.[^src-1] They cost ten "
+                        "pounds.[^src-2] Beta Corp resells them.[^src-3]"
+                    ),
+                    unit_ids=tuple(ids),
+                ),
+            ),
+            page_actions=(),
+            summary=_SUMMARY,
+            scope="structure-only",
+            issues=(),
+            verified=True,
+        )
+        outline = build_plan_outline(plan, segment_page(_BODY).units)
+        assert outline["groups"][0]["merged"] is True
+        # Record the plan too, not just the queue item: `write_apply`
+        # resolves the plan by id out of the SAME ledger, so a queued item
+        # with no plan record behind it would refuse for the wrong reason.
+        plan_id = append_plan_record(plan, wiki)
+        record = queue_plan_for_approval(
+            wiki, plan_id=plan_id, plan=plan, outline=outline
+        )
+        return str(record["id"])
+
+    def test_a_merge_carrying_plan_gets_a_verify_client(self, wiki: Path) -> None:
+        from athenaeum.decision_answers import _page_recompile_verify_client
+        from athenaeum.page_recompile_queue import find_queued_plan
+
+        plan_id = self._queue_merge_plan(wiki)
+        item = find_queued_plan(wiki, plan_id=plan_id)
+        assert item is not None
+        sentinel = object()
+        with patch(
+            "athenaeum.provider.build_llm_client", return_value=sentinel
+        ) as mock_build:
+            resolved = _page_recompile_verify_client(item, _config())
+        mock_build.assert_called_once()
+        assert mock_build.call_args.kwargs["knob"] == "verify"
+        assert resolved is sentinel
+
+    def test_a_plan_with_no_merge_group_builds_no_client(self, wiki: Path) -> None:
+        """The module's own "no model call" invariant still holds for every
+        answer that does not need the check -- which is most of them."""
+        from athenaeum.decision_answers import _page_recompile_verify_client
+        from athenaeum.page_recompile_queue import find_queued_plan
+
+        _seed(wiki, count=1)
+        _run(wiki)
+        plan_id = str(list_pending_page_recompile_plans(wiki)[0]["id"])
+        item = find_queued_plan(wiki, plan_id=plan_id)
+        assert item is not None
+        with patch("athenaeum.provider.build_llm_client") as mock_build:
+            assert _page_recompile_verify_client(item, _config()) is None
+        mock_build.assert_not_called()
+
+    def test_the_applier_receives_that_client_on_approve(self, wiki: Path) -> None:
+        """End to end through the real answer path: the client reaches
+        ``write_apply``, which is where the refusal came from."""
+        plan_id = self._queue_merge_plan(wiki)
+        stub = _StubClient()
+        seen: dict[str, Any] = {}
+
+        def _fake_write_apply(_wiki: Path, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            from athenaeum.page_recompile_apply import ApplyOutcome
+
+            return ApplyOutcome(ok=True, reason="applied", plan_id=plan_id, uid="page0000")
+
+        with (
+            patch("athenaeum.provider.build_llm_client", return_value=stub),
+            patch("athenaeum.page_recompile_apply.write_apply", _fake_write_apply),
+        ):
+            outcome = _answer(
+                wiki, decision_id=plan_id, verdict=VERDICT_APPROVE, lock=_FakeLock()
+            )
+        assert outcome.applied is True, outcome.message
+        assert seen["client"] is stub
+
+    def test_no_configured_client_refuses_and_leaves_the_item_open(
+        self, wiki: Path
+    ) -> None:
+        """With nothing configured ``build_llm_client`` returns ``None``; the
+        applier then reports ``merge-verify-unavailable``. The honest
+        outcome -- and the item must stay answerable rather than be closed
+        with nothing done."""
+        plan_id = self._queue_merge_plan(wiki)
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
+            outcome = _answer(
+                wiki, decision_id=plan_id, verdict=VERDICT_APPROVE, lock=_FakeLock()
+            )
+        assert outcome.applied is False
+        assert outcome.error_code == "apply_refused"
+        assert "merge-verify-unavailable" in outcome.message
+        assert len(list_pending_page_recompile_plans(wiki)) == 1
+
+
+class TestAlreadyQueuedPageCostsNothing:
+    """Async-reviewer finding on this PR, MEDIUM. A page with an unanswered
+    plan pinned to its current bytes must not be re-planned: the plan id
+    would be identical, so the spend buys nothing -- and it would consume a
+    slot of the page budget that a page further down the backlog needs."""
+
+    def test_an_unanswered_page_is_skipped_and_costs_nothing(
+        self, wiki: Path
+    ) -> None:
+        _seed(wiki, count=1)
+        first = _StubClient()
+        assert _run(wiki, client=first).queued == 1
+        assert first.call_count > 0
+
+        second = _StubClient()
+        summary = _run(wiki, client=second)
+        assert summary.skipped_already_queued == 1
+        assert summary.planned == 0
+        assert second.call_count == 0
+        assert len(list_pending_page_recompile_plans(wiki)) == 1
+
+    def test_the_budget_still_reaches_the_rest_of_the_backlog(
+        self, wiki: Path
+    ) -> None:
+        """The defect this closes: with the first page queued, a one-page
+        budget must spend itself on the SECOND page, not re-plan the first."""
+        _seed(wiki, count=1)
+        config = _config(max_pages_per_run=1)
+        assert _run(wiki, config=config).queued == 1
+
+        _write_page(wiki, uid="page0001", name="Acme 1", body=_BODY)
+        summary = _run(wiki, config=config)
+        assert summary.skipped_already_queued == 1
+        assert summary.planned == 1
+        assert summary.queued == 1
+        queued_uids = {
+            str(r.get("uid")) for r in list_pending_page_recompile_plans(wiki)
+        }
+        assert queued_uids == {"page0000", "page0001"}
+
+    def test_an_edited_page_is_replanned_rather_than_skipped(
+        self, wiki: Path
+    ) -> None:
+        """The skip is pinned to the CONTENT HASH, not the uid: an item
+        drafted over bytes the page no longer holds is one no answer could
+        apply, so the page must get a fresh plan."""
+        _seed(wiki, count=1)
+        assert _run(wiki).queued == 1
+
+        path = wiki / "page0000.md"
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        edited = body + "\nSomeone edited this page.[^src-1]\n"
+        path.write_text(render_frontmatter(meta) + "\n" + edited, encoding="utf-8")
+
+        summary = _run(wiki, client=_client_for(edited))
+        assert summary.skipped_already_queued == 0
+        assert summary.planned == 1
+        assert summary.queued == 1
+
+    def test_shadow_mode_does_not_apply_the_skip(self, wiki: Path) -> None:
+        """`shadow` raises no items, so there is no queue for it to consult
+        -- it keeps re-drafting, which is what a shadow pass is for."""
+        _seed(wiki, count=1)
+        assert _run(wiki).queued == 1
+        summary = _run(wiki, config=_config(mode="shadow"))
+        assert summary.skipped_already_queued == 0
+        assert summary.planned == 1
+
+    def test_the_counter_reaches_the_run_summary(self, wiki: Path) -> None:
+        _seed(wiki, count=1)
+        _run(wiki)
+        summary = _run(wiki)
+        assert "skipped_already_queued" in summary.as_profile_fields()
+        assert summary.to_dict()["skipped_already_queued"] == 1
+
+
 # ---------------------------------------------------------------------------
 # AC9: the heartbeat is refreshed between pages.
 # ---------------------------------------------------------------------------
