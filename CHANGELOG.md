@@ -339,6 +339,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists to supply a real actor); an answer with no human signal keeps the
   pre-existing `pipeline:merge-<decision>` stamp unchanged (athenaeum#2523).
 
+- `_resolve_parent_names` now catches `(OSError, UnicodeDecodeError)` around
+  its page read, matching the convention at ~140 other read sites in
+  `src/athenaeum`. `UnicodeDecodeError` is a `ValueError` subclass, not an
+  `OSError`, so a page with invalid UTF-8 bytes used to propagate out of
+  the loop instead of being skipped like any other unreadable candidate —
+  on the per-turn recall hook path, one corrupt page degraded the context
+  build for every turn (athenaeum#2570).
+
 ### Removed
 
 - Removed the one-time warnings about a spend ledger, LLM-schema
