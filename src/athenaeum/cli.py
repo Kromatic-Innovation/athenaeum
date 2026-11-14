@@ -118,10 +118,6 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_corrections_trust_dryrun_subparser",
     ),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
-    "split-oversize": (
-        "athenaeum._cmd_split_oversize",
-        "add_split_oversize_subparser",
-    ),
     "recover-parked": (
         "athenaeum._cmd_recover_parked",
         "add_recover_parked_subparser",
@@ -249,7 +245,6 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_schedule import add_schedule_subparser
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
-    from athenaeum._cmd_split_oversize import add_split_oversize_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
@@ -278,7 +273,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims
     add_decay_subparser(subparsers)  # decay-sweep
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
-    add_split_oversize_subparser(subparsers)  # split-oversize (issue athenaeum#2078)
     add_recover_parked_subparser(subparsers)  # recover-parked (issue athenaeum#2078)
     add_quarantine_subparser(subparsers)  # quarantine requeue (issue athenaeum#2075)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
@@ -413,9 +407,35 @@ def _build_lazy_parser(command: str) -> argparse.ArgumentParser:
     return parser
 
 
+#: Top-level verbs removed outright (no deprecation period) that still get
+#: a specific, helpful message naming their replacement rather than
+#: argparse's generic "invalid choice" error -- issue athenaeum#2550 AC5.
+#: Checked in :func:`main` BEFORE any parser is built (same pre-parse peek
+#: :func:`_peek_subcommand` already does for the fast-dispatch path), so a
+#: removed name is never re-added to any parser's ``choices`` just to carry
+#: this message. Earlier one-shot-repair removals (issue athenaeum#2466:
+#: ``paste-cleanup``, ``dedup-oversize-escalations``, the three
+#: ``auto-memory`` sub-verbs) deliberately got NO entry here and still
+#: don't -- they predate this mechanism, and retrofitting it onto them is
+#: out of this issue's scope; see ``tests/test_cli.py``'s
+#: ``TestSevenOneShotRepairCommandsRemoved`` for their own, plainer,
+#: "unknown choice" coverage.
+_REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT: dict[str, str] = {
+    "split-oversize": "athenaeum recompile",
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     command = _peek_subcommand(argv)
+
+    if command in _REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT:
+        replacement = _REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT[command]
+        print(
+            f"athenaeum: '{command}' was removed; use '{replacement}' instead.",
+            file=sys.stderr,
+        )
+        return 2
 
     if command is None and "--version" in argv and "-h" not in argv and "--help" not in argv:
         # No subcommand token, and no help flag that could out-race

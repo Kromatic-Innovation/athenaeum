@@ -264,11 +264,12 @@ MODULE_LAYER: dict[str, int] = {
     "recurring_claims": 4,
     "repair": 4,
     "retire": 4,
-    "oversize_split": 4,  # athenaeum#2078 AC3: split pass over flagged pages
     # Issue athenaeum#2534 (page-recompile slice S1): the candidate scan +
-    # unit segmenter, sibling to page_decompose.py/oversize_split.py (own
-    # docstring states "Layering: L4 domain/pipeline, same layer as
-    # athenaeum.oversize_split and athenaeum.page_decompose").
+    # unit segmenter, sibling to page_decompose.py (own docstring states
+    # "Layering: L4 domain/pipeline, same layer as
+    # athenaeum.page_decompose"). Its former same-layer sibling
+    # athenaeum.oversize_split (and the "oversize_split": 4 entry that used
+    # to sit here) was retired by issue athenaeum#2550.
     "page_recompile": 4,
     # Issue athenaeum#2537 (page-recompile slice S3): the planner that routes
     # units by id and writes the parent summary (own docstring states
@@ -412,7 +413,6 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_receipts": 5,  # issue athenaeum#2039
     "_cmd_recompile": 5,  # issue athenaeum#2534
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
-    "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
     "_cmd_schedule": 5,  # issue athenaeum#2304
     "_cmd_schema": 5,
