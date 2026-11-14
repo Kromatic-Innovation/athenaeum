@@ -46,6 +46,7 @@ from athenaeum.page_recompile_plan import (
     validate_plan,
 )
 from athenaeum.page_recompile_undo import (
+    REASON_ALREADY_UNDONE,
     REASON_NO_APPLY_RECORD,
     REASON_PAGE_CHANGED,
     REASON_PAGE_MISSING,
@@ -56,6 +57,7 @@ from athenaeum.page_recompile_undo import (
     compute_undo,
     find_apply_record,
     find_inbound_links,
+    last_action_for_plan,
     read_git_blob,
     write_undo,
 )
@@ -171,6 +173,24 @@ def _write_page(wiki: Path, *, uid: str, name: str, body: str, **extra: Any) -> 
     meta.update(extra)
     path = wiki / f"{uid}.md"
     path.write_text(render_frontmatter(meta) + "\n" + body, encoding="utf-8")
+    return path
+
+
+def _write_page_non_canonically(wiki: Path, *, uid: str, name: str, body: str) -> Path:
+    """Write a page with NO blank line after the closing ``---``.
+
+    The real corpus's other shape, and the common one: a seeded 600-page
+    sample of a live 26,660-page wiki found 6.0% of pages written this way.
+    It parses to the same frontmatter and the same body as the canonical
+    form -- so the same plan applies to it -- but its BYTES differ, which is
+    the whole point: a pre-image recorded by re-rendering the parsed
+    frontmatter would not match them.
+    """
+    wiki.mkdir(parents=True, exist_ok=True)
+    meta: dict[str, Any] = {"uid": uid, "type": "reference", "name": name, "access": "internal"}
+    path = wiki / f"{uid}.md"
+    path.write_text(render_frontmatter(meta) + body, encoding="utf-8")
+    assert path.read_text(encoding="utf-8") != render_frontmatter(meta) + "\n" + body
     return path
 
 
@@ -344,6 +364,34 @@ class TestAC1DirectUndoRestoresTheWiki:
         # The ledger is the only non-page file, and it is append-only by
         # design -- nothing else was left behind.
         assert _infra_files(wiki) == {"_page_recompiles.jsonl"}
+
+    def test_a_page_written_non_canonically_still_undoes_directly(self, wiki: Path) -> None:
+        """AC1 on the corpus's OTHER page shape (no blank line after the
+        closing ``---``), which is ~6% of a real wiki.
+
+        The canonical-fixture round-trip test above cannot catch this: it
+        passes whenever the pre-image is recorded by RE-RENDERING the parsed
+        frontmatter, because for a canonically-written page the re-render
+        happens to reproduce the bytes. For this page it does not -- so a
+        re-rendered pre-image names a git blob that was never written, the
+        lookup misses, and a perfectly undoable apply degrades to queued.
+        This test is the one that fails in that case.
+        """
+        knowledge = wiki.parent
+        _init_git_repo(knowledge)
+        page = _write_page_non_canonically(wiki, uid="page0001", name="Acme", body=_BODY)
+        _commit_all(knowledge, "seed")
+        before = _page_bytes(wiki)
+        raw_before = page.read_bytes()
+
+        plan_id = _simple_plan(wiki)
+        assert write_apply(wiki, plan_id=plan_id, client=None, config=None).ok
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
+        assert _page_bytes(wiki) == before
+        assert page.read_bytes() == raw_before
 
     def test_the_created_sub_page_file_is_gone(self, wiki: Path) -> None:
         plan_id, _before, _snapshot = _applied(wiki)
@@ -1021,6 +1069,47 @@ class TestOutOfScopeAndDefensive:
         assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
         assert outcome.deleted_uids == ()
         assert _page_bytes(wiki) == before
+
+    def test_a_second_undo_of_the_same_plan_is_refused_as_already_undone(
+        self, wiki: Path
+    ) -> None:
+        """Without this check the second call would queue a decision item
+        whose diff is EMPTY (the page already holds the pre-image) under the
+        false reason "someone edited this"."""
+        plan_id, before, _snapshot = _applied(wiki)
+        assert write_undo(wiki, plan_id=plan_id, config=None).action == UNDO_DIRECT
+        pending = wiki / "_pending_questions.md"
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None, pending_path=pending)
+
+        assert outcome.action == UNDO_REFUSED
+        assert outcome.reason == REASON_ALREADY_UNDONE
+        assert outcome.ok is False
+        assert not pending.exists(), "an already-undone plan must raise no decision item"
+        assert _page_bytes(wiki) == before
+
+    def test_a_re_applied_plan_can_be_undone_again(self, wiki: Path) -> None:
+        """The ordering control for the check above: "already undone" is the
+        plan's LAST action, not merely the existence of an undo record. A
+        plan applied, undone, then re-applied is live work undo must still
+        reverse -- and the restored page matches the plan's pinned hash
+        again, so the re-apply really does go through."""
+        plan_id, before, _snapshot = _applied(wiki)
+        assert write_undo(wiki, plan_id=plan_id, config=None).action == UNDO_DIRECT
+        assert last_action_for_plan(plan_id, wiki) == UNDO_KIND
+
+        re_applied = write_apply(wiki, plan_id=plan_id, client=None, config=None)
+        assert re_applied.ok, (re_applied.reason, re_applied.issues)
+        assert last_action_for_plan(plan_id, wiki) == "apply"
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
+        assert _page_bytes(wiki) == before
+
+    def test_last_action_for_an_unknown_plan_id_is_empty(self, wiki: Path) -> None:
+        _plan_id, _before, _snapshot = _applied(wiki)
+        assert last_action_for_plan("nosuchplan", wiki) == ""
 
     def test_the_last_apply_record_for_a_plan_id_is_the_one_undone(self, wiki: Path) -> None:
         """The ledger is append-only, so a re-applied plan has two apply

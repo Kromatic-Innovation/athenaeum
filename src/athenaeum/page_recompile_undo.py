@@ -41,12 +41,27 @@ a content-addressed REFERENCE to the bytes themselves, so this module
 restores the pre-image byte for byte (``git cat-file blob <id>``) and
 diffs against it for real.
 
+**That reference has to name the page's RAW bytes, and this slice had to
+fix the applier so it does (athenaeum#2541).** It originally hashed
+``render_frontmatter(parsed_meta) + "\n" + body`` -- a RE-RENDER, which
+normalises the page. For a canonically-written page the re-render happens
+to reproduce the bytes, so a canonical fixture cannot catch it; for a page
+whose frontmatter is followed by no blank line (6.0% of a seeded 600-page
+sample of a real 26,660-page wiki) it produces bytes that were never
+written anywhere, naming a blob git does not have. Every such apply would
+have degraded to a queued decision item with an unreadable-pre-image
+reason, for no reason at all.
+``TestAC1DirectUndoRestoresTheWiki::test_a_page_written_non_canonically_still_undoes_directly``
+is the regression test; it fails against the re-rendered pre-image.
+
 **Reversible default when a pre-image blob is NOT readable (athenaeum#2541
 lane decision).** The applier takes its snapshot AFTER the write, so a
 pre-image lives in that commit's PARENT -- but nothing guarantees a
 pre-apply commit ever happened (a page created and recompiled between two
 snapshots was never staged, so its pre-image bytes exist in no git
-object). The blob can therefore be legitimately absent, and an absent
+object). Since the applier was corrected to record the raw bytes, that is
+the ONLY remaining reason a pre-image can be missing, and it is a real
+one. The blob can therefore be legitimately absent, and an absent
 pre-image is indistinguishable, from here, from a corrupted one. This
 module treats an unreadable pre-image EXACTLY like a page that changed
 after the apply: it writes nothing and queues a decision item naming the
@@ -155,6 +170,14 @@ UNDO_DIRECT = "direct"
 UNDO_QUEUED = "queued"
 UNDO_REFUSED = "refused"
 
+#: Already undone, and not re-applied since. Its own refusal rather than a
+#: queued "the page changed" item: after a direct undo the page genuinely no
+#: longer matches the apply's post hash, so without this check a second
+#: ``recompile undo`` of the same plan id would raise a decision item whose
+#: diff is EMPTY (the page already holds the pre-image) and whose stated
+#: reason -- "someone edited this" -- is false.
+REASON_ALREADY_UNDONE = "already_undone"
+
 #: The one refusal that is an operator MISTAKE rather than a finding about
 #: the corpus: there is no ``apply`` record for the plan id given. Named as a
 #: constant because the CLI's exit code turns on it -- every other refusal is
@@ -192,6 +215,28 @@ def find_apply_record(
         if record.get("kind") == APPLY_KIND and str(record.get("id")) == plan_id:
             match = record
     return match
+
+
+def last_action_for_plan(
+    plan_id: str, wiki_root: Path, *, ledger_path: Path | None = None
+) -> str:
+    """``"apply"`` / ``"undo"`` / ``""`` -- whichever of the two this plan id
+    did LAST, by ledger order.
+
+    Not "is there an undo record", which would be wrong: the ledger is
+    append-only, so a plan that was applied, undone, and then re-applied
+    carries both kinds, and the re-apply is live work an undo must still be
+    able to reverse. Only an undo that is the plan's most recent action
+    means "already undone".
+    """
+    last = ""
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        if str(record.get("id")) != plan_id:
+            continue
+        kind = record.get("kind")
+        if kind in (APPLY_KIND, UNDO_KIND):
+            last = str(kind)
+    return last
 
 
 def _record_pages(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -434,6 +479,14 @@ def compute_undo(
             action=UNDO_REFUSED,
             reason=REASON_NO_APPLY_RECORD,
             plan_id=plan_id,
+        )
+
+    if last_action_for_plan(plan_id, wiki_root, ledger_path=ledger_path) == UNDO_KIND:
+        return ComputedUndo(
+            action=UNDO_REFUSED,
+            reason=REASON_ALREADY_UNDONE,
+            plan_id=plan_id,
+            uid=str(record.get("uid") or ""),
         )
 
     plan_record = find_plan_record(plan_id, wiki_root, ledger_path=ledger_path)
@@ -805,6 +858,7 @@ def write_undo(
 
 
 __all__ = [
+    "REASON_ALREADY_UNDONE",
     "REASON_NO_APPLY_RECORD",
     "REASON_PAGE_CHANGED",
     "REASON_PAGE_MISSING",
@@ -822,6 +876,7 @@ __all__ = [
     "compute_undo",
     "find_apply_record",
     "find_inbound_links",
+    "last_action_for_plan",
     "read_git_blob",
     "write_undo",
 ]
