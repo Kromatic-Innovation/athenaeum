@@ -166,6 +166,60 @@ class TestSessionEndComposition:
         assert list((root / "wiki").glob("p-0001-*.md"))
         assert (cache / "ingest-manifest.json").is_file()
 
+    def test_vector_backend_without_chromadb_degrades_to_fts5_and_succeeds(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2592: a fresh install that followed the README quick
+        start (``pip install athenaeum[mcp]`` only) gets ``search_backend:
+        vector`` from ``athenaeum init`` -- and that config's own comment
+        ("a default install without [chromadb] degrades to fts5 at query
+        time with one logged warning, no traceback", mirrored in
+        ``config.py``'s ``_DEFAULTS["search_backend"]`` docstring) promises a
+        degrade, not a failure. Before this fix, ``session_end`` raised
+        ``ImportError`` straight out of ``librarian.reindex`` the moment the
+        compile-gated reindex ran under ``backend="vector"`` with chromadb
+        absent -- surfacing to the CLI wrapper as a hard
+        ``{"error": "ImportError: ...", "exit_code": 1}``, and (just as
+        importantly) never building even the FTS5 index the query-time
+        fallback needs something to answer from.
+
+        Simulate chromadb's absence through ``VectorBackend._get_chromadb``
+        -- the one choke point every backend method goes through for its
+        chromadb handle -- rather than uninstalling the real chromadb this
+        environment has.
+        """
+        from athenaeum.librarian import session_end
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+            backend="vector",
+        )
+
+        assert result.exit_code == 0, "must degrade, never error, per the yaml promise"
+        assert result.reindexed is True
+        assert result.reindex_pages >= 1
+        # The backend actually used is reported, not the one requested -- a
+        # caller inspecting the summary must see what really got built.
+        assert result.backend == "fts5"
+        # And the fts5 index genuinely exists on disk for a later query to
+        # read -- not just a reported count.
+        assert (cache / "wiki-index.db").is_file()
+        assert (cache / "fts5-manifest.json").is_file()
+
     def test_idle_session_end_is_noop_and_skips_reindex(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
@@ -1322,6 +1376,53 @@ class TestSessionEndCLI:
         # The nested ingest summary round-trips.
         assert payload["ingest"]["command"] == "ingest"
         assert payload["ingest"]["compiled"] == 1
+
+    def test_vector_backend_without_chromadb_cli_exits_zero(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#2592, CLI-wrapper half: before this fix,
+        ``cmd_session_end``'s own ``except Exception`` wrapper turned the
+        ``ImportError`` out of ``librarian.reindex`` into
+        ``{"error": "ImportError: Vector backend requires chromadb. ...",
+        "exit_code": 1}`` -- exactly the failure the clean-machine report
+        recorded for ``athenaeum session-end`` under the shipped
+        ``search_backend: vector`` default. The library-level fallback
+        (asserted in ``TestSessionEndComposition``) must reach all the way
+        through this CLI wrapper to a clean exit 0.
+        """
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "vector",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "error" not in payload
+        assert payload["command"] == "session-end"
+        assert payload["reindexed"] is True
+        assert payload["backend"] == "fts5"
+        assert payload["exit_code"] == 0
 
     def test_single_flight_lock_held(
         self,
