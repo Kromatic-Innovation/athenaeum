@@ -48,7 +48,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum.librarian import process_one
-from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
+from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage, parse_frontmatter
 from athenaeum.tiers import (
     DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS,
     CreateNameCollisionError,
@@ -424,6 +424,213 @@ class TestGateCreateNameClassificationsCollision:
         outcome = gate_create_name_classifications([c], "raw/ref.md", "")
         assert outcome.kept == [c]
         assert outcome.disambiguated == ()
+
+
+# ---------------------------------------------------------------------------
+# validate_create_name / gate_create_name_classifications — alias-aware
+# short-name collision check (issue athenaeum#2527)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateCreateNameShortNameAliasAware:
+    """AC1-AC4 at the `validate_create_name` layer: a short single-token
+    name is resolved against the index's name/alias pool BEFORE the
+    athenaeum#1173 escalation fires."""
+
+    def test_no_match_escalates_with_the_same_reason_as_before(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2, "no behaviour change": with an index supplied but no page
+        answering to the token, `reason` must be byte-identical to the
+        pre-athenaeum#2527 string — not merely "still escalates"."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme Corp", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameEscalatedError) as exc_info:
+            validate_create_name("develop", index=index)
+        assert exc_info.value.reason == "short single lowercase token (<= 7 chars)"
+
+    def test_single_name_match_raises_collision_not_escalation(
+        self, tmp_path: Path
+    ) -> None:
+        """Exactly one page's `name:` normalizes to the token: a
+        CreateNameCollisionError, never CreateNameEscalatedError, so the
+        gate's existing fold machinery attaches instead of escalating."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "cwc.md", uid="u1", name="cwc", type_="concept")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("cwc", index=index, entity_type="concept")
+        assert exc_info.value.existing_uid == "u1"
+        assert exc_info.value.existing_type == "concept"
+
+    def test_single_alias_match_raises_collision_not_escalation(
+        self, tmp_path: Path
+    ) -> None:
+        """Same, but the token only matches via `aliases:`, not the page's
+        own `name:` — the AC's headline scenario (a renamed page keeping
+        its old short name reachable)."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "cwc-platform.md",
+            uid="u1",
+            name="CWC Platform",
+            type_="concept",
+            aliases=["cwc"],
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("cwc", index=index, entity_type="concept")
+        assert exc_info.value.existing_uid == "u1"
+
+    def test_alias_from_the_real_athenaeum_2488_rename_command_matches(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: the alias must come from the REAL rename primitive
+        (:mod:`athenaeum.entity_rename`, issue athenaeum#2488's rename
+        command), not a hand-written `aliases:` list — proving this guard
+        resolves the actual shape that command produces, not an assumed
+        one."""
+        from athenaeum.entity_rename import apply_rename, build_rename_preview
+
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "develop.md", uid="u1", name="develop", type_="concept")
+        preview = build_rename_preview(wiki, "u1", "Development Branch Policy")
+        assert preview.error is None
+        apply_rename(wiki, preview, by="tristan", reason="athenaeum#2527 fixture")
+
+        # The rename primitive appended the old short name to aliases: —
+        # confirm the fixture actually exercises that shape before relying
+        # on it.
+        meta, _ = parse_frontmatter(
+            (wiki / "develop.md").read_text(encoding="utf-8")
+        )
+        assert meta["aliases"] == ["develop"]
+
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("develop", index=index, entity_type="concept")
+        assert exc_info.value.existing_uid == "u1"
+
+    def test_two_matches_escalate_naming_both_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3: 2+ matches still escalate (never silently pick one), and the
+        candidate pages are named in `reason` (which the gate's
+        EscalationItem.description already carries verbatim)."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "yml-one.md", uid="u1", name="yml", type_="concept")
+        _write_page(
+            wiki,
+            "yml-two.md",
+            uid="u2",
+            name="YAML Config Format",
+            type_="concept",
+            aliases=["yml"],
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameEscalatedError) as exc_info:
+            validate_create_name("yml", index=index, entity_type="concept")
+        reason = exc_info.value.reason
+        assert "u1" in reason
+        assert "u2" in reason
+        assert "yml" in reason
+        assert "YAML Config Format" in reason
+
+    def test_different_type_candidate_is_not_counted_as_a_match(
+        self, tmp_path: Path
+    ) -> None:
+        """Same type-scoping exemption the athenaeum#1170 uniqueness check
+        already applies: a differently-typed page sharing the token is
+        legitimate name reuse, not a match — so with the ONE real match
+        left, this still resolves to a collision, not an escalation."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "ford-person.md", uid="person-1", name="Ford", type_="person")
+        _write_page(wiki, "ford-co.md", uid="co-1", name="ford", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("ford", index=index, entity_type="company")
+        assert exc_info.value.existing_uid == "co-1"
+
+    def test_no_index_supplied_is_byte_identical(self) -> None:
+        """Default `index=None`: every pre-athenaeum#2527 caller that does
+        not pass an index is unaffected — the match check never runs."""
+        with pytest.raises(CreateNameEscalatedError) as exc_info:
+            validate_create_name("cwc")
+        assert exc_info.value.reason == "short single lowercase token (<= 7 chars)"
+
+
+class TestGateCreateNameClassificationsShortNameAliasAware:
+    """AC1-AC3 at the `gate_create_name_classifications` layer: the
+    three-way outcome actually reaches `CreateNameGateOutcome`."""
+
+    def test_single_match_attaches_no_escalation_item(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "cwc-platform.md",
+            uid="u1",
+            name="CWC Platform",
+            type_="concept",
+            aliases=["cwc"],
+        )
+        index = EntityIndex(wiki)
+        c = _classified("cwc", entity_type="concept", observations="Mentioned cwc again.")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "Mentioned cwc again.", index=index
+        )
+        assert outcome.escalations == ()
+        assert outcome.rejected == ()
+        assert outcome.disambiguated == ("cwc",)
+        assert len(outcome.kept) == 1
+        kept = outcome.kept[0]
+        assert kept.is_new is False
+        assert kept.existing_uid == "u1"
+        assert kept.observations == "Mentioned cwc again."
+
+    def test_no_match_escalates_short_name_escalated_as_before(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme Corp", type_="company")
+        index = EntityIndex(wiki)
+        c = _classified("develop")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "Something about develop happened.", index=index
+        )
+        assert outcome.kept == []
+        assert outcome.rejected == ()
+        assert len(outcome.escalations) == 1
+        item = outcome.escalations[0]
+        assert item.conflict_type == "short_name_escalated"
+        assert "develop" in item.description
+        assert "Something about develop happened." in item.description
+
+    def test_two_matches_escalate_short_name_escalated_naming_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "yml-one.md", uid="u1", name="yml", type_="concept")
+        _write_page(
+            wiki,
+            "yml-two.md",
+            uid="u2",
+            name="YAML Config Format",
+            type_="concept",
+            aliases=["yml"],
+        )
+        index = EntityIndex(wiki)
+        c = _classified("yml", entity_type="concept")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "", index=index)
+        assert outcome.kept == []
+        assert outcome.disambiguated == ()
+        assert len(outcome.escalations) == 1
+        item = outcome.escalations[0]
+        assert item.conflict_type == "short_name_escalated"
+        assert "u1" in item.description
+        assert "u2" in item.description
+        assert "YAML Config Format" in item.description
 
 
 # ---------------------------------------------------------------------------

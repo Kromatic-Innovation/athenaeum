@@ -54,7 +54,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Protocol, Sequence
 
 import yaml
 
@@ -1246,6 +1246,82 @@ def _is_short_lowercase_token(name: str, config: dict[str, Any] | None) -> bool:
     return len(stripped) <= resolve_create_name_escalate_max_chars(config)
 
 
+class _ShortNameMatch(NamedTuple):
+    """One existing page a short-token create's name/alias resolved to (issue athenaeum#2527)."""
+
+    uid: str
+    name: str
+    type: str | None
+    path: Path
+
+
+def _find_short_name_matches(
+    wiki_root: Path, token: str, *, entity_type: str | None = None
+) -> list[_ShortNameMatch]:
+    """Every LIVE page whose ``name:`` or an ``aliases:`` entry matches *token*
+    (issue athenaeum#2527).
+
+    Normalisation is ``.strip().lower()`` — the SAME idiom this module
+    already applies to the token everywhere else in :func:`validate_create_name`
+    (``retired.get(name.strip().lower())`` just below, and
+    :meth:`~athenaeum.models.EntityIndex.lookup`'s own ``name.lower()``).
+    Reusing it here rather than inventing a second normalisation means a
+    name this guard would otherwise have escalated and a name/alias already
+    on disk are judged equal under exactly one rule.
+
+    A full ``wiki_root.glob("*.md")`` scan, not an
+    :class:`~athenaeum.models.EntityIndex` lookup, DELIBERATELY: ``EntityIndex
+    ._by_name`` is a dict keyed by lower-cased name/alias — last write wins
+    per key (:meth:`~athenaeum.models.EntityIndex._apply_record`) — so two
+    different pages sharing the same name/alias key collapse to whichever
+    was indexed last, and the OTHER match is lost. This issue's three-way
+    contract (0 / 1 / 2+ matches) needs every page that answers to *token*,
+    not just the most-recently-indexed one, so each page is read with
+    :meth:`~athenaeum.models.EntityIndex.read_page_record` — the same
+    per-page extraction :meth:`EntityIndex._load` and every other direct
+    reader (:mod:`athenaeum.entity_index_cache`, :mod:`athenaeum.
+    contact_record_repair`, :mod:`athenaeum.decay_sweep`) already share,
+    rather than a second frontmatter parse.
+
+    *entity_type*, when truthy, applies the SAME type-scoping
+    :func:`validate_create_name`'s uniqueness check already applies to a
+    single-hit :meth:`~athenaeum.models.EntityIndex.lookup`: a candidate
+    page with a known, different type is legitimate name reuse (the
+    ``tristankromer`` repo vs. the person of the same name), not a match,
+    and is excluded. A candidate with no ``type:`` of its own is kept —
+    its type is unconfirmed, not conflicting.
+
+    Returns matches sorted by path, for determinism.
+    """
+    token_key = token.strip().lower()
+    entity_type_key = entity_type.strip().lower() if entity_type else ""
+    matches: list[_ShortNameMatch] = []
+    for fpath in sorted(Path(wiki_root).glob("*.md")):
+        if fpath.name.startswith("_"):
+            continue
+        parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
+        if parsed is None:
+            continue
+        record, _meta = parsed
+        keys = {record.name.strip().lower()}
+        keys.update(alias.strip().lower() for alias in record.aliases)
+        if token_key not in keys:
+            continue
+        page_type = record.type or None
+        if (
+            page_type is not None
+            and entity_type_key
+            and page_type.strip().lower() != entity_type_key
+        ):
+            continue  # different type: legitimate name reuse, not a match.
+        matches.append(
+            _ShortNameMatch(
+                uid=record.uid or record.name, name=record.name, type=page_type, path=fpath
+            )
+        )
+    return matches
+
+
 class CreateNameRejectedError(Exception):
     """AC1: *name* is unambiguous junk and must never mint a page (issue athenaeum#1173).
 
@@ -1732,7 +1808,16 @@ def validate_create_name(
 
     1. :data:`_BARE_ISSUE_REF_RE` — AC1, raises :class:`CreateNameRejectedError`.
     2. :func:`_is_short_lowercase_token` — AC2, raises
-       :class:`CreateNameEscalatedError`.
+       :class:`CreateNameEscalatedError`. Issue athenaeum#2527: when *index* is
+       also supplied, a short token is first resolved against every existing
+       page's ``name:``/``aliases:`` via :func:`_find_short_name_matches`
+       BEFORE escalating — exactly one live match raises
+       :class:`CreateNameCollisionError` instead (the caller's existing
+       fold-into-existing handling attaches the observation and raises no
+       escalation item at all); two or more matches still raise
+       :class:`CreateNameEscalatedError`, with every candidate page named in
+       ``reason``; zero matches escalates with the SAME ``reason`` string as
+       before this issue (no *index* supplied is likewise unchanged).
     3. Retired-name check (issue athenaeum#1406), only when *index* is
        supplied — raises :class:`CreateNameDemotedError`. Runs BEFORE the
        uniqueness check below since a demoted name has no page left in the
@@ -1778,6 +1863,33 @@ def validate_create_name(
         raise CreateNameRejectedError(name, "bare issue-number-shaped name")
     if _is_short_lowercase_token(name, config):
         max_chars = resolve_create_name_escalate_max_chars(config)
+        if index is not None:
+            # Issue athenaeum#2527: resolve the token against existing
+            # pages/aliases BEFORE escalating — see this function's
+            # docstring, step 2.
+            matches = _find_short_name_matches(
+                index.wiki_root, name, entity_type=entity_type
+            )
+            if len(matches) == 1:
+                match = matches[0]
+                raise CreateNameCollisionError(
+                    name,
+                    "short single-token name already answers to an existing "
+                    f"page via its name/alias (issue athenaeum#2527: uid={match.uid})",
+                    existing_uid=match.uid,
+                    existing_path=match.path,
+                    existing_type=match.type,
+                )
+            if len(matches) >= 2:
+                candidates = ", ".join(
+                    f"{m.name!r} (uid={m.uid})" for m in matches
+                )
+                raise CreateNameEscalatedError(
+                    name,
+                    f"short single lowercase token (<= {max_chars} chars); "
+                    f"matches {len(matches)} existing pages/aliases (issue "
+                    f"athenaeum#2527), could not pick a single winner: {candidates}",
+                )
         raise CreateNameEscalatedError(
             name, f"short single lowercase token (<= {max_chars} chars)"
         )
