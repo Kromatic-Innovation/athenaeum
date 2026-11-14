@@ -449,3 +449,42 @@ class TestAC8NeverAutoTypes:
 
         assert summary.applied == 1
         assert summary.queued == 0
+
+
+# ---------------------------------------------------------------------------
+# AC9: README and CHANGELOG document the behaviour change.
+# ---------------------------------------------------------------------------
+
+
+class TestAC9Documentation:
+    @staticmethod
+    def _repo() -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def test_readme_names_how_to_see_undo_and_switch_back(self) -> None:
+        text = (self._repo() / "README.md").read_text(encoding="utf-8")
+        lowered = text.lower()
+        assert "automatically" in lowered
+        assert "recompile list --applied" in text
+        assert "recompile undo" in text
+        assert "librarian.page_recompile.mode" in text
+        assert "queue" in lowered and "off" in lowered
+
+    def test_changelog_has_a_behaviour_change_entry_for_this_slice(self) -> None:
+        changelog = (self._repo() / "CHANGELOG.md").read_text(encoding="utf-8")
+        unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0]
+        entry = next(
+            block
+            for block in unreleased.split("\n- ")
+            if "athenaeum#2549" in block
+        )
+        lead = " ".join(entry.split("**")[1].split()).lower()
+        assert "automatically by default" in lead
+        assert "behaviour change" in lead
+        assert "recompile list --applied" in entry
+        assert "recompile undo" in entry
+        assert "mode: queue" in entry or "mode: `queue`" in entry
+        assert "mode: off" in entry or "mode: `off`" in entry
+        # Marked a Changed entry, not merely Added -- the AC's own wording.
+        changed_section = unreleased.split("### Changed")[1]
+        assert "athenaeum#2549" in changed_section
