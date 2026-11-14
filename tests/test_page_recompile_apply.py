@@ -101,6 +101,30 @@ def _all_supported(n: int) -> dict[str, Any]:
     return {"sentences": [{"index": i, "verdict": "supported"} for i in range(n)]}
 
 
+class _FlipFlopOnce(dict):
+    """Test-only double: returns a DIFFERENT text on the SECOND ``.get()``
+    call for *flip_label*, normal-dict behaviour for every other label and
+    for the first call. The real single-source-page data flow makes a
+    genuine label collision structurally impossible (every unit and
+    definition comes from exactly one already-deduped
+    ``parse_footnote_definitions`` dict) -- this is how AC5's collision
+    guard is exercised anyway, by injecting the one divergence that
+    architecture otherwise forbids."""
+
+    def __init__(self, base: dict[str, str], flip_label: str, second_text: str) -> None:
+        super().__init__(base)
+        self._flip_label = flip_label
+        self._second_text = second_text
+        self._flip_seen = False
+
+    def get(self, key: object, default: object = None) -> object:  # type: ignore[override]
+        if key == self._flip_label:
+            if self._flip_seen:
+                return self._second_text
+            self._flip_seen = True
+        return super().get(key, default)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # Fixtures.
 # ---------------------------------------------------------------------------
@@ -536,6 +560,60 @@ class TestAC5UnitConservationAndByteIdentity:
         outcome = write_apply(wiki, uid="page0001", client=None, config=None)
         assert outcome.ok, outcome.issues
         assert outcome.post_write_issues == ()
+
+
+class TestAC5FootnoteLabelCollisionGuard:
+    """AC5 permits footnote-label renumbering-on-collision as an allowed
+    edit but does not mandate implementing it, and for a structure-only
+    plan it is unreachable: every unit and definition comes from ONE
+    already-deduped source page, so two pieces landing on one destination
+    can never legitimately disagree about what a shared label means.
+    `_first_colliding_label` makes that invariant self-enforcing rather
+    than merely reasoned about -- this proves the guard actually fires,
+    by hand-constructing the one divergence the real data flow forbids."""
+
+    def test_a_hand_constructed_collision_is_refused_with_no_write(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = (
+            _LEAD + "\n\n"
+            "## Alpha\n\nAlpha facts cite a shared source.[^shared1]\n\n"
+            "## Beta\n\nBeta facts also cite the same shared source.[^shared1]\n\n"
+            "[^src-1]: **Source:** doc-a\n"
+            "[^shared1]: **Source:** doc-shared\n"
+        )
+        _write_page(wiki, uid="page0001", name="Acme", body=body)
+        ids = _unit_ids(body)
+        _record_forced_valid_plan(
+            wiki,
+            uid="page0001",
+            body=body,
+            dispositions=[
+                (ids[0], "parent"),
+                (ids[1], "child:g1"),
+                (ids[2], "child:g1"),
+            ],
+            groups=[{"key": "g1", "name": "Shared", "description": "d"}],
+            summary=_SUMMARY,
+        )
+
+        import athenaeum.page_recompile_apply as apply_mod
+
+        real_parse = apply_mod.parse_footnote_definitions
+
+        def _fake_parse(body_text: str) -> dict[str, str]:
+            return _FlipFlopOnce(real_parse(body_text), "shared1", "A DIFFERENT DEFINITION")
+
+        monkeypatch.setattr(apply_mod, "parse_footnote_definitions", _fake_parse)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+        assert outcome.ok is False
+        assert any(
+            i.code == "footnote-label-collision" and i.detail.startswith("shared1")
+            for i in outcome.issues
+        )
+        # No write at all -- not even the sub-page.
+        assert [p.name for p in wiki.glob("*.md")] == ["page0001.md"]
 
 
 class TestAC6FootnoteMarkersResolveOnPage:

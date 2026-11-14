@@ -319,6 +319,47 @@ def _render_footnote_block(labels: Iterable[str], definitions: Mapping[str, str]
     return "\n".join(f"[^{label}]: {definitions[label]}" for label in ordered) + "\n"
 
 
+def _first_colliding_label(pairs: Iterable[tuple[str, str]]) -> str | None:
+    """The first label in *pairs* whose text disagrees with an earlier
+    occurrence of the SAME label, or ``None`` (AC5's footnote-label
+    renumbering-on-collision clause).
+
+    **Why renumbering itself is not implemented, and why this check still
+    is (athenaeum#2540).** A structure-only plan draws every unit -- and
+    therefore every footnote definition -- from exactly ONE source page,
+    whose label namespace :func:`athenaeum.footnote_markers.parse_footnote_definitions`
+    has ALREADY deduped to unique ("a repeated label keeps the FIRST
+    definition", that function's own docstring). Two pieces landing on one
+    destination can therefore never legitimately disagree about what a
+    shared label means -- renumbering code written today would be dead
+    code, never exercised by any input this applier can receive. AC5
+    *permits* renumbering as an allowed edit; it does not mandate writing
+    it, and cross-page moves (where a SECOND source page's own label
+    namespace could genuinely collide with this one) are explicitly out of
+    scope for this issue.
+
+    What this function converts is "reasoned unreachable" into "enforced
+    unreachable": it is wired into every destination's footnote assembly
+    (:func:`compute_apply`) and ACTUALLY RUNS on every apply, so if a
+    future slice adds cross-page moves without first implementing
+    renumbering, this starts firing immediately -- loudly refusing the
+    plan with no write -- instead of the destination silently keeping
+    whichever lookup happened to run last and shipping two different
+    claims under one label. A slice that adds cross-page moves must
+    implement real renumbering (:func:`athenaeum.page_decompose._renumber`
+    is the model -- rewrite every colliding label to a free one on that
+    destination) rather than relying on this assertion to keep passing.
+    """
+    seen: dict[str, str] = {}
+    for label, text in pairs:
+        if label in seen:
+            if seen[label] != text:
+                return label
+            continue
+        seen[label] = text
+    return None
+
+
 def _derive_description(summary: str) -> str:
     """A one-line ``description:`` for the recompiled parent (AC2).
 
@@ -623,11 +664,24 @@ def compute_apply(
                 unit_ids.append(unit_id)
         body_core = _join_units(texts)
 
-        label_set: set[str] = set()
-        for unit_id in unit_ids:
-            label_set |= set(units_by_id[unit_id].footnote_labels)
+        label_pairs: list[tuple[str, str]] = [
+            (label, original_definitions.get(label, ""))
+            for unit_id in unit_ids
+            for label in units_by_id[unit_id].footnote_labels
+        ]
         if section is not None:
-            label_set |= {m.group(1) for m in INLINE_MARKER_RE.finditer(section.text)}
+            label_pairs.extend(
+                (m.group(1), original_definitions.get(m.group(1), ""))
+                for m in INLINE_MARKER_RE.finditer(section.text)
+            )
+        collision = _first_colliding_label(label_pairs)
+        if collision is not None:
+            sub_name_for_issue = (group.name if group is not None else group_key)
+            issues.append(
+                PlanIssue("footnote-label-collision", f"{collision} on {sub_name_for_issue}")
+            )
+            continue
+        label_set = {label for label, _ in label_pairs}
         footnotes = _render_footnote_block(label_set, original_definitions)
         body_with_footnotes = _join_units([body_core, footnotes])
 
@@ -687,6 +741,8 @@ def compute_apply(
                     unit_hashes=tuple(_unit_hash(u) for u in merge_unit_ids),
                 )
             )
+    if issues:
+        return ComputedApply(issues=tuple(issues))
 
     # AC4: new children linked via the page_relations.py writer's shape
     # (`via="split"`), folded together with any pre-existing children in
@@ -725,9 +781,17 @@ def compute_apply(
 
     # AC2/AC3: parent body = cited summary lead, then `parent` units
     # verbatim, then the Sub-pages section.
-    parent_footnote_labels = {
-        label for u in parent_unit_ids for label in units_by_id[u].footnote_labels
-    }
+    parent_label_pairs = [
+        (label, original_definitions.get(label, ""))
+        for u in parent_unit_ids
+        for label in units_by_id[u].footnote_labels
+    ]
+    parent_collision = _first_colliding_label(parent_label_pairs)
+    if parent_collision is not None:
+        return ComputedApply(
+            issues=(PlanIssue("footnote-label-collision", f"{parent_collision} on parent"),)
+        )
+    parent_footnote_labels = {label for label, _ in parent_label_pairs}
     parent_footnotes = _render_footnote_block(parent_footnote_labels, original_definitions)
     parent_core = _join_units(
         [summary_block + ("\n" if summary_block else ""), parent_units_text, parent_footnotes]
