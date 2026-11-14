@@ -931,3 +931,88 @@ each drafting call's tokens are recorded into the run's spend ledger tagged
 (see `librarian._run_rule_proposal_phase`'s docstring for the full
 rationale, including why it does NOT carve out its own runtime share the
 way `_run_shape_rule_phase` does).
+
+---
+
+## 11. Schema-amendment proposals — a misfit proposes, a human adopts (issue athenaeum#2197)
+
+North-star §2.7 extends "rules are data" to schema: a deployment's page types and page
+structure are configuration too, and the librarian works within them rather than forcing
+a shape onto data that does not fit. §10 above is the rule-proposal sibling of this
+mechanism — read it first if this section's shorthand is unclear.
+
+**Field groups are declared, never inferred.** A field group names a set of
+scalar frontmatter fields that together hold ONE record's worth of data for a page —
+the motivating case is a person with several distinct CRM deal records, where a flat
+per-page field set (`crm_*` fields) can hold only one. Declare one under
+`librarian.field_groups.<page_type>.<group_name>`, naming fields that are ALSO listed
+under that type's `librarian.structured_upsert.<page_type>.set_keys` (§7 above —
+field groups cover single-valued scalar slots, not the list-valued `union_keys` the
+ordinary merge already unions without conflict):
+
+```yaml
+# <knowledge_root>/athenaeum.yaml
+librarian:
+  structured_upsert:
+    person:
+      set_keys:
+        - crm_deal_name
+        - crm_deal_amount
+        - crm_deal_stage
+  field_groups:
+    person:
+      deal:
+        - crm_deal_name
+        - crm_deal_amount
+        - crm_deal_stage
+```
+
+**Only declared groups exist — operator ruling 2026-11-13 (issue athenaeum#2197).** The
+engine applies NO built-in grouping heuristic: an earlier draft of this mechanism
+considered defaulting to an importer-prefix convention (treat every `crm_*` field as one
+group automatically); that default was explicitly dropped as deployment policy. A page
+type absent from `librarian.field_groups`, or present with no groups, has no field
+groups at all — the misfit path below never fires for it, however related its field
+names look.
+
+**Misfit detection** lives in `athenaeum.structured_upsert._detect_field_group_misfits`,
+called from `tier0_structured_upsert` before any merge is computed. A raw's value for a
+declared group's field differing from a different, non-empty value the page already
+holds is only a MISFIT if no OTHER field in the same group still agrees between the raw
+and the page — an ordinary update to the record already on the page (the same deal's
+`crm_deal_stage` advancing while `crm_deal_name`/`crm_deal_amount` stay put) applies
+normally instead, because the raw and the page share no explicit record id this deep in
+the pipeline and the group's own other fields are the only identity signal available.
+When every comparable field in the group disagrees, the WHOLE raw is refused
+(`REASON_FIELD_GROUP_MISFIT`) rather than merged piecemeal — the page keeps its existing
+value untouched, and the raw itself (the only copy of the colliding record) stays on
+disk, so neither value is overwritten, interleaved, or lost.
+
+**The proposal** (`athenaeum.schema_amendment_proposals`) names the page type, the field
+group, a COUNT of affected pages (never the colliding values themselves), and a proposed
+amendment — for example "add a `deal` entity type that `person` pages relate to".
+Repeated misfits of the same `(page_type, field_group)` shape add to the ONE open
+proposal (its `affected_uids` set grows) instead of minting a new one each time; the
+same page misfiring on two fields of the same group in one run still counts as one
+page. The proposal surfaces via `list_pending_decisions` as a
+`type: "schema-amendment-proposal"` item
+(`athenaeum.decisions.schema_amendment_proposal_to_decision`), the same
+owner-only, pending-decisions-queue (§2.8) treatment every other proposal in this
+file gets.
+
+**Human adoption only — this issue ships the proposal, not a migration.** Nothing in
+this mechanism ever writes `athenaeum.yaml` or any page's frontmatter outside the
+misfit's own untouched page; there is no "adopt" applier, deliberately — introducing the
+proposed entity type (and migrating existing pages into it) is each its own follow-up
+issue, exactly like `proposed-rule`'s human-adopted-not-auto-adopted posture in §10
+above. An unresolved proposal changes no configuration at all (see
+`tests/test_schema_amendment_proposals.py`'s `TestHumanAdoptionOnly`).
+
+**Reuses the `schema-amendment` conflict-type taxonomy, not the mechanism.**
+`athenaeum.corrections`'s `held-schema-proposal` disposition (`docs/design/field-corrections.md`
+§7.2) already raises a `schema-amendment`-tagged `EscalationItem` for a DIFFERENT
+scenario — an attribute the schema has no slot for at all. This section's misfit is the
+opposite shape: the slot EXISTS but is already held by a conflicting value from a
+different source record. The two rails are deliberately separate — this one is a
+growing, deduplicated ledger proposal, not a per-occurrence `_pending_questions.md`
+escalation — and share only the conflict-type name a human reads in the queue.

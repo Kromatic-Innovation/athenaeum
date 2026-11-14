@@ -183,6 +183,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "search_index",
         "last_compile",
         "schedule",
+        "page_relations",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
@@ -530,6 +531,43 @@ def test_schedule_scheduled_is_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert result.status == "ok"
     assert "scheduled" in result.detail
     assert "not scheduled" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# AC7 (issue athenaeum#2535): one-sided parent/child page relation count.
+# ---------------------------------------------------------------------------
+
+
+def test_page_relations_missing_wiki_dir_is_ok(tmp_path: Path) -> None:
+    result = doctor.check_page_relations(tmp_path / "no-such-wiki")
+    assert result.status == "ok"
+    assert "0" in result.detail
+
+
+def test_page_relations_empty_wiki_is_ok(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    result = doctor.check_page_relations(wiki)
+    assert result.status == "ok"
+
+
+def test_page_relations_one_sided_pair_fails_and_names_fix(tmp_path: Path) -> None:
+    from athenaeum.models import render_frontmatter
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "orphan-child.md").write_text(
+        render_frontmatter(
+            {"uid": "orphan01", "type": "reference", "name": "Orphan Child", "parent": "ghost01"}
+        )
+        + "\nBody.\n",
+        encoding="utf-8",
+    )
+
+    result = doctor.check_page_relations(wiki)
+    assert result.status == "fail"
+    assert "1" in result.detail
+    assert "athenaeum relate" in result.fix
 
 
 def test_interpreter_below_floor_fails(healthy_install: dict) -> None:

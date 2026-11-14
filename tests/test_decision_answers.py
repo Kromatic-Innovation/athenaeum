@@ -586,6 +586,102 @@ class TestApplyMerge:
         assert {outcome.value_a, outcome.value_b} == {"fact", "guideline"}
 
 
+class TestApplyMergeAttachAsSubpage:
+    """Issue athenaeum#2539 AC1: the ``attach-as-subpage`` verdict is accepted
+    through the UNIFIED answer path (``preflight_merge`` -> ``write_decision_
+    answer`` -> ``apply_decision_answers``) — not merely through
+    ``resolve_merge`` called directly (covered separately in
+    ``tests/test_pending_merges_resolve.py::TestResolveMergeAttachAsSubpage``,
+    which also carries this verdict's AC2/AC3/AC7 tests)."""
+
+    @staticmethod
+    def _write_attach_candidates(wiki_root: Path) -> tuple[Path, Path, Path]:
+        merges_path = wiki_root / "_pending_merges.md"
+        target = wiki_root / "widget.md"
+        child = wiki_root / "gizmo.md"
+        target.write_text(
+            "---\nuid: widget-uid\nname: Widget\ntype: reference\n---\nbody\n",
+            encoding="utf-8",
+        )
+        child.write_text(
+            "---\nuid: gizmo-uid\nname: Gizmo\ntype: reference\n---\nbody\n",
+            encoding="utf-8",
+        )
+        return merges_path, target, child
+
+    def test_preflight_accepts_the_verdict(self, wiki_root: Path) -> None:
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+
+        ok, error_code, message = preflight_merge(merges_path, mid, "attach-as-subpage")
+
+        assert ok, (error_code, message)
+
+    def test_apply_attach_as_subpage_sets_the_relation(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """A full round trip through the real tier-0 apply path — the one
+        ``athenaeum ingest-answers`` drives in production — sets the
+        relation exactly as a direct ``resolve_merge`` call would."""
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="attach-as-subpage"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        child_meta, _ = parse_frontmatter(child.read_text(encoding="utf-8"))
+        assert child_meta.get("parent") == "widget-uid"
+        text = merges_path.read_text(encoding="utf-8")
+        assert "**Decision**: attach-as-subpage" in text
+
+    def test_invalid_old_vocabulary_check_still_rejects_bogus_verdicts(
+        self, wiki_root: Path
+    ) -> None:
+        """Widening ``preflight_merge``'s vocabulary to three tokens must not
+        accidentally widen it to anything -- a genuinely unknown verdict is
+        still refused."""
+        merges_path, target, child = self._write_attach_candidates(wiki_root)
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        write_pending_merge(
+            merges_path,
+            merge_target_name="widget",
+            sources=[str(target), str(child)],
+            rationale="r",
+            draft_merged_body=target.read_text(encoding="utf-8"),
+            confidence=0.6,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+
+        ok, error_code, _ = preflight_merge(merges_path, mid, "maybe")
+
+        assert not ok
+        assert error_code == "invalid_decision"
+
+
 # ---------------------------------------------------------------------------
 # TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.
 #
@@ -1027,6 +1123,131 @@ class TestVerdictLedgerWiring:
         )
         assert report.applied == 1
         assert ledger_exists(wiki_root) is False
+
+
+# ---------------------------------------------------------------------------
+# TestDecidedByDiscrimination — issue athenaeum#2523.
+#
+# A merge resolved from a human answer must record `decided_by: human:
+# <actor>` rather than the same `pipeline:merge-<decision>` stamp an
+# automated resolution gets — calibration/audit data (and, eventually, the
+# athenaeum#2077 prior-ruling cooldown) need to tell the two apart. The
+# positive signal is `DecisionAnswer.actor` (threaded from `write_decision_
+# answer`'s `actor` kwarg); its absence is the one thing that still produces
+# the pre-existing `pipeline:` stamp.
+# ---------------------------------------------------------------------------
+
+
+class TestDecidedByDiscrimination:
+    def test_human_answer_with_actor_records_human_decided_by(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC1: an answer that carries a real actor (the shape issue
+        athenaeum#2489 will eventually supply) flows through to
+        `human:<actor>` verbatim."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="human-actor-topic",
+            src_a=wiki_root / "human_actor_a.md",
+            src_b=wiki_root / "human_actor_b.md",
+        )
+        write_decision_answer(
+            raw_root,
+            decision_id=mid,
+            decision_type="merge",
+            verdict="approve",
+            actor="alice",
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "human:alice"
+
+    def test_automated_answer_with_no_actor_keeps_pipeline_decided_by(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC1's counter-example: an answer with no actor signal at all
+        (what an automated/pipeline writer would produce, had one ever
+        written through this raw-intake path) must keep the pre-existing
+        `pipeline:merge-<decision>` stamp — the human label requires a
+        positive signal, never a default."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="no-actor-topic",
+            src_a=wiki_root / "no_actor_a.md",
+            src_b=wiki_root / "no_actor_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "pipeline:merge-approve"
+
+    def test_unattributed_human_surface_records_human_unattributed(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """AC2: until athenaeum#2489's attributable-answer field exists, the
+        MCP and CLI human surfaces both stamp the placeholder actor
+        "unattributed" (see mcp_server.py's `resolve_merge` tool and
+        _cmd_decisions.py's `_cmd_answer`) — never `pipeline:`."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="unattributed-topic",
+            src_a=wiki_root / "unattributed_a.md",
+            src_b=wiki_root / "unattributed_b.md",
+        )
+        write_decision_answer(
+            raw_root,
+            decision_id=mid,
+            decision_type="merge",
+            verdict="reject",
+            actor="unattributed",
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["decided_by"] == "human:unattributed"
 
 
 # ---------------------------------------------------------------------------

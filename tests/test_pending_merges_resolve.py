@@ -1016,3 +1016,156 @@ def test_post_cutover_block_without_confidence_line_parses_cleanly(
     assert len(parsed) == 1
     assert parsed[0].confidence == 0.0
     assert parsed[0].write_kind == "create-merged"
+
+
+# ---------------------------------------------------------------------------
+# attach-as-subpage (issue athenaeum#2539): the third merge verdict besides
+# approve/reject. Folds nothing, tombstones nothing — sets the first-class
+# parent/child relation (athenaeum.page_relations) between the proposal's
+# target and its other source instead.
+# ---------------------------------------------------------------------------
+
+
+def _write_uid_page(
+    path: Path,
+    *,
+    uid: str,
+    name: str,
+    body: str = "body\n",
+    parent: str | None = None,
+    retired: bool = False,
+) -> None:
+    lines = ["---", f"uid: {uid}", f"name: {name}", "type: reference"]
+    if parent is not None:
+        lines.append(f"parent: {parent}")
+    if retired:
+        lines.append("retired: true")
+    lines.append("---")
+    lines.append(body)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _queue_attach_proposal(
+    tmp_path: Path,
+    *,
+    target_name: str = "Widget",
+    target_uid: str = "widget-uid",
+    child_name: str = "Gizmo",
+    child_uid: str = "gizmo-uid",
+    child_parent: str | None = None,
+    target_retired: bool = False,
+) -> tuple[Path, Path, Path, str]:
+    """Write a target + child page and queue a fold-into-existing-shaped
+    proposal naming the target. Returns ``(merges_path, target_path,
+    child_path, merge_id)``."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    target_path = tmp_path / "widget.md"
+    child_path = tmp_path / "gizmo.md"
+    _write_uid_page(target_path, uid=target_uid, name=target_name, retired=target_retired)
+    _write_uid_page(child_path, uid=child_uid, name=child_name, parent=child_parent)
+
+    write_pending_merge(
+        merges,
+        merge_target_name="widget",
+        sources=[str(target_path), str(child_path)],
+        rationale="athenaeum#2539 fixture",
+        draft_merged_body=target_path.read_text(encoding="utf-8"),
+        confidence=0.6,
+    )
+    merge_id = parse_pending_merges(merges)[0].id
+    return merges, target_path, child_path, merge_id
+
+
+class TestResolveMergeAttachAsSubpage:
+    """Issue athenaeum#2539: all eight acceptance criteria this verdict adds."""
+
+    def test_accepted_through_resolve_merge(self, tmp_path: Path) -> None:
+        """AC1: ``resolve_merge`` accepts the verdict directly (not just
+        through the unified decision-answer path — see
+        ``tests/test_decision_answers.py`` for that side)."""
+        merges, _target, _child, merge_id = _queue_attach_proposal(tmp_path)
+
+        result = resolve_merge(merges, merge_id, "attach-as-subpage", wiki_root=tmp_path)
+
+        assert result["ok"] is True, result
+        assert result["error_code"] is None
+
+    def test_sets_relation_without_folding_or_tombstoning(self, tmp_path: Path) -> None:
+        """AC2: both pages stay active, the source gets ``parent:`` set to
+        the target, no tombstone is written, and the proposal is no longer
+        pending."""
+        from athenaeum.models import is_tombstone
+        from athenaeum.page_relations import read_relations
+        from athenaeum.pending_merges import parse_pending_merges
+
+        merges, target_path, child_path, merge_id = _queue_attach_proposal(tmp_path)
+
+        result = resolve_merge(merges, merge_id, "attach-as-subpage", wiki_root=tmp_path)
+        assert result["ok"] is True, result
+
+        target_meta, _ = parse_frontmatter(target_path.read_text(encoding="utf-8"))
+        child_meta, _ = parse_frontmatter(child_path.read_text(encoding="utf-8"))
+
+        assert not is_tombstone(target_meta)
+        assert not is_tombstone(child_meta)
+        assert child_meta.get("parent") == target_meta.get("uid")
+
+        rel = read_relations(target_meta)
+        assert any(c.uid == child_meta.get("uid") and c.via == "fold" for c in rel.children)
+
+        # list_pending_merges only ever returns UNRESOLVED merges (by
+        # design -- it is the open queue) -- parse_pending_merges reads
+        # every block regardless of resolution, which is what "no longer
+        # pending" actually needs to assert against.
+        (pm,) = [p for p in parse_pending_merges(merges) if p.id == merge_id]
+        assert pm.resolved is True
+        assert pm.decision == "attach-as-subpage"
+
+    @pytest.mark.parametrize(
+        "child_parent, target_retired, expected_snippet",
+        [
+            ("some-other-uid", False, "already has a parent"),
+            (None, True, "inactive"),
+        ],
+        ids=["source_already_has_a_parent", "target_is_inactive"],
+    )
+    def test_refused_relation_invariant_leaves_item_open(
+        self,
+        tmp_path: Path,
+        child_parent: str | None,
+        target_retired: bool,
+        expected_snippet: str,
+    ) -> None:
+        """AC3: a broken relation invariant is refused with a reason, and
+        the item stays pending -- the checkbox is never flipped."""
+        from athenaeum.pending_merges import list_pending_merges
+
+        merges, _target, _child, merge_id = _queue_attach_proposal(
+            tmp_path,
+            child_parent=child_parent,
+            target_retired=target_retired,
+        )
+
+        result = resolve_merge(merges, merge_id, "attach-as-subpage", wiki_root=tmp_path)
+
+        assert result["ok"] is False
+        assert expected_snippet in result["message"], result
+        assert result["resolved_block"] is None
+
+        (item,) = [m for m in list_pending_merges(merges) if m["id"] == merge_id]
+        assert not item.get("resolved")
+
+    def test_records_the_verdict_on_the_merge_provenance_ledger(self, tmp_path: Path) -> None:
+        """AC7: the merge-provenance ledger records the attach verdict."""
+        from athenaeum.provenance import read_merge_provenance
+
+        merges, _target, _child, merge_id = _queue_attach_proposal(tmp_path)
+
+        result = resolve_merge(merges, merge_id, "attach-as-subpage", wiki_root=tmp_path)
+        assert result["ok"] is True, result
+
+        records = read_merge_provenance(tmp_path, merge_id=merge_id)
+        assert len(records) == 1
+        assert records[0]["write_kind"] == "attach-as-subpage"

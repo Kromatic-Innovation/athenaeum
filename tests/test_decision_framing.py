@@ -55,6 +55,8 @@ LIVE_DECISION_TYPES = (
     # Issue athenaeum#2019 (athenaeum#719 Plan step 6).
     "tier-movement-proposal",
     "policy-pack-edit",
+    # Issue athenaeum#2197.
+    "schema-amendment-proposal",
 )
 
 
@@ -365,6 +367,20 @@ class TestResponseSchemaValidation:
     def test_a_conforming_answer_validates(self) -> None:
         assert validate_answer("merge", {"verdict": "approve"}) == []
         assert validate_answer("merge", {"verdict": "reject", "note": "why"}) == []
+
+    def test_attach_as_subpage_is_a_conforming_merge_verdict(self) -> None:
+        """Issue athenaeum#2539 AC4: the merge response schema lists the new
+        verdict, with a one-line description of what it does."""
+        assert validate_answer("merge", {"verdict": "attach-as-subpage"}) == []
+        schema = response_schema_for("merge")
+        assert "attach-as-subpage" in schema["properties"]["verdict"]["enum"]
+        assert "attach-as-subpage" in schema["properties"]["verdict"]["description"]
+
+    def test_attach_as_subpage_is_not_the_conservative_default(self) -> None:
+        """Issue athenaeum#2539 AC4: adding the third verdict must not move
+        merge's conservative default off 'reject'."""
+        assert is_default_acceptance("merge", "reject") is True
+        assert is_default_acceptance("merge", "attach-as-subpage") is False
 
     def test_an_out_of_vocabulary_verdict_is_reported(self) -> None:
         assert validate_answer("merge", {"verdict": "maybe"}) != []

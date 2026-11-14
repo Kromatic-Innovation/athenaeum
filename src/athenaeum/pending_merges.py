@@ -80,7 +80,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -125,6 +125,7 @@ from athenaeum.models import (
     stamp_tombstone,
     tombstone_target,
 )
+from athenaeum.page_relations import RelationError, set_relation
 
 if TYPE_CHECKING:
     # Annotation-only (issue athenaeum#1627) — the real import stays local to
@@ -199,7 +200,7 @@ class PendingMerge:
     created_at: str
     resolved: bool
     raw_block: str
-    decision: Literal["approve", "reject", ""] = ""
+    decision: Literal["approve", "reject", "attach-as-subpage", ""] = ""
     note: str = ""
     also_affects: list[str] = field(default_factory=list)
     # Issue athenaeum#421: mechanical slug-collision classification recorded at proposal
@@ -243,6 +244,21 @@ class PendingMerge:
     # derivation — those still use ``merge_target_name`` — this is a pure
     # display override.
     display_name: str = ""
+    # Issue athenaeum#2514 AC2: the ``**Retired**:`` / ``**Archived**:``
+    # disposition a queue-hygiene sweep stamps on a block it moves to
+    # ``_pending_merges_archive.md`` without any human decision, split into
+    # its timestamp and its reason. ``""``/``""`` for every live block and
+    # for any block a human actually resolved (that disposition is carried
+    # by ``decision``/``answered_at`` instead).
+    archived_at: str = ""
+    archive_reason: str = ""
+    # Issue athenaeum#2514 AC2: the
+    # :func:`athenaeum.prior_rulings.source_content_digest` of this
+    # proposal's source pages AS THEY WERE when the sweep archived it —
+    # what makes "has a source page changed since the archive?" answerable
+    # without a clock. ``""`` for a live block and for anything archived
+    # before this field existed.
+    source_digest: str = ""
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
@@ -265,14 +281,24 @@ def _withdraw_stale_widen_question(
 ) -> None:
     """Resolve (not re-raise) an EARLIER ``fold_widen_impossible`` pending
     question this exact fold previously raised against *dimension_name* —
-    issue athenaeum#2071: once the IDENTITY-coordinate case below applies the
-    fold automatically, the question athenaeum#2069 raised asking a human
-    "what should the canonical's value be?" is now stale (the answer
-    already landed on disk). Reuses :func:`athenaeum.answers.resolve_by_id`
+    issue athenaeum#2071: once the fold settles that dimension on its own,
+    the question athenaeum#2069 raised asking a human "what should the
+    canonical's value be?" is now stale (the answer already landed on
+    disk). Reuses :func:`athenaeum.answers.resolve_by_id`
     — the SAME flip-checkbox-and-archive-on-next-tick path a human
     answering by hand goes through — rather than inventing a second
     "withdraw" mechanism; a block this resolves gets archived on the next
     ``ingest-answers`` run exactly like any other answered question.
+
+    Issue athenaeum#2514 AC4: called PER DIMENSION, from inside the widen
+    loop, the moment that dimension stops needing a human — not once at
+    the end of a fold that succeeded. A fold refused on dimension B left
+    dimension A's already-moot question open forever, because the only
+    withdrawal ran after every refusal point; 12 such questions, made
+    stale by athenaeum#2083 on 2026-10-22, were still open three weeks
+    later. Whether the FOLD applies is a different question from whether
+    THIS dimension still needs an answer, and only the second one decides
+    this.
 
     Matches by ``entity == target_slug`` and the dimension name embedded in
     the question text (the exact phrasing the pending-decision branch below
@@ -314,12 +340,11 @@ def _withdraw_stale_widen_question(
             pending_path,
             pq.id,
             (
-                f"Resolved automatically (athenaeum#2071): the fold now "
-                f"applies with the canonical's {dimension_name!r} coordinate "
-                f"set to {resolved_value!r} — opaque-identifier dimension, "
-                "folded sources' ids preserved as aliases on the canonical. "
-                "No human adjudication needed for a name-collision-scan "
-                "approval."
+                f"Resolved automatically (athenaeum#2071, athenaeum#2514): "
+                f"the fold of proposal {proposal_id} settles the canonical's "
+                f"{dimension_name!r} coordinate as {resolved_value!r} without "
+                "a human — this question no longer needs an answer, whether "
+                "or not the fold itself goes on to apply."
             ),
         )
 
@@ -440,6 +465,43 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
         if identity_slug(fpath, f_meta) == target_slug:
             found.append(fpath)
     return found
+
+
+def find_fold_target_collisions(
+    merge_target_name: str,
+    wiki_root: Path,
+    *,
+    canonical_path: Path,
+    other_paths: list[Path],
+) -> list[str]:
+    """Live page NAMES (other than *canonical_path*/*other_paths*) that also
+    identity-resolve to *merge_target_name*'s slug.
+
+    Issue athenaeum#1635/#2118 ambiguity guard, factored out of ``merges
+    propose-fold`` (:func:`athenaeum._cmd_merges._cmd_propose_fold`) so a
+    second caller gets the IDENTICAL detection rather than a hand-rolled
+    copy — issue athenaeum#2518 added that second caller
+    (``_cmd_pending._resolve_fold_question``, the fold-QUESTION answer
+    path), which was found to have skipped this guard entirely: without it,
+    :func:`resolve_target_page` / :func:`resolve_merge` silently take the
+    first of :func:`find_identity_pages`' candidates (an arbitrary, but
+    identical-on-both-sides, tie-break — see that function's own docstring)
+    instead of refusing, which can target and tombstone a DIFFERENT live
+    page than the one actually proposed as canonical.
+
+    *other_paths* excludes itself from the collision set — a page being
+    folded AWAY cannot make its own target ambiguous (issue athenaeum#2118).
+    Empty list means unambiguous; non-empty means the caller must refuse
+    (or, like ``propose-fold``, attempt its own narrower recovery) rather
+    than let :func:`resolve_target_page` guess.
+    """
+    other_resolved = {p.resolve() for p in other_paths}
+    canonical_resolved = canonical_path.resolve()
+    return [
+        fpath.name
+        for fpath in find_identity_pages(merge_target_name, wiki_root)
+        if fpath.resolve() != canonical_resolved and fpath.resolve() not in other_resolved
+    ]
 
 
 def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
@@ -659,6 +721,122 @@ def _split_blocks(text: str) -> list[str]:
     )
 
 
+#: Issue athenaeum#2514 AC2: the block line a queue-hygiene sweep stamps an
+#: archived proposal with, so :func:`athenaeum.prior_rulings.load_prior_rulings`
+#: can later ask "have the source pages changed since this was archived?"
+#: without consulting a clock. Named here because this module owns the
+#: block format; the value it carries is computed by
+#: :func:`source_content_digest` just below.
+SOURCE_DIGEST_LINE_PREFIX = "**Source digest**:"
+
+
+def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
+    """The live file *source* names, or ``None`` when it names none.
+
+    A stored source is normally an absolute path captured when the proposal
+    was written, so a moved checkout invalidates it; the page's FILENAME
+    under *wiki_root* is therefore tried as well -- the same basename-keyed
+    fallback :func:`athenaeum.prior_rulings.source_key` relies on, and for
+    the same reason (the wiki is flat, so the basename is the stable
+    identity). A relative source is resolved against *wiki_root* too, which
+    :func:`_classify_source` already documents as a real stored shape.
+    """
+    direct = Path(source).expanduser()
+    if not direct.is_absolute():
+        direct = Path(wiki_root).expanduser() / direct
+    if direct.is_file():
+        return direct
+    candidate = Path(wiki_root).expanduser() / Path(source).name
+    return candidate if candidate.is_file() else None
+
+
+def source_content_digest(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    page_digests: dict[Path, str] | None = None,
+) -> str:
+    """A stable fingerprint of what every page in *sources* CONTAINS.
+
+    Order-independent (sources fold in basename order) and
+    location-independent (only the basename, never the stored absolute
+    path, enters the hash), so it survives a moved checkout exactly as
+    :func:`athenaeum.prior_rulings.source_key` does. A source naming no live
+    file contributes the digest of empty bytes, so a page that disappears --
+    or one that later reappears -- is itself a change.
+
+    Deliberately content-based rather than clock-based (issue athenaeum#2514):
+    a modification time is rewritten by a fresh clone and by any tool that
+    rewrites a file byte-identically, so it answers "was this file touched",
+    not "did this page change". The second question is the one the archived
+    ruling asks.
+
+    *page_digests* is an optional caller-owned memo of per-page digests,
+    keyed by resolved path. :func:`athenaeum.prior_rulings.load_prior_rulings`
+    passes one because the same page recurs across archived blocks by
+    construction -- the driving case is a single pair re-proposed and
+    re-archived on 19 consecutive nights. Pass ``None`` (the default) for a
+    one-shot call; a caller that reuses a memo across two different instants
+    would be comparing one instant's bytes against another's, so the memo is
+    deliberately the caller's to scope rather than module state.
+    """
+    parts: list[bytes] = []
+    for source in sorted(set(sources), key=lambda s: Path(s).name):
+        path = resolve_source_path(source, wiki_root=wiki_root)
+        digest = page_digests.get(path) if page_digests is not None and path else None
+        if digest is None:
+            data = b""
+            if path is not None:
+                try:
+                    data = path.read_bytes()
+                except OSError:  # pragma: no cover - raced deletion
+                    data = b""
+            digest = hashlib.sha256(data).hexdigest()
+            if page_digests is not None and path is not None:
+                page_digests[path] = digest
+        parts.append(
+            Path(source).name.encode("utf-8") + b"\x00" + digest.encode("ascii")
+        )
+    return hashlib.sha256(b"\x00".join(parts)).hexdigest()
+
+
+def _archive_trailer(
+    sources: Iterable[str],
+    *,
+    wiki_root: Path,
+    disposition: Literal["Retired", "Archived"],
+    ts: str,
+    detail: str,
+) -> str:
+    """The trailer EVERY archive writer appends to a block it moves out of
+    the live sidecar: a source digest, then the disposition line.
+
+    One renderer rather than four f-strings (issue athenaeum#2514 review).
+    The digest is a property of the ARCHIVE FORMAT, not of one writer:
+    :func:`_parse_block` reads ``**Retired**:`` and ``**Archived**:``
+    generically into :attr:`PendingMerge.archived_at`, so
+    :func:`athenaeum.prior_rulings.load_prior_rulings` mints an ``archived``
+    ruling for a block from ANY of these writers. A writer that skipped the
+    digest would therefore mint a ruling nothing can ever prove stale —
+    permanent suppression of that source set, with no recovery even after a
+    source page changes. Routing all four through here is what makes
+    "an archive binds until a source page changes" true of every archive
+    this code writes, rather than only of the queue-hygiene sweep.
+
+    NOT used by :func:`ingest_resolved_merges`, which archives blocks a
+    HUMAN resolved. Those carry a ``**Decision**:`` line, so
+    ``load_prior_rulings`` reads them as the human ruling they are and never
+    reaches the archived-ruling branch at all; a digest there would be
+    inert bytes.
+
+    *detail* is the caller's own reason text (``gate: ...``,
+    ``satisfied: ...``, a retirement reason) and may be empty.
+    """
+    digest = source_content_digest(sources, wiki_root=wiki_root)
+    tail = f" — {detail}" if detail else ""
+    return f"{SOURCE_DIGEST_LINE_PREFIX} {digest}\n**{disposition}**: {ts}{tail}\n"
+
+
 def _parse_block(block_text: str) -> PendingMerge | None:
     lines = block_text.splitlines()
     if not lines:
@@ -696,6 +874,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     auto_applied = False
     embedder = ""
     display_name = ""
+    archived_at = ""
+    archive_reason = ""
+    source_digest = ""
 
     in_sources = False
     in_draft = False
@@ -772,6 +953,24 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             answered_at = s.removeprefix("**Answered at**:").strip()
             continue
+        if s.startswith(SOURCE_DIGEST_LINE_PREFIX):
+            in_sources = False
+            source_digest = s.removeprefix(SOURCE_DIGEST_LINE_PREFIX).strip()
+            continue
+        if s.startswith("**Retired**:") or s.startswith("**Archived**:"):
+            # Issue athenaeum#2514 AC2: a queue-hygiene disposition, not a
+            # human decision. Both spellings are the same fact to a reader
+            # (the block is in the archive and nobody answered it); only
+            # the reason text after the em dash differs, and a bare
+            # ``**Archived**: <ts>`` (the shape ingest_resolved_merges
+            # writes) simply carries no reason.
+            in_sources = False
+            prefix = "**Retired**:" if s.startswith("**Retired**:") else "**Archived**:"
+            raw_disposition = s.removeprefix(prefix).strip()
+            archived_at, _, archive_reason = raw_disposition.partition(" — ")
+            archived_at = archived_at.strip()
+            archive_reason = archive_reason.strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -795,7 +994,11 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         decision=(
             "approve"
             if decision == "approve"
-            else "reject" if decision == "reject" else ""
+            else (
+                "reject"
+                if decision == "reject"
+                else "attach-as-subpage" if decision == "attach-as-subpage" else ""
+            )
         ),
         note=note,
         write_kind=write_kind,
@@ -803,6 +1006,9 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         embedder=embedder,
         display_name=display_name,
         answered_at=answered_at,
+        archived_at=archived_at,
+        archive_reason=archive_reason,
+        source_digest=source_digest,
     )
 
 
@@ -1104,7 +1310,7 @@ def list_pending_merges(
 
 def _rewrite_block_resolved(
     block_text: str,
-    decision: Literal["approve", "reject"],
+    decision: Literal["approve", "reject", "attach-as-subpage"],
     note: str,
     *,
     auto_applied: bool = False,
@@ -1601,6 +1807,56 @@ def _json_safe_coordinate(value: Any) -> Any:
     return value
 
 
+def _backfill_stub_canonical_coordinates(
+    prior_meta: dict[str, Any],
+    source_metas_in_order: list[dict[str, Any]],
+    *,
+    registry: DimensionRegistry,
+    human_approved: bool,
+) -> dict[str, Any]:
+    """Give a STUB canonical the separator coordinates its sources carry,
+    in place, and report what was filled (issue athenaeum#2514 AC3).
+
+    A stub is a canonical page with NO frontmatter whatsoever — either none
+    at all (the live corpus's five ``## From wiki/...`` pages) or an empty
+    ``{}`` block (the sixth). Both parse to an empty mapping, which is the
+    whole predicate: this never touches a canonical that carries any
+    frontmatter, so a page that deliberately omits ONE coordinate still
+    falls through to the pending-question path that exists to ask about it.
+
+    *source_metas_in_order* is consulted in order and the FIRST entry
+    carrying a concrete value for a dimension wins — the folded sources
+    first (they are the real evidence) and the proposal's own draft last.
+    Values round-trip through :func:`athenaeum.dimensions.coordinate_value` /
+    :func:`parsed_coordinate` / :func:`_write_coordinate`, the same pair the
+    widen loop itself uses, so no second frontmatter-key mapping exists to
+    drift.
+
+    HUMAN-APPROVED folds only, matching the athenaeum#2115 AC3 rule this
+    unblocks: the approval is what rules the pages to be the same thing, and
+    without it a backfill would be inventing a coordinate for a page no
+    human has looked at.
+    """
+    if not human_approved or prior_meta:
+        return {}
+    filled: dict[str, Any] = {}
+    for dimension in registry:
+        if not dimension.separates:
+            continue
+        for meta in source_metas_in_order:
+            value = (
+                parsed_coordinate(dimension, meta)
+                if dimension.kind == DimensionKind.INTERVAL
+                else coordinate_value(dimension, meta)
+            )
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            _write_coordinate(prior_meta, dimension, value)
+            filled[dimension.name] = value
+            break
+    return filled
+
+
 #: Phrase every ``fold_widen_impossible`` question carries (issue
 #: athenaeum#2069), shared by the raiser, the stale-question withdrawal and the
 #: answer read-back (issue athenaeum#2115) so the three cannot drift.
@@ -1744,7 +2000,7 @@ def _apply_fold_into_existing(
     5. TOMBSTONE the old source wiki files (issue athenaeum#716 — "a merge may
        destroy renderings, never observations"): stamp each with
        :func:`athenaeum.models.stamp_tombstone` (``status: folded``,
-       ``folded_into: <target_slug>``, ``embedded: false``) IN PLACE, via
+       ``folded_into: <target_path.stem>``, ``embedded: false``) IN PLACE, via
        ``git add`` (never ``git rm``, never ``Path.unlink()`` — the file
        stays on disk, body untouched, every other frontmatter key —
        including the source's own scope coordinate, "the narrow
@@ -1756,6 +2012,20 @@ def _apply_fold_into_existing(
        waiting for the next reindex to notice ``embedded: false``.
     7. Commit the fold itself as its own commit (Commit B), scoped to
        exactly the paths this fold touched.
+
+    Issue athenaeum#2545: step 5's ``folded_into`` is stamped from
+    ``target_path.stem`` — the canonical's own FILENAME identity, already
+    resolved by the caller (see ``resolve_merge``'s ``resolve_target_page``
+    call) — never from ``target_slug`` (``slugify(merge_target_name)``). For
+    the real corpus shape ``<uid>-<slug>.md`` the two differ: ``target_slug``
+    is the bare name-slug, which names no file, so a tombstone stamped with
+    it is a dead redirect the moment a second page could ever share that
+    name. ``target_path.stem`` always names the real file. For a bare-slug
+    canonical (``<slug>.md``) the two coincide, so this is a no-op there.
+    ``target_slug`` keeps its pre-existing meaning everywhere else in this
+    function (alias/source-identity comparisons, the wikilink rewrite
+    target, the pending-question entity key) — only the tombstone stamp
+    changes.
 
     Returns ``{"ok": True, "folded_sources", "aliases_added",
     "links_rewritten", "link_details", "canonical_content_hash",
@@ -1952,6 +2222,29 @@ def _apply_fold_into_existing(
     if not isinstance(draft_meta, dict):
         draft_meta = {}
     widened_draft_meta = dict(draft_meta)
+    # Issue athenaeum#2514 AC3: a STUB canonical — no frontmatter at all, or
+    # an empty ``{}`` block — carries no coordinate on any dimension, so the
+    # athenaeum#2115 AC3 rule below ("a human approve is the identity
+    # ruling, so the canonical keeps its own class") has nothing to keep and
+    # falls straight through to raising the widen question again. Six of the
+    # eleven folds athenaeum#2115 was meant to unblock were stuck exactly
+    # there. Backfill from the folded sources FIRST, here in the preflight,
+    # so the repair reaches a fold that has never applied — the only kind
+    # that can be stuck.
+    backfilled_coordinates = _backfill_stub_canonical_coordinates(
+        prior_meta,
+        [source_metas[s] for s in folded_sources] + [draft_meta],
+        registry=registry,
+        human_approved=human_approved,
+    )
+    if backfilled_coordinates:
+        log.info(
+            "fold-stub-canonical-backfill proposal=%s canonical=%s coordinates=%s "
+            "— canonical page had no frontmatter to widen from",
+            pm.id,
+            target_slug,
+            sorted(backfilled_coordinates),
+        )
     coordinates_widened: dict[str, Any] = {}
     # Issue athenaeum#2071: dimension names resolved via the IDENTITY-kind
     # branch just below — the narrowing-invariant loop that follows this one
@@ -1972,14 +2265,23 @@ def _apply_fold_into_existing(
     #     human-approved fold, with the sources' differing values recorded.
     answered_dimensions: dict[str, tuple[str, str]] = {}
     kept_dimensions: dict[str, dict[str, Any]] = {}
+    # Issue athenaeum#2514 AC4: set per iteration, for the dimensions this
+    # fold settles WITHOUT a human. Any widen question still open on such a
+    # dimension is moot the instant it is set — see the withdrawal at the
+    # bottom of this loop for why that cannot wait for the fold to apply.
+    settled_without_human = False
     for dimension in registry:
         if not dimension.separates:
             continue
+        settled_without_human = False
         metas_in_order = [prior_meta, draft_meta] + [
             source_metas[s] for s in folded_sources
         ]
         try:
             widened_value = _widen_over_metas(dimension, metas_in_order)
+            # Every side agreed, or widened cleanly into one covering
+            # coordinate: nothing here for a human to adjudicate.
+            settled_without_human = True
         except CoordinateWidenImpossible as exc:
             if widen_path_eligible and dimension.kind == DimensionKind.IDENTITY:
                 # An opaque per-page identifier (``subject`` is the only
@@ -2014,6 +2316,7 @@ def _apply_fold_into_existing(
                     widened_value = chosen
                     identity_resolved_dimensions[dimension.name] = chosen
                     identity_aliases.extend(v for v in concrete_values if v != chosen)
+                    settled_without_human = True
                 else:
                     # Every side the widen saw is the sentinel/null —
                     # CoordinateWidenImpossible requires two concrete,
@@ -2037,6 +2340,7 @@ def _apply_fold_into_existing(
                 # hard refusal, and a canonical with NO class falls through
                 # to the question below.
                 widened_value = canonical_class
+                settled_without_human = True
                 kept_dimensions[dimension.name] = {
                     "kept": canonical_class,
                     "differing": sorted(
@@ -2050,6 +2354,7 @@ def _apply_fold_into_existing(
                 }
             elif widen_path_eligible and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
+                settled_without_human = True
             elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
                 # Issue athenaeum#2115: the closed answer set — every
@@ -2152,6 +2457,23 @@ def _apply_fold_into_existing(
         if widened_value != current_value:
             _write_coordinate(widened_draft_meta, dimension, widened_value)
             coordinates_widened[dimension.name] = _json_safe_coordinate(widened_value)
+        if settled_without_human:
+            # Issue athenaeum#2514 AC4: withdraw HERE, per dimension, not
+            # after the fold completes. "Does this dimension still need a
+            # human?" is answered now and is independent of whether the
+            # fold goes on to apply — the end-of-function withdrawal only
+            # ever ran for a fold that applied, so a fold refused on a
+            # LATER dimension stranded this one's question indefinitely.
+            # Idempotent and best-effort (see the helper): a dimension with
+            # no open question is a no-op, and an ANSWERED question is left
+            # alone for the answer read-back to consume.
+            _withdraw_stale_widen_question(
+                wiki_root / "_pending_questions.md",
+                target_slug,
+                dimension.name,
+                widened_value,
+                pm.id,
+            )
 
     for dimension in registry:
         if not dimension.separates:
@@ -2337,7 +2659,11 @@ def _apply_fold_into_existing(
                     repo_root,
                 )
                 continue
-            stamped_meta = stamp_tombstone(source_metas[src], target_slug)
+            # Issue athenaeum#2545: stamp the canonical's resolved FILE
+            # identity (``target_path.stem``), not ``target_slug`` (the
+            # bare name-slug) — see the function docstring. For a bare-slug
+            # canonical the two are identical, so this is a no-op there.
+            stamped_meta = stamp_tombstone(source_metas[src], target_path.stem)
             _, src_body = parse_frontmatter(source_texts[src])
             atomic_write_text(src_path, render_frontmatter(stamped_meta) + src_body)
             add_result = _git(repo_root, "add", "--", rel_src)
@@ -2405,18 +2731,15 @@ def _apply_fold_into_existing(
                 *commit_b_rel_paths,
             )
 
-    # Issue athenaeum#2071: now that the fold has actually succeeded, resolve
-    # any STALE `fold_widen_impossible` pending question a prior
-    # (pre-athenaeum#2071) ingest-answers tick raised against one of the
-    # dimensions this fold just resolved automatically — done here, after
-    # every refusal point above, so a fold that ends up refused for an
-    # UNRELATED reason never withdraws a question that is still live.
-    if identity_resolved_dimensions:
-        pending_path = wiki_root / "_pending_questions.md"
-        for dim_name, resolved_value in identity_resolved_dimensions.items():
-            _withdraw_stale_widen_question(
-                pending_path, target_slug, dim_name, resolved_value, pm.id
-            )
+    # Issue athenaeum#2071's post-success withdrawal of the IDENTITY-resolved
+    # dimensions' stale questions used to live here. Issue athenaeum#2514 AC4
+    # moved it into the widen loop itself, which runs strictly earlier and
+    # covers a superset of the same dimensions — its premise ("a fold that
+    # ends up refused for an UNRELATED reason never withdraws a question
+    # that is still live") was exactly backwards: a question on a dimension
+    # this fold has already settled is not live, and keeping it open was
+    # what stranded 12 of them for three weeks.
+    #
     # Issue athenaeum#2115 AC4: the fold applied, so EVERY still-open widen
     # question naming this proposal (any dimension) is moot — withdraw it as
     # superseded. Answered ones are left alone (their answer was consumed).
@@ -2463,7 +2786,22 @@ def _archive_stale_merge_block(
     untouched) rather than re-deriving them here.
     """
     ts = now_iso(now)
-    archived_block = f"{block_text}\n\n**Retired**: {ts} — {reason}\n"
+    # Issue athenaeum#2514 review: this writer stamps the same source digest
+    # the queue-hygiene sweep does. Without it this archive would bind the
+    # proposers forever (see `_archive_trailer`). A tombstoned source is a
+    # permanent refusal TODAY, but "permanent" is a fact about the pages,
+    # not about this block: un-tombstoning a source changes its bytes, the
+    # digest stops matching, and the pair becomes askable again. Encoding
+    # the permanence in an unprovable archive instead would make it
+    # irreversible, which is a stronger claim than the refusal supports.
+    archived_pm = _parse_block(block_text)
+    archived_block = block_text + "\n\n" + _archive_trailer(
+        archived_pm.sources if archived_pm is not None else [],
+        wiki_root=merges_path.parent,
+        disposition="Retired",
+        ts=ts,
+        detail=reason,
+    )
 
     primary_parts = ["# Pending Merges", *remaining_blocks]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
@@ -2471,7 +2809,7 @@ def _archive_stale_merge_block(
 
     _withdraw_widen_questions_for_proposals(
         merges_path.parent / "_pending_questions.md",
-        [pm.id for pm in [_parse_block(block_text)] if pm is not None],
+        [archived_pm.id] if archived_pm is not None else [],
         "was archived",
     )
 
@@ -2500,7 +2838,7 @@ def _archive_stale_merge_block(
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
-    decision: Literal["approve", "reject"],
+    decision: Literal["approve", "reject", "attach-as-subpage"],
     note: str = "",
     *,
     wiki_root: Path | None = None,
@@ -2588,6 +2926,30 @@ def resolve_merge(
             the detector's declared-pair short-circuit suppresses the
             pair on future runs via the distinct
             ``"declared-merge-rejection"`` rationale.
+
+            ``"attach-as-subpage"`` (issue athenaeum#2539 — a fold decision's
+            third outcome besides merge/reject): folds nothing and writes
+            no tombstone. Sets the parent/child relation between the
+            proposal's target page (parent) and its other source page
+            (child) through :func:`athenaeum.page_relations.set_relation`,
+            with ``via="fold"`` — deliberately NOT ``via="attach"``, because
+            this attach arose from a fold decision read at a different page
+            size (issue athenaeum#1581's ruling that consolidate and
+            decompose are one decision), and athenaeum#2538 keeps a
+            ``via: fold`` child visible in entity listings by default where
+            a ``via: split`` child is hidden. Refused — with a reason, the
+            checkbox left unflipped, the item still pending — when: the
+            proposal's target name does not resolve to an existing page
+            (``attach_target_missing``); the proposal does not carry
+            exactly one OTHER source besides the target
+            (``attach_source_ambiguous``); either page is unreadable or
+            carries no ``uid:`` (``attach_source_unreadable`` /
+            ``attach_target_unreadable`` / ``attach_uid_missing``); or
+            :func:`set_relation` itself refuses the relation
+            (``attach_relation_refused`` — a second, different parent; a
+            cycle; a third nesting level; or an inactive target). On
+            success, a provenance record is appended naming
+            ``write_kind="attach-as-subpage"``.
         note: Optional human note attached to the decision block.
         wiki_root: Optional wiki root override (defaults to
             ``merges_path.parent``).
@@ -2617,11 +2979,14 @@ def resolve_merge(
         and ``"links_rewritten"`` (the count of sibling wiki files whose
         inbound wikilinks were repointed).
     """
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return {
             "ok": False,
             "error_code": "invalid_decision",
-            "message": f"decision must be 'approve' or 'reject', got {decision!r}",
+            "message": (
+                "decision must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {decision!r}"
+            ),
             "resolved_block": None,
         }
     if not merges_path.exists():
@@ -2829,7 +3194,12 @@ def resolve_merge(
                         root,
                         merge_id=target_pm.id,
                         write_kind=write_kind,
-                        canonical_slug=target_slug,
+                        # Issue athenaeum#2545: match the ledger's
+                        # ``canonical_slug`` to the value `folded_into` is
+                        # now stamped with (``target_path.stem``), so a
+                        # later `find_fold_record` lookup by identity still
+                        # finds this record.
+                        canonical_slug=target_path.stem,
                         source_paths=list(target_pm.sources),
                         auto_applied=False,
                         applied=False,
@@ -2917,7 +3287,12 @@ def resolve_merge(
             root,
             merge_id=target_pm.id,
             write_kind=write_kind,
-            canonical_slug=target_slug,
+            # Issue athenaeum#2545: ``target_path.stem`` — identical to
+            # ``target_slug`` for a bare-slug target (``create-merged``
+            # always writes one), and the canonical's real filename stem
+            # for ``fold-into-existing``, matching the tombstone's
+            # ``folded_into`` value so `find_fold_record` keeps resolving.
+            canonical_slug=target_path.stem,
             source_paths=list(target_pm.sources),
             auto_applied=auto_applied,
             **fold_ledger_extra,
@@ -2936,6 +3311,89 @@ def resolve_merge(
             )
             if contact_fold.records_folded:
                 extra_response["contact_records_folded"] = contact_fold.records_folded
+    elif decision == "attach-as-subpage":
+        # Issue athenaeum#2539: attach the proposal's other source page as a
+        # sub-page of its target, instead of merging or rejecting. Folds
+        # nothing and writes no tombstone — the two pages stay exactly as
+        # they are, linked by the first-class parent/child relation
+        # (athenaeum#2535) rather than one of them being absorbed.
+        root = wiki_root or merges_path.parent
+        resolved_target = resolve_target_page(target_pm.merge_target_name, root)
+        if resolved_target is None:
+            return {
+                "ok": False,
+                "error_code": "attach_target_missing",
+                "message": (
+                    f"no existing page resolves to {target_pm.merge_target_name!r}; "
+                    "attach-as-subpage requires an existing target page to "
+                    "attach the other source under"
+                ),
+                "resolved_block": None,
+            }
+        other_sources = [
+            s for s in target_pm.sources if Path(s).resolve() != resolved_target.resolve()
+        ]
+        if len(other_sources) != 1:
+            return {
+                "ok": False,
+                "error_code": "attach_source_ambiguous",
+                "message": (
+                    "attach-as-subpage needs exactly one source distinct from "
+                    f"the target; got {len(other_sources)} (sources: "
+                    f"{target_pm.sources!r})"
+                ),
+                "resolved_block": None,
+            }
+        child_path = Path(other_sources[0])
+        try:
+            child_meta, _ = parse_frontmatter(child_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_source_unreadable",
+                "message": f"could not read source page {child_path}: {exc}",
+                "resolved_block": None,
+            }
+        try:
+            target_meta, _ = parse_frontmatter(resolved_target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_target_unreadable",
+                "message": f"could not read target page {resolved_target}: {exc}",
+                "resolved_block": None,
+            }
+        child_uid = str((child_meta or {}).get("uid", "") or "").strip()
+        target_uid = str((target_meta or {}).get("uid", "") or "").strip()
+        if not child_uid or not target_uid:
+            return {
+                "ok": False,
+                "error_code": "attach_uid_missing",
+                "message": (
+                    f"{'source' if not child_uid else 'target'} page has no "
+                    "uid: frontmatter; cannot set a relation"
+                ),
+                "resolved_block": None,
+            }
+        try:
+            # Deliberately via="fold", not via="attach" — see this function's
+            # own docstring and athenaeum#2538 for why the distinction matters.
+            set_relation(root, child_uid=child_uid, parent_uid=target_uid, via="fold")
+        except RelationError as exc:
+            return {
+                "ok": False,
+                "error_code": "attach_relation_refused",
+                "message": str(exc),
+                "resolved_block": None,
+            }
+        record_merge_provenance(
+            root,
+            merge_id=target_pm.id,
+            write_kind="attach-as-subpage",
+            canonical_slug=resolved_target.stem,
+            source_paths=list(target_pm.sources),
+            auto_applied=auto_applied,
+        )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Issue athenaeum#715 (restating athenaeum#658's D3): a rejection means "these
         # two are NOT the same claim" — a completely different assertion
@@ -3108,7 +3566,9 @@ def ingest_resolved_merges(merges_path: Path) -> int:
 
 @dataclass
 class RetiredProposal:
-    """One unresolved block the current suppression gate would now retire."""
+    """One unresolved block the current suppression gate would now retire
+    as STALE — never a block archived as satisfied instead (see
+    :class:`SatisfiedProposal`)."""
 
     id: str
     merge_target_name: str
@@ -3118,33 +3578,77 @@ class RetiredProposal:
 
 
 @dataclass
+class SatisfiedProposal:
+    """One unresolved block archived as SATISFIED rather than stale (issue
+    athenaeum#2522 AC2): every one of its sources had already been folded
+    into THIS proposal's own ``merge_target_name`` by an unrelated merge, so
+    the merge this proposal asked for has, in effect, already happened. A
+    source folded into some OTHER page, or only some sources folded, is
+    NOT satisfied — it stays on the ordinary :class:`RetiredProposal` stale
+    path (see :func:`revalidate_pending_merges`'s own-target check).
+    """
+
+    id: str
+    merge_target_name: str
+    n_sources: int
+    confidence: float
+    folded_into: str
+
+
+@dataclass
 class RevalidationResult:
     """Outcome of :func:`revalidate_pending_merges`.
 
-    ``retired`` lists the unresolved blocks the CURRENT gate would suppress;
-    ``kept`` counts the blocks left in the primary file (unresolved-and-legal
-    + resolved + unparseable). ``applied`` is True only when the sweep wrote.
+    ``retired`` lists the unresolved blocks the CURRENT gate would suppress
+    as stale; ``satisfied`` lists ones archived instead as satisfied (issue
+    athenaeum#2522 AC2). ``kept`` counts the blocks left in the primary file
+    (unresolved-and-legal + resolved + unparseable — neither retired nor
+    satisfied). ``applied`` is True only when the sweep wrote (either
+    bucket).
     """
 
     retired: list[RetiredProposal]
+    satisfied: list[SatisfiedProposal]
     kept: int
     applied: bool
 
 
-def _source_page_missing(src: str, *, base: Path | None = None) -> bool:
-    """True iff *src* no longer names a live page (issue athenaeum#2072).
+@dataclass(frozen=True)
+class _SourceStatus:
+    """Classification of one ``**Sources**:`` entry at revalidation time
+    (issue athenaeum#2522). Exactly one of three shapes:
 
-    A queued proposal's source can go stale between queue-time and
-    revalidation-time in two ways: the page may have been deleted or
-    renamed outright (the file no longer exists at that path), or it may
-    have been FOLDED AWAY by an unrelated merge in the meantime — the file
-    still exists on disk but now carries the issue athenaeum#716 tombstone
-    stamp (``status: folded`` — see :func:`athenaeum.models.is_tombstone`).
-    Either way the source is no longer something a human reviewing this
-    proposal can meaningfully act on, so both count as "missing" here. A
-    file that cannot be read at all (``OSError``/``UnicodeDecodeError``) is
-    conservatively treated as missing too — this function cannot prove it
-    is still a live page.
+    * ``missing=True`` — the source no longer names a readable page at all
+      (deleted, renamed, or unreadable: ``OSError``/``UnicodeDecodeError``).
+      Genuinely gone; possibly data loss.
+    * ``missing=False, folded=True`` — the source's FILE is still there but
+      is now a tombstone (``status: folded`` — issue athenaeum#716): present,
+      not absent. ``folded_into`` names the slug/stem it was folded into
+      when :func:`athenaeum.models.tombstone_target` can read it, else
+      ``None`` for a malformed tombstone (fails open rather than raising,
+      matching that function's own house style).
+    * ``missing=False, folded=False`` — an ordinary, live page.
+
+    These three were previously conflated into one ``bool`` ("missing") by
+    :func:`revalidate_pending_merges` (issue athenaeum#2072). They are
+    operator-meaningfully different: a fold usually means this proposal's
+    sources already got absorbed somewhere — possibly into THIS proposal's
+    own target, in which case the proposal is already satisfied — while a
+    genuinely missing page may be data loss.
+    """
+
+    missing: bool
+    folded: bool
+    folded_into: str | None = None
+
+
+def _classify_source(src: str, *, base: Path | None = None) -> _SourceStatus:
+    """Classify *src* as live, missing, or folded (issue athenaeum#2522).
+
+    Reuses the existing tombstone reader (:func:`athenaeum.models.is_tombstone`
+    / :func:`athenaeum.models.tombstone_target`) rather than inventing a
+    second way to detect a fold — see that pair's own docstrings for the
+    fail-open malformed-tombstone handling this delegates to.
 
     ``base`` resolves a RELATIVE *src* the same way
     :func:`athenaeum.models.is_page_authorized_at` does (joined to ``base``;
@@ -3158,13 +3662,97 @@ def _source_page_missing(src: str, *, base: Path | None = None) -> bool:
     if base is not None and not path.is_absolute():
         path = Path(base).expanduser() / path
     if not path.is_file():
-        return True
+        return _SourceStatus(missing=True, folded=False)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return True
+        return _SourceStatus(missing=True, folded=False)
     meta, _ = parse_frontmatter(text)
-    return bool(meta) and is_tombstone(meta)
+    if meta and is_tombstone(meta):
+        return _SourceStatus(
+            missing=False, folded=True, folded_into=tombstone_target(meta)
+        )
+    return _SourceStatus(missing=False, folded=False)
+
+
+def _describe_source_staleness(
+    folded_targets: list[str | None], missing_count: int, total: int
+) -> str:
+    """Compose :attr:`RetiredProposal.reason`, distinguishing a folded
+    source from a genuinely missing one (issue athenaeum#2522 AC1).
+
+    *folded_targets* holds the ``folded_into`` value of every FOLDED
+    source (``None`` entries are malformed tombstones with no readable
+    target). A single distinct, known fold target is named (``source
+    folded into <target>: N of M``); more than one distinct target, or
+    none known, reports the count only — naming one of several would
+    mislead an operator into thinking there is a single answer. Missing
+    and folded counts are reported side by side when both are present,
+    preserving the pre-athenaeum#2522 ``"source page missing: N of M"``
+    string verbatim for an all-missing, no-folds block.
+    """
+    parts: list[str] = []
+    if folded_targets:
+        distinct = {t for t in folded_targets if t is not None}
+        if len(distinct) == 1:
+            parts.append(
+                f"source folded into {next(iter(distinct))}: "
+                f"{len(folded_targets)} of {total}"
+            )
+        else:
+            parts.append(f"source folded: {len(folded_targets)} of {total}")
+    if missing_count:
+        parts.append(f"source page missing: {missing_count} of {total}")
+    return "; ".join(parts)
+
+
+def _own_target_identity(own_target_path: Path) -> tuple[str | None, str | None]:
+    """The (bare slug, own ``uid:``) pair identifying *own_target_path*,
+    read from its own frontmatter (issue athenaeum#2522).
+
+    Reuses :func:`identity_slug` — the SAME shared identity rule
+    :func:`find_identity_pages`/:func:`resolve_target_page` already resolve
+    a fold target by (issue athenaeum#1642) — rather than inventing a
+    second slug/uid split. Returns ``(None, None)`` when the file can't be
+    read/parsed, or its own identity can't be resolved (:func:`identity_slug`'s
+    existing rules: a malformed/missing ``name:``, or a filename prefix
+    that is not the page's own ``uid:``).
+    """
+    try:
+        text = own_target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    meta, _ = parse_frontmatter(text)
+    slug = identity_slug(own_target_path, meta)
+    uid = meta.get("uid") if isinstance(meta, dict) else None
+    return slug, (str(uid).strip() if uid and str(uid).strip() else None)
+
+
+def _folded_into_matches(
+    folded_into: str | None, *, target_slug: str, own_uid: str | None
+) -> bool:
+    """Whether a tombstone's ``folded_into`` value names *target_slug*
+    (issue athenaeum#2522).
+
+    A fold stamps a tombstone's ``folded_into`` with the target's real
+    filename STEM (:func:`_apply_fold_into_existing`'s docstring) — which
+    is ``<uid>-<slug>`` for a uid-prefixed canonical, not the bare slug.
+    Pre-athenaeum#2545 folds stamped the bare slug regardless, so a legacy
+    tombstone's value and a uid-prefixed target's CURRENT stem can name
+    the same page while differing in shape. Normalising BOTH sides down
+    to the bare slug (stripping *only* the known-correct ``<own_uid>-``
+    prefix, never an arbitrary one) before comparing by equality is what
+    makes the two forms comparable — never by substring/``endswith``,
+    which would also match an unrelated, longer slug (``sublime-default-rule``
+    inside ``other-sublime-default-rule``) and misreport a live, distinct
+    proposal as already satisfied.
+    """
+    if folded_into is None:
+        return False
+    normalized = folded_into
+    if own_uid and folded_into.startswith(f"{own_uid}-"):
+        normalized = folded_into[len(own_uid) + 1 :]
+    return normalized == target_slug
 
 
 def revalidate_pending_merges(
@@ -3179,15 +3767,34 @@ def revalidate_pending_merges(
 
     Issue athenaeum#2072: also retires a block when at least one of its
     ``**Sources**:`` entries no longer names a live page (see
-    :func:`_source_page_missing` — deleted/renamed, or folded/tombstoned by
-    a later run). This is a DISTINCT reason from the over-cluster gate
-    below (``source page missing: N of M``, not the suppression-gate
-    reason string), recorded and archived the same way. A name-collision-
-    scan proposal (:mod:`athenaeum.name_collisions`) is the driving case —
-    its canonical/source pages can be folded or retired by a LATER run
-    before a human answers the original proposal — but the check applies
-    to every proposal's sources, not just name-collision ones, since a
-    dangling source is equally unreviewable regardless of origin.
+    :func:`_classify_source` — deleted/renamed, or folded/tombstoned by a
+    later run). This is a DISTINCT reason from the over-cluster gate below
+    (``source page missing: N of M`` / ``source folded into <target>: N of
+    M``, not the suppression-gate reason string), recorded and archived
+    the same way. A name-collision-scan proposal (:mod:`athenaeum.name_collisions`)
+    is the driving case — its canonical/source pages can be folded or
+    retired by a LATER run before a human answers the original proposal —
+    but the check applies to every proposal's sources, not just
+    name-collision ones, since a dangling source is equally unreviewable
+    regardless of origin.
+
+    Issue athenaeum#2522: a deleted/renamed source and a FOLDED one used to be
+    reported identically ("source page missing"), even though they mean
+    different things to an operator — a fold usually means the sources
+    were already absorbed somewhere, while a genuinely missing page may be
+    data loss. :func:`_classify_source` now distinguishes the two, and
+    :func:`_describe_source_staleness` composes a reason naming the fold
+    target when every folded source shares one. Further: when EVERY source
+    of an unresolved block is folded (none missing, none still live) and
+    every one of them was folded into THIS proposal's OWN
+    ``merge_target_name`` (resolved the same way :func:`resolve_target_page`
+    resolves it at approve time), the merge this proposal asked for has, in
+    effect, already happened — that block is archived as SATISFIED
+    (:class:`SatisfiedProposal`, ``**Archived**:`` disposition, the same one
+    :func:`ingest_resolved_merges` uses for a human-resolved block) rather
+    than STALE (:class:`RetiredProposal`, ``**Retired**:`` disposition). A
+    source folded into some OTHER page, or only SOME of a block's sources
+    folded, does not qualify — it stays on the ordinary stale path.
 
     athenaeum#480 closed the write-path bypass, so no NEW degenerate over-cluster
     proposal can be appended. This is the complement: it retires entries that
@@ -3220,7 +3827,7 @@ def revalidate_pending_merges(
     Dry-run by default (reports what WOULD be retired, writes nothing); pass
     ``apply=True`` to write. ``now`` is injectable for deterministic tests.
     """
-    result = RevalidationResult(retired=[], kept=0, applied=False)
+    result = RevalidationResult(retired=[], satisfied=[], kept=0, applied=False)
     if not merges_path.exists():
         return result
 
@@ -3228,8 +3835,14 @@ def revalidate_pending_merges(
     blocks = _split_blocks(text)
 
     ts = now_iso(now)
+    wiki_root = merges_path.parent
+    # knowledge_root (wiki_root's parent) — the same base `list_pending_merges`
+    # resolves a relative source against via
+    # `all_sources_authorized`/`is_page_authorized_at`.
+    knowledge_root = wiki_root.parent
     remaining: list[str] = []
     retired_blocks: list[str] = []
+    satisfied_blocks: list[str] = []
 
     for block_text in blocks:
         pm = _parse_block(block_text)
@@ -3244,15 +3857,65 @@ def revalidate_pending_merges(
             config=config,
         )
         if reason is None:
-            # base = knowledge_root (wiki_root's parent) — the same base
-            # `list_pending_merges` resolves a relative source against via
-            # `all_sources_authorized`/`is_page_authorized_at`.
-            knowledge_root = merges_path.parent.parent
-            missing_count = sum(
-                1 for s in pm.sources if _source_page_missing(s, base=knowledge_root)
-            )
-            if missing_count:
-                reason = f"source page missing: {missing_count} of {len(pm.sources)}"
+            statuses = [_classify_source(s, base=knowledge_root) for s in pm.sources]
+            missing_count = sum(1 for st in statuses if st.missing)
+            folded = [st for st in statuses if st.folded]
+
+            # Issue athenaeum#2522 AC2: every source folded (none missing,
+            # none still live) AND every one of them folded into THIS
+            # proposal's OWN target -> the merge already happened in
+            # effect. Resolve "own target" the same way approve-time does
+            # (:func:`resolve_target_page`), then compare by NORMALISED
+            # bare slug (:func:`_folded_into_matches`) rather than raw
+            # filename-stem equality -- a legacy, pre-athenaeum#2545
+            # tombstone's `folded_into` is a bare slug even when its target
+            # is uid-prefixed, so comparing stems verbatim misses it. A
+            # WRONG target (folded into some third page) or a PARTIAL fold
+            # (some sources still live or missing) does not qualify and
+            # falls through to the ordinary stale path below.
+            if folded and len(folded) == len(pm.sources):
+                own_target_path = resolve_target_page(pm.merge_target_name, wiki_root)
+                if own_target_path is not None:
+                    own_target_slug, own_target_uid = _own_target_identity(
+                        own_target_path
+                    )
+                    if own_target_slug is not None and all(
+                        _folded_into_matches(
+                            st.folded_into,
+                            target_slug=own_target_slug,
+                            own_uid=own_target_uid,
+                        )
+                        for st in folded
+                    ):
+                        result.satisfied.append(
+                            SatisfiedProposal(
+                                id=pm.id,
+                                merge_target_name=pm.merge_target_name,
+                                n_sources=len(pm.sources),
+                                confidence=pm.confidence,
+                                folded_into=own_target_path.stem,
+                            )
+                        )
+                        satisfied_blocks.append(
+                            block_text
+                            + "\n\n"
+                            + _archive_trailer(
+                                pm.sources,
+                                wiki_root=wiki_root,
+                                disposition="Archived",
+                                ts=ts,
+                                detail=(
+                                    "satisfied: all sources already folded "
+                                    f"into {own_target_path.stem!r}"
+                                ),
+                            )
+                        )
+                        continue
+
+            if missing_count or folded:
+                reason = _describe_source_staleness(
+                    [st.folded_into for st in folded], missing_count, len(pm.sources)
+                )
         if reason is None:
             remaining.append(block_text)
             continue
@@ -3265,22 +3928,39 @@ def revalidate_pending_merges(
                 reason=reason,
             )
         )
+        # Issue athenaeum#2514 AC2: record WHAT the sources contained at the
+        # moment of the archive. Without it the archive is a ruling nobody
+        # can tell has gone stale, so the proposers could only ever ignore
+        # it -- which is exactly why a sweep that archived 17 proposals was
+        # followed by a night that re-proposed every one of them.
         retired_blocks.append(
-            f"{block_text}\n\n**Retired**: {ts} — gate: {reason}\n"
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=wiki_root,
+                disposition="Retired",
+                ts=ts,
+                detail=f"gate: {reason}",
+            )
         )
 
     result.kept = len(remaining)
 
-    if not apply or not retired_blocks:
+    if not apply or not (retired_blocks or satisfied_blocks):
         return result
 
-    # --- apply: rewrite primary (retired blocks removed) + append archive ---
+    # --- apply: rewrite primary (handled blocks removed) + append archive ---
     primary_parts = ["# Pending Merges", *remaining]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
     atomic_write_text(merges_path, new_primary)
 
     archive_path = merges_path.parent / "_pending_merges_archive.md"
-    new_section = "\n\n---\n\n".join(retired_blocks)
+    # Both dispositions land in the SAME archive file (retired first, then
+    # satisfied -- an arbitrary but stable order); this sidecar was never
+    # meant to fork into two files, only the block's own ``**Retired**:``
+    # vs ``**Archived**:`` line distinguishes why it's there.
+    new_section = "\n\n---\n\n".join([*retired_blocks, *satisfied_blocks])
     existing_archive = ""
     if archive_path.exists():
         existing_archive = archive_path.read_text(encoding="utf-8")
@@ -3301,16 +3981,24 @@ def revalidate_pending_merges(
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
 
-    _withdraw_widen_questions_for_proposals(
-        merges_path.parent / "_pending_questions.md",
-        [r.id for r in result.retired],
-        "was retired",
-    )
+    if result.retired:
+        _withdraw_widen_questions_for_proposals(
+            merges_path.parent / "_pending_questions.md",
+            [r.id for r in result.retired],
+            "was retired",
+        )
+    if result.satisfied:
+        _withdraw_widen_questions_for_proposals(
+            merges_path.parent / "_pending_questions.md",
+            [s.id for s in result.satisfied],
+            "was archived as satisfied",
+        )
     result.applied = True
     log.info(
-        "pending_merges: revalidation retired %d stale proposal(s) to %s "
-        "(current suppression gate)",
+        "pending_merges: revalidation retired %d stale and archived %d "
+        "satisfied proposal(s) to %s (current suppression gate)",
         len(retired_blocks),
+        len(satisfied_blocks),
         archive_path.name,
     )
     return result
@@ -3409,7 +4097,24 @@ def withdraw_pending_merges_for_retired_pages(
                 id=pm.id, merge_target_name=pm.merge_target_name, reason=full_reason
             )
         )
-        withdrawn_blocks.append(f"{block_text}\n\n**Retired**: {ts} — {full_reason}\n")
+        # Issue athenaeum#2514 review: digest-stamped like every other
+        # archive writer. A retired page is usually gone for good, so the
+        # digest will keep matching and this archive will keep binding --
+        # which is the right outcome. But "usually" is not "always": a page
+        # restored from the retirement is a genuine source change, and that
+        # should make the proposal askable again rather than leave it
+        # suppressed by an archive nobody can disprove.
+        withdrawn_blocks.append(
+            block_text
+            + "\n\n"
+            + _archive_trailer(
+                pm.sources,
+                wiki_root=merges_path.parent,
+                disposition="Retired",
+                ts=ts,
+                detail=full_reason,
+            )
+        )
 
     result.kept = len(remaining)
 

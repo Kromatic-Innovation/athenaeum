@@ -620,6 +620,41 @@ See `resolve_relay_local_prefixes` for why this inlines its own
 ``librarian`` -> ``attribution`` -> ``thresholds`` chain rather than
 sharing a helper.
 
+### `resolve_audit_max_per_cluster`
+
+- **YAML path:** `librarian.audit_max_per_cluster`
+- **Environment variable:** `ATHENAEUM_AUDIT_MAX_PER_CLUSTER`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the per-``cluster_id`` cap on calibration audit items.
+
+`athenaeum.calibration.sample_tier_decision` draws each ``(tier,
+proposal_id)`` independently at a flat rate
+(`resolve_audit_sample_rate_t1_rejects` etc.) — a uniform per-item
+rate still lets one abnormally LARGE ``cluster_id`` dominate the sample
+purely by volume: every pairwise T1/T2 screen generated from one
+near-duplicate-page burst shares the same ``cluster_id``
+(`athenaeum.cluster_comparator.t1_rejects_pair_paths` /
+`athenaeum.wiki_dedupe`), so a single oversized burst draws many
+more independent samples than a normal, small cluster at the identical
+rate. Observed live: 140+ of 158 human-reviewed T1-reject audit samples
+came from one such burst family.
+
+This caps how many ``kind: "audit"`` records any one ``cluster_id`` may
+contribute to the calibration ledger; once a cluster has already
+reached the cap, further draws from it are skipped outright — the
+sample for that run is simply smaller, never backfilled from another
+cluster (a smaller, more representative sample is the point; silently
+reallocating the skipped slot would just move the skew elsewhere).
+Callers that have no ``cluster_id`` to offer (e.g. the ATTRIBUTION
+tier) are unaffected — the cap only applies when a caller supplies one.
+
+Env ``ATHENAEUM_AUDIT_MAX_PER_CLUSTER`` > yaml
+``librarian.audit_max_per_cluster`` > `DEFAULT_AUDIT_MAX_PER_CLUSTER`.
+``<= 0`` disables the cap (every draw is kept, pre- behavior).
+
 ### `resolve_audit_on_touch_freshness_hours`
 
 - **YAML path:** `librarian.audit_on_touch_freshness_hours`
@@ -1453,6 +1488,55 @@ Returns the operator's ``librarian.ephemeral_scopes`` list when set
 set), else the built-in `_DEFAULT_EPHEMERAL_SCOPES`. A present-but-
 empty list disables scope-based ephemeral classification entirely.
 
+### `resolve_page_type_field_groups`
+
+- **YAML path:** `librarian.field_groups`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.field_groups`` -- per page type, the declared
+single-valued field groups a misfit can fire against
+(``librarian.field_groups.<page_type>.<group_name>``, a list of field
+names).
+
+A field group names a set of frontmatter fields that, together, hold
+ONE record's worth of data for a page -- a second, distinct record's
+values competing for the same fields is a misfit the structured-upsert
+merge (`athenaeum.structured_upsert`) must not silently overwrite,
+interleave, or drop (see that module's ``field_group_misfits`` output).
+
+Example -- a deployment whose CRM importer flattens each person's deals
+onto `crm_*` frontmatter fields, and wants a misfit flagged the moment a
+second, different deal collides with the first:
+```
+librarian:
+  field_groups:
+    person:
+      deal:
+        - crm_deal_name
+        - crm_deal_amount
+        - crm_deal_stage
+```
+
+**Declared groups only -- there is no built-in grouping heuristic.** An
+importer-prefix default was considered and explicitly dropped as
+deployment policy (operator ruling 2026-11-13). A page type absent from
+this config -- or present with no groups -- has NO field groups, however
+related its field names look; the misfit path in
+`athenaeum.structured_upsert` never fires for it. Only fields also
+listed under that type's ``librarian.structured_upsert.<type>.set_keys``
+(`resolve_structured_upsert`) are eligible: a field group names
+scalar, single-valued slots, not the list-valued ``union_keys`` this
+module's structured-upsert merge unions instead of overwriting.
+
+Validation never raises: a non-dict ``field_groups``/page-type/group
+entry, a non-string page type or group name, or a group with no
+non-empty string field names is dropped (logged at WARNING) rather than
+half-applied. Missing or malformed config returns an empty mapping, so
+every existing deployment is unaffected.
+
 ### `resolve_full_compile_every_days`
 
 - **YAML path:** `librarian.full_compile_every_days`
@@ -1997,12 +2081,12 @@ No seed in ``_DEFAULTS``.
 
 Resolve ``librarian.oversize_hard_ceiling_chars``.
 
-The body size above which ``athenaeum split-oversize --auto`` splits a
-page without per-page approval; pages between the page-size threshold and
-this ceiling are split only when the operator names them with ``--uid``.
-Same validation contract as `resolve_page_size_threshold_chars`:
-must be ``>= 1`` (bool rejected as an int subclass); anything else falls
-back to `DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+The body size above which a page-recompile candidate is treated as
+most urgent -- see `DEFAULT_OVERSIZE_HARD_CEILING_CHARS`'s own
+comment for the current consumers. Same validation contract as
+`resolve_page_size_threshold_chars`: must be ``>= 1`` (bool
+rejected as an int subclass); anything else falls back to
+`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
 
 ### `resolve_page_flag_bytes`
 
@@ -2019,6 +2103,237 @@ yaml > ``16384``. A page over this is flagged more loudly (and logged during
 ``athenaeum run``) as one that should be broken into linked sub-entities.
 Kept comfortably below the tier-3 merge body cap so flagging precedes any
 hard merge-budget pressure. See `_resolve_positive_int_knob`.
+
+DEPRECATED, removed in ``0.25.0``: the byte
+vocabulary disagrees with the split machinery, which measures BODY
+chars against ``librarian.page_size_threshold_chars`` /
+``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+Read ``athenaeum status``'s chars-based page-recompile backlog block
+(``page_recompile`` in ``--json``) instead; this knob and its
+``Oversized pages (warn/flag)`` status line go away in that release.
+
+### `resolve_page_recompile_auto_apply_class`
+
+- **YAML path:** `librarian.page_recompile.auto_apply_class`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS`
+- **CLI flag:** —
+- **Default:** `'structure-only'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.auto_apply_class`` (AC3, AC1).
+
+One of `PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
+default precedence and same warn-and-fall-back-to-the-default contract
+as `resolve_page_recompile_mode`.
+
+**Read AND acted on, as of **: in mode ``auto``
+(`resolve_page_recompile_mode`), `athenaeum.page_recompile_nightly`
+applies a plan unattended only when this resolves to ``structure-only``
+AND the plan's own `athenaeum.page_recompile_plan.RecompilePlan.scope`
+is `athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` -- this
+knob narrows which plans the phase MAY apply; it never widens what a
+plan's own scope already permits, and a ``cross-page`` plan is queued
+regardless of its value.
+
+### `resolve_page_recompile_max_api_calls_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_api_calls_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `40`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_api_calls_per_run`` (AC4): how many model calls the nightly page-recompile
+phase may make in one run.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
+
+### `resolve_page_recompile_max_auto_applies_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_auto_applies_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `3`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_auto_applies_per_run`` (AC5): how many plans the nightly phase may APPLY
+unattended in one run, in mode ``auto``.
+
+A structure-only plan that would otherwise auto-apply but finds this
+bound already spent in the current run is neither applied nor queued
+(`athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` plans under
+``auto_apply_class: structure-only`` are never queued, by the same
+reasoning `resolve_page_recompile_auto_apply_class` gives) -- it
+waits for a later run, when the bound resets.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN`.
+
+### `resolve_page_recompile_max_input_chars_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_input_chars_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `200000`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_input_chars_per_run`` (AC4): the per-run total of candidate page-body characters
+the phase may plan over.
+
+Checked BEFORE each page's first model call, against that page's own
+body size, so it is a real pre-spend gate rather than an after-the-fact
+report. A page that does not fit the remaining allowance is counted
+``skipped_budget`` and costs nothing.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
+
+### `resolve_page_recompile_max_open_items`
+
+- **YAML path:** `librarian.page_recompile.max_open_items`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_open_items`` (AC4).
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
+
+### `resolve_page_recompile_max_pages_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_pages_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `3`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_pages_per_run`` (AC4): how many pages the nightly phase may PLAN in one
+run once no candidate is over the hard ceiling.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
+
+### `resolve_page_recompile_merge_near_duplicates`
+
+- **YAML path:** `librarian.page_recompile.merge_near_duplicates`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.merge_near_duplicates`` (AC11).
+
+Default ``True``. With this ``False``, the applier re-plans away any
+``merge`` group a plan carries (each merge group's units fall back to
+separate ``child`` placement) rather than writing the merged text — a
+kill switch for the merge guarantee, mirroring
+`resolve_section_scoped_merge_enabled`'s own "behavioral change
+needs an off switch" shape.
+
+Env ``ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`` (``1``/``true``/
+``yes``/``on``, case-insensitive) > yaml
+``librarian.page_recompile.merge_near_duplicates`` > default ``True``.
+Non-bool yaml values and unrecognized env strings fall through to on.
+
+### `resolve_page_recompile_min_parent_chars`
+
+- **YAML path:** `librarian.page_recompile.min_parent_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `200`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.min_parent_chars`` (AC3).
+
+Only a yaml layer (no ``ATHENAEUM_*`` env override) — this is a per-corpus
+editorial judgement call, not a cost/behavior toggle an operator needs to
+flip from a shell one-off. Must be a non-negative, non-bool int; anything
+else (missing key/section, wrong type, negative) falls back to
+`DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS`.
+
+### `resolve_page_recompile_mode`
+
+- **YAML path:** `librarian.page_recompile.mode`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_MODE`
+- **CLI flag:** —
+- **Default:** `'auto'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.mode`` (AC2,
+ AC1).
+
+One of `PAGE_RECOMPILE_MODES`. Env
+``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
+``librarian.page_recompile.mode`` > default
+`DEFAULT_PAGE_RECOMPILE_MODE`.
+
+**An unknown value falls back to the default and logs a WARNING** (the
+AC asks for exactly this). Deliberately not a hard error: a typo in one
+optional key must not take the whole nightly run down. The fallback is
+the DEFAULT mode, not necessarily the most conservative one -- as of
+ that is ``auto``, which the operator ruling on
+ made the safe-by-construction choice: it only ever writes
+a ``structure-only`` plan that passed every validation, and every write
+is reversible with ``athenaeum recompile undo``. Case- and
+whitespace-insensitive, so ``Queue`` and `` queue `` resolve rather than
+warning.
+
+### `resolve_page_recompile_never_auto_types`
+
+- **YAML path:** `librarian.page_recompile.never_auto_types`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.never_auto_types`` (AC8): page ``type:`` values (`athenaeum.models.resolve_page_type`)
+whose plans always go to the queue, never the unattended applier,
+regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
+
+Yaml only, like `resolve_model_rates` and
+`resolve_excluded_fields_config` -- a whole list of operator-named
+types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
+A non-list value, or a non-dict ``page_recompile`` section, resolves to
+`DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
+entry within an otherwise-valid list is dropped rather than rejecting
+the whole list, the same per-entry tolerance
+`resolve_excluded_fields_config` already applies to its own list
+values.
+
+### `resolve_page_recompile_opening_max_pages_per_run`
+
+- **YAML path:** `librarian.page_recompile.opening_max_pages_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `10`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.opening_max_pages_per_run`` (AC4): the per-run page budget used while ANY candidate is
+over the hard ceiling.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
+over-ceiling candidate remains, the steady
+`resolve_page_recompile_max_pages_per_run` applies instead -- the
+switch is a property of the corpus, not a second knob.
+
+### `resolve_page_recompile_rejoin_fraction`
+
+- **YAML path:** `librarian.page_recompile.rejoin_fraction`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `0.5`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.rejoin_fraction`` (AC12).
+
+Only a yaml layer, same rationale as
+`resolve_page_recompile_min_parent_chars`. Must be a positive,
+non-bool number ``<= 1.0``; anything else falls back to
+`DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION`.
 
 ### `resolve_page_size_threshold_chars`
 
@@ -2051,6 +2366,14 @@ yaml > ``8192``. A page whose UTF-8 size (frontmatter + body) exceeds this
 is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
 never a block. See `_resolve_positive_int_knob` for the coercion
 contract.
+
+DEPRECATED, removed in ``0.25.0``: the byte
+vocabulary disagrees with the split machinery, which measures BODY
+chars against ``librarian.page_size_threshold_chars`` /
+``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+Read ``athenaeum status``'s chars-based page-recompile backlog block
+(``page_recompile`` in ``--json``) instead; this knob and its
+``Oversized pages (warn/flag)`` status line go away in that release.
 
 ### `resolve_policy_pack_edit_proposals_enabled`
 
@@ -4685,6 +5008,26 @@ no floor is applied regardless of config. A malformed env value WARNs
 and falls through to yaml/default (see `_env_number`); a
 non-numeric yaml value is ignored the same way.
 
+### `resolve_recall_sub_pages_cap`
+
+- **YAML path:** `recall.sub_pages_cap`
+- **Environment variable:** `ATHENAEUM_RECALL_SUB_PAGES_CAP`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve how many of a parent hit's sub-pages ``recall`` names on its
+``**Sub-pages:**`` line before folding the rest into a remainder count
+
+Precedence: ``ATHENAEUM_RECALL_SUB_PAGES_CAP`` env > ``recall.sub_pages_cap``
+yaml > ``5``. A malformed env value WARNs and falls through (see
+`_env_number`); a non-int / ``<= 0`` yaml value falls through to
+the default. No seed in ``_DEFAULTS``. The cap is
+applied AFTER the same audience/policy filter the hit itself passed
+through (`athenaeum.mcp_server._render_relation_lines`) — a
+sub-page the caller may not see is excluded before this cap, and
+therefore before the remainder count, ever sees it.
+
 ## `screening`
 
 ### `resolve_screening`
@@ -5589,7 +5932,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLASSIFY_MAX_TOKENS` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/decision_answers.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
+| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/decision_answers.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/page_recompile_plan.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/config.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
@@ -5618,6 +5961,13 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_THINKING` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS` | `src/athenaeum/tiers.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_LABEL_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_LABEL_THINKING` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_MODEL` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_THINKING` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_VERIFY_MAX_TOKENS` | `src/athenaeum/page_recompile_plan.py` |
+| `ATHENAEUM_PAGE_RECOMPILE_VERIFY_THINKING` | `src/athenaeum/page_recompile_plan.py` |
 | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_QUARANTINE_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_REASONING_T1_LLM_PROVIDER` | `src/athenaeum/provider.py` |
@@ -5656,6 +6006,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_TOPIC_MAX_TOKENS` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
+| `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/page_recompile_plan.py` |
 | `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` | `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

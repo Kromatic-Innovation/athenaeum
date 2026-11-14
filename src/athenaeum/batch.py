@@ -111,6 +111,7 @@ from athenaeum.provider import (
 )
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.structured_upsert import (
@@ -124,6 +125,7 @@ from athenaeum.tiers import (
     PreambleOnlyResponseError,
     Tier2ParseStats,
     TruncatedCreateResponseError,
+    attach_contradiction_writeback_copy,
     check_page_size_gate,
     existing_body_needs_full_echo,
     gate_create_name_classifications,
@@ -927,20 +929,19 @@ class BatchRunResult:
     #: file is preserved and retried on the next run — but the raised default
     #: ``max_tokens`` (athenaeum#476) makes a truncation far rarer to begin with.
     truncated: int = 0
-    #: Issue athenaeum#1182: Tier-3 merges suppressed by the page-size
-    #: invariant across BOTH of this transport's merge-dispatch sites — the
-    #: batch-submission assembly loop (an over-threshold page never becomes
-    #: a batch request) and the finalize-time ``sync_merges`` fallback
-    #: (mirrors the synchronous transport's ``tier3_derive_actions`` exactly).
-    #: Derived from the same per-file escalations flushed via
-    #: ``tier4_escalate`` (by ``conflict_type == "oversize_page"``), the same
-    #: way ``athenaeum.models.ProcessingResult.oversize_suppressed`` is.
-    oversize_suppressed: int = 0
-    #: Issue athenaeum#1248: same cross-site derivation as oversize_suppressed
-    #: above, for the split/log_demote dispositions — see
-    #: ``athenaeum.models.ProcessingResult.oversize_split``/
-    #: ``oversize_log_demoted``'s docstrings.
-    oversize_split: int = 0
+    #: Issue athenaeum#1248: Tier-3 merges the ``log_demote`` disposition
+    #: actually moved into the preserved-log area, across BOTH of this
+    #: transport's merge-dispatch sites — the batch-submission assembly
+    #: loop (an over-threshold page never becomes a batch request) and the
+    #: finalize-time ``sync_merges`` fallback (mirrors the synchronous
+    #: transport's ``tier3_derive_actions`` exactly). Derived from the same
+    #: per-file escalations flushed via ``tier4_escalate`` (by
+    #: ``conflict_type == "oversize_log_demote"``), the same way
+    #: ``athenaeum.models.ProcessingResult.oversize_log_demoted`` is.
+    #:
+    #: Issue athenaeum#2550 removed this field's two siblings,
+    #: ``oversize_suppressed`` and ``oversize_split`` — see that model
+    #: field's docstring for why.
     oversize_log_demoted: int = 0
     #: Issue athenaeum#1196: NEW entity writes this run's finalize loop refused
     #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES`` (the
@@ -1396,6 +1397,17 @@ def process_batch_run(
                 if su_outcome.status == STATUS_REFUSED:
                     st.skipped.append(su_outcome.skipped_label)
                     st.retain_raw = True
+                    if su_outcome.field_group_misfits:
+                        # Issue athenaeum#2197: same schema-amendment
+                        # proposal rail the synchronous path raises from
+                        # (see athenaeum.librarian.process_one) -- the
+                        # batch transport must not silently drop the same
+                        # misfit signal.
+                        record_field_group_misfits(
+                            su_outcome.field_group_misfits,
+                            wiki_root=wiki_root,
+                            uid=su_outcome.uid,
+                        )
                 elif su_outcome.status == STATUS_APPLIED:
                     st.updated_uids.append(su_outcome.uid)
                 st.done = True
@@ -2089,19 +2101,11 @@ def process_batch_run(
                     config=resolved_config,
                 )
                 result.escalated += len(st.address_escalations)
-                # Issue athenaeum#1182: same derived-from-conflict_type counting
+                # Issue athenaeum#1248: same derived-from-conflict_type counting
                 # as the main finalize branch below and the synchronous
-                # transport's _apply_tier3_results.
-                result.oversize_suppressed += sum(
-                    1
-                    for _e in st.address_escalations
-                    if _e.conflict_type == "oversize_page"
-                )
-                result.oversize_split += sum(
-                    1
-                    for _e in st.address_escalations
-                    if _e.conflict_type == "oversize_split"
-                )
+                # transport's _apply_tier3_results. Issue athenaeum#2550
+                # removed the sibling oversize_suppressed/oversize_split
+                # counting that used to sit here.
                 result.oversize_log_demoted += sum(
                     1
                     for _e in st.address_escalations
@@ -2213,6 +2217,22 @@ def process_batch_run(
                         target_type=merge_target_type,
                     )
                 if esc:
+                    # Issue athenaeum#2519: same durable write-back stamp as
+                    # the st.sync_merges loop below -- this is the OTHER
+                    # merge-escalation site in this transport, reached for
+                    # an action whose patch-mode (or full-echo fallback)
+                    # call actually went through the batch API
+                    # (``st.merge_ids`` / ``t3_results``), not the
+                    # synchronous ``st.sync_merges`` path. Same page_path/
+                    # meta/existing_body already unpacked above, no second
+                    # lookup needed.
+                    attach_contradiction_writeback_copy(
+                        esc,
+                        existing_path=page_path,
+                        wiki_root=wiki_root,
+                        observations=action.observations,
+                        existing_body=existing_body,
+                    )
                     escalations.append(esc)
                 if updated_body:
                     stamp_merge_provenance(meta, config=config)
@@ -2327,6 +2347,17 @@ def process_batch_run(
                     target_type=resolve_page_type(meta) or None,
                 )
                 if esc:
+                    # Issue athenaeum#2519: same durable write-back stamp as
+                    # the synchronous path (tier3_derive_actions) — this
+                    # loop is that same merge, reached via the batch
+                    # transport's finalize step.
+                    attach_contradiction_writeback_copy(
+                        esc,
+                        existing_path=existing_path,
+                        wiki_root=wiki_root,
+                        observations=action.observations,
+                        existing_body=existing_body,
+                    )
                     escalations.append(esc)
                 if updated_body:
                     stamp_merge_provenance(meta, config=config)
@@ -2450,17 +2481,13 @@ def process_batch_run(
             # transport's `result.updated` exclusion.
             result.updated += len(_applied_updated_uids)
             result.escalated += len(escalations)
-            # Issue athenaeum#1182: derived from `escalations` by conflict_type,
+            # Issue athenaeum#1248: derived from `escalations` by conflict_type,
             # mirroring athenaeum.librarian._apply_tier3_results on the
             # synchronous transport — covers BOTH this file's batched merge_ids
             # escalations and its finalize-time sync_merges escalations, since
-            # both were folded into the same `escalations` list above.
-            result.oversize_suppressed += sum(
-                1 for _e in escalations if _e.conflict_type == "oversize_page"
-            )
-            result.oversize_split += sum(
-                1 for _e in escalations if _e.conflict_type == "oversize_split"
-            )
+            # both were folded into the same `escalations` list above. Issue
+            # athenaeum#2550 removed the sibling oversize_suppressed/
+            # oversize_split counting that used to sit here.
             result.oversize_log_demoted += sum(
                 1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
             )
@@ -2527,13 +2554,10 @@ class BatchCollectResult:
     skipped: int = 0
     degraded: int = 0
     truncated: int = 0
-    #: Issue athenaeum#1182: summed from each inner process_batch_run() call's
-    #: BatchRunResult.oversize_suppressed — see that field's docstring.
-    oversize_suppressed: int = 0
-    #: Issue athenaeum#1248: same summing convention, for the split/
-    #: log_demote dispositions — see BatchRunResult.oversize_split/
-    #: oversize_log_demoted's docstrings.
-    oversize_split: int = 0
+    #: Issue athenaeum#1248: summed from each inner process_batch_run() call's
+    #: BatchRunResult.oversize_log_demoted — see that field's docstring.
+    #: Issue athenaeum#2550 removed this field's two siblings,
+    #: oversize_suppressed and oversize_split.
     oversize_log_demoted: int = 0
     #: Issue athenaeum#1196: same write-boundary-guard counter as
     #: :attr:`BatchRunResult.type_rejected`, folded up from the underlying
@@ -3134,8 +3158,6 @@ def collect_pending_batches(
         out.skipped += applied.skipped
         out.degraded += applied.degraded
         out.truncated += applied.truncated
-        out.oversize_suppressed += applied.oversize_suppressed
-        out.oversize_split += applied.oversize_split  # issue athenaeum#1248
         out.oversize_log_demoted += applied.oversize_log_demoted  # issue athenaeum#1248
         out.type_rejected += applied.type_rejected  # issue athenaeum#1196
         out.failed_refs.extend(applied.failed_refs)

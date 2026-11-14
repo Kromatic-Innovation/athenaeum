@@ -615,7 +615,13 @@ class TestRunSummaryLedgerRecordRefusalField:
             "reason": "budget",
             "files": 0,
         }
-        assert records[0]["v"] == RUN_SUMMARY_LEDGER_VERSION == 3
+        # ``>= 3``, not ``== 3``: the refusal field's contract is "v3 or
+        # later" (``refusal_in_record`` itself gates on ``>= 3``), and
+        # athenaeum#2536's additive v4 bump must not read as a regression
+        # here. The exact-version pin lives in ``test_version_is_at_least_3``
+        # below, against the CURRENT version.
+        assert records[0]["v"] == RUN_SUMMARY_LEDGER_VERSION
+        assert records[0]["v"] >= 3
 
     def test_an_evaluated_clean_verdict_is_written_not_omitted(
         self, tmp_path: Path
@@ -650,15 +656,25 @@ class TestRunSummaryLedgerRecordRefusalField:
             _PROFILE, refusal={}
         )
 
-    def test_version_bumped_to_3(self) -> None:
+    def test_version_is_at_least_3(self) -> None:
         # Issue athenaeum#1283: the version bump itself is load-bearing, not
         # just additive bookkeeping -- it is what lets a reader distinguish
         # a v<3 record (cannot speak, full stop -- the field didn't exist)
         # from a v>=3 one, where an ABSENT ``refusal`` key means "never
         # evaluated" and a PRESENT one carries the actual verdict via its
         # ``tripped`` sub-field -- see TestRefusalInRecord below.
-        assert RUN_SUMMARY_LEDGER_VERSION == 3
-        assert build_run_summary_ledger_record(_PROFILE)["v"] == 3
+        #
+        # Asserted as ``>= 3``, not ``== 3`` (issue athenaeum#2536, which
+        # bumped to 4 for its own additive ``page_recompile`` key): what
+        # athenaeum#1283 needs pinned is the FLOOR at and above which the
+        # three-state refusal contract holds. A later additive bump is not
+        # a regression in that contract, and a test that reads as one would
+        # be re-litigated on every schema addition.
+        assert RUN_SUMMARY_LEDGER_VERSION >= 3
+        assert (
+            build_run_summary_ledger_record(_PROFILE)["v"]
+            == RUN_SUMMARY_LEDGER_VERSION
+        )
 
 
 class TestRefusalInRecord:

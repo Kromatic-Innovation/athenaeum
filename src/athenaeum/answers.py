@@ -73,6 +73,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from athenaeum.models import TokenUsage
     from athenaeum.provider import LLMBackend
 
@@ -140,6 +142,16 @@ def _unescape_entity(raw: str) -> str:
 # (:data:`_HEADER_RE`) recovers a boundary swallowed by an unclosed fence.
 _ANY_H2_RE = re.compile(r"^## ")
 
+# Issue athenaeum#2516: one-shot-per-distinct-block WARNING dedup for
+# `_parse_block`'s malformed-header message — module-level so it persists
+# across every parse within one process (mirrors the warn-once convention in
+# `wiki_dedupe._WIKI_FALLBACK_WARNED` / `search._EMBED_TEXTS_NONE_WARNED`,
+# generalized here to a *set* of content hashes rather than a single bool
+# flag, since each distinct malformed block must still warn once on its own).
+# Tests reset it the same way those siblings do: `monkeypatch.setattr(
+# answers, "_MALFORMED_BLOCK_WARNED", set())`.
+_MALFORMED_BLOCK_WARNED: set[str] = set()
+
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
@@ -167,15 +179,62 @@ _RAISED_BY_AGENT = "agent"
 _OBSERVATION_PREFIX = "**Observation**:"
 
 
+def _render_fenced_field(prefix: str, text: str) -> str:
+    """Render *text* as a fenced ``<prefix>`` field (no trailing newline).
+
+    Shared by :func:`render_observation_field` and
+    :func:`render_conflicting_claims_field` (issue athenaeum#2519) — same
+    fence-width-picking logic, different field prefix. The fence is one
+    backtick longer than the longest backtick run in the text, so no line
+    of the field's content can close it early.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{prefix}\n{fence}text\n{text.strip(chr(10))}\n{fence}"
+
+
 def render_observation_field(text: str) -> str:
     """Render *text* as a fenced ``**Observation**:`` field (no trailing newline).
 
     The fence is one backtick longer than the longest backtick run in the
     text, so no line of the observation can close it early.
     """
-    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"{_OBSERVATION_PREFIX}\n{fence}text\n{text.strip(chr(10))}\n{fence}"
+    return _render_fenced_field(_OBSERVATION_PREFIX, text)
+
+
+# Issue athenaeum#2519: a fenced field carrying the durable copy of the
+# conflicting claims a contradiction question was raised over — the new
+# raw claim plus the compiled page's conflicting content — captured by the
+# raise site at the moment the question is created. Mirrors
+# ``**Observation**:``'s fencing exactly (see that field's docstring for
+# why a fence, not a plain multi-line value): a human's free-text answer
+# can legitimately contain blank lines, ``---`` or ``## `` text, and this
+# field is written BEFORE that answer exists, so it must not be mistaken
+# for block-delimiting content either.
+_CONFLICTING_CLAIMS_PREFIX = "**Conflicting claims**:"
+
+# Issue athenaeum#2519: single-line metadata naming the compiled wiki page
+# this contradiction's raw claim would have merged into, captured at raise
+# time. A plain ``**Key**: value`` line (like ``**Fingerprint**:``) rather
+# than a fenced field — a repo-relative path never spans multiple lines.
+_COMPILED_PAGE_PREFIX = "**Compiled page**:"
+
+# Issue athenaeum#2517: single-line metadata carrying the block's
+# creation-time id disambiguator (see `_make_id`'s docstring and
+# `mint_unique_block_id` below). A plain ``**Key**: value`` line, same shape
+# as ``**Compiled page**:`` — never multi-line, never fenced, and NEVER
+# recomputed once parsed: a human/agent edit to the description must not
+# touch this line, or the id-stability guarantee breaks.
+_ID_SALT_PREFIX = "**Id salt**:"
+
+
+def render_conflicting_claims_field(text: str) -> str:
+    """Render *text* as a fenced ``**Conflicting claims**:`` field (issue athenaeum#2519).
+
+    No trailing newline — mirrors :func:`render_observation_field`'s shape
+    exactly, just a different prefix.
+    """
+    return _render_fenced_field(_CONFLICTING_CLAIMS_PREFIX, text)
 
 # Issue athenaeum#1990: the moment ``resolve_by_id`` flips a block's checkbox
 # to ``[x]`` — the decision-time metric's paired counterpart to the header's
@@ -287,6 +346,26 @@ class PendingQuestion:
     # fenced ``**Observation**:`` field. Empty on every block that predates
     # the field -- see :attr:`recovered_observation` for the legacy fallback.
     observation: str = ""
+    # Issue athenaeum#2519: durable copy of the conflicting claims, recovered
+    # off the fenced ``**Conflicting claims**:`` field. Empty on every block
+    # that predates this change, and on every escalation that is not this
+    # kind of contradiction (there is no field to recover).
+    conflicting_claims: str = ""
+    # Issue athenaeum#2519: the compiled wiki page this contradiction's raw
+    # claim would have merged into, recovered off the ``**Compiled page**:``
+    # line. Empty ("") means either a pre-athenaeum#2519 block (no field was
+    # ever written) or a non-contradiction escalation — both fall back to
+    # resolving the write-back against ``source`` the way every block did
+    # before this change (see :func:`_block_source_refs`).
+    compiled_page: str = ""
+    # Issue athenaeum#2517: the creation-time id disambiguator, recovered off
+    # the ``**Id salt**:`` line (minted once by `mint_unique_block_id` and
+    # never recomputed). Empty ("") on every block that predates this
+    # change — `_make_id` falls back to the pre-athenaeum#2517 (header,
+    # question)-only hash for those, so an id already handed out (and
+    # possibly cached by an MCP consumer, or embedded in an in-flight
+    # answer) keeps resolving.
+    id_salt: str = ""
 
     @property
     def recovered_observation(self) -> str:
@@ -304,8 +383,8 @@ class PendingQuestion:
         return ""
 
 
-def _make_id(header_line: str, question_text: str) -> str:
-    """Stable id derived from the header line + question text.
+def _make_id(header_line: str, question_text: str, salt: str = "") -> str:
+    """Stable id derived from the header line + question text (+ salt).
 
     Idempotent across runs as long as the block text hasn't been edited —
     which is also when the id should change, because the block's identity
@@ -314,7 +393,8 @@ def _make_id(header_line: str, question_text: str) -> str:
     Stability contract (locked by ``test_id_stable_across_checkbox_flip``
     and ``test_id_changes_when_question_edited``):
 
-    - The id is a 12-hex-char SHA-1 prefix over header + question text.
+    - The id is a 12-hex-char SHA-1 prefix over header + question text
+      (+ ``salt``, when non-empty — see below).
     - It is **stable** across description edits and across checkbox state
       flips (``[ ]`` ↔ ``[x]``). A handle obtained from
       :func:`list_unanswered` therefore remains valid for
@@ -324,9 +404,94 @@ def _make_id(header_line: str, question_text: str) -> str:
 
     This means MCP consumers can cache ``id`` values across a session
     without worrying about description-text churn invalidating them.
+
+    Issue athenaeum#2517 — ``salt`` is a block's ``**Id salt**:`` value (see
+    ``_ID_SALT_PREFIX``): a creation-time disambiguator minted ONCE by
+    :func:`mint_unique_block_id` and persisted verbatim in the block,
+    never recomputed from live content. Folding it into the hash is what
+    lets two blocks that happen to share an identical header + question
+    (e.g. two detector items whose generic question line collapses to the
+    same text and only their ``**Description**:`` differs — the failure
+    mode athenaeum#2517 reports) get different ids, WITHOUT putting the
+    description itself in the hash: unlike the description, the salt line
+    is written once and never touched again, so a later free-text edit to
+    the description still cannot change the id — the stability contract
+    above keeps holding. ``salt=""`` (the default, and every block that
+    predates this field) reproduces the EXACT pre-athenaeum#2517 hash —
+    required so an id already handed out (cached by an MCP consumer, or
+    embedded in an in-flight answer) keeps resolving via
+    :func:`resolve_by_id`.
     """
-    payload = f"{header_line.strip()}\n{question_text.strip()}".encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:12]
+    payload = f"{header_line.strip()}\n{question_text.strip()}"
+    if salt:
+        payload += f"\n{salt.strip()}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+# Issue athenaeum#2517 AC2: bound on the collision-retry loop in
+# `mint_unique_block_id`. Each retry appends a new attempt number to the
+# salt, which can never reproduce a prior candidate string within the same
+# call — this bound only guards against a pathological infinite loop; it
+# is not expected to ever be reached in practice.
+_MAX_ID_SALT_ATTEMPTS = 10_000
+
+
+def mint_unique_block_id(
+    header_line: str,
+    question_text: str,
+    content: str,
+    existing_ids: Iterable[str],
+) -> tuple[str, str]:
+    """Mint a ``(salt, id)`` pair for a brand-new block.
+
+    Issue athenaeum#2517 AC1/AC2. Callers (:func:`raise_pending_question`,
+    ``athenaeum.tiers.tier4_escalate``) write the returned ``salt`` into
+    the new block's ``**Id salt**:`` line and use ``id`` as the block's
+    id — exactly what ``_parse_block`` will recompute (via ``_make_id``)
+    when it later reads the persisted line back, so the id returned here
+    is valid immediately, with no round-trip read required.
+
+    ``content`` is the block's own ``**Description**:``/context text AT
+    CREATION TIME — the salt is a short SHA-1 prefix over it. This is
+    deliberately deterministic (not random, not wall-clock) rather than a
+    generic nonce: it directly targets the collision athenaeum#2517
+    reports (two detector items sharing a header + a generic question
+    line, differing only in description) by construction, it keeps two
+    identically-worded raises (same header, question, AND description —
+    e.g. two "question" calls in the same test with the same args)
+    reproducibly landing on the same id, and it never depends on the
+    wall clock, which several existing golden/round-trip tests pin
+    inputs specifically to keep ids reproducible (see
+    ``test_writer_identity_enforcement.py``'s ``athenaeum#2120`` comment,
+    pinning the header date for exactly this reason). Note this salt is
+    captured ONCE, from *content* as it is at creation — the persisted
+    ``**Id salt**:`` line is what `_make_id` reads back later, never a
+    fresh hash of the (possibly since-edited) live description.
+
+    AC2 — "the writer refuses or disambiguates on write instead of
+    producing two blocks with one id" — is resolved here in favor of
+    DISAMBIGUATE, never refuse: refusing to write a pending question (or
+    an agent-raised decision) would silently drop the item, which is
+    strictly worse than writing it under an id that merely took one extra
+    retry to mint. When the first candidate already appears in
+    *existing_ids* (two blocks share header + question + description
+    verbatim — the only way this fires), a numbered suffix is appended to
+    the content-derived salt and retried, up to `_MAX_ID_SALT_ATTEMPTS`
+    times; each attempt number produces a distinct salt string, so the
+    loop is guaranteed to terminate with an id not in *existing_ids*
+    (barring a genuine SHA-1 collision, which is not a case any amount of
+    retrying can address differently).
+    """
+    existing = set(existing_ids)
+    base_salt = hashlib.sha1(content.strip().encode("utf-8")).hexdigest()[:12]
+    salt = base_salt
+    candidate = _make_id(header_line, question_text, salt)
+    attempt = 1
+    while candidate in existing and attempt < _MAX_ID_SALT_ATTEMPTS:
+        attempt += 1
+        salt = f"{base_salt}#{attempt}"
+        candidate = _make_id(header_line, question_text, salt)
+    return salt, candidate
 
 
 def _split_blocks(text: str) -> list[str]:
@@ -397,7 +562,9 @@ def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
     return [lines[0], f"- [ ] {question}", *lines[1:]]
 
 
-def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | None:
+def _parse_block(
+    block_text: str, *, quiet: bool = False, block_index: int | None = None
+) -> PendingQuestion | None:
     """Parse one block. Returns ``None`` on malformed input.
 
     Args:
@@ -411,6 +578,13 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
             ``caplog``-style capture even under ``--quiet``. Keyword-only;
             defaults to ``False`` so every existing caller (including
             ``resolve_by_id`` and ``parse_pending_questions``) is unaffected.
+        block_index: Issue athenaeum#2516 — the 1-based position of this
+            block within the file it came from (as split by
+            :func:`_split_blocks`), so the malformed-header warning below
+            can name where the block sits. ``None`` (the default) when a
+            caller parses a bare block with no file position available —
+            the warning then falls back to naming the block by its header
+            text alone.
     """
     lines = block_text.splitlines()
     if not lines:
@@ -418,13 +592,30 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
 
     header_match = _HEADER_RE.match(lines[0])
     if not header_match:
-        log.warning("Skipping block with malformed header: %r", lines[0][:80])
-        if not quiet:
-            print(
-                f"[warn] skipping pending-question block with malformed header: "
-                f"{lines[0][:80]!r}",
-                file=sys.stderr,
+        # Issue athenaeum#2516: the pending-questions file is parsed many
+        # times over the life of one process (e.g. a long-lived MCP server
+        # answering repeated `decisions count`/`decisions list` calls) — one
+        # malformed block otherwise re-prints this warning once per parse,
+        # drowning out the real signal within thousands of identical lines.
+        # Dedupe on a content hash of the block itself (not its file
+        # position, which can drift between parses as earlier blocks are
+        # fixed/archived) so the SAME malformed block warns at most once per
+        # process, while two genuinely different malformed blocks — distinct
+        # content, distinct hash — each still get their own warning.
+        block_key = hashlib.sha1(block_text.encode("utf-8")).hexdigest()[:12]
+        already_warned = block_key in _MALFORMED_BLOCK_WARNED
+        _MALFORMED_BLOCK_WARNED.add(block_key)
+        location = f"block #{block_index}" if block_index is not None else "block"
+        if not already_warned:
+            log.warning(
+                "Skipping %s with malformed header: %r", location, lines[0][:80]
             )
+            if not quiet:
+                print(
+                    f"[warn] skipping pending-question {location} with malformed "
+                    f"header: {lines[0][:80]!r}",
+                    file=sys.stderr,
+                )
         return None
 
     # Find the checkbox line — first non-blank line after the header.
@@ -499,6 +690,16 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     observation_lines: list[str] = []
     observation_fence = 0  # open fence's backtick length, 0 when none
     observation_pending = False  # saw the key, awaiting the fence opener
+    # Issue athenaeum#2519: fenced ``**Conflicting claims**:`` field state —
+    # same fence-tracking shape as the observation field above.
+    conflicting_claims_lines: list[str] = []
+    conflicting_claims_fence = 0
+    conflicting_claims_pending = False
+    compiled_page = ""
+    # Issue athenaeum#2517: the creation-time id disambiguator, recovered
+    # off `**Id salt**:` (see `_ID_SALT_PREFIX`). "" for every pre-athenaeum#2517
+    # block — `_make_id` falls back to the old hash for those.
+    id_salt = ""
 
     def _match_confirmation_key(stripped_line: str) -> bool:
         """Recognize a `**<Confirmation key>**:` line; record it if found.
@@ -547,6 +748,42 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                 observation_lines.append(inline)
             else:
                 observation_pending = True
+            continue
+        if conflicting_claims_fence:
+            close = FENCE_CLOSE_RE.match(stripped)
+            if close and len(close.group("fence")) == conflicting_claims_fence:
+                conflicting_claims_fence = 0
+            else:
+                conflicting_claims_lines.append(raw_line)
+            continue
+        if conflicting_claims_pending:
+            conflicting_claims_pending = False
+            open_match = GENERIC_FENCE_OPEN_RE.match(stripped)
+            if open_match:
+                conflicting_claims_fence = len(open_match.group("fence"))
+                continue
+        if stripped.startswith(_CONFLICTING_CLAIMS_PREFIX):
+            # Issue athenaeum#2519: durable copy of the conflicting claims —
+            # metadata, must not leak into answer_lines as a phantom answer.
+            in_description = False
+            inline = stripped.removeprefix(_CONFLICTING_CLAIMS_PREFIX).strip()
+            if inline:
+                conflicting_claims_lines.append(inline)
+            else:
+                conflicting_claims_pending = True
+            continue
+        if stripped.startswith(_COMPILED_PAGE_PREFIX):
+            # Issue athenaeum#2519: compiled-page path — metadata, must not
+            # leak into answer_lines as a phantom answer.
+            in_description = False
+            compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
+            continue
+        if stripped.startswith(_ID_SALT_PREFIX):
+            # Issue athenaeum#2517: creation-time id disambiguator — metadata,
+            # must not leak into answer_lines, and never recomputed once
+            # read (see `_make_id`'s stability contract).
+            in_description = False
+            id_salt = stripped.removeprefix(_ID_SALT_PREFIX).strip()
             continue
         if stripped.startswith("**Conflict type**:"):
             in_description = False
@@ -619,6 +856,12 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                 if stripped.startswith(_ANSWERED_AT_PREFIX):
                     answered_at = stripped.removeprefix(_ANSWERED_AT_PREFIX).strip()
                     continue
+                if stripped.startswith(_COMPILED_PAGE_PREFIX):
+                    compiled_page = stripped.removeprefix(_COMPILED_PAGE_PREFIX).strip()
+                    continue
+                if stripped.startswith(_ID_SALT_PREFIX):
+                    id_salt = stripped.removeprefix(_ID_SALT_PREFIX).strip()
+                    continue
                 if _match_confirmation_key(stripped):
                     continue
                 # Unknown **Key**: — treat as answer body.
@@ -637,7 +880,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         answer_lines.pop()
 
     return PendingQuestion(
-        id=_make_id(lines[0], question),
+        id=_make_id(lines[0], question, id_salt),
         entity=_unescape_entity(header_match.group("entity")),
         source=header_match.group("ref"),
         question=question,
@@ -660,6 +903,9 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         alternative=confirmation_fields.get("alternative", ""),
         raised_at=confirmation_fields.get("raised_at", ""),
         observation="\n".join(observation_lines).strip("\n"),
+        conflicting_claims="\n".join(conflicting_claims_lines).strip("\n"),
+        compiled_page=compiled_page,
+        id_salt=id_salt,
     )
 
 
@@ -672,7 +918,11 @@ def parse_pending_questions(pending_path: Path) -> list[PendingQuestion]:
     if not pending_path.exists():
         return []
     text = pending_path.read_text(encoding="utf-8")
-    return [pq for b in _split_blocks(text) if (pq := _parse_block(b)) is not None]
+    return [
+        pq
+        for idx, b in enumerate(_split_blocks(text), start=1)
+        if (pq := _parse_block(b, block_index=idx)) is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +1068,23 @@ _NO_SOURCE_WRITEBACK_CONFLICT_TYPES: frozenset[str] = frozenset(
     ("field-correction", "schema-amendment")
 )
 
+# Issue athenaeum#2518: a `duplicate`-verdict FOLD question
+# (`athenaeum.verdict_effects._apply_duplicate`) is raised with
+# `raw_ref=f"comparator:{pair_key}"` -- a ref that never resolves to a file,
+# by construction (it names a comparator PAIR, not a source memory). Routing
+# it through `_writeback_source` is exactly athenaeum#1804's bug for this one
+# block shape: every answer held forever, nothing ever folded. `duplicate`
+# is used for no other escalation (verified: it is the only
+# `conflict_type="duplicate"` call site in verdict_effects.py), so
+# classifying on it alone is unambiguous. See `_writeback_class` and the
+# `"fold"` branch in `ingest_answers` below -- the actual apply (via
+# `athenaeum.pending_merges`) is injected by the caller as `fold_applier`
+# (`_cmd_pending._resolve_fold_question`), never imported here: that edge
+# would create an `answers` <-> `pending_merges` import cycle
+# (`pending_merges` already imports from `answers` at module load; see
+# `tests/test_import_graph_acyclic.py`, `ALLOWED_SCCS = []`).
+_FOLD_CONFLICT_TYPE = "duplicate"
+
 
 def _parse_verdict(answer_body: str) -> tuple[str | None, str]:
     """Split a leading verdict token off an answer body.
@@ -942,7 +1209,20 @@ def _block_source_refs(pq: PendingQuestion) -> list[str]:
     additional members the block involves (also-affects), side b onward;
     ``Members involved:`` (issue athenaeum#210 follow-up) covers the
     auto-memory-contradiction detector's own attribution line.
+
+    Issue athenaeum#2519: when ``pq.compiled_page`` is set (a contradiction
+    question that stored its own durable copy of the conflicting claims and
+    the compiled page they landed in), that page IS the write-back target —
+    returned alone, in place of ``pq.source``. ``pq.source`` names the raw
+    file this kind of contradiction was raised against, which the librarian
+    deletes on its normal intake-consumption schedule regardless of whether
+    the question is still open; resolving against it would make the
+    write-back depend on timing it will usually lose. A block raised before
+    this change has ``compiled_page == ""`` and falls straight through to
+    the pre-existing order below, unchanged.
     """
+    if pq.compiled_page:
+        return [pq.compiled_page]
     return [
         pq.source,
         *_extract_member_path_refs(pq.raw_block),
@@ -955,13 +1235,18 @@ def _writeback_class(pq: PendingQuestion) -> str:
 
     Returns ``"agent"`` for an agent-raised block (:func:`raise_pending_question`
     — the answer is consumed by whoever reads the archive, not written back
-    to a source), ``"field-correction"`` / ``"schema-amendment"`` for a block
-    whose source ref is unresolvable by design (see
+    to a source), ``"fold"`` for a `duplicate`-verdict fold question (issue
+    athenaeum#2518 — never a source write-back; approve/reject is handed to
+    the normal merge path instead, see the ``"fold"`` branch in
+    :func:`ingest_answers`), ``"field-correction"`` / ``"schema-amendment"``
+    for a block whose source ref is unresolvable by design (see
     :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or ``"source"`` for every
     ordinary detector-raised block, where a write-back IS expected.
     """
     if pq.raised_by == "agent":
         return "agent"
+    if pq.conflict_type == _FOLD_CONFLICT_TYPE:
+        return "fold"
     if pq.conflict_type in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
         return pq.conflict_type
     return "source"
@@ -1046,6 +1331,20 @@ def _writeback_source(
         member_paths = _resolve_source_files(refs, roots)
         if not member_paths:
             return 0
+
+        # Issue athenaeum#2519: a contradiction question with a stored
+        # compiled-page target writes back DIRECTLY to that page. It names
+        # exactly one file, not an a/b member PAIR, so none of the
+        # pair-oriented machinery below applies — an enacting verdict like
+        # `forget_a` would otherwise sail past the `len(member_paths) <=
+        # idx` guard at index 0 and DELETE the compiled page itself, and
+        # `archive`/`supersede` would mark a live wiki entity `deprecated`
+        # over a free-text answer. Routed to its own small helper instead,
+        # which only ever proposes an edit or annotates — never enacts.
+        if pq.compiled_page:
+            return _writeback_compiled_page(
+                pq, member_paths[0], answer_body, client=client, config=config, usage=usage
+            )
 
         verdict, remainder = _parse_verdict(answer_body)
 
@@ -1163,6 +1462,97 @@ def _writeback_source(
     except Exception:
         log.exception("answers: source write-back failed for entity=%s", pq.entity)
         return 0
+
+
+def _writeback_compiled_page(
+    pq: PendingQuestion,
+    page_path: Path,
+    answer_body: str,
+    *,
+    client: "LLMBackend | None",
+    config: "dict | None",
+    usage: "TokenUsage | None",
+) -> int:
+    """Apply ``pq``'s ratified answer directly to its stored compiled page.
+
+    Issue athenaeum#2519: a contradiction question whose source ref names a
+    raw file (a session transcript or assistant note) stores its own
+    durable copy of the conflicting claims and the compiled page they
+    landed in, at raise time — because the librarian deletes that raw file
+    on its normal intake-consumption schedule regardless of whether the
+    question is still open. This is where the stored copy gets used: the
+    write-back targets *page_path* directly, never attempting to resolve
+    the (likely already-deleted) raw source.
+
+    Unlike :func:`_writeback_source`'s member-pair machinery, there is
+    exactly ONE target file and no a/b orientation here, so this never
+    calls :func:`athenaeum.resolutions.enact_resolution` (an enacting
+    verdict deletes or marks one side of a PAIR; there is no pair) and
+    never marks the page ``deprecated`` for an ``archive``/``supersede``
+    token. It always either (a) proposes a concrete edit via the LLM
+    free-text proposer — using ``pq.conflicting_claims`` as context in
+    place of a raw source's body when the description carries no ``Passage
+    N:`` lines of its own — or (b) falls back to a non-destructive
+    annotation, mirroring :func:`_writeback_source`'s own free-text branch.
+    Never raises — a write-back failure must not block the provenance/
+    archive path; returns 0 on any failure.
+    """
+    from athenaeum.models import parse_frontmatter, render_frontmatter
+    from athenaeum.resolutions import _annotate_body
+
+    try:
+        text = page_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        log.warning("answers: compiled page missing/unreadable: %s", page_path)
+        return 0
+    meta, body = parse_frontmatter(text)
+
+    passages = extract_passages(pq.description)
+    if not passages and pq.conflicting_claims:
+        passages = [pq.conflicting_claims]
+
+    if client is not None:
+        from athenaeum.resolutions import propose_freetext_source_edits
+
+        # athenaeum#248: one attempt per proposer call, counted before the
+        # call so an API failure still counts as an attempt — mirrors
+        # _writeback_source's own convention.
+        if usage is not None:
+            usage.api_calls += 1
+        proposed = propose_freetext_source_edits(
+            answer_body, [(page_path, body)], passages, client, config, usage=usage
+        )
+        new_body = proposed.get(page_path)
+        if new_body is not None and new_body != body:
+            if meta:
+                atomic_write_text(page_path, render_frontmatter(meta) + "\n" + new_body)
+            else:
+                atomic_write_text(page_path, new_body)
+            log.info(
+                "answers: freetext proposer edited compiled page %s for entity=%s",
+                page_path,
+                pq.entity,
+            )
+            return 1
+        # Proposer returned nothing — fall through to annotation.
+
+    # Non-destructive annotation fallback. Strip a leading verdict token
+    # (e.g. "not_a_conflict: ...") the same way _writeback_source's own
+    # non-enacting branch does, purely for a clean annotation note — no
+    # verdict here ever dispatches to enact/historical machinery.
+    _verdict, remainder = _parse_verdict(answer_body)
+    note = remainder if _verdict is not None else answer_body
+    note = (note or answer_body).strip()
+    if not note:
+        return 0
+    new_body = _annotate_body(body, note)
+    if new_body == body:
+        return 0
+    if meta:
+        atomic_write_text(page_path, render_frontmatter(meta) + "\n" + new_body)
+    else:
+        atomic_write_text(page_path, new_body)
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -1301,6 +1691,14 @@ class IngestAnswersReport:
             ``recorded-as-prose``/``noop``).
         corrections_rejected: Issue athenaeum#1850 — field-correction blocks
             archived this run whose answer was ``reject`` (no write).
+        folds_applied: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose "approve" answer folded the pair
+            (``fold_applier`` returned ``"folded"``).
+        folds_rejected: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose answer was "reject" (no pages changed).
+        folds_refused: Issue athenaeum#2518 — fold-question blocks archived
+            this run whose "approve" was refused by one of the normal merge
+            path's safety checks (``fold_applier`` returned ``"refused"``).
     """
 
     files_written: int = 0
@@ -1309,6 +1707,9 @@ class IngestAnswersReport:
     archived_no_writeback: dict[str, int] = field(default_factory=dict)
     corrections_applied: int = 0
     corrections_rejected: int = 0
+    folds_applied: int = 0
+    folds_rejected: int = 0
+    folds_refused: int = 0
 
 
 def ingest_answers(
@@ -1319,6 +1720,7 @@ def ingest_answers(
     config: "dict | None" = None,
     quiet: bool = False,
     report: IngestAnswersReport | None = None,
+    fold_applier: "Callable[[PendingQuestion], tuple[str, str]] | None" = None,
 ) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
@@ -1366,6 +1768,23 @@ def ingest_answers(
             accumulator, updated in place. Keyword-only; defaults to
             ``None`` so every existing caller is unaffected. The function's
             return value stays a plain ``int`` regardless.
+        fold_applier: Issue athenaeum#2518 — callback invoked for an answered
+            ``"fold"``-class block (see :func:`_writeback_class`) in place of
+            :func:`_writeback_source`, which this block's `comparator:`
+            source ref could never resolve against. Takes the
+            :class:`PendingQuestion` and returns ``(outcome, detail)`` where
+            ``outcome`` is ``"folded"``, ``"refused"``, ``"rejected"``, or
+            ``"held"`` — never raises. This module cannot do the apply
+            itself: it would need :mod:`athenaeum.pending_merges`, which
+            already imports FROM this module at load time, so the reverse
+            edge would be an import cycle (see
+            ``tests/test_import_graph_acyclic.py``). The production caller
+            (``athenaeum._cmd_pending.cmd_ingest_answers``, which already
+            imports both modules) supplies the real implementation
+            (``_resolve_fold_question``); ``None`` (the default) holds every
+            fold question instead of crashing, so a caller that does not
+            thread this through degrades safely rather than silently
+            dropping the answer.
 
     Returns:
         Count of answers moved to the archive on this run (a held block is
@@ -1437,8 +1856,8 @@ def ingest_answers(
     iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
-    for block_text in blocks:
-        pq = _parse_block(block_text, quiet=quiet)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, quiet=quiet, block_index=block_index)
         if pq is None:
             # Malformed — preserve as-is in the primary file so the human
             # can see + fix it. Do not archive. Left as an unconditional
@@ -1488,6 +1907,11 @@ def ingest_answers(
         # same early-evaluation shape the "source" class already uses for
         # its own hold_refs resolution check just above.
         field_correction_outcome: tuple[str, str] | None = None
+        # Issue athenaeum#2518: the fold-question twin of
+        # `field_correction_outcome`, computed the same way (before deciding
+        # whether this run needs to write anything) so a fold's
+        # folded/refused/rejected/held status is known up front.
+        fold_outcome: tuple[str, str] | None = None
         if writeback_class == "source" and existing_state != "waived":
             hold_body = _answer_body(pq)
             hold_refs = _block_source_refs(pq)
@@ -1501,6 +1925,17 @@ def ingest_answers(
                 config=config,
             )
             if field_correction_outcome[0] == "held":
+                will_hold = True
+        elif writeback_class == "fold" and existing_state != "waived":
+            if fold_applier is None:
+                fold_outcome = (
+                    "held",
+                    "no fold_applier wired into this ingest_answers call "
+                    "(issue athenaeum#2518)",
+                )
+            else:
+                fold_outcome = fold_applier(pq)
+            if fold_outcome[0] == "held":
                 will_hold = True
 
         if will_hold and existing_state == "held":
@@ -1620,6 +2055,30 @@ def ingest_answers(
                         report.corrections_applied += 1
                     else:
                         report.corrections_rejected += 1
+        elif writeback_class == "fold":
+            # Issue athenaeum#2518: a fold question never calls
+            # _writeback_source either (its `comparator:` ref never
+            # resolves) — `fold_outcome`, computed above via `fold_applier`,
+            # is the ONLY record of what happened. Unlike field-correction,
+            # an unresolvable answer or missing page went to `will_hold`
+            # above; everything reaching this branch is "folded", "refused",
+            # or "rejected" — never "held" (AC4: approve/reject never end
+            # held).
+            skip_writeback = True
+            if existing_state == "waived":
+                if report is not None:
+                    report.waived += 1
+            elif not will_hold:
+                assert fold_outcome is not None
+                outcome, detail = fold_outcome
+                archive_status_line = f"**Write-back**: {outcome} — {detail}"
+                if report is not None:
+                    if outcome == "folded":
+                        report.folds_applied += 1
+                    elif outcome == "rejected":
+                        report.folds_rejected += 1
+                    else:
+                        report.folds_refused += 1
         elif writeback_class == "schema-amendment":
             skip_writeback = True
             archive_status_line = (
@@ -1645,6 +2104,14 @@ def ingest_answers(
                 held_line = (
                     f"**Write-back**: held — {hold_detail} as of {iso_ts}; answer "
                     '"ratify" or "reject", or change "held" to "waived" to '
+                    "archive without a write"
+                )
+            elif writeback_class == "fold":
+                assert fold_outcome is not None
+                _, hold_detail = fold_outcome
+                held_line = (
+                    f"**Write-back**: held — {hold_detail} as of {iso_ts}; answer "
+                    '"approve" or "reject", or change "held" to "waived" to '
                     "archive without a write"
                 )
             else:
@@ -2212,6 +2679,24 @@ def raise_pending_question(
     # grammar (`_HEADER_RE`) instead of corrupting it.
     escaped_entity = ent.replace("\\", "\\\\").replace('"', '\\"')
     header = f'## [{created_at}] Entity: "{escaped_entity}" (from {ref})'
+
+    existing_text = (
+        pending_path.read_text(encoding="utf-8") if pending_path.exists() else ""
+    )
+    # Issue athenaeum#2517: ids already in THIS file, so the fresh id minted
+    # below for a brand-new block cannot collide with one already on disk.
+    existing_ids = {
+        pq.id
+        for b in _split_blocks(existing_text)
+        if (pq := _parse_block(b, quiet=True)) is not None
+    }
+    # The salt is derived from `ctx` (the block's own context/description
+    # text), so two calls with identical args and no on-disk collision mint
+    # the identical id — see
+    # test_plain_question_kind_is_byte_for_byte_unchanged, which relies on
+    # exactly that determinism.
+    id_salt, decision_id = mint_unique_block_id(header, q, ctx, existing_ids)
+
     lines = [header, f"- [ ] {q}", "", f"**Description**: {ctx}"]
     if kind == "confirmation":
         raised_at_iso = now_iso(when)
@@ -2225,18 +2710,10 @@ def raise_pending_question(
             f"{_ALTERNATIVE_PREFIX} {alternative.strip()}",
             f"{_RAISED_AT_PREFIX} {raised_at_iso}",
         ]
+    lines.append(f"{_ID_SALT_PREFIX} {id_salt}")
     lines.append(f"{_RAISED_BY_PREFIX} {_RAISED_BY_AGENT}")
     block = ("\n".join(lines)).rstrip() + "\n"
 
-    # Computed the exact same way `_make_id` computes an id when the block
-    # is later re-parsed off disk, from the same (header, question) pair —
-    # so the id returned here is valid immediately for `resolve_question`
-    # without a round-trip read.
-    decision_id = _make_id(header, q)
-
-    existing_text = (
-        pending_path.read_text(encoding="utf-8") if pending_path.exists() else ""
-    )
     if existing_text.strip():
         new_content = existing_text.rstrip() + "\n\n---\n\n" + block
     else:
@@ -2303,8 +2780,8 @@ def resolve_by_id(
     new_block_text: str | None = None
     rewritten_blocks: list[str] = []
 
-    for block_text in blocks:
-        pq = _parse_block(block_text)
+    for block_index, block_text in enumerate(blocks, start=1):
+        pq = _parse_block(block_text, block_index=block_index)
         if pq is None:
             rewritten_blocks.append(block_text)
             continue

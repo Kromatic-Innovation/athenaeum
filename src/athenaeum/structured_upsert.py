@@ -34,6 +34,17 @@ Contract:
   on: the caller records it as skipped and leaves the raw on disk, so it can
   never fall through to the uid-bind path or the LLM tiers (which would
   flatten the structure this exists to preserve).
+- A raw whose value for a declared ``librarian.field_groups.<type>`` field
+  collides with a different, already-held value is likewise REFUSED (issue
+  athenaeum#2197, ``REASON_FIELD_GROUP_MISFIT``) -- but only when NO other
+  field in the same group still agrees between the raw and the page; an
+  ordinary update to the record already on the page (e.g. the same deal's
+  stage moving forward while its name/amount stay put) applies normally
+  instead (post-merge review of athenaeum#2197). When a misfit does fire,
+  the whole raw is refused, not merged piecemeal, so neither value is
+  lost. The outcome's ``field_group_misfits`` names what collided;
+  :mod:`athenaeum.schema_amendment_proposals` is what turns that into a
+  growing pending-decisions proposal.
 """
 
 from __future__ import annotations
@@ -49,6 +60,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     STRUCTURED_UPSERT_PROTECTED_KEYS,
     StructuredUpsertSpec,
+    resolve_page_type_field_groups,
     resolve_structured_upsert,
 )
 from athenaeum.models import parse_frontmatter, render_frontmatter
@@ -71,10 +83,36 @@ REASON_TYPE_MISMATCH = "type-mismatch"
 REASON_INELIGIBLE = "ineligible"
 REASON_UNRESOLVED_UID = "unresolved-uid"
 REASON_UNAPPLIABLE = "unappliable"
+#: Issue athenaeum#2197: the raw's value for a declared single-valued field
+#: group's field differs from a different value the page already holds.
+#: Refused (never applied, never partially merged) so the existing page is
+#: untouched and the raw stays on disk -- see ``tier0_structured_upsert``'s
+#: ``field_group_misfits`` output, which names what to propose.
+REASON_FIELD_GROUP_MISFIT = "field-group-misfit"
 
 _H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _BULLET_RE = re.compile(r"^[-*+][ \t]+")
+
+
+@dataclass(frozen=True)
+class FieldGroupMisfit:
+    """One declared single-valued field-group slot a raw's value collided
+    with (issue athenaeum#2197): the page already holds a DIFFERENT, non-empty
+    value for *field*, and -- per :func:`_detect_field_group_misfits`'s
+    group-level agreement check -- NO other field in the same group still
+    matches, so this is read as a different source record's data rather
+    than an ordinary update to the record already on the page.
+
+    Pure data -- :func:`athenaeum.schema_amendment_proposals.record_field_group_misfits`
+    is what turns a list of these into a growing pending-decisions proposal.
+    """
+
+    page_type: str
+    field_group: str
+    field: str
+    existing_value: Any
+    incoming_value: Any
 
 
 @dataclass(frozen=True)
@@ -85,6 +123,11 @@ class StructuredUpsertOutcome:
     uid: str = ""
     name: str = ""
     reason: str = ""
+    #: Non-empty only for a :data:`REASON_FIELD_GROUP_MISFIT` refusal (issue
+    #: athenaeum#2197) -- every declared-group field the raw's value collided
+    #: with. Empty for every other status/reason, including every
+    #: pre-athenaeum#2197 caller's outcome.
+    field_group_misfits: tuple[FieldGroupMisfit, ...] = ()
 
     @property
     def skipped_label(self) -> str:
@@ -277,6 +320,105 @@ def _rank_regressed(
     return False
 
 
+def _detect_field_group_misfits(
+    type_groups: dict[str, tuple[str, ...]],
+    spec: StructuredUpsertSpec,
+    page_type: str,
+    existing: dict[str, Any],
+    raw: dict[str, Any],
+) -> list[FieldGroupMisfit]:
+    """Declared single-valued field-group conflicts between *raw* and *existing*
+    (issue athenaeum#2197; record-identity narrowing from athenaeum#2197's
+    post-merge review).
+
+    Only ``spec.set_keys`` are eligible: a field group names scalar,
+    single-valued slots (the motivating case is a flat ``crm_*`` deal
+    record), not the list-valued ``union_keys`` the ordinary merge already
+    unions without conflict. ``type_groups`` empty (no groups declared for
+    *page_type*) always returns ``[]`` regardless of field names or values --
+    the "no implicit groups" guarantee lives here, not in the caller.
+
+    A field is a CANDIDATE misfit when: it belongs to a declared group, the
+    raw carries a non-empty value for it, the page already holds a non-empty
+    value for it, and the two differ. Matching or absent-on-either-side
+    values are never a candidate -- they are the ordinary "no delta" /
+    "first value" cases ``_merge_frontmatter`` already handles correctly.
+
+    A candidate only becomes a REPORTED misfit once per GROUP, not per
+    field, because this is where record identity is decided. Neither the
+    raw nor the page carries an explicit source-record id this deep in the
+    pipeline -- the raw's frontmatter is limited to the identity keys plus
+    whatever the spec's ``union_keys``/``set_keys``/``ordered_keys``/
+    ``keep_keys`` declare (an undeclared id field is refused upstream in
+    :func:`tier0_structured_upsert` as an unknown key), and
+    :mod:`athenaeum.registry`'s athenaeum#453 source-handle keys identify a
+    wiki ENTITY across adapters, not a sub-record within one page's field
+    group. Lacking that signal, this uses the group's OWN other declared
+    fields as the identity proxy the design doc already describes them as
+    ("a field group names a set of scalar fields that together hold ONE
+    record's worth of data"): if ANY other field in the same group has a
+    non-empty value on both sides that AGREES, the raw is treated as an
+    ordinary update to the record already on the page -- e.g. the same
+    deal's ``crm_deal_name``/``crm_deal_amount`` staying put while only
+    ``crm_deal_stage`` advances -- and no misfit is reported for ANY field
+    in that group, even the ones that differ; they apply normally. Only
+    when every comparable field in the group disagrees (no shared anchor)
+    is the group reported as a different source record's conflicting data,
+    exactly as before.
+
+    This is deliberately the conservative side of the tradeoff: a different
+    record that happens to coincidentally share one field's value with the
+    page's existing record (vanishingly unlikely for the motivating case --
+    two unrelated deals with an identical name AND amount) would wrongly be
+    let through rather than flagged. Closing that gap would need an
+    explicit per-record identity carried through the raw, which nothing in
+    this pipeline provides today.
+    """
+    if not type_groups:
+        return []
+    field_to_group = {
+        field_name: group_name
+        for group_name, fields in type_groups.items()
+        for field_name in fields
+    }
+    # Per group: candidate (key, existing, incoming) diffs, and whether any
+    # OTHER field in the same group agrees (non-empty on both sides, equal)
+    # -- the signal that this raw updates the record already on the page
+    # rather than naming a different one.
+    group_diffs: dict[str, list[tuple[str, Any, Any]]] = {}
+    group_has_agreement: dict[str, bool] = {}
+    for key in spec.set_keys:
+        group_name = field_to_group.get(key)
+        if group_name is None:
+            continue
+        incoming_value = raw.get(key)
+        if incoming_value in (None, "", [], {}):
+            continue
+        existing_value = existing.get(key)
+        if existing_value in (None, "", [], {}):
+            continue
+        if existing_value == incoming_value:
+            group_has_agreement[group_name] = True
+        else:
+            group_diffs.setdefault(group_name, []).append((key, existing_value, incoming_value))
+
+    misfits: list[FieldGroupMisfit] = []
+    for group_name, diffs in group_diffs.items():
+        if group_has_agreement.get(group_name):
+            continue
+        for key, existing_value, incoming_value in diffs:
+            misfits.append(
+                FieldGroupMisfit(
+                    page_type=page_type,
+                    field_group=group_name,
+                    field=key,
+                    existing_value=existing_value,
+                    incoming_value=incoming_value,
+                )
+            )
+    return misfits
+
+
 def _merge_frontmatter(
     spec: StructuredUpsertSpec,
     existing: dict[str, Any],
@@ -348,7 +490,12 @@ def tier0_structured_upsert(
     uid = str(meta.get("uid", "") or "").strip()
     name = str(meta.get("name", "") or "").strip()
 
-    def refuse(reason: str, detail: str) -> StructuredUpsertOutcome:
+    def refuse(
+        reason: str,
+        detail: str,
+        *,
+        misfits: tuple[FieldGroupMisfit, ...] = (),
+    ) -> StructuredUpsertOutcome:
         log.warning(
             "  T0 structured-upsert: raw %s (type %s, uid %r) refused: %s; "
             "leaving the raw on disk, not falling through to the LLM tiers",
@@ -357,7 +504,7 @@ def tier0_structured_upsert(
             uid,
             detail,
         )
-        return StructuredUpsertOutcome(STATUS_REFUSED, uid, name, reason)
+        return StructuredUpsertOutcome(STATUS_REFUSED, uid, name, reason, misfits)
 
     if not uid or not name or etype not in valid_types:
         return refuse(REASON_INELIGIBLE, "needs a non-empty uid and name and a schema-valid type")
@@ -392,6 +539,27 @@ def tier0_structured_upsert(
             REASON_UNAPPLIABLE,
             f"raw carries frontmatter key(s) the config neither merges nor keeps: {unknown}",
         )
+
+    # Issue athenaeum#2197: a declared single-valued field-group conflict is
+    # checked BEFORE any merge is computed -- the whole raw is refused
+    # (never partially applied) so the page keeps both the existing and the
+    # not-yet-adopted incoming value intact, and the raw itself (the only
+    # copy of the colliding record) stays on disk rather than being
+    # consumed. Types with no `librarian.field_groups` entry get an empty
+    # `type_groups`, so this is a complete no-op for every pre-athenaeum#2197
+    # deployment and every page type that declares no groups.
+    type_groups = resolve_page_type_field_groups(config).get(etype, {})
+    misfits = _detect_field_group_misfits(type_groups, spec, etype, existing_meta, meta)
+    if misfits:
+        return refuse(
+            REASON_FIELD_GROUP_MISFIT,
+            "declared field group(s) "
+            f"{sorted({m.field_group for m in misfits})} already hold a "
+            "different value, with no other field in the group still "
+            "agreeing -- read as a different source record's data",
+            misfits=tuple(misfits),
+        )
+
     raw_name = str(meta.get("name", "") or "").strip()
     page_name = str(existing_meta.get("name", "") or "").strip()
     if raw_name != page_name:

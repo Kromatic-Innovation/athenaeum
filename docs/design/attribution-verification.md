@@ -619,8 +619,9 @@ Two code paths remove a page and leave its contact record live:
   the wiki.
 
 Neither touches the contacts surface. The merge paths already fold absorbed
-records (athenaeum#2184), and `oversize_split.split_pages` keeps the hub page's
-uid, so neither of those orphans anything.
+records (athenaeum#2184); the reactive split disposition this section
+originally reasoned about also kept the hub page's uid before its
+retirement (athenaeum#2550), so neither of those orphaned anything.
 
 The fix makes both removal paths call one helper, which folds the removed
 uid's records into a named successor through

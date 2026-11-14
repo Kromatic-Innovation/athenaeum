@@ -178,6 +178,11 @@ MODULE_LAYER: dict[str, int] = {
     "provider": 3,
     "push_metrics": 3,
     "query_topics": 3,
+    # Issue athenaeum#2535: the first-class parent/child page relation --
+    # own docstring states "Layering: L3 service", placed below every
+    # named caller (tiers.py's recompile pass, the merge resolver, cli.py)
+    # so none of them has to import another just to reach it.
+    "page_relations": 3,
     "relatedness": 3,
     "rules": 3,
     "screening": 3,
@@ -237,6 +242,10 @@ MODULE_LAYER: dict[str, int] = {
     "entity_resolution": 4,
     "entity_rename": 4,  # athenaeum#2488: page rename primitive
     "fold_graph_lint": 4,
+    # Issue athenaeum#2545: dangling-fold-target repair. Imports
+    # pending_merges (L4 sibling, for find_identity_pages' identity
+    # resolver), models (L1), atomic_io (L0).
+    "fold_target_repair": 4,
     "intake_audit": 4,
     "librarian": 4,
     "merge": 4,
@@ -255,7 +264,38 @@ MODULE_LAYER: dict[str, int] = {
     "recurring_claims": 4,
     "repair": 4,
     "retire": 4,
-    "oversize_split": 4,  # athenaeum#2078 AC3: split pass over flagged pages
+    # Issue athenaeum#2534 (page-recompile slice S1): the candidate scan +
+    # unit segmenter, sibling to page_decompose.py (own docstring states
+    # "Layering: L4 domain/pipeline, same layer as
+    # athenaeum.page_decompose"). Its former same-layer sibling
+    # athenaeum.oversize_split (and the "oversize_split": 4 entry that used
+    # to sit here) was retired by issue athenaeum#2550.
+    "page_recompile": 4,
+    # Issue athenaeum#2537 (page-recompile slice S3): the planner that routes
+    # units by id and writes the parent summary (own docstring states
+    # "Layering: L4 domain/pipeline, the same layer as its S1 sibling
+    # athenaeum.page_recompile").
+    "page_recompile_plan": 4,
+    # Issue athenaeum#2540 (page-recompile slice S4): the atomic applier for
+    # structure-only plans (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings athenaeum.page_recompile
+    # and athenaeum.page_recompile_plan").
+    "page_recompile_apply": 4,
+    # Issue athenaeum#2541 (page-recompile slice S5): the compensating undo
+    # for an applied plan (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings
+    # athenaeum.page_recompile, athenaeum.page_recompile_plan and
+    # athenaeum.page_recompile_apply").
+    "page_recompile_undo": 4,
+    # Issue athenaeum#2547 (page-recompile slice S6): the nightly pass's own
+    # policy -- budget, modes, deadline and suppression (own docstring
+    # states "Layering: L4 domain/pipeline, the same layer as every other
+    # page_recompile* module and as athenaeum.audit_queue").
+    "page_recompile_nightly": 4,
+    # Issue athenaeum#2547 (page-recompile slice S6): the approval queue a
+    # drafted plan is raised through (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings").
+    "page_recompile_queue": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,
@@ -270,6 +310,10 @@ MODULE_LAYER: dict[str, int] = {
     # proposal drafters, same deterministic L4 peer shape as dimension_proposals.py.
     "tier_movement_proposals": 4,
     "policy_pack_edit_proposals": 4,
+    # Issue athenaeum#2197: schema-amendment proposal ledger -- same
+    # deterministic L4 peer shape as tier_movement_proposals.py (imports
+    # store.py, L3; imported by the L4 librarian/batch and decisions.py).
+    "schema_amendment_proposals": 4,
     # Issue athenaeum#719: shape mining over the verdict ledger (L2) and the
     # dimension coordinate readers (L1/L2 upper bound) -- the self-tuning
     # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it
@@ -363,11 +407,12 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_quiesce": 5,
     "_cmd_reconcile": 5,
     "_cmd_recovery_yield": 5,
+    "_cmd_relate": 5,  # issue athenaeum#2535
     "_cmd_repair": 5,
     "_cmd_retire": 5,
     "_cmd_receipts": 5,  # issue athenaeum#2039
+    "_cmd_recompile": 5,  # issue athenaeum#2534
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
-    "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
     "_cmd_schedule": 5,  # issue athenaeum#2304
     "_cmd_schema": 5,

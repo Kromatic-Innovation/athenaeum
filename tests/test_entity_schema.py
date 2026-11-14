@@ -293,3 +293,60 @@ class TestDeclaredEntityClasses:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         assert declared_entity_classes(wiki) >= KNOWN_TYPES
+
+
+class TestSplitChildrenExcludedFromCounts:
+    """Issue athenaeum#2538 AC7: ``resolve_entity_classes``'s page counts
+    exclude a ``via: split`` sub-page by default -- the same default
+    ``enumerate_entities`` applies -- while attach/fold/manual children are
+    always counted. ``include_split=True`` counts it too."""
+
+    def _wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| company |\n")
+        _write_page(wiki, "parent.md", uid="company-acme", page_type="company", name="Acme")
+        # Real shape the now-retired `tiers.py:_build_split_child_pages`
+        # used to write (deleted by issue athenaeum#2550): only the legacy
+        # `split-from` row, no top-level `parent:` key.
+        _write_page(
+            wiki,
+            "split.md",
+            uid="company-acme-split",
+            page_type="company",
+            name="Acme Split",
+            extra="related:\n  - uid: company-acme\n    role: split-from",
+        )
+        _write_page(
+            wiki,
+            "attach.md",
+            uid="company-acme-attach",
+            page_type="company",
+            name="Acme Attach",
+            extra="parent: company-acme",
+        )
+        return wiki
+
+    def test_count_excludes_split_by_default(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        classes = {c.name: c for c in resolve_entity_classes(wiki)}
+        # Parent + attach child counted; split child excluded.
+        assert classes["company"].count == 2
+
+    def test_include_split_counts_it(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        classes = {c.name: c for c in resolve_entity_classes(wiki, include_split=True)}
+        assert classes["company"].count == 3
+
+    def test_cached_resolver_keys_on_include_split(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        clear_entity_class_cache()
+        default = {c.name: c for c in resolve_entity_classes_cached(wiki)}
+        with_split = {
+            c.name: c
+            for c in resolve_entity_classes_cached(wiki, include_split=True)
+        }
+        assert default["company"].count == 2
+        assert with_split["company"].count == 3
+        clear_entity_class_cache()

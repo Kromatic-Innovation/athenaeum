@@ -82,6 +82,14 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     "init": 3,
     "librarian": 3,  # git_push, git_pull, _capture_head's rev-parse — NOT snapshot
     "pending_merges": 2,
+    "page_recompile_undo": 1,  # athenaeum#2541 AC1: `git cat-file blob <id>`
+    # reads of the knowledge store's OWN history to restore the pre-image of
+    # a page an applied recompile rewrote. The apply record pins each
+    # pre-image by git blob id precisely so the bytes are recoverable;
+    # pii_restore/parked_recovery/reconcile's read-only-history shape, no
+    # snapshot/commit (the undo's own ONE snapshot commit goes through
+    # FilesystemStore.snapshot like every other), so there is no store
+    # primitive this read maps onto.
     "parked_recovery": 1,  # athenaeum#2078 AC5: `git show <commit>:<path>` reads
     # of the knowledge store's OWN history to restore consumed raw files --
     # pii_restore/reconcile's read-only-history shape, no snapshot/commit,

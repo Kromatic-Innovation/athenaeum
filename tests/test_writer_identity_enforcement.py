@@ -219,6 +219,14 @@ def collect_flag_off_outputs(tmp_path: Path) -> dict[str, Any]:
 
 
 #: Recorded from the code on ``develop`` BEFORE athenaeum#2041 landed.
+#: ``ingest:records[0].source_verdict_id`` was regenerated after athenaeum#2517
+#: gave every new pending-question block a persisted ``**Id salt**:`` value
+#: (a hash of its own description, folded into `_make_id`'s hash so two
+#: blocks sharing a header + question can no longer collide) — same
+#: mechanism as the athenaeum#2120 pinned-date comment in
+#: `_answer_through_ingest` above, just a second input to the same id hash.
+#: Deterministic across runs (see `test_explicit_false_is_same_as_unset`),
+#: just a different literal than before athenaeum#2517.
 GOLDEN_FLAG_OFF: dict[str, Any] = json.loads(
     r"""
 {
@@ -259,7 +267,7 @@ GOLDEN_FLAG_OFF: dict[str, Any] = json.loads(
    "resolved_by": "human",
    "side_a_norm": "acme is headquartered in boston.",
    "side_b_norm": "acme is headquartered in austin.",
-   "source_verdict_id": "7af7d1776734"
+   "source_verdict_id": "94f89d78ffd2"
   }
  ],
  "supersession:different_no_corroborator": [

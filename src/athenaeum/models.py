@@ -2055,6 +2055,24 @@ class EscalationItem:
     # function). ``"coordinate"`` is the one other value in use today
     # (:func:`athenaeum.verdict_effects.queue_coordinate_batch`).
     decision_kind: str = "question"
+    # Issue athenaeum#2519: a durable copy of the conflicting claims and the
+    # path of the compiled wiki page they landed in, captured by the raise
+    # site at the moment a contradiction question is created. The
+    # librarian deletes a raw file (``raw_ref``) on its normal intake-
+    # consumption schedule regardless of whether a question is still open
+    # against it (unchanged by this issue — see its AC3); a contradiction
+    # whose write-back would otherwise depend on that raw file still
+    # existing stores this copy so the answer can be applied to the
+    # compiled page later, even once the raw file is gone.
+    # :func:`athenaeum.tiers.attach_contradiction_writeback_copy` is the
+    # sole writer, called once by ``athenaeum.librarian``'s entity-tier
+    # loop right after a ``tier3_merge`` escalation for an "update" action.
+    # Both default to ``""`` -- every other escalation constructor in this
+    # codebase leaves them unset, and :func:`athenaeum.tiers.tier4_escalate`
+    # only renders the corresponding block lines when non-empty, so no
+    # pre-athenaeum#2519 rendered block changes.
+    compiled_page: str = ""
+    conflicting_claims: str = ""
 
 
 # Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the
@@ -3318,30 +3336,27 @@ class ProcessingResult:
     #: refusal. Surfaced as ``uid_bind_mismatch=N`` in the run summary (only
     #: when non-zero, same convention as ``uid_bind_unresolved``).
     uid_bind_mismatch: int = 0
-    #: Count of Tier-3 merges suppressed by the page-size invariant (issue
-    #: athenaeum#1182): a page over ``librarian.page_size_threshold_chars``
-    #: routes to escalation (``EscalationItem.conflict_type=
-    #: "oversize_page"``) instead of another merge, and is left unmodified.
-    #: Derived from ``escalated`` by conflict_type — see
-    #: ``athenaeum.librarian._apply_tier3_results`` — rather than tracked as
-    #: an independent counter, so it can never drift out of sync with what
-    #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
-    #: run summary, mirroring the degraded/truncated convention above.
-    oversize_suppressed: int = 0
-    #: Count of oversize pages ``librarian.oversize_page_action: split``
-    #: actually split into a hub + linked atomic pages this run (issue
-    #: athenaeum#1248 — ``EscalationItem.conflict_type == "oversize_split"``).
-    #: Derived from ``escalated`` exactly like ``oversize_suppressed`` above,
-    #: and deliberately DISJOINT from it: a page that was split is never
-    #: also counted as ``oversize_suppressed`` (that conflict_type is
-    #: ``review``'s alone), so the two counters partition the gate's fired
-    #: outcomes rather than double-counting. Surfaced as ``oversize_split=N``.
-    oversize_split: int = 0
     #: Count of oversize pages ``librarian.oversize_page_action: log_demote``
     #: actually moved into the preserved-log area this run (issue
     #: athenaeum#1248 — ``EscalationItem.conflict_type ==
-    #: "oversize_log_demote"``). Same derivation/disjointness contract as
-    #: ``oversize_split`` above. Surfaced as ``oversize_log_demoted=N``.
+    #: "oversize_log_demote"``). Derived from ``escalated`` by conflict_type
+    #: — see ``athenaeum.librarian._apply_tier3_results`` — rather than
+    #: tracked as an independent counter, so it can never drift out of sync
+    #: with what was actually escalated. Surfaced as
+    #: ``oversize_log_demoted=N`` in the run summary, mirroring the
+    #: degraded/truncated convention above.
+    #:
+    #: Issue athenaeum#2550 removed this field's two siblings,
+    #: ``oversize_suppressed`` (``review``'s old escalate-and-count shape,
+    #: dead since athenaeum#2078's "flag needs_split and merge anyway"
+    #: ruling) and ``oversize_split`` (the retired reactive ``split``
+    #: disposition) — along with the matching fields on
+    #: ``BatchRunResult``/``BatchCollectResult`` in ``batch.py`` and
+    #: ``RunSummaryContext.total_oversize_suppressed``/``total_oversize_split``
+    #: in ``librarian.py``. ``oversize_page``/``oversize_split`` remain
+    #: valid ``EscalationItem.conflict_type`` values for an already-archived
+    #: block (:data:`athenaeum.tiers.OVERSIZE_ESCALATION_CONFLICT_TYPES`) —
+    #: they are simply no longer produced or counted.
     oversize_log_demoted: int = 0
     #: Count of NEW entity writes this file's Tier-3 create phase produced
     #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was

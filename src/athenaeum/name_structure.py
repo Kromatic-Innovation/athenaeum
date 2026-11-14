@@ -88,15 +88,18 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
 from athenaeum.config import (
+    resolve_page_recompile_rejoin_fraction,
     resolve_page_size_threshold_chars,
     resolve_rejected_merge_cooldown_days,
 )
 from athenaeum.models import parse_frontmatter, resolve_page_type
+from athenaeum.page_relations import read_relations
 from athenaeum.t1_census import T1_UNSCREENED_NAME_STRUCTURE, get_t1_census
 
 if TYPE_CHECKING:
@@ -366,6 +369,57 @@ def _load_candidates(
     return pages
 
 
+def exceeds_split_rejoin_bound(
+    *,
+    bare_meta: Mapping[str, object],
+    bare_body: str,
+    qualified_meta: Mapping[str, object],
+    qualified_body: str,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Would folding *qualified* back into *bare* rejoin a split-created
+    sub-page the applier (issue athenaeum#2540) just made (AC12)?
+
+    True only when BOTH hold: *qualified* names *bare*'s own uid as its
+    parent VIA ``"split"`` (:func:`athenaeum.page_relations.read_relations`
+    -- the exact relation :mod:`athenaeum.page_recompile_apply` writes, not
+    every ``attach``/``fold``/``manual`` parent link), AND their combined
+    size is above :func:`athenaeum.config.resolve_page_recompile_rejoin_fraction`
+    of :func:`athenaeum.config.resolve_page_size_threshold_chars`. A
+    ``False`` return means :func:`scan_qualified_name_splits` proposes the
+    pair exactly as before this issue -- in particular, an ordinary
+    "one entity written down twice" qualified-name pair with no recorded
+    relation at all is untouched.
+
+    This is deliberately narrower than
+    :func:`merged_body_within_page_size_threshold` (which gates the WHOLE
+    scan on the full threshold and is explicitly "deliberately not wired
+    into" it): that predicate would also suppress a genuine duplicate pair
+    that happens to be large, which athenaeum#1581 reserves for a separate
+    decision. This one only ever fires for a page the SPLIT machinery
+    itself created, at a smaller FRACTION of the threshold -- stopping the
+    scan from immediately re-proposing the merge the oversize gate would
+    just split back apart (the same oscillation that predicate's own
+    docstring names), without changing behaviour for any other pair.
+    """
+    qualified_uid = str(qualified_meta.get("uid") or "")
+    if not qualified_uid:
+        return False
+    # `via` is recorded on the PARENT's own `related` row, not on the
+    # child's `parent:` key -- read_relations leaves a child-side via
+    # unknown by design (see its own docstring), so this reads the BARE
+    # page's children, not the qualified page's parent pointer.
+    child_ref = next(
+        (c for c in read_relations(bare_meta).children if c.uid == qualified_uid), None
+    )
+    if child_ref is None or child_ref.via != "split":
+        return False
+    threshold = resolve_page_size_threshold_chars(config)
+    fraction = resolve_page_recompile_rejoin_fraction(config)
+    combined = len(bare_body) + len(qualified_body)
+    return combined > threshold * fraction
+
+
 def scan_qualified_name_splits(
     wiki_root: Path, *, config: dict[str, Any] | None = None
 ) -> list[QualifiedNameSplit]:
@@ -413,6 +467,14 @@ def scan_qualified_name_splits(
         base, qualifier = parts
         for twin in by_key.get((normalize_name(base), page.page_type), []):
             if twin.path == page.path:
+                continue
+            if exceeds_split_rejoin_bound(
+                bare_meta=parse_frontmatter(twin.text)[0],
+                bare_body=twin.body,
+                qualified_meta=parse_frontmatter(page.text)[0],
+                qualified_body=page.body,
+                config=config,
+            ):
                 continue
             splits.append(
                 QualifiedNameSplit(
@@ -628,7 +690,10 @@ def propose_qualified_name_merges(
             "qualifier may mark a synonym/expansion (one entity, twice) or a "
             "scope/phase (a genuinely narrower thing); this scan cannot tell "
             "those apart, so a human decides. The draft below concatenates both "
-            "bodies verbatim — nothing was summarised."
+            "bodies verbatim — nothing was summarised. If the qualifier is a "
+            "genuinely narrower thing rather than a synonym, 'attach-as-subpage' "
+            "(athenaeum#2539) is also available: it attaches the qualified page "
+            f"under {split.bare_name!r} as a sub-page instead of folding it away."
         )
         if expired is not None:
             # Issue athenaeum#2077: the cooldown lapsed, so this is a fresh

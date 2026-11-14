@@ -834,6 +834,7 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC2 counter-example: `--quiet` against a fixture with a malformed
         # block and a valid answered block still prints the summary line but
@@ -850,6 +851,15 @@ class TestIngestAnswers:
         # subprocess: both noise lines appear on stderr unflagged and both
         # disappear under `--quiet`.
         import logging
+
+        import athenaeum.answers as answers_module
+
+        # Issue athenaeum#2516: `_write_mixed_corpus`'s malformed block text
+        # is byte-identical across this test and the two siblings below (and
+        # across two tests in test_answers.py) — reset the process-global
+        # warn-once dedupe set so an earlier test's encounter can't mask
+        # this one's own first-encounter assertions.
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
@@ -870,8 +880,13 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import logging
+
+        import athenaeum.answers as answers_module
+
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
@@ -889,6 +904,7 @@ class TestIngestAnswers:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # AC3 positive control: the SAME fixture without `--quiet` still
         # emits both noise strings — proving the flag is additive, not a
@@ -896,6 +912,14 @@ class TestIngestAnswers:
         # for why "Preserving malformed" (log-only, no paired print) is
         # asserted via `caplog` rather than `capsys`.
         import logging
+
+        import athenaeum.answers as answers_module
+
+        # Same byte-identical malformed-block content as the two sibling
+        # tests above — reset so THIS test's own first encounter (the AC3
+        # positive control: the print must still fire) is what gets
+        # asserted (issue athenaeum#2516).
+        monkeypatch.setattr(answers_module, "_MALFORMED_BLOCK_WARNED", set())
 
         caplog.set_level(logging.WARNING, logger="athenaeum.answers")
         self._write_mixed_corpus(tmp_path)
@@ -1998,6 +2022,17 @@ class TestSevenOneShotRepairCommandsRemoved:
     ``prune-code-entities`` were all removed, so the whole noun is gone;
     ``storage`` keeps ``migrate-pii``/``lint-pii``/``lint-mapping`` and only
     loses its ``audit-h1-redaction``/``prune-dispositions`` sub-choices.
+
+    ``split-oversize`` (issue athenaeum#2550) is folded into this class's
+    registry/choices/module-deletion checks ONLY -- the class name stays
+    "seven" because that count still describes
+    ``REMOVED_TOP_LEVEL_INVOCATIONS``/``test_invoking_a_removed_top_level_
+    command_is_an_unknown_choice_error``'s own plain-argparse-rejection
+    coverage, which ``split-oversize`` deliberately does NOT share: issue
+    athenaeum#2550 AC5 requires a removed subcommand invocation to name its
+    replacement, so ``split-oversize`` gets a dedicated, non-argparse
+    check in ``TestSplitOversizeRemovedWithReplacementMessage`` below
+    instead of an eighth parametrize entry here.
     """
 
     #: (top-level argv, expected invalid-choice token). A top-level verb
@@ -2031,6 +2066,7 @@ class TestSevenOneShotRepairCommandsRemoved:
         assert "paste-cleanup" not in choices
         assert "dedup-oversize-escalations" not in choices
         assert "auto-memory" not in choices
+        assert "split-oversize" not in choices  # issue athenaeum#2550
         # Positive control: a sibling command registered by the SAME
         # grouping module (_cmd_curate) still is, so this cannot pass on an
         # empty/broken parser.
@@ -2063,6 +2099,7 @@ class TestSevenOneShotRepairCommandsRemoved:
         assert "paste-cleanup" not in _SUBCOMMAND_LOADERS
         assert "dedup-oversize-escalations" not in _SUBCOMMAND_LOADERS
         assert "auto-memory" not in _SUBCOMMAND_LOADERS
+        assert "split-oversize" not in _SUBCOMMAND_LOADERS  # issue athenaeum#2550
         assert "dedupe" in _SUBCOMMAND_LOADERS
         assert "storage" in _SUBCOMMAND_LOADERS
 
@@ -2100,6 +2137,9 @@ class TestSevenOneShotRepairCommandsRemoved:
         assert importlib.util.find_spec("athenaeum._cmd_paste_cleanup") is None
         assert importlib.util.find_spec("athenaeum.paste_cleanup") is None
         assert importlib.util.find_spec("athenaeum.filename_entity_prune") is None
+        # issue athenaeum#2550
+        assert importlib.util.find_spec("athenaeum._cmd_split_oversize") is None
+        assert importlib.util.find_spec("athenaeum.oversize_split") is None
 
     def test_the_kept_sibling_commands_still_work(self) -> None:
         """``recover-parked``, ``quarantine requeue``, ``repair
@@ -2117,3 +2157,51 @@ class TestSevenOneShotRepairCommandsRemoved:
             with pytest.raises(SystemExit) as excinfo:
                 main(argv)
             assert excinfo.value.code == 0, " ".join(argv)
+
+
+class TestSplitOversizeRemovedWithReplacementMessage:
+    """Issue athenaeum#2550 AC5: unlike the seven one-shot repair commands
+    above (bare argparse "invalid choice", no replacement named),
+    invoking ``athenaeum split-oversize`` prints which command replaces
+    it. ``main`` catches the name in its own pre-parse peek (the same
+    mechanism the fast lazy-dispatch path already uses), BEFORE any
+    parser -- lazy or eager -- is built, so ``split-oversize`` never goes
+    back into any parser's ``choices`` just to carry this message. That
+    also means ``main`` returns the exit code directly rather than
+    raising ``SystemExit`` the way an argparse-rejected invocation does."""
+
+    def test_prints_the_replacement_command_and_exits_2(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code = main(["split-oversize"])
+
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "split-oversize" in err
+        assert "athenaeum recompile" in err
+
+    def test_fires_regardless_of_trailing_args(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The peek only looks at the first non-option token -- trailing
+        flags/args (as a caller migrating a stale script might still
+        pass) must not dodge the message or reach real argument
+        parsing."""
+        exit_code = main(["split-oversize", "--apply", "--uid", "aaaa1111"])
+
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "athenaeum recompile" in err
+
+    def test_does_not_register_a_removed_subparsers_module(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The replacement message fires before ``_build_lazy_parser`` or
+        ``build_parser`` is ever called -- confirmed indirectly: the
+        deleted ``_cmd_split_oversize`` module is never imported, so this
+        cannot be exercising a resurrected subparser."""
+        import sys as _sys
+
+        assert "athenaeum._cmd_split_oversize" not in _sys.modules
+        main(["split-oversize"])
+        assert "athenaeum._cmd_split_oversize" not in _sys.modules

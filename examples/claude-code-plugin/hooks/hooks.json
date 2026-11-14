@@ -1,0 +1,54 @@
+{
+  "description": "Wires the existing examples/claude-code/ recall hooks (unchanged, reused in place -- not copied, see README.md) plus a launcher-owned warm-up step that keeps SessionStart fast on a first run before the pinned athenaeum release has been materialized through uv.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/launcher.sh\" --ensure-ready 2>/dev/null || true",
+            "timeout": 5,
+            "statusMessage": "Preparing athenaeum (uv)..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/../claude-code/session-start-recall.sh\" 2>/dev/null || true",
+            "timeout": 60,
+            "statusMessage": "Building knowledge index..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/../claude-code/wiki-context-inject.sh\" 2>/dev/null || true",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/../claude-code/pending-questions-surface.sh\" 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/../claude-code/user-prompt-recall.sh\" 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/../claude-code/pre-compact-save.sh\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

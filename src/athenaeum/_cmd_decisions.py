@@ -147,6 +147,32 @@ def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, int, str | 
     )
 
 
+def _duplicate_decision_ids(decisions: list[dict]) -> list[str]:
+    """Ids shared by more than one item in *decisions* (issue athenaeum#2517 AC3).
+
+    A single O(n) pass over an already-built list — cheap enough to run on
+    every ``decisions list`` call. A duplicate here means two in-flight
+    decisions share one id: an answer keyed on that id resolves whichever
+    block the resolver meets first, silently leaving (or double-answering)
+    the other. The write path (``athenaeum.answers.mint_unique_block_id``)
+    is what actually prevents a NEW collision; this is the read-path safety
+    net for anything already on disk from before that existed, or for an
+    id this function's own callers don't mint (merges, retractions, ...).
+    Returns a sorted list of the colliding ids (empty when none collide).
+    """
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for d in decisions:
+        did = d.get("id")
+        if not did:
+            continue
+        if did in seen:
+            dupes.add(did)
+        else:
+            seen.add(did)
+    return sorted(dupes)
+
+
 def _cmd_scan_retractions(args: argparse.Namespace) -> int:
     """Run the retraction cascade (issue athenaeum#435): flag dependent merges for review.
 
@@ -380,6 +406,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "scan-retractions",
         "raise-confirmation",
         "answer",
+        "pending-answers",
         "budget",
         "challenge-coordinate",
         "migrate",
@@ -391,7 +418,8 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     ):
         print(
             "usage: athenaeum decisions "
-            "{list,next,count,scan-retractions,raise-confirmation,answer,budget,"
+            "{list,next,count,scan-retractions,raise-confirmation,answer,"
+            "pending-answers,budget,"
             "challenge-coordinate,migrate,revalidate,recompare,scrub-pii,"
             "propose-fold,provenance} [...]",
             file=sys.stderr,
@@ -409,6 +437,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "answer":
         return _cmd_answer(args)
+
+    if sub == "pending-answers":
+        return _cmd_pending_answers(args)
 
     if sub == "budget":
         return _cmd_budget(args)
@@ -491,6 +522,18 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         return 0
 
     # sub == "list"
+    # Issue athenaeum#2517 AC3: warn on the FULL unified list, before any
+    # `--limit` slice hides a duplicate off the tail of a short page.
+    # Printed to stderr so it never corrupts `--json`'s stdout payload.
+    dup_ids = _duplicate_decision_ids(decisions)
+    if dup_ids:
+        print(
+            "[warn] duplicate decision id(s) in queue, athenaeum#2517 "
+            "(two pending items share one id -- an answer keyed on it "
+            f"resolves only one of them): {', '.join(dup_ids)}",
+            file=sys.stderr,
+        )
+
     limit = getattr(args, "limit", 0) or 0
     if limit > 0:
         decisions = decisions[:limit]
@@ -526,8 +569,27 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     only created once the answer is known to satisfy the schema, and it is
     then applied by the existing ``athenaeum ingest-answers`` tick exactly
     like any other answer file.
+
+    Issue athenaeum#2544: for ``--type coordinate``, that schema check used
+    to be the ONLY one run here — everything else (JSON-decoding the
+    verdict, pair/page/dimension membership) was deferred to the next
+    ``ingest-answers`` tick, refusing the whole batch hours later. Those
+    checks now also run here, before anything is written, via the SAME
+    :func:`athenaeum.decision_answers.validate_coordinate_answer` the
+    applier itself calls (:func:`athenaeum.decision_answers.write_decision_answer`
+    raises :class:`athenaeum.decision_answers.CoordinateAnswerRefused`,
+    caught below).
+
+    Issue athenaeum#2544 AC3: before writing ANY type, reports whether an
+    unapplied answer file already exists for this id (and, for ``merge``,
+    for another proposal whose sources overlap) — warns by default;
+    ``--refuse-on-pending-conflict`` makes it a refusal instead.
     """
-    from athenaeum.decision_answers import write_decision_answer
+    from athenaeum.decision_answers import (
+        CoordinateAnswerRefused,
+        check_pending_conflicts,
+        write_decision_answer,
+    )
     from athenaeum.decision_framing import (
         ANSWERABLE_AS,
         answerable_as,
@@ -586,38 +648,155 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             schema=response_schema_for(decision_type),
         )
 
-    raw_root = _resolve_knowledge_root(args) / "raw"
-    path = write_decision_answer(
-        raw_root,
-        decision_id=args.id,
-        decision_type=applier_type,
-        verdict=str(parsed["verdict"]),
-        note=str(parsed.get("note", "")),
-        # Issue athenaeum#1996: preserve the ORIGINAL outbound-queue type
-        # (e.g. "confirmation") alongside the applier type (e.g. "question")
-        # — they diverge exactly here, the one call site that does the
-        # answerable_as translation. See render_decision_answer's docstring.
-        origin_decision_type=decision_type,
-        # Issue athenaeum#2016: forward a "rename" answer's human-chosen
-        # dimension name. Absent for every other type/verdict (validate_answer
-        # above already refused a "name" the schema does not declare).
-        name=str(parsed.get("name", "")),
-    )
-    if as_json:
+    knowledge_root = _resolve_knowledge_root(args)
+    raw_root = knowledge_root / "raw"
+    wiki_root = knowledge_root / "wiki"
+    config = load_config(knowledge_root)
+
+    refuse_on_conflict = getattr(args, "refuse_on_pending_conflict", False)
+    try:
+        conflicts = check_pending_conflicts(
+            raw_root, wiki_root, decision_id=args.id, decision_type=applier_type
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort visibility only (issue
+        # athenaeum#2544): a stray unreadable file elsewhere in raw/answers/
+        # (e.g. invalid UTF-8 — `_load_decision_answer` reads it with
+        # `encoding="utf-8"` and that raises `UnicodeDecodeError`, not
+        # caught by its own `except OSError`) must never take down an
+        # otherwise-valid answer for THIS id — same "lookup is best-effort"
+        # posture decision_answers.py's own `_raised_at_for` already takes,
+        # and the same guard triage.submit_answer already has around its
+        # own check_pending_conflicts call.
+        conflicts = []
         print(
+            f"warning: pending-conflict scan skipped ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
+    if conflicts:
+        conflict_descriptions = [
+            f"{c.decision_type} answer at {c.path} ({c.resolved_at}): {c.verdict!r}"
+            for c in conflicts
+        ]
+        if refuse_on_conflict:
+            return _answer_refusal(
+                as_json=as_json,
+                decision_id=args.id,
+                decision_type=decision_type,
+                error_code="pending_conflict",
+                headline="has an unapplied answer already waiting for the same item",
+                errors=conflict_descriptions,
+            )
+        for description in conflict_descriptions:
+            print(
+                f"warning: unapplied pending answer already on disk: {description}",
+                file=sys.stderr,
+            )
+
+    try:
+        path = write_decision_answer(
+            raw_root,
+            decision_id=args.id,
+            decision_type=applier_type,
+            verdict=str(parsed["verdict"]),
+            note=str(parsed.get("note", "")),
+            # Issue athenaeum#1996: preserve the ORIGINAL outbound-queue type
+            # (e.g. "confirmation") alongside the applier type (e.g. "question")
+            # — they diverge exactly here, the one call site that does the
+            # answerable_as translation. See render_decision_answer's docstring.
+            origin_decision_type=decision_type,
+            # Issue athenaeum#2016: forward a "rename" answer's human-chosen
+            # dimension name. Absent for every other type/verdict (validate_answer
+            # above already refused a "name" the schema does not declare).
+            name=str(parsed.get("name", "")),
+            # Issue athenaeum#2523: this CLI command is a human-operator
+            # surface, so every answer it writes is human-originated — but
+            # no surface yet carries a real per-user identity (issue
+            # athenaeum#2489, still open), so the placeholder stands in
+            # until that lands. Only consumed today by a ``merge`` answer's
+            # decided_by stamp (:func:`athenaeum.decision_answers.
+            # _apply_merge_answer`); harmless metadata for every other type.
+            actor="unattributed",
+            config=config,
+            wiki_root=wiki_root,
+        )
+    except CoordinateAnswerRefused as exc:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            error_code=exc.error_code,
+            headline="fails a coordinate applier check (issue athenaeum#2544)",
+            errors=[exc.message],
+        )
+
+    if as_json:
+        sys.stdout.write(
             json.dumps(
                 {
                     "ok": True,
                     "decision_id": args.id,
                     "decision_type": decision_type,
                     "answer_file": str(path),
-                },
-                indent=2,
+                }
             )
+            + "\n"
         )
     else:
         print(f"answer recorded for {args.id} ({decision_type}): {path}")
         print("Run `athenaeum ingest-answers` to apply it.")
+    return 0
+
+
+def _cmd_pending_answers(args: argparse.Namespace) -> int:
+    """``athenaeum decisions pending-answers --id <id> | --page <page_id>``.
+
+    Issue athenaeum#2544 AC4: read-only visibility into answer files
+    already on disk under ``raw/answers/`` that have NOT yet applied —
+    the same scan :func:`_cmd_answer` runs on every write
+    (:func:`athenaeum.decision_answers.check_pending_conflicts`), exposed
+    directly so a caller can check BEFORE deciding to answer anything, not
+    just be warned after the fact. Never mutates.
+    """
+    from athenaeum.decision_answers import scan_unapplied_answers
+
+    knowledge_root = _resolve_knowledge_root(args)
+    raw_root = knowledge_root / "raw"
+    wiki_root = knowledge_root / "wiki"
+    as_json = getattr(args, "json", False)
+
+    records = scan_unapplied_answers(
+        raw_root, wiki_root, decision_id=args.id, page_id=args.page
+    )
+
+    if as_json:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": True,
+                    "id": args.id,
+                    "page": args.page,
+                    "answers": [
+                        {
+                            "decision_id": r.decision_id,
+                            "decision_type": r.decision_type,
+                            "resolved_at": r.resolved_at,
+                            "verdict": r.verdict,
+                            "path": str(r.path),
+                        }
+                        for r in records
+                    ],
+                }
+            )
+            + "\n"
+        )
+        return 0
+
+    if not records:
+        print("No unapplied answer files found.")
+        return 0
+    for r in records:
+        print(f"{r.resolved_at}  {r.decision_type:<12}  {r.decision_id}  {r.path}")
+        print(f"  verdict: {r.verdict}")
     return 0
 
 
@@ -648,7 +827,9 @@ def _answer_refusal(
         }
         if schema is not None:
             payload["response_schema"] = schema
-        print(json.dumps(payload, indent=2), file=sys.stderr)
+        # Issue athenaeum#2544 AC5: single-line, matching the success path
+        # below and `propose-fold --json` — never `indent=2`.
+        print(json.dumps(payload), file=sys.stderr)
     else:
         print(
             f"refused: answer for {decision_id} ({decision_type}) {headline}:",
@@ -766,6 +947,48 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             'The answer as a JSON object, e.g. \'{"verdict": "approve"}\'. '
             "Must satisfy the item's response_schema."
+        ),
+    )
+    answer_p.add_argument(
+        "--refuse-on-pending-conflict",
+        action="store_true",
+        help=(
+            "By default, an unapplied answer file already on disk for this "
+            "id (or, for a merge, for another proposal whose sources "
+            "overlap) is reported as a warning and the new answer is still "
+            "written (issue athenaeum#2544). Pass this to refuse instead — "
+            "nothing is written."
+        ),
+    )
+
+    pending_answers_p = d_sub.add_parser(
+        "pending-answers",
+        help=(
+            "Read-only: list unapplied answer files already on disk for a "
+            "decision id or a page, with timestamp and verdict (issue "
+            "athenaeum#2544). Never mutates."
+        ),
+    )
+    pending_answers_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    pending_answers_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    pending_answers_group = pending_answers_p.add_mutually_exclusive_group(required=True)
+    pending_answers_group.add_argument(
+        "--id", help="A decision id — list unapplied answer files for this id."
+    )
+    pending_answers_group.add_argument(
+        "--page",
+        help=(
+            "A wiki page id (comparator id) — list unapplied coordinate/merge "
+            "answer files naming this page."
         ),
     )
 

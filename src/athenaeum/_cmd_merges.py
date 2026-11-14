@@ -10,7 +10,10 @@ executed-merge ledger (``wiki/_merge_provenance.jsonl``):
                    queryable by ``--canonical-slug`` / ``--merge-id``.
 - ``revalidate``  re-validate existing unresolved proposals against the
                    CURRENT suppression gate and archive stale ones (issue
-                   athenaeum#481). Dry-run by default; ``--apply`` writes.
+                   athenaeum#481). Also archives a proposal whose sources were
+                   ALL folded into its own target as satisfied, distinct from
+                   one that's genuinely stale (issue athenaeum#2522). Dry-run
+                   by default; ``--apply`` writes.
 - ``recompare``   re-run the five-verdict comparator over every unresolved
                    proposal and ledger a verdict per source pair (issue
                    athenaeum#715). Dry-run by default; ``--apply`` writes to the
@@ -192,7 +195,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         _make_id,
         classify_write_kind,
         filename_slug_by_uid,
-        find_identity_pages,
+        find_fold_target_collisions,
         identity_slug,
         write_pending_merge,
     )
@@ -302,16 +305,16 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # uid-prefixed file exist for the same name, or two uid-prefixed pages
     # share a name. Only one file can be the fold target for this slug, so a
     # second candidate makes the target genuinely ambiguous: name both
-    # colliding pages rather than silently picking one.
-    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
-    # Issue athenaeum#2118: the ``--source`` pages are being folded away, so
-    # they cannot make their own target ambiguous and are excluded.
-    source_resolved = {p.resolve() for p in source_paths}
-    colliding = [
-        fpath.name
-        for fpath in find_identity_pages(merge_target_name, wiki_root)
-        if fpath.resolve() != into_path and fpath.resolve() not in source_resolved
-    ]
+    # colliding pages rather than silently picking one. Issue athenaeum#2118:
+    # the ``--source`` pages are being folded away, so they cannot make
+    # their own target ambiguous and are excluded. Issue athenaeum#2518
+    # factored the detection itself out to
+    # :func:`athenaeum.pending_merges.find_fold_target_collisions` so the
+    # fold-QUESTION answer path (``_cmd_pending._resolve_fold_question``)
+    # gets the identical guard instead of a second hand-rolled copy.
+    colliding = find_fold_target_collisions(
+        merge_target_name, wiki_root, canonical_path=into_path, other_paths=source_paths
+    )
     if colliding:
         others = ", ".join(colliding)
         # Issue athenaeum#2118: a canonical named by its exact `<uid>-<slug>.md`
@@ -491,21 +494,52 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
                         }
                         for r in result.retired
                     ],
+                    # Issue athenaeum#2522: a block whose sources were all
+                    # folded into ITS OWN target is archived as satisfied,
+                    # not stale -- a distinct bucket from "retired" so a
+                    # caller can tell "already done" from "needs a human".
+                    "satisfied": [
+                        {
+                            "id": s.id,
+                            "merge_target_name": s.merge_target_name,
+                            "n_sources": s.n_sources,
+                            "confidence": s.confidence,
+                            "folded_into": s.folded_into,
+                        }
+                        for s in result.satisfied
+                    ],
                 }
             )
             + "\n"
         )
         return 0
 
-    if not result.retired:
+    if not result.retired and not result.satisfied:
         print("0 stale proposals — nothing to retire against the current gate")
         return 0
 
-    verb = "Retired" if result.applied else "Would retire"
-    print(f"{verb} {len(result.retired)} stale proposal(s) against the current suppression gate:")
-    for r in result.retired:
-        print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
-    if not result.applied:
+    if result.satisfied:
+        verb = "Archived" if result.applied else "Would archive"
+        print(
+            f"{verb} {len(result.satisfied)} already-satisfied proposal(s) "
+            "(every source already folded into its own target):"
+        )
+        for s in result.satisfied:
+            print(
+                f"  - {s.merge_target_name!r} ({s.n_sources} sources) "
+                f"-> folded into {s.folded_into!r}"
+            )
+
+    if result.retired:
+        verb = "Retired" if result.applied else "Would retire"
+        print(
+            f"{verb} {len(result.retired)} stale proposal(s) against "
+            "the current suppression gate:"
+        )
+        for r in result.retired:
+            print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
+
+    if not result.applied and (result.retired or result.satisfied):
         print(
             "\nDry-run — no changes written. Re-run with --apply to archive "
             "them to _pending_merges_archive.md."

@@ -161,6 +161,7 @@ class TestClearSameJudgementWrites:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -208,6 +209,7 @@ class TestUnclearJudgementRaisesOnceOnly:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -326,6 +328,7 @@ class TestScopeProvenanceRecordsDecider:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -365,6 +368,7 @@ class TestScopeProvenanceRecordsDecider:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(
@@ -417,6 +421,7 @@ class TestUnavailableJudgeRaisesInsteadOfGuessing:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -451,6 +456,7 @@ class TestUnavailableJudgeRaisesInsteadOfGuessing:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -485,6 +491,7 @@ class TestClearDifferentJudgementAlsoRaises:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=_same_subject_verdict(pair_key, id_a, id_b),
@@ -520,6 +527,7 @@ class TestJudgeNeverRunsOutsideItsTriggerShape:
             raw_root = tmp_path / "raw"
             write_decision_answer(
                 raw_root,
+                wiki_root=tmp_path,
                 decision_id=pq.id,
                 decision_type="coordinate",
                 verdict=json.dumps(

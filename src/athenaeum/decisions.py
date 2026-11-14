@@ -115,12 +115,14 @@ from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledg
 from athenaeum.decision_framing import frame_decision
 from athenaeum.dimension_proposals import list_pending_dimension_proposals
 from athenaeum.models import parse_frontmatter
+from athenaeum.page_recompile_queue import list_pending_page_recompile_plans
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.policy_pack_edit_proposals import list_pending_policy_pack_edit_proposals
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
+from athenaeum.schema_amendment_proposals import list_pending_schema_amendment_proposals
 from athenaeum.tier_movement_proposals import list_pending_tier_movement_proposals
 
 log = logging.getLogger(__name__)
@@ -914,6 +916,98 @@ def policy_pack_edit_proposal_to_decision(rec: dict) -> dict:
     }
 
 
+def schema_amendment_proposal_to_decision(rec: dict) -> dict:
+    """Convert a schema-amendment-proposal ledger record to a unified
+    decision dict (issue athenaeum#2197).
+
+    A ``type: "schema-amendment-proposal"`` item: a declared single-valued
+    field group (:mod:`athenaeum.structured_upsert`'s
+    ``REASON_FIELD_GROUP_MISFIT``) that keeps receiving a second, different
+    value from what must be a different source record. ``confidence`` is
+    ``None`` -- deterministically derived from the misfit count, no model
+    score, same convention as every other proposal builder in this module.
+    Same visible-but-not-yet-answerable posture as ``dimension-proposal``
+    pre-ratification (see :mod:`athenaeum.schema_amendment_proposals`'s
+    module docstring): adopting the amendment is each its own follow-up
+    issue, never something this item or any applier enacts.
+    """
+    page_type = rec.get("page_type", "")
+    field_group = rec.get("field_group", "")
+    count = rec.get("affected_page_count", 0)
+    amendment = rec.get("proposed_amendment", "")
+    summary = (
+        f"{count} page(s) of type {page_type!r} received a second, different "
+        f"value for the {field_group!r} field group, which only holds one "
+        f"value per page -- approve to treat the amendment below as adopted "
+        f"deployment policy, or reject to dismiss the finding. Proposed "
+        f"amendment: {amendment}"
+    )
+    return {
+        "type": "schema-amendment-proposal",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "page_type": page_type,
+            "field_group": field_group,
+            "affected_page_count": count,
+            "affected_uids": rec.get("affected_uids", []),
+            "proposed_amendment": amendment,
+        },
+    }
+
+
+def page_recompile_plan_to_decision(rec: dict) -> dict:
+    """Convert a queued page-recompile plan record to a unified decision
+    dict (issue athenaeum#2547 AC7).
+
+    A ``type: "page-recompile"`` item: the nightly page-recompile phase
+    (:mod:`athenaeum.page_recompile_nightly`) drafted a plan for cutting one
+    oversized page into a parent plus sub-pages, and it needs an operator's
+    ``approve`` / ``approve-structure-only`` / ``reject``. ``confidence`` is
+    ``None`` -- the planner's per-GROUP confidences are in the outline, and
+    there is no single plan-level score to promote to this field, the same
+    convention every other proposal builder in this module follows.
+
+    **The payload is the plan OUTLINE and never a page body.** It is carried
+    verbatim from the ledger record that
+    :func:`athenaeum.page_recompile_queue.queue_plan_for_approval` wrote,
+    which is itself the output of
+    :func:`athenaeum.page_recompile_queue.build_plan_outline` -- the one
+    place that projection happens. Nothing is re-derived here, so there is
+    no second, drift-prone idea of what an item may carry.
+    """
+    outline = rec.get("outline")
+    outline = dict(outline) if isinstance(outline, dict) else {}
+    uid = str(rec.get("uid") or outline.get("uid") or "")
+    page_name = str(outline.get("page_name") or uid or "(unknown page)")
+    group_count = outline.get("group_count")
+    page_chars = outline.get("page_chars")
+    scope = str(rec.get("scope") or outline.get("scope") or "")
+    summary = (
+        f"Page {page_name} is {page_chars} characters and the recompile "
+        f"planner proposes cutting it into a parent plus {group_count} "
+        f"sub-page group(s) (scope: {scope or 'unknown'}) -- approve to "
+        f"carry the plan out, approve-structure-only to authorise just the "
+        f"in-page restructure, or reject to leave the page alone until it "
+        f"changes."
+    )
+    return {
+        "type": "page-recompile",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at") or rec.get("ts"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "uid": uid,
+            "content_hash": rec.get("content_hash"),
+            "scope": scope,
+            "outline": outline,
+        },
+    }
+
+
 def list_pending_decisions(
     wiki_root: Path,
     *,
@@ -1096,6 +1190,28 @@ def list_pending_decisions(
         decisions += [
             policy_pack_edit_proposal_to_decision(rec)
             for rec in list_pending_policy_pack_edit_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2197: schema-amendment proposals -- a declared
+        # single-valued field group that kept receiving a second, different
+        # value. Same owner-only, visible-but-not-yet-answerable posture as
+        # dimension-proposal/tier-movement-proposal/policy-pack-edit above
+        # (no readable source-page path to authorize against for a
+        # restricted caller; this module writes no resolution kind at all).
+        decisions += [
+            schema_amendment_proposal_to_decision(rec)
+            for rec in list_pending_schema_amendment_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2547: page-recompile plans the nightly phase
+        # drafted and raised for approval. Same owner-only posture as the
+        # proposal types above (the item names a page by uid and carries an
+        # outline of it, not a readable compiled-wiki source path a
+        # restricted caller could be authorized against), but -- unlike
+        # them -- answerable from day one: its applier
+        # (`decision_answers._apply_page_recompile_answer`) lands in the
+        # same slice.
+        decisions += [
+            page_recompile_plan_to_decision(rec)
+            for rec in list_pending_page_recompile_plans(wiki_root)
         ]
     # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
     # point every item passes through, so no item can enter the queue unframed

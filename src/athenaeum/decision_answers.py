@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +115,7 @@ DecisionType = Literal[
     "coordinate",
     "auto-apply-threshold",
     "dimension-proposal",
+    "page-recompile",
 ]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
     (
@@ -124,6 +126,10 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
         "coordinate",
         "auto-apply-threshold",
         "dimension-proposal",
+        # Issue athenaeum#2547: a drafted page-recompile plan, answered
+        # `approve` / `approve-structure-only` / `reject`. See
+        # :func:`_apply_page_recompile_answer`.
+        "page-recompile",
     )
 )
 
@@ -136,6 +142,21 @@ DECISION_ANSWER_SOURCE_TAG = "decision_answer"
 
 class MalformedDecisionAnswer(ValueError):
     """A ``raw/answers/*.md`` file carries ``decision_id`` but fails schema."""
+
+
+class CoordinateAnswerRefused(ValueError):
+    """Raised by :func:`write_decision_answer` for a ``coordinate`` verdict
+    that fails :func:`validate_coordinate_answer` (issue athenaeum#2544) --
+    the SAME checks :func:`_apply_coordinate_answer` used to be the only
+    place that ran, hours later, refusing the whole batch at apply time.
+    ``error_code``/``message`` mirror :class:`DecisionAnswerOutcome`'s
+    refusal shape so a caller can report it identically.
+    """
+
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
 
 
 @dataclass
@@ -164,6 +185,19 @@ class DecisionAnswer:
     #: (:data:`DECISION_ANSWER_SOURCE_TAG` for every file this module writes).
     #: Empty for a file with no ``source`` key.
     source: str = ""
+    #: Issue athenaeum#2523: the human answerer's identity, when the answer
+    #: surface can supply one. The two human-facing surfaces that can
+    #: currently reach :func:`_apply_merge_answer` (the MCP ``resolve_merge``
+    #: tool and the ``athenaeum decisions answer`` CLI command) both stamp
+    #: the placeholder ``"unattributed"`` here today, because no surface yet
+    #: carries a real per-user identity (that is issue athenaeum#2489,
+    #: still open) — once it lands, a caller that resolves a real actor
+    #: flows straight through to ``human:<actor>`` with no further change
+    #: needed here. Empty for a file with no ``actor`` key, which is the
+    #: honest default for anything written by an automated/pipeline path
+    #: (e.g. :mod:`athenaeum.triage`, which never writes a ``merge`` answer
+    #: at all — see that module's "Why only question/coordinate" note).
+    actor: str = ""
 
 
 @dataclass
@@ -192,6 +226,11 @@ class DecisionAnswerOutcome:
     #: skip only. Empty for every other outcome.
     value_a: str = ""
     value_b: str = ""
+    #: Issue athenaeum#2514 (AC5): for an ``error_code == "superseded"``
+    #: outcome only, the FILENAME of the newer answer file that decided
+    #: this same ``decision_id`` and was applied in this file's place.
+    #: Empty for every other outcome.
+    superseded_by: str = ""
 
 
 @dataclass
@@ -217,6 +256,7 @@ def render_decision_answer(
     resolved_at: str | None = None,
     origin_decision_type: str = "",
     name: str = "",
+    actor: str = "",
 ) -> str:
     """Render a decision-answer raw-intake record (athenaeum#908 D1 format).
 
@@ -239,6 +279,13 @@ def render_decision_answer(
     omitted (every caller for which the two are not known to diverge, and
     every answer file written before this field existed, round-trips as
     "origin == applier", which is correct for all three of those).
+
+    ``actor`` (issue athenaeum#2523): the human answerer's identity, when
+    known. Omitted (empty string) means "no positive human signal" —
+    :func:`_apply_merge_answer` reads this back to decide between a
+    ``human:<actor>`` and a ``pipeline:merge-<decision>`` ``decided_by``
+    stamp. See :attr:`DecisionAnswer.actor`'s docstring for why the two
+    current human surfaces both pass the placeholder ``"unattributed"``.
     """
     if decision_type not in VALID_DECISION_TYPES:
         raise ValueError(
@@ -268,6 +315,8 @@ def render_decision_answer(
         meta["note"] = note
     if name and name.strip():
         meta["name"] = name.strip()
+    if actor and actor.strip():
+        meta["actor"] = actor.strip()
 
     frontmatter = yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True, default_flow_style=False
@@ -290,6 +339,9 @@ def write_decision_answer(
     note: str = "",
     origin_decision_type: str = "",
     name: str = "",
+    actor: str = "",
+    config: dict | None = None,
+    wiki_root: Path | None = None,
 ) -> Path:
     """Render + write one decision-answer file under ``raw_root/answers/``.
 
@@ -301,7 +353,55 @@ def write_decision_answer(
     ``origin_decision_type`` (issue athenaeum#1996): see
     :func:`render_decision_answer`'s docstring — forwarded verbatim,
     defaulting to *decision_type* when omitted.
+
+    ``actor`` (issue athenaeum#2523): forwarded verbatim to
+    :func:`render_decision_answer` — see its docstring and
+    :attr:`DecisionAnswer.actor`.
+
+    Issue athenaeum#2544: for ``decision_type == "coordinate"``, *verdict*
+    is first run through :func:`validate_coordinate_answer` — the exact
+    deep check (JSON decoding, schema, pair/page/dimension membership)
+    :func:`_apply_coordinate_answer` runs at apply time, hours later — and
+    refused BEFORE anything is written on any failure, naming the failing
+    pair. This is the ONE function every current coordinate-answer writer
+    (``athenaeum decisions answer --type coordinate`` via
+    :func:`athenaeum._cmd_decisions._cmd_answer`,
+    :func:`athenaeum.triage.submit_answer`) already calls, and any future
+    MCP mutator that writes a coordinate answer must call too to get this
+    for free — so the "shape-only, fails hours later" gap this closes stays
+    closed without relying on every caller re-implementing it.
+    ``wiki_root`` is the directory holding ``_pending_questions.md`` /
+    ``_pending_merges.md`` — every real caller already has it in scope (the
+    standard ``knowledge_root/{wiki,raw}`` layout). Required to run the
+    coordinate check below; when omitted, falls back to
+    ``raw_root.parent / "wiki"``, which is correct for that standard
+    layout but WRONG for any caller (e.g. a test fixture) that puts
+    ``raw_root`` somewhere else — such a caller should pass *wiki_root*
+    explicitly rather than rely on the guess. *config* is forwarded to
+    resolve the dimension registry (``resolve_dimensions(None)`` — kernel
+    dimensions only — when omitted, which can falsely refuse a
+    deployment-declared dimension, so a caller with config already loaded
+    should pass it).
+
+    Raises:
+        CoordinateAnswerRefused: *decision_type* is ``"coordinate"`` and
+            *verdict* fails validation. Never raised for any other
+            *decision_type*, and never after this point (nothing below
+            this check can fail the same way).
     """
+    if decision_type == "coordinate":
+        effective_wiki_root = wiki_root if wiki_root is not None else raw_root.parent / "wiki"
+        pending_path = effective_wiki_root / "_pending_questions.md"
+        error_code, message, _plan = validate_coordinate_answer(
+            effective_wiki_root,
+            pending_path,
+            decision_id=decision_id,
+            verdict=verdict,
+            config=config,
+        )
+        if error_code is not None:
+            raise CoordinateAnswerRefused(error_code, message)
+
     answers_dir = raw_root / "answers"
     answers_dir.mkdir(parents=True, exist_ok=True)
 
@@ -317,6 +417,7 @@ def write_decision_answer(
         resolved_at=iso_ts,
         origin_decision_type=origin_decision_type,
         name=name,
+        actor=actor,
     )
 
     stem = f"{filename_ts}-{decision_type}-{decision_id}"
@@ -364,11 +465,14 @@ def preflight_merge(
 
     Returns ``(ok, error_code, message)``. Never mutates.
     """
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return (
             False,
             "invalid_decision",
-            f"decision must be 'approve' or 'reject', got {decision!r}",
+            (
+                "decision must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {decision!r}"
+            ),
         )
 
     from athenaeum.pending_merges import parse_pending_merges
@@ -406,6 +510,282 @@ def preflight_audit(wiki_root: Path, decision_id: str) -> tuple[bool, str | None
     if already_reviewed:
         return False, "already_resolved", f"audit item already reviewed: {decision_id}"
     return True, None, "ok"
+
+
+# ---------------------------------------------------------------------------
+# Unapplied-answer visibility (issue athenaeum#2544)
+#
+# A file under ``raw/answers/`` is NEVER deleted by `apply_decision_answers`
+# — applied or not, it stays as its own audit trail (see that function's
+# docstring and `TestCoordinateAnswerApplierRefusals.
+# test_already_answered_item_is_refused`, which asserts exactly this).
+# Presence on disk therefore cannot tell "unapplied" apart from "applied
+# hours ago" — `_decision_is_open` re-uses each decision type's OWN
+# preflight/"already answered" check (the same one `write_decision_answer`
+# would be refused by) to tell them apart live, rather than inventing a
+# second notion of "applied".
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UnappliedAnswerRecord:
+    """One answer file on disk whose own decision has not (yet) resolved."""
+
+    path: Path
+    decision_id: str
+    decision_type: str
+    resolved_at: str
+    verdict: str
+
+
+def _decision_is_open(wiki_root: Path, decision_type: str, decision_id: str) -> bool:
+    """Whether *decision_id* still awaits apply, per ITS OWN source of truth.
+
+    ``question``/``coordinate`` items both live as a
+    :class:`athenaeum.answers.PendingQuestion` entry (a coordinate answer
+    resolves via the same ``resolve_by_id`` a question answer does — see
+    :func:`_apply_coordinate_answer`), so :func:`preflight_question`
+    answers both. ``merge`` reads ``_pending_merges.md`` directly rather
+    than through :func:`preflight_merge` — that helper also validates an
+    ``approve``/``reject`` *decision* argument irrelevant to a pure status
+    check. ``audit`` uses :func:`preflight_audit`. Every other type
+    (``proposed-rule``, ``auto-apply-threshold``, ``dimension-proposal``)
+    has no cheap live lookup here and is conservatively reported OPEN: a
+    false positive (surfacing a long-applied file as noise) is safe, a
+    false negative (hiding a genuinely contradicting live answer) is not.
+
+    ``question``/``coordinate`` archival (found empirically, not merely
+    assumed): :func:`athenaeum.answers.resolve_by_id` only flips the
+    block's checkbox in place, so right after
+    :func:`apply_decision_answers` alone, :func:`preflight_question` still
+    reports ``already_answered`` for it — but the FULL ``ingest-answers``
+    tick runs :func:`athenaeum.answers.ingest_answers` immediately after,
+    which (when the block's source resolves — the common case for a real
+    question; a coordinate item's synthetic ``coordinate-batch:`` source
+    never resolves, so it is NEVER archived this way and stays
+    ``already_answered`` forever) MOVES the block out of
+    ``_pending_questions.md`` into ``_pending_questions_archive.md``
+    entirely. From that point on ``preflight_question`` reports
+    ``id_not_found`` for a decision that is in fact long since CLOSED, not
+    open — treating every ``id_not_found`` as open (as this function used
+    to) defeats the whole point of this check: it would warn/refuse on
+    settled decisions forever and train the caller to ignore the signal.
+    So ``id_not_found`` is resolved one level deeper: a hit in the archive
+    means closed; a miss there too is genuinely ambiguous (never existed,
+    or a typo) and stays on the SAFE side (reported open) per this
+    function's own stated tie-breaking rule above. ``merge``/``audit``
+    need no equivalent check: an already-resolved merge block is left
+    byte-for-byte in place by :func:`athenaeum.pending_merges.revalidate_pending_merges`
+    (only UNRESOLVED stale blocks are ever archived out), and the
+    calibration ledger :func:`preflight_audit` reads is append-only, so
+    neither ever loses a resolved id out from under this check.
+    """
+    if decision_type in ("question", "coordinate"):
+        pending_path = wiki_root / "_pending_questions.md"
+        _ok, error_code, _message = preflight_question(pending_path, decision_id)
+        if error_code != "id_not_found":
+            return error_code != "already_answered"
+        archive_path = wiki_root / "_pending_questions_archive.md"
+        if archive_path.exists():
+            from athenaeum.answers import parse_pending_questions
+
+            if any(pq.id == decision_id for pq in parse_pending_questions(archive_path)):
+                return False  # genuinely archived — closed, not open
+        return True  # never seen anywhere — ambiguous, safe side: report it
+    if decision_type == "merge":
+        from athenaeum.pending_merges import parse_pending_merges
+
+        merges_path = wiki_root / "_pending_merges.md"
+        if not merges_path.exists():
+            return True
+        pm = next((p for p in parse_pending_merges(merges_path) if p.id == decision_id), None)
+        if pm is None:
+            return True
+        return not pm.resolved
+    if decision_type == "audit":
+        _ok, error_code, _message = preflight_audit(wiki_root, decision_id)
+        return error_code != "already_resolved"
+    return True
+
+
+def scan_unapplied_answers(
+    raw_root: Path,
+    wiki_root: Path,
+    *,
+    decision_id: str | None = None,
+    page_id: str | None = None,
+) -> list[UnappliedAnswerRecord]:
+    """Every still-OPEN answer file under ``raw_root/answers/`` matching
+    *decision_id* or *page_id* (exactly one must be given) — issue
+    athenaeum#2544 AC3/AC4: the visibility the write path and a read-only
+    CLI both need into answers already waiting on disk for the same item.
+
+    *page_id* matches:
+
+    - a ``coordinate`` answer whose verdict JSON names a ``pair`` (an
+      ``<id>+<id>`` key) containing that page id;
+    - a ``merge`` answer whose OWN decision id still has a
+      ``_pending_merges.md`` entry (:func:`athenaeum.pending_merges.parse_pending_merges`)
+      listing a source path whose comparator id
+      (:func:`athenaeum.verdicts.page_id_for_path`) matches.
+
+    A malformed answer file (:class:`MalformedDecisionAnswer`) or one with
+    no ``decision_id`` is skipped, same posture as
+    :func:`apply_decision_answers`. Results are oldest-first (filename-sort
+    order, same as that function).
+    """
+    if (decision_id is None) == (page_id is None):
+        raise ValueError("scan_unapplied_answers requires exactly one of decision_id, page_id")
+
+    answers_dir = raw_root / "answers"
+    if not answers_dir.exists():
+        return []
+
+    merge_sources_by_id: dict[str, list[str]] = {}
+    if page_id is not None:
+        from athenaeum.pending_merges import parse_pending_merges
+
+        merges_path = wiki_root / "_pending_merges.md"
+        if merges_path.exists():
+            merge_sources_by_id = {
+                pm.id: pm.sources for pm in parse_pending_merges(merges_path)
+            }
+
+    def _matches_page(answer: DecisionAnswer) -> bool:
+        if answer.decision_type == "coordinate":
+            try:
+                payload = json.loads(answer.verdict)
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(payload, dict) or not isinstance(payload.get("answers"), list):
+                return False
+            for item in payload["answers"]:
+                if not isinstance(item, dict):
+                    continue
+                pair_ids = str(item.get("pair", "")).split("+", 1)
+                if page_id in pair_ids:
+                    return True
+            return False
+        if answer.decision_type == "merge":
+            from athenaeum.verdicts import page_id_for_path
+
+            for src in merge_sources_by_id.get(answer.decision_id, []):
+                try:
+                    if page_id_for_path(Path(src)) == page_id:
+                        return True
+                except (OSError, ValueError):
+                    continue
+            return False
+        return False
+
+    out: list[UnappliedAnswerRecord] = []
+    for path in sorted(answers_dir.glob("*.md")):
+        try:
+            answer = _load_decision_answer(path)
+        except MalformedDecisionAnswer:
+            continue
+        if answer is None:
+            continue
+        if decision_id is not None:
+            if answer.decision_id != decision_id:
+                continue
+        elif not _matches_page(answer):
+            continue
+        if not _decision_is_open(wiki_root, answer.decision_type, answer.decision_id):
+            continue
+        out.append(
+            UnappliedAnswerRecord(
+                path=path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                resolved_at=answer.resolved_at,
+                verdict=answer.verdict,
+            )
+        )
+    return out
+
+
+def scan_overlapping_merge_proposals(
+    raw_root: Path,
+    wiki_root: Path,
+    *,
+    decision_id: str,
+    sources: list[str],
+) -> list[UnappliedAnswerRecord]:
+    """Every OPEN ``merge`` answer file for a DIFFERENT proposal whose own
+    sources overlap *sources* (issue athenaeum#2544 AC3) — e.g. two fold
+    proposals that both name the same source page, where approving one
+    changes what the other would actually be folding.
+    """
+    answers_dir = raw_root / "answers"
+    if not answers_dir.exists():
+        return []
+
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges_path = wiki_root / "_pending_merges.md"
+    sources_by_id: dict[str, set[str]] = {}
+    if merges_path.exists():
+        sources_by_id = {
+            pm.id: set(pm.sources) for pm in parse_pending_merges(merges_path)
+        }
+    target_sources = set(sources)
+
+    out: list[UnappliedAnswerRecord] = []
+    for path in sorted(answers_dir.glob("*.md")):
+        try:
+            answer = _load_decision_answer(path)
+        except MalformedDecisionAnswer:
+            continue
+        if answer is None or answer.decision_type != "merge":
+            continue
+        if answer.decision_id == decision_id:
+            continue
+        other_sources = sources_by_id.get(answer.decision_id)
+        if not other_sources or not (other_sources & target_sources):
+            continue
+        if not _decision_is_open(wiki_root, "merge", answer.decision_id):
+            continue
+        out.append(
+            UnappliedAnswerRecord(
+                path=path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                resolved_at=answer.resolved_at,
+                verdict=answer.verdict,
+            )
+        )
+    return out
+
+
+def check_pending_conflicts(
+    raw_root: Path,
+    wiki_root: Path,
+    *,
+    decision_id: str,
+    decision_type: str,
+) -> list[UnappliedAnswerRecord]:
+    """Everything the write path should know about BEFORE writing a NEW
+    answer for *decision_id* (issue athenaeum#2544 AC3): every unapplied
+    answer file already on disk for the same id, plus — for ``merge`` —
+    every unapplied answer for another proposal whose sources overlap.
+    Never mutates; callers decide warn vs. refuse.
+    """
+    conflicts = scan_unapplied_answers(raw_root, wiki_root, decision_id=decision_id)
+    if decision_type == "merge":
+        from athenaeum.pending_merges import parse_pending_merges
+
+        merges_path = wiki_root / "_pending_merges.md"
+        if merges_path.exists():
+            pm = next(
+                (p for p in parse_pending_merges(merges_path) if p.id == decision_id),
+                None,
+            )
+            if pm is not None:
+                conflicts = conflicts + scan_overlapping_merge_proposals(
+                    raw_root, wiki_root, decision_id=decision_id, sources=pm.sources
+                )
+    return conflicts
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +848,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
     )
 
     raw_name = meta.get("name", "") or ""
+    raw_actor = meta.get("actor", "") or ""
 
     return DecisionAnswer(
         decision_id=decision_id.strip(),
@@ -479,6 +860,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         origin_decision_type=origin_decision_type,
         name=str(raw_name),
         source=str(meta.get("source") or "").strip(),
+        actor=str(raw_actor).strip(),
     )
 
 
@@ -552,14 +934,17 @@ def _apply_merge_answer(
     from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 
     decision = answer.verdict.strip().lower()
-    if decision not in ("approve", "reject"):
+    if decision not in ("approve", "reject", "attach-as-subpage"):
         return DecisionAnswerOutcome(
             path=answer.path,
             decision_id=answer.decision_id,
             decision_type=answer.decision_type,
             applied=False,
             error_code="invalid_decision",
-            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+            message=(
+                "verdict must be 'approve', 'reject' or 'attach-as-subpage', "
+                f"got {answer.verdict!r}"
+            ),
         )
 
     cfg = config or {}
@@ -604,12 +989,26 @@ def _apply_merge_answer(
         from athenaeum.verdicts import record_pair_decision
 
         verdict_value = "duplicate" if decision == "approve" else "distinct"
+        # Issue athenaeum#2523: a merge resolved from a human answer must be
+        # distinguishable from an automated one in the ledger. `answer.actor`
+        # is the positive signal — set only by the two human-facing answer
+        # surfaces (MCP's `resolve_merge` tool, the `athenaeum decisions
+        # answer` CLI command), both of which stamp the placeholder
+        # "unattributed" today because no surface yet carries a real
+        # per-user identity (that is issue athenaeum#2489, still open).
+        # Once it lands, a caller that resolves a real actor flows straight
+        # through to `human:<actor>` with no further change needed here.
+        # A DecisionAnswer with no actor (e.g. a hypothetical future
+        # automated writer that reuses this same raw-intake path) keeps the
+        # pre-existing `pipeline:merge-<decision>` stamp unchanged — the
+        # human label requires that positive signal, never a default.
+        decided_by = f"human:{answer.actor}" if answer.actor else f"pipeline:merge-{decision}"
         record_pair_decision(
             wiki_root,
             source_a=sources[0],
             source_b=sources[1],
             verdict=verdict_value,
-            decided_by=f"pipeline:merge-{decision}",
+            decided_by=decided_by,
             lock=lock,
             # Issue athenaeum#984 (AC3): let record_pair_decision route an
             # erasure-class or cross-boundary pair to the off-corpus ledger
@@ -948,6 +1347,303 @@ def _apply_auto_apply_threshold_proposal_answer(
     )
 
 
+
+
+def _apply_page_recompile_answer(
+    wiki_root: Path,
+    answer: DecisionAnswer,
+    *,
+    config: dict[str, Any] | None = None,
+    lock: "RunLock | None" = None,
+) -> DecisionAnswerOutcome:
+    """Apply one ``page-recompile`` decision answer (issue athenaeum#2547 AC8).
+
+    Three verdicts, per that AC and
+    :data:`athenaeum.page_recompile_queue.VERDICTS`:
+
+    * ``approve`` / ``approve-structure-only`` -- run the recompile applier
+      (:func:`athenaeum.page_recompile_apply.write_apply`) for the plan this
+      answer's ``decision_id`` names, then close the queue item. The item is
+      closed only AFTER a successful apply, so a refused apply leaves it
+      open and answerable again rather than closed with nothing done. The
+      verdict is passed THROUGH to the applier (issue athenaeum#2548): it
+      is what authorises a cross-page plan (AC8), and
+      ``approve-structure-only`` additionally applies only the
+      structure-only part of one, leaving the units bound for another page
+      on the parent (AC9).
+    * ``reject`` -- close the item and suppress the page: nothing is
+      written, and :func:`athenaeum.page_recompile_queue.rejected_page_skip_reason`
+      keeps the nightly phase off that page until its content hash changes.
+
+    **Requires an active run lock**, the same refusal
+    :func:`_apply_coordinate_answer` makes for the same reason: an approve
+    WRITES pages in the knowledge store, and a write racing the nightly
+    librarian is the single-writer violation the lock exists to prevent. A
+    ``reject`` needs no lock -- it appends one ledger line and writes no
+    page -- and is deliberately not gated on one, so the safe answer is
+    always available.
+
+    **A page that moved since the plan was drafted is not applied, and is
+    re-planned** (the AC's own wording). The plan's pinned content hash is
+    what detects it: ``write_apply`` refuses a mismatch outright. This
+    function then closes the item as
+    :data:`~athenaeum.page_recompile_queue.STALE_KIND` rather than as a
+    rejection -- so the stale draft leaves the queue (no answer to it could
+    ever be applied) while recording NO suppression, which is what lets the
+    next nightly pass draft a fresh plan over the new bytes. Recording it as
+    a rejection instead would have frozen the page at exactly the moment it
+    was being actively edited.
+    """
+    from athenaeum.page_recompile_queue import (
+        VERDICT_APPROVE,
+        VERDICT_APPROVE_STRUCTURE_ONLY,
+        VERDICT_REJECT,
+        PageRecompileItemAlreadyResolved,
+        UnknownPageRecompileItem,
+        find_queued_plan,
+        record_page_recompile_approval,
+        record_page_recompile_rejection,
+        record_page_recompile_stale,
+    )
+
+    def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=message,
+        )
+
+    verdict = answer.verdict.strip().lower()
+    if verdict not in (
+        VERDICT_APPROVE,
+        VERDICT_APPROVE_STRUCTURE_ONLY,
+        VERDICT_REJECT,
+    ):
+        return _refuse(
+            "invalid_decision",
+            "verdict must be 'approve', 'approve-structure-only' or "
+            f"'reject', got {answer.verdict!r}",
+        )
+
+    item = find_queued_plan(wiki_root, plan_id=answer.decision_id)
+    if item is None:
+        return _refuse(
+            "id_not_found",
+            f"no queued page-recompile plan with id {answer.decision_id!r}",
+        )
+
+    if verdict == VERDICT_REJECT:
+        try:
+            record_page_recompile_rejection(
+                wiki_root, plan_id=answer.decision_id, note=answer.note
+            )
+        except PageRecompileItemAlreadyResolved as exc:
+            return _refuse("already_resolved", str(exc))
+        except UnknownPageRecompileItem as exc:
+            return _refuse("id_not_found", str(exc))
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=True,
+            error_code=None,
+            message=(
+                "page-recompile plan rejected; the page is skipped until its "
+                "content hash changes"
+            ),
+        )
+
+    if lock is None:
+        return _refuse(
+            "lock_required",
+            "approving a page-recompile plan writes pages and requires an "
+            "active run lock",
+        )
+
+    def _close_as_stale(reason: str) -> DecisionAnswerOutcome:
+        try:
+            record_page_recompile_stale(
+                wiki_root,
+                plan_id=answer.decision_id,
+                verdict=verdict,
+                reason=reason,
+                note=answer.note,
+            )
+        except (
+            PageRecompileItemAlreadyResolved,
+            UnknownPageRecompileItem,
+        ) as exc:  # pragma: no cover - find_queued_plan already matched
+            log.debug("decision_answers: stale record skipped: %s", exc)
+        return _refuse(
+            "plan_stale",
+            "the page changed since this plan was drafted, so nothing was "
+            f"applied and it will be re-planned: {reason}",
+        )
+
+    # The AC8 pin, checked HERE rather than inferred from the applier's
+    # refusal prose: the applier reports a stale plan as a reason string
+    # with no machine-readable code, and matching on prose would silently
+    # stop detecting it the day that sentence is reworded. The queued item
+    # records the content hash the plan was drafted over, so this is a
+    # direct comparison against the live page.
+    pinned = item.get("content_hash")
+    live, live_error = _page_recompile_live_hash(wiki_root, str(item.get("uid") or ""))
+    if live_error:
+        return _refuse("apply_refused", live_error)
+    if isinstance(pinned, str) and pinned and live != pinned:
+        return _close_as_stale(
+            "the page's content hash no longer matches the one the plan was "
+            "pinned to"
+        )
+
+    from athenaeum.page_recompile_apply import write_apply
+
+    outcome = write_apply(
+        wiki_root,
+        plan_id=answer.decision_id,
+        config=config,
+        client=_page_recompile_verify_client(item, config),
+        # Issue athenaeum#2548: the operator's answer, which is what
+        # authorises a CROSS-PAGE plan at all (AC8 -- the applier refuses
+        # one with no approving verdict, in every mode) and which of the
+        # two approving verdicts it is (AC9 -- `approve-structure-only`
+        # applies only the structure-only part and leaves the other units
+        # on the parent). A structure-only plan is unaffected by either.
+        #
+        # Orthogonal to `client` above, and both are needed on the same
+        # call: the client is what lets a MERGE group's text be re-verified,
+        # the verdict is what decides WHICH parts of the plan are applied at
+        # all. `approve-structure-only` over a plan that both merges and
+        # moves therefore still verifies the merge and still refuses the
+        # move.
+        verdict=verdict,
+    )
+    if not outcome.ok:
+        # Defence in depth: the applier re-checks the same pin under the
+        # lock, so it can still catch a page that moved between the check
+        # above and the write. Its refusal for that case is the only one
+        # prefixed `stale:`. Every OTHER refusal leaves the item OPEN -- it
+        # may well be answerable once whatever blocked it is fixed.
+        if outcome.reason.startswith(_STALE_PLAN_REASON_PREFIX):
+            return _close_as_stale(outcome.reason)
+        # Name the applier's own issue CODES, not just its generic reason:
+        # `compute_apply`'s refusal reason for a re-validation failure is
+        # the fixed string "plan rejected at apply time", and the codes
+        # (`merge-verify-unavailable`, `parent-too-thin`, ...) are the only
+        # part that tells an operator what to do about it.
+        codes = ", ".join(sorted({issue.code for issue in outcome.issues}))
+        detail = f"{outcome.reason} ({codes})" if codes else outcome.reason
+        return _refuse(
+            "apply_refused",
+            f"page-recompile plan was not applied: {detail}",
+        )
+
+    try:
+        record_page_recompile_approval(
+            wiki_root,
+            plan_id=answer.decision_id,
+            verdict=verdict,
+            note=answer.note,
+            extra={"created_uids": list(outcome.created_uids)},
+        )
+    except PageRecompileItemAlreadyResolved as exc:
+        return _refuse("already_resolved", str(exc))
+    except UnknownPageRecompileItem as exc:  # pragma: no cover - found above
+        return _refuse("id_not_found", str(exc))
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=(
+            f"page-recompile plan applied ({verdict}); "
+            f"{len(outcome.created_uids)} sub-page(s) created"
+        ),
+    )
+
+
+#: Issue athenaeum#2547 AC8: the prefix
+#: :func:`athenaeum.page_recompile_apply.write_apply` puts on its OWN
+#: content-hash-pin refusal, the one apply refusal that must close the queue
+#: item as stale rather than leave it open. Only a BACKSTOP -- the primary
+#: check is the direct hash comparison in
+#: :func:`_apply_page_recompile_answer`, which needs no agreement about
+#: wording at all -- so a reworded refusal degrades to "item stays open",
+#: never to "page silently rewritten".
+_STALE_PLAN_REASON_PREFIX = "stale:"
+
+
+def _page_recompile_verify_client(
+    item: Mapping[str, Any], config: dict[str, Any] | None
+) -> Any | None:
+    """The ``verify``-knob client :func:`write_apply` needs, or ``None``.
+
+    **The one place in this module that may construct an LLM client**, and
+    the deliberate exception to :func:`apply_decision_answers`'s "no model
+    call, ever" note. The reason is the applier's, not this module's:
+    :func:`athenaeum.page_recompile_apply.compute_apply` re-verifies each
+    ``merge`` group's model-written text against the units that feed it, and
+    with no client it records a ``merge-verify-unavailable`` issue and
+    refuses the whole plan. Without this, approving ANY plan carrying a
+    merge group -- the planner's default behaviour
+    (``librarian.page_recompile.merge_near_duplicates``) -- would always be
+    refused, which would make athenaeum#2547's "approve applies the plan
+    through the applier" true only for the subset of plans that happen to
+    merge nothing.
+
+    **Lazy, and keyed on the plan's own outline.** The queued item already
+    records which groups are merges, so a plan with none builds no client
+    and makes no call -- the module's invariant still holds for every answer
+    that does not need the check, which is most of them. Built the same way
+    ``athenaeum recompile apply`` builds it (``knob="verify"``), so the two
+    approval paths verify a merge identically rather than one being stricter
+    than the other. Returns ``None`` when nothing is configured (no
+    ``ANTHROPIC_API_KEY``), which the applier then reports as
+    ``merge-verify-unavailable`` -- the honest outcome, and the item stays
+    open rather than being closed with nothing done.
+    """
+    outline = item.get("outline")
+    if not isinstance(outline, Mapping):
+        return None
+    groups = outline.get("groups")
+    if not isinstance(groups, list):
+        return None
+    if not any(
+        isinstance(group, Mapping) and group.get("merged") for group in groups
+    ):
+        return None
+    from athenaeum.provider import build_llm_client
+
+    return build_llm_client(config, knob="verify")
+
+
+def _page_recompile_live_hash(wiki_root: Path, uid: str) -> tuple[str, str]:
+    """``(content_hash, "")`` for the live page *uid*, or ``("", error)``.
+
+    The hash is :func:`athenaeum.page_recompile_plan.page_content_hash` over
+    the page BODY -- the same function the plan pinned itself with, so the
+    comparison in :func:`_apply_page_recompile_answer` is between two values
+    produced the same way.
+    """
+    from athenaeum.models import EntityIndex, parse_frontmatter
+    from athenaeum.page_recompile_plan import page_content_hash
+
+    if not uid:
+        return "", "the queued page-recompile item names no page uid"
+    path = EntityIndex(wiki_root).get_by_uid(uid)
+    if path is None:
+        return "", f"no page with uid {uid}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", f"unreadable page {uid}: {exc}"
+    _meta, body = parse_frontmatter(text)
+    return page_content_hash(body), ""
 
 
 def _apply_dimension_proposal_answer(
@@ -1425,6 +2121,137 @@ def _older_scope_value(
     return existing_a if id_a <= id_b else existing_b
 
 
+def validate_coordinate_answer(
+    wiki_root: Path,
+    pending_path: Path,
+    *,
+    decision_id: str,
+    verdict: str,
+    config: dict | None,
+) -> tuple[str | None, str, list[tuple[str, Path, Path, str, str, dict[str, dict[str, Any]]]]]:
+    """Pure validation half of a ``coordinate`` decision answer (issue athenaeum#2544).
+
+    Extracted from :func:`_apply_coordinate_answer`, which used to be the
+    ONLY caller — and therefore the only point any of this ran, hours
+    after a shape-only write at :func:`write_decision_answer` (issue
+    athenaeum#2544's whole premise). Runs every check that function's apply
+    step ran: JSON-decoding *verdict*, schema
+    (:func:`athenaeum.decision_framing.validate_coordinate_payload`), pair
+    membership in *decision_id*'s own batch
+    (:func:`athenaeum.verdict_effects.parse_coordinate_batch_members`),
+    page-id membership in its own pair, each page resolving to a file
+    under *wiki_root* (:func:`_find_page_path_by_id`), and each named
+    dimension being registered (:func:`athenaeum.config.resolve_dimensions`).
+    Reads *pending_path*/*wiki_root*/*config*; never writes anything — a
+    pure function of its arguments, exactly like the two lower-level
+    checks it calls — which is what lets it run from BOTH
+    :func:`write_decision_answer` (before a byte is written) and
+    :func:`_apply_coordinate_answer` (at apply time, as a second,
+    independent check against whatever ``raw/answers/`` actually holds —
+    a hand-placed or pre-athenaeum#2544 file never ran this at write time).
+
+    Returns ``(error_code, message, plan)``:
+
+    - On refusal: ``error_code`` is one of ``malformed_verdict_json``,
+      ``schema_invalid``, ``id_not_found``, ``already_resolved``,
+      ``no_recoverable_members``, ``invalid_coordinate_answer`` (the last
+      NAMES the failing pair in *message* — issue athenaeum#2544 AC1);
+      *message* is human-readable; *plan* is empty.
+    - On success: ``error_code`` is ``None``, *message* is ``""``, and
+      *plan* is the fully-resolved write plan — one
+      ``(pair_key, path_a, path_b, id_a, id_b, dims_for_pair)`` tuple per
+      answered pair — :func:`_apply_coordinate_answer` writes from.
+    """
+    from athenaeum.answers import parse_pending_questions
+    from athenaeum.config import resolve_dimensions
+    from athenaeum.decision_framing import validate_coordinate_payload
+    from athenaeum.verdict_effects import parse_coordinate_batch_members
+
+    try:
+        payload = json.loads(verdict)
+    except (ValueError, TypeError) as exc:
+        return "malformed_verdict_json", f"verdict is not valid JSON: {exc}", []
+
+    schema_errors = validate_coordinate_payload(payload)
+    if schema_errors:
+        return "schema_invalid", "; ".join(schema_errors), []
+
+    questions = parse_pending_questions(pending_path)
+    pq = next((q for q in questions if q.id == decision_id), None)
+    if pq is None:
+        return "id_not_found", f"coordinate item id not found: {decision_id}", []
+    if pq.answered:
+        return (
+            "already_resolved",
+            f"coordinate item {decision_id} already answered",
+            [],
+        )
+
+    batch_members = parse_coordinate_batch_members(pq.description)
+    batch_pairs = {m["pair"] for m in batch_members}
+    if not batch_pairs:
+        return (
+            "no_recoverable_members",
+            f"coordinate item {decision_id} carries no recoverable batch "
+            "members (missing or malformed machine-readable marker)",
+            [],
+        )
+
+    registry = resolve_dimensions(config)
+
+    # Validate everything and resolve every page path BEFORE writing
+    # anything — same "nothing half-lands" posture as the schema-shape
+    # refusal above, just one layer deeper (value semantics, not shape).
+    errors: list[str] = []
+    plan: list[tuple[str, Path, Path, str, str, dict[str, dict[str, Any]]]] = []
+    for item in payload["answers"]:
+        pair_key = str(item["pair"])
+        if pair_key not in batch_pairs:
+            errors.append(
+                f"pair {pair_key!r} is not a member of batch {decision_id!r}"
+            )
+            continue
+        ids = pair_key.split("+", 1)
+        if len(ids) != 2 or not all(ids):
+            errors.append(f"pair {pair_key!r} is not a valid '<id>+<id>' pair key")
+            continue
+        id_a, id_b = ids
+        path_a = _find_page_path_by_id(wiki_root, id_a)
+        path_b = _find_page_path_by_id(wiki_root, id_b)
+        if path_a is None or path_b is None:
+            missing = id_a if path_a is None else id_b
+            errors.append(
+                f"pair {pair_key!r}: could not locate page {missing!r} under {wiki_root}"
+            )
+            continue
+        dims_for_pair: dict[str, dict[str, Any]] = {}
+        for dim_name, values in item["dimensions"].items():
+            dimension = registry.get(dim_name)
+            if dimension is None:
+                errors.append(f"pair {pair_key!r}: unknown dimension {dim_name!r}")
+                continue
+            if not isinstance(values, dict):
+                errors.append(
+                    f"pair {pair_key!r} dimension {dim_name!r}: value must be an "
+                    "object keyed by page id"
+                )
+                continue
+            unknown_ids = sorted(set(values) - {id_a, id_b})
+            if unknown_ids:
+                errors.append(
+                    f"pair {pair_key!r} dimension {dim_name!r}: {unknown_ids} are "
+                    "not members of this pair"
+                )
+                continue
+            dims_for_pair[dim_name] = values
+        plan.append((pair_key, path_a, path_b, id_a, id_b, dims_for_pair))
+
+    if errors:
+        return "invalid_coordinate_answer", "; ".join(errors), []
+
+    return None, "", plan
+
+
 def _apply_coordinate_answer(
     wiki_root: Path,
     pending_path: Path,
@@ -1499,9 +2326,14 @@ def _apply_coordinate_answer(
     (:func:`athenaeum.verdict_effects.parse_coordinate_batch_members`), a
     page id that is not one of its own named pair's two members, or an
     unknown dimension name — "nothing half-lands", the same posture every
-    other applier in this module takes.
+    other applier in this module takes. Issue athenaeum#2544: all of the
+    above now runs via :func:`validate_coordinate_answer`, a pure function
+    shared with :func:`write_decision_answer` — one implementation, two
+    callers — so this is a defense-in-depth re-check (a hand-placed or
+    pre-athenaeum#2544 answer file never ran it at write time), never a
+    second implementation of the same checks.
     """
-    from athenaeum.answers import parse_pending_questions, resolve_by_id
+    from athenaeum.answers import resolve_by_id
     from athenaeum.comparator import (
         COMPARATOR_VERSION_GATE2,
         VERDICT_UNDERDETERMINED,
@@ -1513,14 +2345,9 @@ def _apply_coordinate_answer(
         record_comparison,
     )
     from athenaeum.config import resolve_dimensions
-    from athenaeum.decision_framing import validate_coordinate_payload
     from athenaeum.dimensions import Relation
     from athenaeum.pending_merges import _write_coordinate
-    from athenaeum.verdict_effects import (
-        build_coordinate_request,
-        parse_coordinate_batch_members,
-        queue_coordinate_batch,
-    )
+    from athenaeum.verdict_effects import build_coordinate_request, queue_coordinate_batch
     from athenaeum.verdicts import mark_pairs_stale
 
     def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
@@ -1533,87 +2360,22 @@ def _apply_coordinate_answer(
             message=message,
         )
 
-    try:
-        payload = json.loads(answer.verdict)
-    except (ValueError, TypeError) as exc:
-        return _refuse("malformed_verdict_json", f"verdict is not valid JSON: {exc}")
+    error_code, message, plan = validate_coordinate_answer(
+        wiki_root,
+        pending_path,
+        decision_id=answer.decision_id,
+        verdict=answer.verdict,
+        config=config,
+    )
+    if error_code is not None:
+        return _refuse(error_code, message)
 
-    schema_errors = validate_coordinate_payload(payload)
-    if schema_errors:
-        return _refuse("schema_invalid", "; ".join(schema_errors))
-
-    questions = parse_pending_questions(pending_path)
-    pq = next((q for q in questions if q.id == answer.decision_id), None)
-    if pq is None:
-        return _refuse(
-            "id_not_found", f"coordinate item id not found: {answer.decision_id}"
-        )
-    if pq.answered:
-        return _refuse(
-            "already_resolved",
-            f"coordinate item {answer.decision_id} already answered",
-        )
-
-    batch_members = parse_coordinate_batch_members(pq.description)
-    batch_pairs = {m["pair"] for m in batch_members}
-    if not batch_pairs:
-        return _refuse(
-            "no_recoverable_members",
-            f"coordinate item {answer.decision_id} carries no recoverable batch "
-            "members (missing or malformed machine-readable marker)",
-        )
-
+    # validate_coordinate_answer already resolved the registry internally
+    # to check dimension membership; re-resolve it here (cheap — not a
+    # re-check of anything validate_coordinate_answer already decided) for
+    # the record_comparison call below, which needs the registry object
+    # itself, not just a pass/fail on it.
     registry = resolve_dimensions(config)
-
-    # Validate everything and resolve every page path BEFORE writing
-    # anything — same "nothing half-lands" posture as the schema-shape
-    # refusal above, just one layer deeper (value semantics, not shape).
-    errors: list[str] = []
-    plan: list[tuple[str, Path, Path, str, str, dict[str, dict[str, Any]]]] = []
-    for item in payload["answers"]:
-        pair_key = str(item["pair"])
-        if pair_key not in batch_pairs:
-            errors.append(
-                f"pair {pair_key!r} is not a member of batch {answer.decision_id!r}"
-            )
-            continue
-        ids = pair_key.split("+", 1)
-        if len(ids) != 2 or not all(ids):
-            errors.append(f"pair {pair_key!r} is not a valid '<id>+<id>' pair key")
-            continue
-        id_a, id_b = ids
-        path_a = _find_page_path_by_id(wiki_root, id_a)
-        path_b = _find_page_path_by_id(wiki_root, id_b)
-        if path_a is None or path_b is None:
-            missing = id_a if path_a is None else id_b
-            errors.append(
-                f"pair {pair_key!r}: could not locate page {missing!r} under {wiki_root}"
-            )
-            continue
-        dims_for_pair: dict[str, dict[str, Any]] = {}
-        for dim_name, values in item["dimensions"].items():
-            dimension = registry.get(dim_name)
-            if dimension is None:
-                errors.append(f"pair {pair_key!r}: unknown dimension {dim_name!r}")
-                continue
-            if not isinstance(values, dict):
-                errors.append(
-                    f"pair {pair_key!r} dimension {dim_name!r}: value must be an "
-                    "object keyed by page id"
-                )
-                continue
-            unknown_ids = sorted(set(values) - {id_a, id_b})
-            if unknown_ids:
-                errors.append(
-                    f"pair {pair_key!r} dimension {dim_name!r}: {unknown_ids} are "
-                    "not members of this pair"
-                )
-                continue
-            dims_for_pair[dim_name] = values
-        plan.append((pair_key, path_a, path_b, id_a, id_b, dims_for_pair))
-
-    if errors:
-        return _refuse("invalid_coordinate_answer", "; ".join(errors))
 
     if lock is None:
         return _refuse(
@@ -1898,11 +2660,50 @@ def _raised_at_for(
                 if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
                     return str(rec.get("created_at") or "")
             return ""
+        if decision_type == "page-recompile":
+            from athenaeum.page_recompile_queue import find_queued_plan
+
+            item = find_queued_plan(wiki_root, plan_id=decision_id)
+            if item is None:
+                return ""
+            return str(item.get("created_at") or item.get("ts") or "")
     except Exception as exc:  # noqa: BLE001 - lookup is best-effort
         log.debug(
             "decision_answers: raised_at lookup skipped (%s): %s", type(exc).__name__, exc
         )
     return ""
+
+
+def _answer_order_key(path: Path, answer: "DecisionAnswer | None") -> tuple[str, int]:
+    """Oldest-first ordering key for two files under ``raw/answers/``
+    (issue athenaeum#2514, Seer review finding).
+
+    A raw filename sort gets the SAME-SECOND case exactly backwards.
+    :func:`write_decision_answer` names a file
+    ``{ISO-TS}-{type}-{id}.md`` and retries a second-level collision as
+    ``{ISO-TS}-{type}-{id}-1.md``, ``-2``, ... In ASCII ``-`` (0x2D) sorts
+    before ``.`` (0x2E), so ``sorted()`` puts the SUFFIXED file first and
+    the unsuffixed one -- the one written FIRST, i.e. the OLDER -- last.
+    Under a "last in the walk is newest" rule that inverts the answer: two
+    answers given in the same wall-clock second would resolve to the older
+    verdict, which is the precise failure athenaeum#2514 AC5 exists to stop.
+
+    The collision index is located via the ``-{type}-{id}`` infix the writer
+    mints, NEVER a trailing-``-digits`` regex: a decision id is 12 hex
+    characters and can be all digits, which such a regex would silently read
+    as a collision index. A file that does not follow the convention at all
+    (hand-authored, or a future scheme) simply sorts at index 0 on its own
+    name, which is the pre-existing behaviour.
+    """
+    stem = path.stem
+    if answer is not None:
+        marker = f"-{answer.decision_type}-{answer.decision_id}"
+        head, found, tail = stem.rpartition(marker)
+        if found and tail.startswith("-") and tail[1:].isdigit():
+            return (head + marker, int(tail[1:]))
+        if found and not tail:
+            return (stem, 0)
+    return (stem, 0)
 
 
 def apply_decision_answers(
@@ -1943,6 +2744,37 @@ def apply_decision_answers(
     happens to live in ``raw/answers/``) is silently left alone — not
     counted in either ``applied`` or ``skipped``.
 
+    Issue athenaeum#2514 (AC5): when SEVERAL files decide the same
+    ``decision_id``, only the NEWEST is dispatched; every older one is
+    skipped with ``error_code="superseded"`` and
+    :attr:`DecisionAnswerOutcome.superseded_by` naming the winner. Before
+    this, every file was dispatched in turn and the FIRST one to land won —
+    the rest bounced off the resolver's ``already_resolved`` guard — so an
+    older answer beat a newer one. Observed: a 2026-10-14 reject overrode a
+    2026-11-12 human approval of the same merge on every nightly tick until
+    the old file was moved out of the walk by hand.
+
+    "Newest" is the walk's own order: the filename, whose ISO-timestamp
+    prefix :func:`write_decision_answer` mints from the clock. Deliberately
+    NOT the ``resolved_at`` frontmatter, even though it comes from that same
+    clock — this function's chronology has always been the filename, and
+    having two sources of truth for "which is newer" is how an answer file
+    becomes un-orderable. (``resolved_at`` could not break the same-second
+    tie below anyway: both files carry the same value.)
+
+    That order is :func:`_answer_order_key`, not raw ``sorted()``, because
+    raw filename sort inverts exactly the same-second case — see that
+    function. Two answers to one decision given in the same wall-clock
+    second would otherwise resolve to the OLDER verdict.
+
+    A superseded file is never deleted — like every other skip here, it
+    stays as its own audit trail. Note the fail-closed corner: if the newest
+    file is malformed or schema-invalid it is refused on its own merits AND
+    the older ones stay superseded, so nothing applies. That is deliberate.
+    Applying a stale ruling because the current one is unreadable is the
+    exact failure this AC exists to stop, and both files report their own
+    reason, so an operator sees what happened.
+
     An unknown id, an already-resolved id, an invalid verdict/decision, or a
     schema-malformed answer file is logged and skipped — the file is NEVER
     deleted (it stays as its own audit trail), and no other file in the
@@ -1957,6 +2789,14 @@ def apply_decision_answers(
     docstring documents — see :func:`_judge_scope_sameness`'s ``client is
     None`` fallback for why every OTHER call (including every test that
     omits *client*) stays exactly as deterministic as before this issue.
+
+    One further narrow exception since issue athenaeum#2547, independent of
+    *client*: approving a ``page-recompile`` plan that carries a ``merge``
+    group builds a ``verify``-knob client so the applier can re-check that
+    group's text against its feeder units, because the applier refuses the
+    plan outright without one. Every other answer, and every
+    ``page-recompile`` plan with no merge group, makes no model call at all.
+    See :func:`_page_recompile_verify_client`.
 
     Args:
         wiki_root: Directory holding ``_pending_questions.md`` /
@@ -1995,18 +2835,40 @@ def apply_decision_answers(
     pending_questions_path = wiki_root / "_pending_questions.md"
     pending_merges_path = wiki_root / "_pending_merges.md"
 
+    # Issue athenaeum#2514 (AC5): load the whole batch BEFORE dispatching any
+    # of it, so "which file is the newest answer to this decision?" is known
+    # when the first (possibly stale) one comes up. Parsing is pure and
+    # already happened once per file either way, so this costs nothing but
+    # the batch held in memory — which the loop below already implied.
+    loaded: list[tuple[Path, DecisionAnswer | None, MalformedDecisionAnswer | None]] = []
     for path in sorted(answers_dir.glob("*.md")):
         try:
-            answer = _load_decision_answer(path)
+            parsed = _load_decision_answer(path)
         except MalformedDecisionAnswer as exc:
-            log.warning("decision_answers: %s", exc)
+            loaded.append((path, None, exc))
+            continue
+        loaded.append((path, parsed, None))
+    # Re-sort on the real chronology now that each file's decision type and
+    # id are known: a raw filename sort inverts a same-second collision
+    # pair. See `_answer_order_key`. Dispatch order is this order too, so
+    # "oldest-first" in this function's contract is now actually true.
+    loaded.sort(key=lambda entry: _answer_order_key(entry[0], entry[1]))
+    newest_answer_for: dict[str, Path] = {}
+    for path, parsed, _load_exc in loaded:
+        if parsed is not None:
+            # The walk is oldest-first, so the last writer wins.
+            newest_answer_for[parsed.decision_id] = path
+
+    for path, answer, load_error in loaded:
+        if load_error is not None:
+            log.warning("decision_answers: %s", load_error)
             outcome = DecisionAnswerOutcome(
                 path=path,
                 decision_id=None,
                 decision_type=None,
                 applied=False,
                 error_code="malformed",
-                message=str(exc),
+                message=str(load_error),
             )
             report.outcomes.append(outcome)
             report.skipped += 1
@@ -2014,6 +2876,28 @@ def apply_decision_answers(
 
         if answer is None:
             # No decision_id — legacy/non-decision file, not our concern.
+            continue
+
+        winner = newest_answer_for[answer.decision_id]
+        if winner != path:
+            # Issue athenaeum#2514 (AC5): a newer file decides this same id.
+            message = (
+                f"superseded by {winner.name}, a newer answer for decision "
+                f"{answer.decision_id}; not applied"
+            )
+            log.info("decision_answers: %s (%s)", message, path.name)
+            report.outcomes.append(
+                DecisionAnswerOutcome(
+                    path=path,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    applied=False,
+                    error_code="superseded",
+                    message=message,
+                    superseded_by=winner.name,
+                )
+            )
+            report.skipped += 1
             continue
 
         # Issue athenaeum#717: an answer must satisfy the response schema the
@@ -2108,6 +2992,13 @@ def apply_decision_answers(
             # reaches THIS branch, never ``_apply_proposed_rule_answer``.
             outcome = _apply_dimension_proposal_answer(
                 wiki_root.parent, wiki_root, answer, config=config
+            )
+        elif answer.decision_type == "page-recompile":
+            # Issue athenaeum#2547: its own applier -- an approve runs the
+            # recompile applier under the caller's run lock and WRITES
+            # pages, which no other branch here does.
+            outcome = _apply_page_recompile_answer(
+                wiki_root, answer, config=config, lock=lock
             )
         else:  # pragma: no cover - unreachable: _load_decision_answer already
             # refuses any decision_type outside VALID_DECISION_TYPES as
@@ -2223,13 +3114,19 @@ __all__ = [
     "VALID_DECISION_TYPES",
     "DECISION_ANSWER_SOURCE_TAG",
     "MalformedDecisionAnswer",
+    "CoordinateAnswerRefused",
     "DecisionAnswer",
     "DecisionAnswerOutcome",
     "ApplyReport",
+    "UnappliedAnswerRecord",
     "render_decision_answer",
     "write_decision_answer",
+    "validate_coordinate_answer",
     "preflight_question",
     "preflight_merge",
     "preflight_audit",
+    "scan_unapplied_answers",
+    "scan_overlapping_merge_proposals",
+    "check_pending_conflicts",
     "apply_decision_answers",
 ]

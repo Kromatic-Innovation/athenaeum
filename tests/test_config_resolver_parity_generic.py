@@ -116,6 +116,19 @@ resolver cannot silently join the exclusion set without this file changing):
   Exercised directly, with real bucket names, in
   ``TestDecayHorizonResolverDirect``.
 
+- ``resolve_page_type_field_groups`` (issue athenaeum#2197): only two literal
+  keys are discoverable from its source (``librarian``, ``field_groups`` —
+  the ``page_type``/``group_name`` levels below them are operator-chosen,
+  not literals), so ``_candidate_nestings`` can only ever construct a
+  TWO-deep path. The real shape is THREE levels deep with a list-of-strings
+  leaf (``librarian.field_groups.<page_type>.<group_name>`` -> field names),
+  which no sentinel in ``_SENTINEL_VALUES`` can reach — every candidate the
+  prober can build is rejected by the resolver's own defensive validation
+  (a non-dict ``page_type``/group entry, or a non-list leaf) and returns the
+  empty-dict baseline, reading identically to "never read the key". Same
+  shape gap as ``resolve_witness_keys`` above, same treatment: covered
+  directly in ``tests/test_structured_upsert.py::TestResolvePageTypeFieldGroupsDirect``.
+
 Every other resolver goes through the full generic check.
 """
 
@@ -201,6 +214,9 @@ _STRUCTURED_CONTAINER_VALUE = frozenset(
         "resolve_quarantine_retry_delays_days",
         "resolve_raw_file_max_api_calls_by_source",
         "resolve_witness_keys",
+        # Issue athenaeum#2197: double-nested (page_type -> group_name ->
+        # field list), covered directly instead — see module docstring.
+        "resolve_page_type_field_groups",
     }
 )
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
@@ -222,6 +238,17 @@ _CLOSED_VOCABULARY_VALUE = frozenset(
         # this generically: the vocabulary is two specific words. Covered
         # directly by TestClosedVocabularyResolversDirect below.
         "resolve_serve_transport",
+        # Issue athenaeum#2547: only "off"/"shadow"/"queue"/"auto" are valid
+        # page-recompile modes, and only "none"/"structure-only" are valid
+        # auto-apply classes, so every generic sentinel -- of any type -- is
+        # out-of-vocabulary and correctly returns the default, reading
+        # identically to "never read the key". Same shape as
+        # ``resolve_serve_transport`` above and the same treatment: covered
+        # directly by TestClosedVocabularyResolversDirect below, on BOTH
+        # channels (each of these reads an env var too, so each is skipped
+        # by the env-var check as well as the yaml one).
+        "resolve_page_recompile_mode",
+        "resolve_page_recompile_auto_apply_class",
     }
 )
 
@@ -848,6 +875,78 @@ class TestClosedVocabularyResolversDirect:
         # every unrecognised value lands on the transport that binds nothing.
         monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "htttp")
         assert config_mod.resolve_serve_transport(None) == "stdio"
+
+    def test_page_recompile_mode_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PAGE_RECOMPILE_MODE", raising=False)
+        resolved = config_mod.resolve_page_recompile_mode(
+            {"librarian": {"page_recompile": {"mode": "shadow"}}}
+        )
+        assert resolved == "shadow"
+
+    def test_page_recompile_mode_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "off")
+        assert config_mod.resolve_page_recompile_mode(None) == "off"
+
+    def test_page_recompile_mode_env_beats_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "off")
+        resolved = config_mod.resolve_page_recompile_mode(
+            {"librarian": {"page_recompile": {"mode": "queue"}}}
+        )
+        assert resolved == "off"
+
+    def test_page_recompile_mode_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing direction: a typo must fall back to the DEFAULT
+        # mode, not some other one chosen ad hoc. As of athenaeum#2549 the
+        # default is "auto" -- the operator ruling on athenaeum#2525 made
+        # unattended structure-only recompiles the safe-by-construction
+        # install default, not a special case a typo should dodge.
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "auto-apply-everything")
+        assert config_mod.resolve_page_recompile_mode(None) == "auto"
+
+    def test_page_recompile_auto_apply_class_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", raising=False)
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(
+            {"librarian": {"page_recompile": {"auto_apply_class": "structure-only"}}}
+        )
+        assert resolved == "structure-only"
+
+    def test_page_recompile_auto_apply_class_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "structure-only")
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(None)
+        assert resolved == "structure-only"
+
+    def test_page_recompile_auto_apply_class_env_beats_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "none")
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(
+            {"librarian": {"page_recompile": {"auto_apply_class": "structure-only"}}}
+        )
+        assert resolved == "none"
+
+    def test_page_recompile_auto_apply_class_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing direction: a typo must fall back to the DEFAULT
+        # class, not some other one chosen ad hoc. As of athenaeum#2549 the
+        # default is "structure-only" -- the class the write-side approval
+        # interlock (athenaeum#2548) already lets apply with no verdict at
+        # all, so a typo here authorises nothing beyond what the applier
+        # itself already treats as safe.
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "anything")
+        assert config_mod.resolve_page_recompile_auto_apply_class(None) == "structure-only"
 
     def test_sibling_widening_classes_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch

@@ -4,6 +4,17 @@ Issue athenaeum#1581. First measurement of whether the librarian turns a page
 that has grown several **facets** into a hub plus linked facet sub-pages, and
 whether it leaves alone a page that is merely **long**.
 
+> **Updated 2026-11-14 (issue athenaeum#2550).** Case B's row below changed
+> from PASS to FAIL, dropping the layer score from 2/3 to 1/3. This is NOT a
+> regression in the librarian's ability to decompose a facet-aligned page —
+> it is this slice retiring the one deterministic path (the reactive
+> `split` disposition) that used to express a decomposition at all.
+> Decomposition now lives entirely in the (LLM-backed)
+> `librarian.page_recompile` pipeline, which this no-LLM, no-network measure
+> cannot exercise. See the per-case note on B below and
+> `tests/test_eval_decomposition.py::test_case_b_no_longer_decomposes` for
+> the regression pin.
+
 - Corpus: `tests/evals/data/decomposition/cases.yaml` (invented; leakage lint
   green, no skip, against a real local tree).
 - Measure: `tests/evals/decomposition.py`.
@@ -18,48 +29,63 @@ whether it leaves alone a page that is merely **long**.
 | Case | Page | Facets | Expected | Observed | Deciding tier | Pass |
 |---|---|---|---|---|---|---|
 | **A** `multifacet_under_threshold` | 553 chars | 3 | decompose | **not decomposed**, no escalation, 0 children | deterministic size gate | **FAIL** |
-| **B** `multifacet_oversize` | 10,930 chars | 3 | decompose | decomposed into 3 children, `conflict_type=oversize_split`, every facet placed on its own child (`scattered=[] conflated=[] missing=[]`) | deterministic size gate | PASS |
-| **C** `singlefacet_oversize` | 11,013 chars | 1 | no decompose | **not decomposed**, `conflict_type=oversize_page`, 0 children | deterministic size gate | PASS |
+| **B** `multifacet_oversize` | 10,930 chars | 3 | decompose | **not decomposed** (as of athenaeum#2550), flagged `needs_split`, 0 children — see note below | deterministic size gate | **FAIL** (was PASS) |
+| **C** `singlefacet_oversize` | 11,013 chars | 1 | no decompose | **not decomposed**, flagged `needs_split`, 0 children | deterministic size gate | PASS |
 | **D** `decomposed_hub_new_intake` | 159 chars | 2 | attach to existing facet sub-page | **not yet measured** — needs a recorded fixture | classify | — |
 
-**Layer score on the shipped librarian: 2 / 3 deterministic cases.** A is the
-anti-vacuity gate (AC3) and it fails as predicted.
+**Layer score on the shipped librarian: 1 / 3 deterministic cases (was 2/3
+before athenaeum#2550).** A is the anti-vacuity gate (AC3) and it fails as
+predicted. B's flip to FAIL is this slice retiring the mechanism that used
+to pass it, not a new defect — see the note on B below.
 
 ## What the numbers say
 
-**Every verdict above is reached without a model call.** The only code path
-that decomposes a page is `tiers.check_page_size_gate` → `_perform_oversize_
-page_split`, and its trigger is `len(existing_body) > threshold`. There is no
-tier that asks whether a page has grown several facets, so AC2's "which tier
-decided" has the same answer for A, B and C — and that sameness is the
-finding, not a formality.
+**Every verdict above is reached without a model call.** Until athenaeum#2550,
+the only code path that decomposed a page was `tiers.check_page_size_gate` →
+`_perform_oversize_page_split` (since deleted), triggered by
+`len(existing_body) > threshold`. That issue retired the disposition —
+`oversize_page_action: split` now resolves to `review` — so as of this
+update there is no code path left that decomposes a page without a model
+call; decomposition is the (LLM-backed) `librarian.page_recompile`
+pipeline's job now. There was never a tier that asked whether a page had
+grown several facets, so AC2's "which tier decided" still has the same
+answer for A, B and C: the deterministic size gate, deciding nothing but
+`len()`.
 
 **A fails because it is never considered.** 553 characters is 5% of the
 threshold, so the gate returns `None`, raises no escalation, and writes no
 child. All three of A's facets score `missing`. A reader handed this page
 would draw a hub and three sub-pages; the librarian sees a small page.
 
-**B passes, and the pass is narrower than it looks.** B's top-level markdown
-headings *are* its facets, one to one, and `_split_into_atomic_sections` cuts
-at the shallowest heading depth present. So the result says the mechanism
-**preserves a facet boundary it is handed**, not that it can find one. A page
-whose headings cross its facets would score `scattered` and `conflated`; the
-fixture says so explicitly rather than letting a green row imply otherwise.
+**B now fails too, and the reason is this slice, not a new defect.** Before
+athenaeum#2550, B's top-level markdown headings *being* its facets, one to
+one, meant the reactive `split` disposition preserved a facet boundary it
+was handed (not that it could find one — A proves it cannot). That
+disposition is gone: B is now flagged `needs_split` and left untouched,
+identically to A and C, because every disposition now shares the same
+flag-and-leave-untouched shape at the size gate. The favourable arrangement
+B's fixture describes is still real; it is simply no longer observable
+through this no-LLM measure. A page whose headings cross its facets would
+have scored `scattered`/`conflated` under the old mechanism — that
+distinction no longer has a code path to exercise either.
 
-**C passes for the right verdict and the wrong reason.** It is genuinely over
-the threshold, so the split path is genuinely offered it, and declines —
-because it has no markdown heading to cut on (the no-heading cohort
-athenaeum#1248 documents itself as declining, athenaeum#1282's job), not
-because it has one facet. Both halves are pinned so a future facet-aware path
-is not credited with a result the heading check is producing.
+**C passes for the right verdict, now for an unchanged reason.** It is
+genuinely over the threshold, flagged `needs_split`, and left untouched —
+previously because it had no markdown heading to cut on (the no-heading
+cohort athenaeum#1248 documented itself as declining, athenaeum#1282's
+job); now because nothing at the size gate restructures anything. The
+OBSERVABLE outcome (no children, flagged) is unchanged either way, which is
+why C's row did not need to move.
 
-**Nothing was applied.** At the shipped default (`oversize_page_action:
-review`) no page in any case is restructured: the over-threshold cases raise
-an `oversize_page` escalation for the pending queue and the page is
-byte-for-byte unchanged, which the measure re-reads from disk to confirm
-(AC4, `docs/north-star.md` §2.7–2.8). The `split` disposition is exercised
-only against a throwaway `tmp_path` wiki, to see *what a proposal would
-contain*.
+**Nothing was applied, for every case, now including B.** At the shipped
+default (`oversize_page_action: review`) no page in any case is
+restructured: the over-threshold cases flag `needs_split` in place and the
+page is byte-for-byte unchanged, which the measure re-reads from disk to
+confirm (AC4, `docs/north-star.md` §2.7–2.8). The `split` disposition is
+still exercised against a throwaway `tmp_path` wiki
+(`run_split_disposition`), but as a regression pin that it now behaves
+identically to the default, not to see what a proposal would contain —
+that question moved to `librarian.page_recompile`'s own eval coverage.
 
 ## The consolidate / decompose boundary
 
@@ -147,3 +173,6 @@ lands.
   assertion inverts.
 - Any change to `DEFAULT_PAGE_SIZE_THRESHOLD_CHARS` → both tables move
   together, by construction. That is the point of sharing the constant.
+- A future deterministic (no-LLM) decomposition path landing → Case B
+  starts passing again. `test_case_b_no_longer_decomposes` fails loudly
+  with a message naming this file, mirroring A's convention above.

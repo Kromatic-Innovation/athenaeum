@@ -9,6 +9,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Page recompile now runs in the nightly librarian run and is ON by
+  default: it makes model calls every night (up to 3 pages a run, 10 while
+  any page is still over the hard ceiling) and you turn it off with
+  `librarian.page_recompile.mode: off`.** The phase runs after the entity and
+  auto-memory phases and before finalize, is not reached by a merge-only or
+  cluster-only run, is skipped when the run deadline has already tripped,
+  re-checks that deadline between pages, refreshes the run-lock heartbeat
+  between pages, and carves out no share of the run's wall-clock budget for
+  itself. Four modes (`librarian.page_recompile.mode`): `off` builds no
+  client and makes no call, `shadow` drafts and records plans but writes no
+  page and raises no item, `queue` raises each plan as a decision item, and
+  `auto` applies a valid structure-only plan unattended and queues
+  everything else — see the behaviour-change entry below for what that
+  means by default. An unknown mode falls back to the default and logs a
+  warning. Which pages are picked up is still decided by the existing
+  `librarian.page_size_threshold_chars`. Five new budget keys under
+  `librarian.page_recompile`: `max_pages_per_run` (3),
+  `opening_max_pages_per_run` (10, used while any candidate is over the hard
+  ceiling), `max_input_chars_per_run` (200000), `max_api_calls_per_run` (40,
+  counted against the run-level `librarian.max_api_calls`) and
+  `max_open_items` (5 — no new item is raised, and nothing is spent, while
+  that many are unanswered); plus `auto_apply_class` (`none` or
+  `structure-only`), which decides which plans mode `auto` may apply
+  unattended. A new `page-recompile` decision type appears in `athenaeum
+  decisions` with verdicts `approve`, `approve-structure-only` and `reject`,
+  framed reversible-with-work and routed to the owner with a conservative
+  `reject` default; the item carries the plan outline (group names, unit
+  counts, sizes and first-line excerpts) and never a page body. `approve`
+  applies the plan through the recompile applier under the run lock;
+  `reject` writes nothing and skips the page until its content hash changes;
+  an answer against a page that changed since the plan was drafted is not
+  applied, drops out of the queue, and the page is re-planned. A page that
+  already has an unanswered item pinned to its current content is skipped
+  before any model call, so it neither re-spends nor consumes a page-budget
+  slot the rest of the backlog needs. The run summary reports `planned`,
+  `queued`, `invalid`, `skipped_budget` and `backlog`, spend is attributed
+  per knob, and `athenaeum status` now fills "plans awaiting approval" and
+  "nights since progress" (athenaeum#2547).
+
+- **An approved page recompile can now act across pages: it can move a
+  genuinely misfiled section onto the existing page it belongs on, split
+  one off into a new standalone page that is not a sub-page, attach an
+  existing standalone page under a parent, and move an alias.** Every one of
+  those actions classes the whole plan `cross-page`, and a `cross-page` plan
+  is never written without an approved `page-recompile` decision item — in
+  every mode, `auto` included, and not from `athenaeum recompile apply`
+  either. The verdict `approve-structure-only` applies only the in-page
+  restructure of such a plan and leaves the other units on the parent.
+  `move:<uid>` inserts the units verbatim before the target's footnote
+  block, under their own headings and with no wrapper heading, leaving the
+  target's frontmatter identity and existing content alone; their footnote
+  definitions travel with them and are renumbered if a label is already
+  taken. A move is refused outright when the target is readable more widely
+  than the source (a coarser `access:` level, an `audience:` role the source
+  does not grant, or world-readable against a source that is not), and is
+  never refused for size — a target pushed over
+  `librarian.page_size_threshold_chars` is flagged `needs_split` and becomes
+  a candidate on the next scan. A unit that carries no citation and lands on
+  another page gains one relocation footnote naming the page it came from and
+  the plan id; a unit that already cites something gains nothing. A
+  standalone page gets a new uid and a name and type validated against the
+  deployment's own schema, with no relation to the source page; a proposed
+  name that already matches an existing page's name or alias is turned into a
+  move instead. Attaching goes through the one relation writer with
+  `via: attach`, changes no body text beyond the breadcrumb and the Sub-pages
+  rendering, and never renames the attached page. Aliases stay on the parent
+  unless the approved plan lists an alias move. The ledger records every
+  touched page with its pre and post content hash and its pre-image blob id,
+  and `athenaeum recompile undo` reverses the lot: moved units are removed
+  from their targets, created standalone pages are deleted, and an attach is
+  undone by a detach — with a target edited since the apply sent to the
+  queued path instead, carrying a diff (athenaeum#2548).
+
+- `athenaeum recompile plan --uid <uid>` plans the recompilation of one
+  oversized page — a model labels its units on the `classify` knob (cached by
+  unit hash, so a re-plan over unchanged bytes makes no labelling call),
+  groups and routes them by unit id on the new `page_recompile` knob, and
+  writes a footnote-cited parent summary that a `verify`-knob call then
+  checks sentence by sentence — a verify that is attempted but comes back
+  with no usable verdicts invalidates the plan rather than passing it. The
+  plan is validated in code (unknown unit id, missing target uid, a unit
+  assigned twice, a model-asserted duplicate whose text differs, a merge of
+  fewer than two units, an uncited summary sentence all reject it);
+  tombstoned, retired and superseded pages are refused outright, reusing the
+  candidate scan's own predicate. A plan is classified structure-only or
+  cross-page, and appended to `wiki/_page_recompiles.jsonl` as a shadow
+  record pinned to the page's content hash. `athenaeum recompile show
+  <plan id>` prints it. Shadow only: no page is written (athenaeum#2537).
+
+- `athenaeum recompile apply (--uid <uid> | --plan <id>)` applies a
+  `structure-only` recompile plan: writes the recompiled parent (its cited
+  summary, then its `parent` units verbatim, then a Sub-pages section) and
+  new sub-pages for each `child`/`merge` group, under the run lock (exits
+  75 on contention) and refusing a plan whose pinned content hash no longer
+  matches the live page. The parent keeps its identity — frontmatter stays
+  byte-identical outside `updated`/`description`/`related`/`needs_split`,
+  and a plan that would leave the parent nothing but links is refused
+  (`librarian.page_recompile.min_parent_chars`, default 200). Sub-pages get
+  new uids, are named `<Parent name> (<Sub-topic>)`, inherit access/tags/
+  coordinates (never wider access than the parent), and are linked both
+  ways through `page_relations.py` (`via: split`). Every unit is accounted
+  for exactly once across the parent, every sub-page, confirmed duplicates
+  and merged groups, checked before any write and again after re-reading
+  the written pages; a `merge` group's citations, footnote definitions and
+  length are validated and a `verify`-knob call confirms each merged
+  sentence is supported before anything is written —
+  `librarian.page_recompile.merge_near_duplicates` (default on) turns
+  merging off, re-planning a `merge` group as separate `child` placements
+  instead. The write is all-or-nothing: every sub-page lands before the
+  parent, written last, under a journal that a killed process's next run
+  rolls back; the apply appends one ledger record (pre/post content hash
+  and the pre-image git blob id per touched page, created uids, units per
+  destination, and each merged group's original unit ids/hashes) and makes
+  exactly one snapshot commit, so a merged section's originals stay
+  reachable. `name_structure`'s qualified-name scan no longer proposes
+  folding a `via: split` sub-page back into its parent while their combined
+  size is above `librarian.page_recompile.rejoin_fraction` (default 0.5)
+  of the page-size threshold (athenaeum#2540).
+
+- `athenaeum recompile undo <plan id>` is that applier's compensating
+  operation. When every page an apply touched still holds exactly what the
+  apply wrote, undo restores each one byte for byte from the pre-image git
+  blob the apply recorded, deletes the sub-pages it created, appends an
+  `undo` ledger record naming the plan id and makes exactly one snapshot
+  commit — a merged section's originals come back verbatim, and the
+  parent's relation rows and Sub-pages section come back with the
+  pre-image rather than being rebuilt. When a touched page has been edited
+  since the apply (or its pre-image was never committed, so no git object
+  holds it), nothing is written and one pending-decisions item is raised
+  carrying a unified diff of the pre-image against what is on disk now.
+  When any other page already links to a created sub-page, undo is refused
+  and reports how many such links there are, counting all four reference
+  shapes — a `related` row, a `parent:` key, a `[[uid]]` wikilink and an
+  ordinary markdown link to the sub-page's `uid-slug.md` file — de-duplicated so the two
+  spellings of one parent relation count once. An apply record missing
+  either content hash blocks the undo rather than restoring over an edit
+  or writing an undo record the re-apply guard could not honour. A page restored by an undo is
+  not re-planned while its content hash still matches the restored
+  pre-image, so an unattended pass cannot re-apply what was just undone —
+  a content comparison, not a timer, lifted by any later edit.
+  Re-running undo on a plan that was already undone is refused as such
+  rather than reported as "the page changed" — but a plan that was undone
+  and then re-applied can be undone again, because "already undone" is the
+  plan's most recent action, not merely the presence of an undo record.
+  `--dry-run` reports which of the three outcomes you would get and why,
+  writing nothing at all. Runs under the run lock in both modes (exit 75
+  on contention). `git revert` of the apply's own snapshot commit remains
+  the coarse fallback, now documented. The applier's recorded pre-image
+  blob id now names each page's raw on-disk bytes rather than a re-render
+  of its parsed frontmatter, so a page written without a blank line after
+  its frontmatter — 6% of a sampled real corpus — is undoable directly
+  instead of falling through to a decision item (athenaeum#2541).
+
 - `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
   rename primitive: dry-run by default, `--apply` sets `name:`, appends the
   previous name to `aliases:` (deduplicated), rebuilds the recall index,
@@ -34,8 +187,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Person dedupe's strong-identifier fields are now configurable
   (`dedupe.strong_identifier_keys`); the default keeps today's Apollo
   fields (athenaeum#2472).
+- The librarian proposes a schema amendment, instead of overwriting,
+  interleaving, or dropping a value, when filed data collides with a
+  declared single-valued `librarian.field_groups.<page_type>` field; the
+  proposal grows in the pending-decisions queue and nothing adopts it
+  automatically (athenaeum#2197).
+
+- First-class parent/child page relation (`src/athenaeum/page_relations.py`):
+  one atomic writer/remover with invariant checks (second parent, cycle,
+  third nesting level, inactive parent), idempotent "Sub-pages"/breadcrumb
+  rendering, and read-compat for the legacy `split-into`/`split-from`
+  roles; `athenaeum relate --child <uid> --parent <uid>` / `--detach` sets
+  or removes it by hand (exits 75 under a held run lock); `athenaeum
+  doctor` reports the count of one-sided pairs (athenaeum#2535).
+
+- Page recompile, slice S1 (`src/athenaeum/page_recompile.py`): a candidate
+  scan over active pages that are over `librarian.page_size_threshold_chars`
+  or flagged `needs_split: true`, ordered over-ceiling-first / most-recently-
+  updated / largest, with a `blocked` bucket (reason `no_uid` /
+  `invalid_frontmatter` / `unreadable`) instead of silently dropping a page;
+  and a segmenter cutting a page body into ordered, addressable units (one
+  per heading group, cut further at paragraph/list-item boundaries past a
+  size cap) plus pure conservation and marker-resolution checkers.
+  `athenaeum recompile candidates` reports counts only. No LLM call, no page
+  write (athenaeum#2534).
+
+- Recall and entity listings are now aware of the parent/child page
+  relation: a `recall` hit on a child renders a `**Parent:** <uid> —
+  <Name>` line, a hit on a parent renders a `**Sub-pages:** <uid> —
+  <Name>, ...` line (capped at `recall.sub_pages_cap` /
+  `ATHENAEUM_RECALL_SUB_PAGES_CAP`, default 5, with a count of the
+  remainder), and a uid named on either line is dropped from the same
+  hit's `**Links:**` line. Both lines pass through the hit's own
+  audience/policy filter, applied before the remainder count. Sub-pages
+  created by a split (`via: split`) are now hidden from
+  `enumerate_entities` and `entity_schema`'s page counts by default — a
+  page attached via `attach`/`fold`/`manual` stays listed; pass
+  `include_split=True` (`--include-split` on the CLI) to include them.
+  The per-turn hook bullet for a child whose own name doesn't already
+  contain its parent's reads `<Name> (under <Parent name>) —
+  <description>` (athenaeum#2538).
+
+- Merge decisions have a third verdict, `attach-as-subpage`, beside
+  `approve`/`reject`: it attaches the proposal's other source page under
+  the target as a sub-page (via `page_relations.set_relation`, stamped
+  `via: fold`) instead of folding either page away, and is refused — with
+  a reason, the item left pending — on the same relation invariants
+  `athenaeum relate` already enforces. A pair resolved this way is not
+  re-proposed by the qualified-name scan or wiki dedupe, matching an
+  approve/reject's suppression. Available through `resolve_merge` and the
+  unified decision-answer path (athenaeum#2539).
+
+- `athenaeum status` prints a page-recompile backlog block in the chars
+  vocabulary the split machinery itself uses
+  (`librarian.page_size_threshold_chars`,
+  `librarian.oversize_hard_ceiling_chars`): how many active pages are
+  flagged `needs_split: true` or over the threshold, how many are over the
+  hard ceiling, and how many are blocked, with a count per reason. Built
+  from the athenaeum#2534 candidate scan, so status and the splitter no
+  longer disagree about which pages are oversized, and from the SAME single
+  walk of the wiki the byte-based scan already performed. Page names are
+  never printed by default; `athenaeum status --verbose` lists them.
+  "Plans awaiting approval", "applied in the last 7 days" and "nights since
+  progress" print as `not available` — never as `0` — until the plan ledger
+  and the nightly phase exist. The durable run-summary ledger carries the
+  same counts under a `page_recompile` key (schema v4), and the new
+  `athenaeum status --json` emits the whole snapshot, backlog block
+  included, as JSON (athenaeum#2536).
+
+### Deprecated
+
+- The byte-based `Oversized pages (warn/flag)` status line and its
+  `librarian.page_warn_bytes` / `librarian.page_flag_bytes` knobs are
+  deprecated and will be removed in 0.25.0: they measure frontmatter + body
+  in bytes against their own thresholds and know nothing of `needs_split`.
+  Use the chars-based page-recompile backlog block instead (athenaeum#2536).
 
 ### Fixed
+
+- Merge proposals a human rejected, and proposals `athenaeum decisions
+  revalidate --apply` archived as stale, are no longer re-proposed the next
+  night. The nightly name-collision scan was the one proposer of three that
+  never consulted prior rulings, and nothing recorded "archived as stale" as
+  a ruling at all; every archive writer now stamps a content digest of a
+  proposal's source pages on the archived block, and the archive binds every
+  proposer until one of those pages actually changes (athenaeum#2514).
+
+- A human-approved fold into a canonical page that has no frontmatter — or
+  an empty `{}` block — now backfills that page's separator coordinates from
+  the folded sources in the fold preflight, so it applies instead of raising
+  a widen question nothing can answer. An open widen question on a dimension
+  the fold settles without a human is withdrawn on the next `ingest-answers`
+  tick, whether or not the fold itself applies (athenaeum#2514).
+
+- When several files under `raw/answers/` decide the same decision id, only
+  the newest applies; the older ones are reported as `superseded` and kept
+  on disk. An older answer file used to win, because every conformant file
+  was dispatched in turn and the first one to land settled the decision
+  (athenaeum#2514).
+
+- `split-oversize` and the `librarian.oversize_page_action: split`
+  disposition no longer split a compiled page at its lone top-level `#
+  <Name>` title heading (moving the whole body into one child renamed
+  `<Name>: <Name>`); the split now moves to the next heading depth down
+  when the shallowest heading is a single title, and a split that would
+  still yield exactly one child is refused and degrades to `review` like
+  the existing no-heading case (athenaeum#2524).
+
+- A contradiction question raised during Tier 3 merge (`ESCALATE:`) now
+  stores its own durable copy of the conflicting claims and the path of
+  the compiled wiki page they landed in, captured at raise time; answering
+  it writes back to that page from the stored copy even after its raw
+  source (a session transcript or assistant note) has been deleted by the
+  librarian's normal intake-consumption schedule — unchanged by this fix.
+  A question raised before this change (no stored copy) keeps the prior
+  behaviour (athenaeum#2519).
+
+- `decisions answer --type coordinate` (and every writer that calls
+  `write_decision_answer`, e.g. the triage lane) now runs the applier's own
+  deep checks — JSON decoding, payload schema, pair/page/dimension
+  membership — BEFORE writing anything, naming the failing pair on
+  refusal, instead of deferring them to the next `ingest-answers` tick and
+  refusing the whole batch hours later. The write path also now reports
+  (warns by default; `--refuse-on-pending-conflict` refuses) any unapplied
+  answer file already on disk for the same decision id, and for a merge,
+  for another proposal whose sources overlap; a new read-only
+  `decisions pending-answers --id/--page` lists them. `decisions answer
+  --json` now emits a single-line JSON object, matching `propose-fold
+  --json` (athenaeum#2544).
+
+- A fold now stamps a tombstone's `folded_into` from the canonical's
+  resolved filename stem instead of the bare slug of its `name:`
+  frontmatter, so the redirect names a real file even when the canonical
+  lives at `<uid>-<slug>.md` (the real corpus shape); `tombstone_target`
+  readers resolve both the old bare-slug and new stem forms, and the
+  merge-provenance ledger's `canonical_slug` was aligned to match so unfold
+  keeps working. `athenaeum repair --fold-targets` (dry-run by default,
+  `--apply` to write) repairs pre-existing dangling tombstones whose bare
+  slug resolves to exactly one live page (athenaeum#2545).
+
+- `_detect_field_group_misfits` no longer refuses an ordinary same-record
+  update (e.g. a deal's stage advancing while its name/amount stay put) as
+  a field-group misfit: a misfit now requires that NO other field in the
+  same declared group still agrees between the raw and the page, matching
+  the issue's own "from a different source record" acceptance criterion.
+  `librarian.process_one` also no longer appends to
+  `wiki/_schema_amendment_proposals.jsonl` on a `dry_run=True` structured-
+  upsert refusal — a preview no longer creates a visible pending decision
+  (post-merge review fix, athenaeum#2197).
 
 - `athenaeum doctor` now ends its report with a short note when one or more
   checks FAIL, saying FAILs are expected on a fresh or not-yet-configured
@@ -92,6 +391,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecar block that fails to parse at all — athenaeum#2455's unresolved-only
   filter dropped both, so their raw members became retirable while the
   system still needed them (athenaeum#2497).
+- Fold questions (`Approve folding X and Y?`, raised with a `comparator:`
+  source ref that never resolves to a file) no longer land in the
+  athenaeum#1804 held write-back state no matter the answer: approving one now
+  hands the pair to the normal merge machinery (`athenaeum.pending_merges`)
+  and folds it immediately, in the same `ingest-answers` pass, with every
+  safety check any other merge is subject to; rejecting records the
+  decision without folding. Neither outcome ever ends `**Write-back**: held`
+  (athenaeum#2518).
 
 - The `resolve_merge` MCP tool's docstring and `docs/design/contradiction-detection.md`
   said approving a `fold-into-existing` merge "deletes the old source wiki
@@ -108,6 +415,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   judgement is clear and raising the scope item immediately (recording
   model vs. human provenance) when it is unclear or the model call fails
   or is unavailable (athenaeum#2515).
+
+- `_parse_block`'s "skipping pending-question block with malformed header"
+  warning now fires at most once per distinct malformed block per process,
+  instead of once per parse — a long-lived caller (the MCP server serving
+  repeated `decisions count`/`decisions list` calls) previously reprinted
+  the same line thousands of times over a session, burying the real count.
+  The warning now also names the block's 1-based position in the file
+  (`block #N`) so the operator can find it (athenaeum#2516).
+
+- Two pending questions sharing one header + the same (often generic)
+  question line — e.g. two detector-raised field-correction items that
+  differ only in `**Description**:` — no longer collapse onto one
+  decision id: every new block now carries a `**Id salt**:` line (a
+  creation-time disambiguator, hashed once from the block's own
+  description/context and persisted — never recomputed), folded into the
+  id hash alongside header + question. A block written before this
+  change (no salt line) still hashes exactly as before, so an in-flight
+  cached id or answer keeps resolving. If a writer's minted id would
+  still collide with one already in the file, it disambiguates (mints a
+  fresh one) rather than silently dropping the item. `decisions list`
+  now also warns on stderr if it ever finds two pending items sharing one
+  id (athenaeum#2517).
+
+- T1's `reason_code` on a model-path reject no longer defaults to
+  `different_entities` unconditionally; the model is now asked for its own
+  `reason_code` (`different_entities` or `other`) alongside its verdict and
+  reason, and a reject with a missing/mismatched `reason_code` degrades to
+  `pass_up` like any other schema violation. Before the fix, every
+  model-path T1 reject was stamped `different_entities` regardless of what
+  the free-text reason said — on a live store, 1893/1893 reason_code-bearing
+  T1 decisions carried that one value, including 1609 whose reason called
+  the pages a "duplicate"/"same entity". On the 158 human-reviewed
+  calibration samples the mislabeling concentrates where review disagreement
+  also concentrates: a deterministic replay of the fixed classification
+  over those samples' stored reasons found the subgroup the fix
+  reclassifies away from `different_entities` was overturned at roughly 3x
+  the rate (53% vs. 17%) of the subgroup whose label was already accurate;
+  the overall overturn rate (76/158, 48%) is unchanged by this fix alone,
+  since it corrects the label only, not T1's reject-vs-pass_up verdict
+  (athenaeum#2521).
+
+- The calibration audit sampler (`sample_tier_decision`) now stratifies by
+  `cluster_id`: once one near-duplicate-page burst's `cluster_id` has
+  contributed `librarian.audit_max_per_cluster` (default 5) audit items,
+  further draws from that same cluster are skipped for the rest of the run,
+  so one abnormally large burst can no longer fill the sample on volume
+  alone — live evidence showed 140+ of 158 human-reviewed T1 samples coming
+  from exactly one such family. `cluster_id` is an optional field on the
+  audit record now, wired through both the T1 and T2 merge-proposal screens
+  (`athenaeum.reasoning_screens`); callers that supply none (e.g. the
+  ATTRIBUTION tier) are unaffected (athenaeum#2521).
+
+- `decisions revalidate` (`athenaeum.pending_merges.revalidate_pending_merges`)
+  no longer reports a source that was folded into another page the same
+  way as a source that is genuinely gone — both used to collapse into one
+  `source page missing: N of M` reason. A folded source is now reported as
+  `source folded into <target>: N of M`, and a proposal whose sources are
+  ALL folded into its OWN target is archived as satisfied
+  (`**Archived**:`) rather than stale (`**Retired**:`) — a wrong-target
+  fold or a partial fold still reports as stale (athenaeum#2522).
+
+- A merge approved or rejected from a human answer no longer records
+  `decided_by: pipeline:merge-<decision>` in the verdict ledger, indistinguishable
+  from an automated decision. The MCP `resolve_merge` tool and the
+  `decisions answer` CLI command — the only two surfaces that can answer a
+  merge decision today — now stamp a `human:<actor>` decided_by instead
+  (`human:unattributed` until athenaeum#2489's attributable-answer field
+  exists to supply a real actor); an answer with no human signal keeps the
+  pre-existing `pipeline:merge-<decision>` stamp unchanged (athenaeum#2523).
+
+- `_resolve_parent_names` now catches `(OSError, UnicodeDecodeError)` around
+  its page read, matching the convention at ~140 other read sites in
+  `src/athenaeum`. `UnicodeDecodeError` is a `ValueError` subclass, not an
+  `OSError`, so a page with invalid UTF-8 bytes used to propagate out of
+  the loop instead of being skipped like any other unreadable candidate —
+  on the per-turn recall hook path, one corrupt page degraded the context
+  build for every turn (athenaeum#2570).
 
 ### Removed
 
@@ -221,8 +605,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposals.heterogeneity_threshold` yaml key is now ignored with a
   warning, same as every other removed key; a pre-upgrade answer file
   naming the removed type is skipped the same way any other unrecognized
-  decision type is. `split-oversize` and page decomposition are
-  unaffected.
+  decision type is. Page decomposition is unaffected.
 
 - Removed the never-exposed `demote_oversize_pages` / `DemoteResult`
   operator-entrypoint helper from `tiers.py` and the unused
@@ -232,7 +615,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disposition, and the write-side alias recording in
   `_apply_fold_into_existing`) are unaffected.
 
+- Removed the reactive page-split disposition, the last oversized-page
+  path still standing once the `librarian.page_recompile` pipeline took
+  over the job (athenaeum#2550, slice S9 of the page-recompile design,
+  athenaeum#2525). `athenaeum split-oversize`, its `oversize_split.py`
+  module, and `dedup-oversize-escalations` (already gone since
+  athenaeum#2466) are all removed; invoking `split-oversize` now prints
+  which command replaces it (`athenaeum recompile`) and exits non-zero,
+  rather than the generic unrecognized-command error an older removal
+  gets. `check_page_size_gate`'s `split` branch, and the
+  `_perform_oversize_page_split`/`_build_split_child_pages` helpers it
+  alone called, are deleted from `tiers.py`; `librarian.oversize_page_action:
+  split` now reads as `review` (one warning per run, naming
+  `librarian.page_recompile.mode`, logged by `load_config`). The
+  `oversize_suppressed`/`oversize_split` run-summary counters are gone
+  from `models.py`/`batch.py`/`librarian.py` — `oversize_page`/
+  `oversize_split` remain valid, parseable archived-escalation types
+  (`OVERSIZE_ESCALATION_CONFLICT_TYPES` is unchanged), simply no longer
+  produced or counted. Applying a recompile plan now archives any open
+  oversize-family notice for that page (reason naming the plan id),
+  unless the notice still carries a parked observation, which stays
+  open. `log_demote` and `page_decompose.py`/the `page-split` decision
+  type are unaffected. See `docs/guides/upgrading.md` for the full
+  migration note.
+
 ### Changed
+
+- **Page recompile now restructures oversized pages automatically by
+  default; this is a real behaviour change, not just a new feature.**
+  `librarian.page_recompile.mode` defaults to `auto` (was `queue`) and
+  `librarian.page_recompile.auto_apply_class` defaults to `structure-only`
+  (was `none`): on an unconfigured install, the nightly pass now writes a
+  structure-only plan — a parent summary plus sub-pages, nothing moved to
+  another page, attached, or alias-moved — the moment it passes every
+  validation, with no decision item raised at all. A plan that touches
+  another page, or whose page carries a `type:` listed in the new
+  `librarian.page_recompile.never_auto_types` (default empty), is still
+  queued for your answer exactly as before, and a new
+  `librarian.page_recompile.max_auto_applies_per_run` (default equal to
+  the steady per-run page budget, 3) separately bounds how many of those
+  unattended writes happen in one run. See what the pass has done with
+  `athenaeum recompile list --applied` or `athenaeum status` (now fills
+  "applied in the last 7 days"); undo one with `athenaeum recompile undo
+  <plan-id>` — the same reversible path an operator-approved apply already
+  used. Set `librarian.page_recompile.mode: queue` to go back to asking
+  before every write, or `mode: off` to turn the whole pass off
+  (athenaeum#2549).
+
+- The startup pricing preflight now also covers the `page_recompile` and
+  `verify` model knobs, because it is derived from the registered knob set.
+  **Behaviour change for operators with a custom `pricing:` section** (which
+  REPLACES the code-default table rather than overlaying it): that table must
+  now price `claude-sonnet-5`, the default both new knobs resolve to, or
+  `athenaeum run` refuses to start — even though the nightly run itself never
+  calls either knob (athenaeum#2537).
 
 - Docs: security docs now state that erasure is not yet available
   (athenaeum#2454).

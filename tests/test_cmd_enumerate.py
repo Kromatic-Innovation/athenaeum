@@ -71,6 +71,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=[],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=knowledge,
             cache_dir=tmp_path / "cache",
@@ -95,6 +96,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=[],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=knowledge,
             cache_dir=tmp_path / "cache",
@@ -117,6 +119,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=[],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=knowledge,
             cache_dir=tmp_path / "cache",
@@ -142,6 +145,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=["google_contact_kromatic"],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=knowledge,
             cache_dir=tmp_path / "cache",
@@ -165,6 +169,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=["do_not_email"],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=knowledge,
             cache_dir=tmp_path / "cache",
@@ -186,6 +191,7 @@ class TestCmdEnumerate:
             cursor=None,
             field=[],
             with_pii=False,
+            include_split=False,
             audience=None,
             path=tmp_path / "no-such-knowledge",
             cache_dir=tmp_path / "cache",
@@ -238,3 +244,84 @@ class TestArgvWiring:
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert {h["uid"] for h in payload["hits"]} == {"u-alice", "u-bob"}
+
+
+class TestIncludeSplitFlag:
+    """Issue athenaeum#2538 AC7: ``--include-split`` includes a
+    split-created sub-page that is excluded by default."""
+
+    @staticmethod
+    def _wiki_with_split_child(tmp_path: Path) -> Path:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "parent.md").write_text(
+            "---\nuid: company-acme\ntype: company\nname: Acme\n---\n\nBody.\n"
+        )
+        # Real shape the now-retired `tiers.py:_build_split_child_pages`
+        # used to write (deleted by issue athenaeum#2550): only the legacy
+        # `split-from` row, no top-level `parent:` key.
+        (wiki / "split.md").write_text(
+            "---\nuid: company-acme-split\ntype: company\nname: Acme Split\n"
+            "related:\n  - uid: company-acme\n    role: split-from\n---\n\nBody.\n"
+        )
+        return knowledge
+
+    def test_excluded_by_default(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge = self._wiki_with_split_child(tmp_path)
+        args = argparse.Namespace(
+            entity_type="company",
+            where=[],
+            sort_key="name",
+            ascending=False,
+            limit=50,
+            cursor=None,
+            field=[],
+            with_pii=False,
+            include_split=False,
+            audience=None,
+            path=knowledge,
+            cache_dir=tmp_path / "cache",
+        )
+        rc = cmd_enumerate(args)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert {h["uid"] for h in payload["hits"]} == {"company-acme"}
+
+    def test_include_split_flag_includes_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge = self._wiki_with_split_child(tmp_path)
+        args = argparse.Namespace(
+            entity_type="company",
+            where=[],
+            sort_key="name",
+            ascending=False,
+            limit=50,
+            cursor=None,
+            field=[],
+            with_pii=False,
+            include_split=True,
+            audience=None,
+            path=knowledge,
+            cache_dir=tmp_path / "cache",
+        )
+        rc = cmd_enumerate(args)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert {h["uid"] for h in payload["hits"]} == {
+            "company-acme",
+            "company-acme-split",
+        }
+
+    def test_argv_parses_include_split_flag(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["enumerate", "--type", "company", "--include-split"])
+        assert args.include_split is True
+
+    def test_argv_default_is_false(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["enumerate", "--type", "company"])
+        assert args.include_split is False

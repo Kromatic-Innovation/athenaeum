@@ -53,7 +53,8 @@ are NOT librarian<->sibling cycle back-edges and stay deferred:
   propose_wiki_page_merges`` and ``from athenaeum.batch import
   process_batch_run`` — neither module imports librarian back; deferred for
   best-effort/optional-branch isolation, not cycle-breaking.
-- run loop: local ``from athenaeum.status import scan_page_sizes``.
+- run loop: local ``from athenaeum.status import build_page_recompile_backlog,
+  scan_page_backlog`` (issue athenaeum#2536; ``scan_page_sizes`` until then).
   ``status.py`` no longer imports librarian (it gets ``discover_raw_files``
   from ``intake`` now); this is a one-way edge kept deferred for best-effort
   page-size guardrail isolation.
@@ -142,6 +143,7 @@ from athenaeum.config import (
     resolve_heartbeat_interval,
     resolve_intake_runtime_floor,
     resolve_model_rates,
+    resolve_page_recompile_mode,
     resolve_person_registry_root,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -262,11 +264,13 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
     STARVATION_FIELD,
     STARVATION_STREAK_THRESHOLD,
     build_economics_and_alerts,
+    build_page_recompile_entry,
     read_combined_starvation_priority,
     read_stall_streaks,
     read_starvation_streaks,
     write_run_summary_record,
 )
+from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
@@ -2339,18 +2343,12 @@ def _apply_tier3_results(
 
     result.updated.extend(_admitted_updated_uids)
     result.escalated.extend(escalations)
-    # Issue athenaeum#1182: derived from the escalations just folded in above,
-    # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
-    # for why this is derived rather than an independent counter threaded
-    # through tier3_derive_actions's return tuple.
-    result.oversize_suppressed += sum(
-        1 for _e in escalations if _e.conflict_type == "oversize_page"
-    )
-    # Issue athenaeum#1248: same derivation, disjoint conflict_types — see
-    # ProcessingResult.oversize_split/oversize_log_demoted's docstrings.
-    result.oversize_split += sum(
-        1 for _e in escalations if _e.conflict_type == "oversize_split"
-    )
+    # Issue athenaeum#1248: derived from the escalations just folded in
+    # above, by conflict_type — see ProcessingResult.oversize_log_demoted's
+    # docstring for why this is derived rather than an independent counter
+    # threaded through tier3_derive_actions's return tuple. Issue
+    # athenaeum#2550 removed the sibling oversize_suppressed/oversize_split
+    # counting that used to sit here.
     result.oversize_log_demoted += sum(
         1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
     )
@@ -2637,6 +2635,22 @@ def process_one(
         if su_outcome.status == STRUCTURED_UPSERT_REFUSED:
             result.skipped.append(su_outcome.skipped_label)
             result.retain_raw = True
+            if su_outcome.field_group_misfits and not dry_run:
+                # Issue athenaeum#2197: a declared single-valued field-group
+                # misfit also raises, or grows, ONE schema-amendment
+                # proposal per (page type, field group) shape in the
+                # pending-decisions queue -- never a migration, never a
+                # config write (see athenaeum.schema_amendment_proposals's
+                # module docstring). Gated on `dry_run` (post-merge review
+                # of athenaeum#2197): a read-only preview must not append to
+                # the on-disk proposal ledger or create a visible pending
+                # decision, mirroring every other side-effecting write this
+                # function already guards the same way.
+                record_field_group_misfits(
+                    su_outcome.field_group_misfits,
+                    wiki_root=wiki_root,
+                    uid=su_outcome.uid,
+                )
         elif su_outcome.status == STRUCTURED_UPSERT_APPLIED:
             result.updated.append(su_outcome.uid)
         return result
@@ -5489,6 +5503,17 @@ class RunContext:
     # mirroring ``rule_proposals_summary``'s "disabled phase never touches
     # this field" contract immediately above).
     audit_nightly_drain_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2547: run-summary counts from
+    # ``_run_page_recompile_phase``
+    # (:meth:`athenaeum.page_recompile_nightly.PageRecompileRunSummary.to_dict`).
+    # ``None`` until that phase runs -- including when
+    # ``librarian.page_recompile.mode`` is ``off``, the one gate that makes
+    # this phase a no-op -- so "didn't run" stays distinguishable from "ran
+    # and planned nothing", the same contract
+    # ``rule_proposals_summary``/``audit_nightly_drain_summary`` document
+    # above. Unlike those two, this phase is ON by default: a ``None`` here
+    # on a normal nightly run means the mode was explicitly switched off.
+    page_recompile_summary: dict[str, Any] | None = None
     # Issue athenaeum#2020: run-summary counts from
     # ``_run_signal_mining_phase`` (``None`` until that phase runs,
     # including when its config gate --
@@ -5743,6 +5768,20 @@ class RunContext:
     # log line. See ``run_summary_log.REFUSAL_FIELD`` for the durable form.
     librarian_refusal: bool | None = None
 
+    # Issue athenaeum#2536: the oversized-page backlog block
+    # (``status.build_page_recompile_backlog``) measured by the athenaeum#310
+    # page-size guardrail near the end of ``run()`` — the SAME single wiki
+    # walk, so surfacing the backlog in the run summary costs no extra read
+    # (``status.scan_page_backlog`` produces the byte buckets that guardrail
+    # warns on AND the chars-based candidate scan in one pass). Stashed here
+    # rather than recomputed in ``emit_run_summary`` for exactly that
+    # reason. ``None`` means "never measured on this run" — true of every
+    # early-exit path that emits a summary before the guardrail runs
+    # (``stop_on_deadline``, the cluster-only/merge-only exits) — and omits
+    # the ledger key entirely rather than writing a falsely-healthy zero;
+    # see ``run_summary_log.build_page_recompile_entry``.
+    page_recompile_backlog: dict[str, Any] | None = None
+
     # Issue athenaeum#1184: cost/matches-per-file regression instrumentation.
     # ``total_matched`` sums ``ProcessingResult.matched`` (Tier-1 fan-out) across
     # every file the SYNCHRONOUS entity loop processed to completion.
@@ -5810,19 +5849,15 @@ class RunContext:
     # `emit_run_summary` computes its own consecutive-run streak over.
     stalled_sources: list[str] = field(default_factory=list)
 
-    # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
+    # Issue athenaeum#1248: page-size-invariant log_demote moves. UNLIKE
     # total_matched (documented as synchronous-only above), this counter
     # covers BOTH transports: the synchronous entity loop (summed the same
     # way total_degraded/total_truncated are, below) AND the batch-API
     # transport's two independent merge-dispatch sites (assembly + the
     # sync_merges finalize fallback in athenaeum.batch), via
-    # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
-    total_oversize_suppressed: int = 0
-    #: Issue athenaeum#1248: same cross-transport threading as
-    #: total_oversize_suppressed above, for the split/log_demote
-    #: dispositions — see ProcessingResult.oversize_split/
-    #: oversize_log_demoted's docstrings.
-    total_oversize_split: int = 0
+    # BatchRunResult.oversize_log_demoted / BatchCollectResult.oversize_log_demoted.
+    # Issue athenaeum#2550 removed this field's two siblings,
+    # total_oversize_suppressed and total_oversize_split.
     total_oversize_log_demoted: int = 0
 
     #: Issue athenaeum#1866: run-wide counts of tier-0 person-hint verdicts,
@@ -6250,6 +6285,13 @@ class RunContext:
                 economics=economics,
                 alerts=econ_alerts,
                 refusal=refusal,
+                # Issue athenaeum#2536 AC6: the oversized-page backlog this
+                # run measured (see `page_recompile_backlog`'s own comment
+                # for why it is read, not recomputed, here). The builder
+                # returns None for an unmeasured run, which omits the key.
+                page_recompile=build_page_recompile_entry(
+                    self.page_recompile_backlog
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: durable ledger write skipped: %s", exc)
@@ -6354,6 +6396,10 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
     instead of repeating the athenaeum#1174 defect this function's derivation
     exists to prevent.
     """
+    from athenaeum.page_recompile_plan import (
+        _get_page_recompile_model,
+        _get_verify_model,
+    )
     from athenaeum.pii_attribution import _get_attribution_model_for_preflight
     from athenaeum.query_topics import _get_topic_model
     from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
@@ -6370,6 +6416,11 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
         "reasoning_t2": get_t2_model,
         "rule_proposals": _get_rule_proposals_model,
         "attribution": _get_attribution_model_for_preflight,
+        # athenaeum#2537: both knobs the page-recompile planner routes. The
+        # ``page_recompile`` getter resolves the ``verify`` one internally
+        # for its own default, so the pair cannot drift.
+        "page_recompile": _get_page_recompile_model,
+        "verify": _get_verify_model,
     }
 
 
@@ -6425,13 +6476,22 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
 #:   at escalation time (out of scope here; issue athenaeum#2212), never by
 #:   this module's bulk entity/merge pipeline — mirroring ``rule_proposals``,
 #:   not a routed knob every run serves.
+#: * ``page_recompile`` / ``verify`` (issue athenaeum#2537) -- the
+#:   page-recompile planner (``athenaeum recompile plan``) is an
+#:   operator-invoked, shadow-only CLI pass that builds its own client for
+#:   the one page it is asked about. It is not a phase of this module's
+#:   bulk entity/merge pipeline at all, so folding either knob into the
+#:   per-knob client cache would build two clients at startup for work no
+#:   ``athenaeum run`` ever does. Same posture as ``rule_proposals``.
 #:
 #: Naively setting ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` would
-#: silently fold all three into the client-cache pipeline — a behaviour
+#: silently fold all five into the client-cache pipeline — a behaviour
 #: change none of these knobs' own issues asked for (in ``rule_proposals``'s
 #: case, it would also mean building a real LLM client at startup for a
 #: phase that is off by default).
-_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals", "attribution"})
+_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset(
+    {"topic", "rule_proposals", "attribution", "page_recompile", "verify"}
+)
 
 #: The knobs the librarian's entity/merge pipeline serves, each through its
 #: OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
@@ -6449,7 +6509,7 @@ _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals", "a
 #: ``tests/test_pricing_config.py::TestLibrarianRoutedKnobsDerivation``
 #: asserts ``set(_LIBRARIAN_ROUTED_KNOBS) | _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
 #: == set(prompt_registry.KNOBS)`` (with no overlap) at TEST time instead, so
-#: a ninth knob added to ``_META_ROWS`` without an explicit routing decision
+#: an eleventh knob added to ``_META_ROWS`` without an explicit routing decision
 #: here still fails loudly — just via a test, not a runtime import.
 _LIBRARIAN_ROUTED_KNOBS = (
     "classify",
@@ -7364,6 +7424,130 @@ def _run_audit_nightly_drain_phase(ctx: RunContext) -> None:
         )
 
 
+def _run_page_recompile_phase(ctx: RunContext) -> None:
+    """Nightly page-recompile pass (issue athenaeum#2547, slice S6, and
+    issue athenaeum#2549, slice S8, of athenaeum#2525) -- the first thing in
+    the nightly run that acts on an oversized page at all.
+
+    Delegates entirely to
+    :func:`athenaeum.page_recompile_nightly.run_nightly_page_recompile` --
+    the candidate walk, the per-run budget, the mode handling, the
+    suppression checks, the auto-apply decision and the queueing all live
+    there (see that module's docstring); this function is only the
+    librarian wiring, modelled on :func:`_run_rule_proposal_phase` directly
+    above for client construction, knob attribution and deadline
+    participation.
+
+    **ON by default, unlike every other phase in this family.** The three
+    phases above it are opt-in because each adds recurring unattended spend
+    an operator must consciously accept. The operator ruling on
+    athenaeum#2525 made the opposite call here, and gave the reason: nothing
+    in the nightly run acted on an oversized page, so a pass that is off by
+    default would have left the page-size invariant permanently unenforced.
+    The gate is therefore ``librarian.page_recompile.mode: off``
+    (:func:`~athenaeum.config.resolve_page_recompile_mode`) -- and on that
+    value this function returns BEFORE building a client, so ``off`` really
+    does cost nothing, not merely nothing visible (athenaeum#2547 AC2).
+    The default mode is ``auto`` (athenaeum#2549): a structure-only plan
+    that passes every validation is applied right here with no decision
+    item at all; every other plan -- ``cross-page`` always, and anything
+    else when ``auto_apply_class``/``never_auto_types`` says so -- is still
+    drafted and raised as a ``page-recompile`` decision item, and no page
+    outside the auto-applied class is ever written without an operator's
+    answer.
+
+    **Placement** (AC1): called from ``run()`` after the entity-tier and
+    auto-memory phases and immediately before the finalize phase, beside the
+    other late LLM-spend phases -- so it is NOT reached by a ``merge_only``
+    or ``cluster_only`` run (both return above this call site, same as
+    finalize), and it runs only after the phases that claim the shared
+    deadline first have had it. Skipped whenever ``ctx.deadline_tripped``,
+    mirroring the auto-memory block's own guard: a run that already blew its
+    wall-clock budget must not open a brand-new LLM knob afterward.
+
+    **Deadline participation carves NO share of its own** -- the operator
+    ruling on athenaeum#2525 says so outright, and the reason is exactly the
+    one :func:`_run_rule_proposal_phase`'s docstring gives for itself: a
+    fresh share taken by a phase that runs LAST would extend the run's total
+    wall-clock time past ``max_runtime``, which is the one thing
+    ``run_deadline`` exists to bound. It participates in
+    ``ctx.run_deadline`` directly instead: skipped entirely when already
+    expired, and re-checked between pages via ``deadline_check`` so a run
+    that trips the deadline partway through the backlog stops cleanly.
+
+    **Heartbeat** (AC10): ``ctx.tick_heartbeat`` is passed through and called
+    between pages, so a long pass refreshes the run lock's heartbeat and is
+    never mistaken for wedged -- the same per-boundary tick the entity loop
+    makes per file.
+
+    **Spend-ledger accounting** (AC9): the phase's calls are recorded into
+    ``ctx.usage`` by :func:`~athenaeum.page_recompile_plan.plan_page`, which
+    tags each one with the knob that made it, so a page-recompile night is
+    attributed correctly by ``athenaeum spend --by-knob`` and counts against
+    the run's own ``max_api_calls`` ceiling. The knob's resolved
+    provider/model are recorded into
+    ``ctx.knob_providers``/``ctx.knob_models`` so
+    ``spend.record_spend_per_knob_provider`` attributes this phase's spend to
+    its own knob rather than the unmodeled default. As with every other
+    phase, the finalize phase's single ledger write covers these tokens; this
+    phase writes no spend row itself.
+    """
+    mode = resolve_page_recompile_mode(ctx.config)
+    if mode == "off":
+        ctx.run_profile.append(("page-recompile", 0.0, {"reason": "off"}))
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.run_profile.append(
+            ("page-recompile", 0.0, {"reason": "deadline-tripped", "mode": mode})
+        )
+        return
+
+    _start = time.monotonic()
+    try:
+        from athenaeum.page_recompile_nightly import (
+            PAGE_RECOMPILE_KNOB,
+            run_nightly_page_recompile,
+        )
+        from athenaeum.page_recompile_plan import _get_page_recompile_model
+
+        _provider = resolve_provider(
+            ctx.config, knob=PAGE_RECOMPILE_KNOB, default=ctx.provider
+        )
+        ctx.knob_providers[PAGE_RECOMPILE_KNOB] = _provider
+        ctx.knob_models[PAGE_RECOMPILE_KNOB] = _get_page_recompile_model(ctx.config)
+        client = build_llm_client(
+            ctx.config,
+            knob=PAGE_RECOMPILE_KNOB,
+            api_key=ctx.api_key,
+            max_retries=3,
+        )
+        summary = run_nightly_page_recompile(
+            ctx.wiki_root,
+            client=client,
+            config=ctx.config,
+            now=ctx.now.date() if ctx.now is not None else None,
+            usage=ctx.usage,
+            deadline_check=ctx.deadline_exceeded,
+            heartbeat=ctx.tick_heartbeat,
+            dry_run=ctx.dry_run,
+        )
+    except Exception:
+        # A defect in this phase must never change a run's exit code; every
+        # other late phase in this family is wrapped the same way
+        # (`log.exception` re-raises nothing, so BLE001 does not fire on a
+        # bare `except Exception:` that logs the traceback).
+        log.exception("page-recompile phase failed; continuing run")
+        ctx.run_profile.append(
+            ("page-recompile", time.monotonic() - _start, {"reason": "failed"})
+        )
+        return
+
+    ctx.page_recompile_summary = summary.to_dict()
+    ctx.run_profile.append(
+        ("page-recompile", time.monotonic() - _start, summary.as_profile_fields())
+    )
+
+
 def _run_signal_mining_phase(ctx: RunContext) -> None:
     """Self-tuning loop nightly wiring (issue athenaeum#2020, athenaeum#719
     Plan steps 7-8): mining -> dimension-proposal drafting, behind ONE
@@ -8067,6 +8251,15 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
             ctx.wiki_root,
             auto_merge=auto_merge,
             dry_run=ctx.dry_run,
+            # Issue athenaeum#2514 AC1: the scan needs the run's config to
+            # resolve `librarian.rejected_merge_cooldown_days` — without it
+            # this proposer would honour prior rulings on a DIFFERENT decay
+            # schedule (the hard default) from the other two. Harmless for
+            # the only other thing this parameter gates, the athenaeum#2364
+            # content-comparator auto-apply: that path needs a comparator
+            # verdict of `duplicate`, which Gate 2 can only reach with an
+            # LLM client, and this call site passes none.
+            config=ctx.config,
             # Issue athenaeum#1627: audit each page in a collision group
             # before its merge proposal is written. Dry-run never
             # reaches write_pending_merge (see resolve_name_collisions'
@@ -8567,8 +8760,6 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_skipped += outcome.skipped
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
-    ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
-    ctx.total_oversize_split += outcome.oversize_split  # issue athenaeum#1248
     ctx.total_oversize_log_demoted += (
         outcome.oversize_log_demoted
     )  # issue athenaeum#1248
@@ -9005,12 +9196,6 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
-                    ctx.total_oversize_suppressed = (
-                        outcome.oversize_suppressed
-                    )  # issue athenaeum#1182
-                    ctx.total_oversize_split = (
-                        outcome.oversize_split
-                    )  # issue athenaeum#1248
                     ctx.total_oversize_log_demoted = (
                         outcome.oversize_log_demoted
                     )  # issue athenaeum#1248
@@ -9611,13 +9796,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.total_person_hint_verdicts[_verdict] = (
                                 ctx.total_person_hint_verdicts.get(_verdict, 0) + 1
                             )
-                        # Issue athenaeum#1182: same getattr-tolerance rationale as
+                        # Issue athenaeum#1248: same getattr-tolerance rationale as
                         # degraded/truncated/matched above.
-                        ctx.total_oversize_suppressed += getattr(
-                            result, "oversize_suppressed", 0
-                        )
-                        # Issue athenaeum#1248: same getattr-tolerance rationale.
-                        ctx.total_oversize_split += getattr(result, "oversize_split", 0)
                         ctx.total_oversize_log_demoted += getattr(
                             result, "oversize_log_demoted", 0
                         )
@@ -10081,28 +10261,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         if ctx.total_uid_bind_mismatch
                         else {}
                     ),
-                    # athenaeum#1182: pages the page-size invariant suppressed a
-                    # merge into this run (routed to "review" escalation
-                    # instead, page left unmodified). Only rendered when
-                    # non-zero, mirroring the degraded/truncated convention
-                    # immediately above.
-                    **(
-                        {"oversize_suppressed": ctx.total_oversize_suppressed}
-                        if ctx.total_oversize_suppressed
-                        else {}
-                    ),
-                    # athenaeum#1248: oversize pages the gate actually SPLIT (into a
-                    # hub + linked atomic pages) or DEMOTED to a log this run —
-                    # kept as separate fields from oversize_suppressed above so
-                    # a run summary makes clear which disposition fired for
-                    # each page, never conflating "escalated for a human" with
-                    # "already restructured automatically". Only rendered when
-                    # non-zero, same convention.
-                    **(
-                        {"oversize_split": ctx.total_oversize_split}
-                        if ctx.total_oversize_split
-                        else {}
-                    ),
+                    # athenaeum#1248: oversize pages the gate actually DEMOTED to
+                    # a log this run. Only rendered when non-zero, mirroring
+                    # the degraded/truncated convention above. Issue
+                    # athenaeum#2550 removed this field's two siblings,
+                    # ``oversize_suppressed`` (the retired "review escalates
+                    # and counts" shape, dead since athenaeum#2078) and
+                    # ``oversize_split`` (the retired reactive split
+                    # disposition), from this summary.
                     **(
                         {"oversize_log_demoted": ctx.total_oversize_log_demoted}
                         if ctx.total_oversize_log_demoted
@@ -11371,13 +11537,38 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # want splitting into linked sub-entities. Never fatal, never mutating —
     # any failure here degrades to a single non-fatal note. The split-proposal
     # workflow is explicitly out of scope (issue athenaeum#310, moscow:could).
+    #
+    # Issue athenaeum#2536: the SAME walk now also produces the chars-based
+    # page-recompile candidate scan, stashed on `ctx` for the run summary
+    # (`RunContext.page_recompile_backlog`). One wiki read serves both the
+    # byte-based WARNING below and the backlog entry — `scan_page_backlog`
+    # exists precisely so neither surface pays for a second traversal.
     try:
-        from athenaeum.config import resolve_page_flag_bytes, resolve_page_warn_bytes
-        from athenaeum.status import scan_page_sizes
+        from athenaeum.config import (
+            resolve_oversize_hard_ceiling_chars,
+            resolve_page_flag_bytes,
+            resolve_page_size_threshold_chars,
+            resolve_page_warn_bytes,
+        )
+        from athenaeum.status import build_page_recompile_backlog, scan_page_backlog
 
         _pw_bytes = resolve_page_warn_bytes(ctx.config)
         _pf_bytes = resolve_page_flag_bytes(ctx.config)
-        _, _pages_flag = scan_page_sizes(ctx.wiki_root, _pw_bytes, _pf_bytes)
+        _threshold_chars = resolve_page_size_threshold_chars(ctx.config)
+        _ceiling_chars = resolve_oversize_hard_ceiling_chars(ctx.config)
+        _page_walk = scan_page_backlog(
+            ctx.wiki_root,
+            warn_bytes=_pw_bytes,
+            flag_bytes=_pf_bytes,
+            threshold_chars=_threshold_chars,
+            ceiling_chars=_ceiling_chars,
+        )
+        _pages_flag = _page_walk.pages_flag
+        ctx.page_recompile_backlog = build_page_recompile_backlog(
+            _page_walk.recompile,
+            threshold_chars=_threshold_chars,
+            ceiling_chars=_ceiling_chars,
+        )
         # Issue athenaeum#490 (slice A) / athenaeum#310: aggregate into ONE health-signal count
         # line rather than one WARNING per page — a corpus with ~35 oversized
         # pages previously buried the rest of the nightly log under 35 near-
@@ -11930,6 +12121,20 @@ def run(
     # entity/auto-memory have already spent whatever `ctx.run_deadline`
     # allowed — see `_run_audit_nightly_drain_phase`'s own docstring.
     _run_audit_nightly_drain_phase(ctx)
+
+    # Phase: the nightly page-recompile pass (issue athenaeum#2547, and
+    # issue athenaeum#2549 for the auto-apply its default mode now does) —
+    # the ONE phase in this late family that is ON by default, because until
+    # it landed nothing in the nightly run acted on an oversized page at all
+    # (operator ruling on athenaeum#2525). Its off switch is
+    # `librarian.page_recompile.mode: off`; its default mode (`auto`)
+    # applies a validated structure-only plan with no decision item, and
+    # still writes no page outside that class without an operator's answer.
+    # Runs here, after entity/auto-memory and immediately before finalize,
+    # and is not reached by a merge_only/cluster_only run — see
+    # `_run_page_recompile_phase`'s own docstring for the full ordering,
+    # deadline and no-reserved-share rationale.
+    _run_page_recompile_phase(ctx)
 
     # Phase: self-tuning loop mining + dimension-proposal drafting (issue
     # athenaeum#2020) — config-gated OFF by default

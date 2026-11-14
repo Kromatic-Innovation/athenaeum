@@ -36,6 +36,31 @@ A bare email address, or a query phrased as a lookup question, bypasses the rank
 entirely and resolves as an exact reverse lookup against the identity registry instead of a
 BM25/vector search.
 
+## Parent and sub-page relations
+
+A page can declare a parent/child relation to another page — set by hand, by a fold
+decision, or as the by-product of splitting an oversized page. `recall` surfaces that
+relation on a hit without changing which pages come back or in what order:
+
+- A hit on a **child** page renders a `**Parent:** <uid> — <Name>` line.
+- A hit on a **parent** page renders a `**Sub-pages:** <uid> — <Name>, ...` line, capped at
+  a configurable number with a count of the remainder.
+- Both lines pass through the exact same audience and policy filter the hit itself passed —
+  a sub-page the caller isn't authorized to see is neither named nor counted toward the
+  remainder.
+- A uid already named on one of these two lines is dropped from the hit's `**Links:**` line,
+  so it is never shown twice.
+- A sub-page is never pulled into the result set on its own — these are rendering additions
+  to an already-selected hit, not a ranking or selection change.
+
+**Sub-pages created by a split are hidden from listings by default.** A page attached under
+a parent, or folded into one, is a real entity of its own type and always appears in
+`enumerate_entities` results and in `entity_schema`'s page counts. A page created by
+*splitting* an oversized page inherits its parent's type, so it is excluded from both by
+default — otherwise a listing of every page of a given type would include every split-off
+fragment of every other page of that type. Pass `include_split=True` to `enumerate_entities`
+(or `--include-split` on the CLI) to include them.
+
 ## Per-claim provenance: the `footnotes` map
 
 A compiled page is itself a source for the level above, so an agent following

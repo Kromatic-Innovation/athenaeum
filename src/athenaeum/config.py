@@ -331,6 +331,26 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
                 reason,
             )
 
+    # Issue athenaeum#2550: `librarian.oversize_page_action: split` is
+    # deprecated, not removed outright like `_REMOVED_CONFIG_KEYS` above --
+    # the KEY is still read (`resolve_oversize_page_action`), only this one
+    # VALUE is retired, mapped to "review" there. Warned exactly once per
+    # run, here, because `load_config` itself runs exactly once per run;
+    # `resolve_oversize_page_action` is called once per oversized page and
+    # would warn once per page if it warned at all.
+    librarian_cfg = result.get("librarian")
+    if (
+        isinstance(librarian_cfg, dict)
+        and librarian_cfg.get("oversize_page_action") == "split"
+    ):
+        logger.warning(
+            "librarian.oversize_page_action: split in %s is deprecated (issue "
+            "athenaeum#2550) and is read as 'review' -- the reactive split "
+            "disposition is retired in favour of the unattended "
+            "librarian.page_recompile pipeline; see librarian.page_recompile.mode.",
+            config_path,
+        )
+
     return result
 
 
@@ -1757,6 +1777,53 @@ def resolve_audit_sample_rate_attribution(config: dict[str, Any] | None) -> floa
     )
 
 
+#: Default per-cluster cap on calibration audit items (issue athenaeum#2521).
+DEFAULT_AUDIT_MAX_PER_CLUSTER = 5
+
+
+def resolve_audit_max_per_cluster(config: dict[str, Any] | None) -> int:
+    """Resolve the per-``cluster_id`` cap on calibration audit items (athenaeum#2521).
+
+    :func:`athenaeum.calibration.sample_tier_decision` draws each ``(tier,
+    proposal_id)`` independently at a flat rate
+    (:func:`resolve_audit_sample_rate_t1_rejects` etc.) — a uniform per-item
+    rate still lets one abnormally LARGE ``cluster_id`` dominate the sample
+    purely by volume: every pairwise T1/T2 screen generated from one
+    near-duplicate-page burst shares the same ``cluster_id``
+    (:func:`athenaeum.cluster_comparator.t1_rejects_pair_paths` /
+    :mod:`athenaeum.wiki_dedupe`), so a single oversized burst draws many
+    more independent samples than a normal, small cluster at the identical
+    rate. Observed live: 140+ of 158 human-reviewed T1-reject audit samples
+    came from one such burst family (athenaeum#2521).
+
+    This caps how many ``kind: "audit"`` records any one ``cluster_id`` may
+    contribute to the calibration ledger; once a cluster has already
+    reached the cap, further draws from it are skipped outright — the
+    sample for that run is simply smaller, never backfilled from another
+    cluster (a smaller, more representative sample is the point; silently
+    reallocating the skipped slot would just move the skew elsewhere).
+    Callers that have no ``cluster_id`` to offer (e.g. the ATTRIBUTION
+    tier) are unaffected — the cap only applies when a caller supplies one.
+
+    Env ``ATHENAEUM_AUDIT_MAX_PER_CLUSTER`` > yaml
+    ``librarian.audit_max_per_cluster`` > :data:`DEFAULT_AUDIT_MAX_PER_CLUSTER`.
+    ``<= 0`` disables the cap (every draw is kept, pre-athenaeum#2521 behavior).
+    """
+    value = _env_number("ATHENAEUM_AUDIT_MAX_PER_CLUSTER", int)
+    if value is not None:
+        return value
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            raw = librarian_cfg.get("audit_max_per_cluster")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return DEFAULT_AUDIT_MAX_PER_CLUSTER
+    return DEFAULT_AUDIT_MAX_PER_CLUSTER
+
+
 def resolve_default_acceptance_audit_sample_rate(config: dict[str, Any] | None) -> float:
     """Resolve the share of human DEFAULT-ACCEPTANCES sampled for second
     review (issue athenaeum#1996 ratchet guard 2).
@@ -2711,6 +2778,14 @@ def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
     is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
     never a block. See :func:`_resolve_positive_int_knob` for the coercion
     contract.
+
+    DEPRECATED (issue athenaeum#2536), removed in ``0.25.0``: the byte
+    vocabulary disagrees with the split machinery, which measures BODY
+    chars against ``librarian.page_size_threshold_chars`` /
+    ``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+    Read ``athenaeum status``'s chars-based page-recompile backlog block
+    (``page_recompile`` in ``--json``) instead; this knob and its
+    ``Oversized pages (warn/flag)`` status line go away in that release.
     """
     return _resolve_positive_int_knob(config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192)
 
@@ -2723,6 +2798,14 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     ``athenaeum run``) as one that should be broken into linked sub-entities.
     Kept comfortably below the tier-3 merge body cap so flagging precedes any
     hard merge-budget pressure. See :func:`_resolve_positive_int_knob`.
+
+    DEPRECATED (issue athenaeum#2536), removed in ``0.25.0``: the byte
+    vocabulary disagrees with the split machinery, which measures BODY
+    chars against ``librarian.page_size_threshold_chars`` /
+    ``librarian.oversize_hard_ceiling_chars`` and honours ``needs_split``.
+    Read ``athenaeum status``'s chars-based page-recompile backlog block
+    (``page_recompile`` in ``--json``) instead; this knob and its
+    ``Oversized pages (warn/flag)`` status line go away in that release.
     """
     return _resolve_positive_int_knob(config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384)
 
@@ -3341,6 +3424,32 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
             if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
                 return raw
     return 1200
+
+
+def resolve_recall_sub_pages_cap(config: dict[str, Any] | None) -> int:
+    """Resolve how many of a parent hit's sub-pages ``recall`` names on its
+    ``**Sub-pages:**`` line before folding the rest into a remainder count
+    (issue athenaeum#2538).
+
+    Precedence: ``ATHENAEUM_RECALL_SUB_PAGES_CAP`` env > ``recall.sub_pages_cap``
+    yaml > ``5``. A malformed env value WARNs and falls through (see
+    :func:`_env_number`); a non-int / ``<= 0`` yaml value falls through to
+    the default. No seed in ``_DEFAULTS`` (issue athenaeum#231). The cap is
+    applied AFTER the same audience/policy filter the hit itself passed
+    through (:func:`athenaeum.mcp_server._render_relation_lines`) — a
+    sub-page the caller may not see is excluded before this cap, and
+    therefore before the remainder count, ever sees it.
+    """
+    value = _env_number("ATHENAEUM_RECALL_SUB_PAGES_CAP", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("recall")
+        if isinstance(cfg, dict):
+            raw = cfg.get("sub_pages_cap")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return 5
 
 
 # Issue athenaeum#1783: the push-path relevance-bounded cap's hard CEILING --
@@ -4484,23 +4593,30 @@ def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> i
     return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 
 
-#: Issue athenaeum#2078 AC3: the body size above which ``athenaeum
-#: split-oversize --auto`` splits a page WITHOUT per-page operator approval.
-#: Four times :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`: a page this far past
-#: the 10,000-char invariant has outgrown any plausible atomic form, whereas
-#: one just over it is a judgement call the operator approves by uid.
+#: Issue athenaeum#2078 AC3: the body size above which a page-recompile
+#: candidate is treated as most urgent -- ordered first
+#: (:func:`athenaeum.page_recompile._candidate_sort_key`) and, while any
+#: candidate remains over this ceiling, given the larger
+#: ``opening_max_pages_per_run`` nightly budget instead of the steady-state
+#: ``max_pages_per_run`` one (:func:`athenaeum.page_recompile_nightly.page_budget`,
+#: issue athenaeum#2525's operator ruling). Originally the threshold
+#: ``athenaeum split-oversize --auto`` (retired by issue athenaeum#2550)
+#: split past WITHOUT per-page operator approval -- this knob outlived
+#: that command. Four times :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`: a
+#: page this far past the 10,000-char invariant has outgrown any plausible
+#: atomic form, whereas one just over it is a judgement call.
 DEFAULT_OVERSIZE_HARD_CEILING_CHARS = 40_000
 
 
 def resolve_oversize_hard_ceiling_chars(config: dict[str, Any] | None = None) -> int:
     """Resolve ``librarian.oversize_hard_ceiling_chars`` (issue athenaeum#2078).
 
-    The body size above which ``athenaeum split-oversize --auto`` splits a
-    page without per-page approval; pages between the page-size threshold and
-    this ceiling are split only when the operator names them with ``--uid``.
-    Same validation contract as :func:`resolve_page_size_threshold_chars`:
-    must be ``>= 1`` (bool rejected as an int subclass); anything else falls
-    back to :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+    The body size above which a page-recompile candidate is treated as
+    most urgent -- see :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`'s own
+    comment for the current consumers. Same validation contract as
+    :func:`resolve_page_size_threshold_chars`: must be ``>= 1`` (bool
+    rejected as an int subclass); anything else falls back to
+    :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -4509,6 +4625,522 @@ def resolve_oversize_hard_ceiling_chars(config: dict[str, Any] | None = None) ->
             if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
                 return raw
     return DEFAULT_OVERSIZE_HARD_CEILING_CHARS
+
+
+#: Issue athenaeum#2540 AC3: the recompile applier refuses a structure-only
+#: plan that would leave the parent page's own prose (its cited summary plus
+#: every ``parent``-disposed unit, BEFORE the generated Sub-pages link list)
+#: under this many characters — a parent reduced to "nothing but links" is
+#: exactly the link-hub degradation athenaeum#2525's operator ruling forbids.
+#: 200 chars is roughly one short paragraph: enough to require genuine prose
+#: beyond a bare list of ``- [[uid|name]]`` rows, small enough that a
+#: legitimately thin parent (a short cited summary, no ``parent`` units left)
+#: still clears it.
+DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS = 200
+
+
+def resolve_page_recompile_min_parent_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.min_parent_chars`` (issue athenaeum#2540 AC3).
+
+    Only a yaml layer (no ``ATHENAEUM_*`` env override) — this is a per-corpus
+    editorial judgement call, not a cost/behavior toggle an operator needs to
+    flip from a shell one-off. Must be a non-negative, non-bool int; anything
+    else (missing key/section, wrong type, negative) falls back to
+    :data:`DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("min_parent_chars")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                    return raw
+    return DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS
+
+
+#: Issue athenaeum#2540 AC11: default ON — the applier merges near-duplicate
+#: sections it validates (every citation and footnote from the merged
+#: originals carried forward, each original reachable via the apply's own
+#: snapshot commit per AC9) rather than keeping every originally-proposed
+#: group separate.
+DEFAULT_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES = True
+
+
+def resolve_page_recompile_merge_near_duplicates(config: dict[str, Any] | None = None) -> bool:
+    """Resolve ``librarian.page_recompile.merge_near_duplicates`` (issue athenaeum#2540 AC11).
+
+    Default ``True``. With this ``False``, the applier re-plans away any
+    ``merge`` group a plan carries (each merge group's units fall back to
+    separate ``child`` placement) rather than writing the merged text — a
+    kill switch for the merge guarantee, mirroring
+    :func:`resolve_section_scoped_merge_enabled`'s own "behavioral change
+    needs an off switch" shape.
+
+    Env ``ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`` (``1``/``true``/
+    ``yes``/``on``, case-insensitive) > yaml
+    ``librarian.page_recompile.merge_near_duplicates`` > default ``True``.
+    Non-bool yaml values and unrecognized env strings fall through to on.
+    """
+    env = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("merge_near_duplicates")
+                if isinstance(raw, bool):
+                    return raw
+    return DEFAULT_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES
+
+
+#: Issue athenaeum#2540 AC12: the fraction of ``page_size_threshold_chars``
+#: above which ``name_structure`` must NOT propose folding a split-created
+#: sub-page back into its parent. 0.5 -- a sub-page that, combined with its
+#: parent, would already spend half the page-size budget is clearly not the
+#: "one entity written down twice" shape ``name_structure``'s qualified-name
+#: scan exists to catch; proposing that merge would just have the oversize
+#: gate split it right back apart (the same oscillation
+#: :func:`athenaeum.name_structure.merged_body_within_page_size_threshold`'s
+#: own docstring already names as the thing to avoid).
+DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION = 0.5
+
+
+def resolve_page_recompile_rejoin_fraction(config: dict[str, Any] | None = None) -> float:
+    """Resolve ``librarian.page_recompile.rejoin_fraction`` (issue athenaeum#2540 AC12).
+
+    Only a yaml layer, same rationale as
+    :func:`resolve_page_recompile_min_parent_chars`. Must be a positive,
+    non-bool number ``<= 1.0``; anything else falls back to
+    :data:`DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get("rejoin_fraction")
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                    value = float(raw)
+                    if 0.0 < value <= 1.0:
+                        return value
+    return DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION
+
+
+# ---------------------------------------------------------------------------
+# The nightly page-recompile phase's own knobs (issue athenaeum#2547, slice
+# S6 of athenaeum#2525). The phase is ON by default; every knob below is how
+# an operator bounds, narrows or switches it off. The TRIGGER threshold is
+# NOT here -- it is the existing ``librarian.page_size_threshold_chars``
+# (:func:`resolve_page_size_threshold_chars`), which is what decides whether
+# a page is a candidate at all; these knobs only decide what the nightly
+# phase does with the candidates that threshold already produced.
+# ---------------------------------------------------------------------------
+
+#: The nightly page-recompile phase's mode (issue athenaeum#2547 AC2), in
+#: order of increasing effect:
+#:
+#: * ``off`` -- the phase returns immediately: no client is built and no
+#:   model call is made. THE off switch for the whole pass.
+#: * ``shadow`` -- plans are drafted and recorded in
+#:   ``wiki/_page_recompiles.jsonl``, but no page is written and no decision
+#:   item is raised.
+#: * ``queue`` -- plans are drafted AND raised as ``page-recompile`` decision
+#:   items for an operator to approve, partly approve or reject.
+#: * ``auto`` -- THE DEFAULT (issue athenaeum#2549). A plan that is
+#:   ``structure-only`` (:data:`athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY`)
+#:   and passes every validation is applied in the nightly phase with no
+#:   decision item, when :data:`PAGE_RECOMPILE_AUTO_APPLY_CLASSES`'
+#:   ``auto_apply_class`` is ``structure-only`` (also the default). A
+#:   cross-page plan is never auto-applied -- it is always queued, in every
+#:   mode, the same interlock athenaeum#2548 built. With ``auto_apply_class:
+#:   none``, ``auto`` queues everything, same as ``queue``.
+PAGE_RECOMPILE_MODES: tuple[str, ...] = ("off", "shadow", "queue", "auto")
+
+#: Issue athenaeum#2549: ``auto`` -- the operator ruling on athenaeum#2525 made
+#: unattended structure-only recompiles the default install behaviour, relying
+#: on the undo path rather than an operator's answer. ``queue`` (ask before
+#: every write) and ``off`` are both still one yaml line away.
+DEFAULT_PAGE_RECOMPILE_MODE = "auto"
+
+
+def resolve_page_recompile_mode(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.page_recompile.mode`` (issues athenaeum#2547 AC2,
+    athenaeum#2549 AC1).
+
+    One of :data:`PAGE_RECOMPILE_MODES`. Env
+    ``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
+    ``librarian.page_recompile.mode`` > default
+    :data:`DEFAULT_PAGE_RECOMPILE_MODE`.
+
+    **An unknown value falls back to the default and logs a WARNING** (the
+    AC asks for exactly this). Deliberately not a hard error: a typo in one
+    optional key must not take the whole nightly run down. The fallback is
+    the DEFAULT mode, not necessarily the most conservative one -- as of
+    athenaeum#2549 that is ``auto``, which the operator ruling on
+    athenaeum#2525 made the safe-by-construction choice: it only ever writes
+    a ``structure-only`` plan that passed every validation, and every write
+    is reversible with ``athenaeum recompile undo``. Case- and
+    whitespace-insensitive, so ``Queue`` and `` queue `` resolve rather than
+    warning.
+    """
+    raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_MODE")
+    origin = "ATHENAEUM_PAGE_RECOMPILE_MODE"
+    if raw is None:
+        origin = "librarian.page_recompile.mode"
+        if isinstance(config, dict):
+            librarian_cfg = config.get("librarian")
+            if isinstance(librarian_cfg, dict):
+                section = librarian_cfg.get("page_recompile")
+                if isinstance(section, dict):
+                    raw = section.get("mode")
+    if raw is None:
+        return DEFAULT_PAGE_RECOMPILE_MODE
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate in PAGE_RECOMPILE_MODES:
+            return candidate
+    logger.warning(
+        "%s: unknown page-recompile mode %r; falling back to %r (valid: %s)",
+        origin,
+        raw,
+        DEFAULT_PAGE_RECOMPILE_MODE,
+        ", ".join(PAGE_RECOMPILE_MODES),
+    )
+    return DEFAULT_PAGE_RECOMPILE_MODE
+
+
+#: The plan scopes the nightly phase may apply WITHOUT an operator answer
+#: (issue athenaeum#2547 AC3). ``none`` applies nothing unattended;
+#: ``structure-only`` (issue athenaeum#2549, the default) authorises the
+#: phase to apply a validated ``structure-only`` plan itself, with no
+#: decision item. A ``cross-page`` plan is never a member of either class's
+#: authorisation -- see :mod:`athenaeum.page_recompile_apply`'s approval
+#: interlock, which this knob never bypasses.
+PAGE_RECOMPILE_AUTO_APPLY_CLASSES: tuple[str, ...] = ("none", "structure-only")
+
+#: Issue athenaeum#2549: ``structure-only``. The operator ruling on
+#: athenaeum#2525 draws the unattended-write line at "touches no other
+#: page" -- exactly the scope :func:`athenaeum.page_recompile_plan.classify_plan_scope`
+#: already computes, and exactly the scope the applier already lets apply
+#: with no verdict at all (see ``write_apply``'s own docstring). ``none``
+#: still switches every plan back to the queue.
+DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS = "structure-only"
+
+
+def resolve_page_recompile_auto_apply_class(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.page_recompile.auto_apply_class`` (issues
+    athenaeum#2547 AC3, athenaeum#2549 AC1).
+
+    One of :data:`PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
+    default precedence and same warn-and-fall-back-to-the-default contract
+    as :func:`resolve_page_recompile_mode`.
+
+    **Read AND acted on, as of athenaeum#2549**: in mode ``auto``
+    (:func:`resolve_page_recompile_mode`), :mod:`athenaeum.page_recompile_nightly`
+    applies a plan unattended only when this resolves to ``structure-only``
+    AND the plan's own :attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope`
+    is :data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` -- this
+    knob narrows which plans the phase MAY apply; it never widens what a
+    plan's own scope already permits, and a ``cross-page`` plan is queued
+    regardless of its value.
+    """
+    raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS")
+    origin = "ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS"
+    if raw is None:
+        origin = "librarian.page_recompile.auto_apply_class"
+        if isinstance(config, dict):
+            librarian_cfg = config.get("librarian")
+            if isinstance(librarian_cfg, dict):
+                section = librarian_cfg.get("page_recompile")
+                if isinstance(section, dict):
+                    raw = section.get("auto_apply_class")
+    if raw is None:
+        return DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate in PAGE_RECOMPILE_AUTO_APPLY_CLASSES:
+            return candidate
+    logger.warning(
+        "%s: unknown page-recompile auto-apply class %r; falling back to %r "
+        "(valid: %s)",
+        origin,
+        raw,
+        DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS,
+        ", ".join(PAGE_RECOMPILE_AUTO_APPLY_CLASSES),
+    )
+    return DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS
+
+
+def _page_recompile_budget_value(raw: Any, default: int) -> int:
+    """*raw* as a positive int, else *default*.
+
+    The ONE validation contract every athenaeum#2547 budget key shares, and
+    deliberately the SAME one :func:`resolve_page_size_threshold_chars`
+    uses (that AC's own wording: "each validated like
+    ``librarian.page_size_threshold_chars``"): must be an ``int`` that is
+    not a ``bool`` -- ``max_pages_per_run: yes`` in yaml must not silently
+    become a budget of 1 -- and must be ``>= 1``. Anything else (``None``
+    for a missing key, wrong type, zero, negative) falls back to *default*.
+
+    Takes the already-looked-up VALUE, not the config dict and a key name.
+    Each of the five resolvers below therefore spells its own
+    ``librarian`` / ``page_recompile`` / leaf lookup out in its own body,
+    the way the three ``page_recompile`` resolvers directly above already
+    do, and only the validation is shared. That is not duplication for its
+    own sake: ``tests/test_config_resolver_parity_generic.py`` reconstructs
+    a resolver's yaml nesting from the string literals in its OWN body
+    (following a private helper only one level, and then only as a flat
+    literal list whose order it has to guess), so a resolver that hides its
+    section literals behind a delegating helper reads to that gate as a
+    resolver whose yaml key is dead.
+
+    Note that ``0`` is NOT how the pass is disabled -- it falls back to the
+    default like any other invalid value. ``mode: off``
+    (:func:`resolve_page_recompile_mode`) is the off switch.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw
+    return default
+
+
+#: Issue athenaeum#2547 AC4: the STEADY per-run page budget -- 3, the figure
+#: the operator ruling on athenaeum#2525 names for a corpus whose
+#: over-ceiling backlog has been cleared.
+DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN = 3
+
+
+def resolve_page_recompile_max_pages_per_run(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.max_pages_per_run`` (issue
+    athenaeum#2547 AC4): how many pages the nightly phase may PLAN in one
+    run once no candidate is over the hard ceiling.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_pages_per_run"), DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+
+
+#: Issue athenaeum#2547 AC4: the OPENING per-run page budget -- 10, larger
+#: than the steady 3 for exactly as long as the corpus still holds a
+#: candidate over ``librarian.oversize_hard_ceiling_chars`` (the operator
+#: ruling on athenaeum#2525: "the budget is larger at first until the
+#: over-ceiling backlog is cleared and then 3 pages a run, both
+#: configurable").
+DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN = 10
+
+
+def resolve_page_recompile_opening_max_pages_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.opening_max_pages_per_run`` (issue
+    athenaeum#2547 AC4): the per-run page budget used while ANY candidate is
+    over the hard ceiling.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
+    over-ceiling candidate remains, the steady
+    :func:`resolve_page_recompile_max_pages_per_run` applies instead -- the
+    switch is a property of the corpus, not a second knob.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("opening_max_pages_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN
+
+
+#: Issue athenaeum#2547 AC4: the per-run ceiling on how many characters of
+#: PAGE BODY the phase may feed to a model. 200,000 -- the steady 3-page
+#: budget with every page at the default hard ceiling of 40,000 chars is
+#: 120,000, so this clears the documented steady worst case with headroom
+#: for a corpus whose ceiling is set higher, while still refusing a
+#: pathological run. The issue fixes no figure for this key, so this is a
+#: reversible default: lower it to spend less per night, raise it to let
+#: the opening budget run at full width.
+DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN = 200_000
+
+
+def resolve_page_recompile_max_input_chars_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_input_chars_per_run`` (issue
+    athenaeum#2547 AC4): the per-run total of candidate page-body characters
+    the phase may plan over.
+
+    Checked BEFORE each page's first model call, against that page's own
+    body size, so it is a real pre-spend gate rather than an after-the-fact
+    report. A page that does not fit the remaining allowance is counted
+    ``skipped_budget`` and costs nothing.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_input_chars_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN
+
+
+#: Issue athenaeum#2547 AC4: the per-run ceiling on the phase's OWN model
+#: calls, counted against the run-level ``librarian.max_api_calls`` budget
+#: (the phase increments the same run-level ``TokenUsage``, so its calls are
+#: never invisible to the run's own ceiling). 40 -- one page at the default
+#: hard ceiling costs at most ~4 calls (two labelling chunks of eight units,
+#: one plan, one verify), so 40 covers the opening 10-page budget at full
+#: width. The issue fixes no figure for this key either, so this too is a
+#: reversible default.
+DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN = 40
+
+
+def resolve_page_recompile_max_api_calls_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_api_calls_per_run`` (issue
+    athenaeum#2547 AC4): how many model calls the nightly page-recompile
+    phase may make in one run.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_api_calls_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN
+
+
+#: Issue athenaeum#2547 AC4: how many UNANSWERED ``page-recompile`` decision
+#: items may stand before the phase stops raising new ones -- 5. A queue an
+#: operator is not keeping up with must not keep growing: drafting a plan
+#: nobody will read is spend with no outcome, so the phase makes no model
+#: call at all once the cap is reached.
+DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS = 5
+
+
+def resolve_page_recompile_max_open_items(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.max_open_items`` (issue
+    athenaeum#2547 AC4).
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_open_items"), DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
+
+
+#: Issue athenaeum#2549 AC5: how many plans the ``auto`` phase may APPLY
+#: unattended in one run -- separate from :data:`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`
+#: (how many it may PLAN), because an operator who wants the pass to keep
+#: drafting at the usual rate while applying more cautiously needs the two
+#: to move independently. Defaults to the SAME figure as the steady per-run
+#: page budget rather than a second hand-picked number: the operator ruling
+#: on athenaeum#2525 names no distinct figure for this knob, and "as many
+#: unattended writes as pages planned, by default" is the reading that adds
+#: no new behaviour of its own on an unconfigured install.
+DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN = DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+
+
+def resolve_page_recompile_max_auto_applies_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_auto_applies_per_run`` (issue
+    athenaeum#2549 AC5): how many plans the nightly phase may APPLY
+    unattended in one run, in mode ``auto``.
+
+    A structure-only plan that would otherwise auto-apply but finds this
+    bound already spent in the current run is neither applied nor queued
+    (:data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` plans under
+    ``auto_apply_class: structure-only`` are never queued, by the same
+    reasoning :func:`resolve_page_recompile_auto_apply_class` gives) -- it
+    waits for a later run, when the bound resets.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_auto_applies_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN
+
+
+#: Issue athenaeum#2549 AC8: no page ``type:`` is exempted from unattended
+#: apply by default -- an operator opts a type OUT explicitly, rather than
+#: having to opt every type IN.
+DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES: tuple[str, ...] = ()
+
+
+def resolve_page_recompile_never_auto_types(
+    config: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Resolve ``librarian.page_recompile.never_auto_types`` (issue
+    athenaeum#2549 AC8): page ``type:`` values (:func:`athenaeum.models.resolve_page_type`)
+    whose plans always go to the queue, never the unattended applier,
+    regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
+
+    Yaml only, like :func:`resolve_model_rates` and
+    :func:`resolve_excluded_fields_config` -- a whole list of operator-named
+    types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
+    A non-list value, or a non-dict ``page_recompile`` section, resolves to
+    :data:`DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
+    entry within an otherwise-valid list is dropped rather than rejecting
+    the whole list, the same per-entry tolerance
+    :func:`resolve_excluded_fields_config` already applies to its own list
+    values.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    librarian_cfg = config.get("librarian")
+    if not isinstance(librarian_cfg, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    section = librarian_cfg.get("page_recompile")
+    if not isinstance(section, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    raw = section.get("never_auto_types")
+    if not isinstance(raw, list):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    return tuple(
+        entry.strip() for entry in raw if isinstance(entry, str) and entry.strip()
+    )
 
 
 def resolve_model_rates(
@@ -5206,16 +5838,19 @@ search_backend: vector
 #   cosine is below it is archived (`below_confidence_floor` in the dedupe
 #   attribution snapshot) instead of queued. 0 disables. env
 #   ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE > this key > default.
-# page_warn_bytes: soft byte threshold above which a wiki entity page is
-#   reported as a WARN-level oversized page in `athenaeum status` (athenaeum#310).
-#   Warn-only -- nothing is blocked or modified. Precedence:
-#   ATHENAEUM_PAGE_WARN_BYTES env, then this key, then 8192. A long page
-#   usually means poorly-factored knowledge to split into linked entities.
-# page_flag_bytes: louder byte threshold above which a page is FLAGGED for
-#   splitting -- surfaced in `status` and logged as a non-fatal WARNING
-#   during `athenaeum run` (athenaeum#310). Still warn-only (the tier-3 merge body
-#   cap is separate and unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES
-#   env, then this key, then 16384. Keep comfortably below the merge cap.
+# page_warn_bytes: DEPRECATED (athenaeum#2536), removed in 0.25.0. Soft byte
+#   threshold above which a wiki entity page is reported as a WARN-level
+#   oversized page in `athenaeum status` (athenaeum#310). Warn-only -- nothing is
+#   blocked or modified. Precedence: ATHENAEUM_PAGE_WARN_BYTES env, then this
+#   key, then 8192. Superseded by page_size_threshold_chars, which the split
+#   machinery itself acts on; read the page-recompile backlog block in
+#   `athenaeum status` instead.
+# page_flag_bytes: DEPRECATED (athenaeum#2536), removed in 0.25.0. Louder byte
+#   threshold above which a page is FLAGGED for splitting -- surfaced in
+#   `status` and logged as a non-fatal WARNING during `athenaeum run`
+#   (athenaeum#310). Still warn-only (the tier-3 merge body cap is separate and
+#   unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES env, then this key, then
+#   16384. Superseded by oversize_hard_ceiling_chars; see page_warn_bytes.
 # drain_warn_days: backlog-drain ETA threshold in days (issue athenaeum#470). At the
 #   end of any run that leaves raw intake undrained (and in `athenaeum
 #   status`), the advisor projects time-to-drain from OBSERVED throughput
@@ -9466,3 +10101,98 @@ def resolve_strong_identifier_keys(config: dict[str, Any] | None) -> list[str] |
     if not isinstance(raw, list):
         return None
     return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2197 -- `librarian.field_groups.<page_type>`. Appended
+# here, at the end of the file, per this module's own established
+# convention (see the `dedupe.strong_identifier_keys` block above) of
+# giving a concurrently-landing lane's resolver its own append point so two
+# lanes' diffs don't collide on the same hunk.
+# ---------------------------------------------------------------------------
+
+
+def resolve_page_type_field_groups(
+    config: dict[str, Any] | None,
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Resolve ``librarian.field_groups`` -- per page type, the declared
+    single-valued field groups a misfit can fire against
+    (``librarian.field_groups.<page_type>.<group_name>``, a list of field
+    names).
+
+    A field group names a set of frontmatter fields that, together, hold
+    ONE record's worth of data for a page -- a second, distinct record's
+    values competing for the same fields is a misfit the structured-upsert
+    merge (:mod:`athenaeum.structured_upsert`) must not silently overwrite,
+    interleave, or drop (see that module's ``field_group_misfits`` output;
+    issue athenaeum#2197).
+
+    Example -- a deployment whose CRM importer flattens each person's deals
+    onto `crm_*` frontmatter fields, and wants a misfit flagged the moment a
+    second, different deal collides with the first::
+
+        librarian:
+          field_groups:
+            person:
+              deal:
+                - crm_deal_name
+                - crm_deal_amount
+                - crm_deal_stage
+
+    **Declared groups only -- there is no built-in grouping heuristic.** An
+    importer-prefix default was considered and explicitly dropped as
+    deployment policy (operator ruling 2026-11-13). A page type absent from
+    this config -- or present with no groups -- has NO field groups, however
+    related its field names look; the misfit path in
+    :mod:`athenaeum.structured_upsert` never fires for it. Only fields also
+    listed under that type's ``librarian.structured_upsert.<type>.set_keys``
+    (:func:`resolve_structured_upsert`) are eligible: a field group names
+    scalar, single-valued slots, not the list-valued ``union_keys`` this
+    module's structured-upsert merge unions instead of overwriting.
+
+    Validation never raises: a non-dict ``field_groups``/page-type/group
+    entry, a non-string page type or group name, or a group with no
+    non-empty string field names is dropped (logged at WARNING) rather than
+    half-applied. Missing or malformed config returns an empty mapping, so
+    every existing deployment is unaffected.
+    """
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    if not isinstance(config, dict):
+        return out
+    lib = config.get("librarian")
+    if not isinstance(lib, dict):
+        return out
+    section = lib.get("field_groups")
+    if not isinstance(section, dict):
+        return out
+    for page_type, groups in section.items():
+        if not isinstance(page_type, str) or not page_type.strip() or not isinstance(groups, dict):
+            logger.warning(
+                "librarian.field_groups: ignoring malformed entry %r "
+                "(want a non-empty page type mapping to a dict of groups)",
+                page_type,
+            )
+            continue
+        type_groups: dict[str, tuple[str, ...]] = {}
+        for group_name, fields in groups.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                logger.warning(
+                    "librarian.field_groups.%s: ignoring group with a "
+                    "non-string or empty name: %r",
+                    page_type.strip(),
+                    group_name,
+                )
+                continue
+            field_tuple = _structured_upsert_str_list(fields)
+            if not field_tuple:
+                logger.warning(
+                    "librarian.field_groups.%s.%s: ignoring group with no "
+                    "non-empty field names",
+                    page_type.strip(),
+                    group_name.strip(),
+                )
+                continue
+            type_groups[group_name.strip()] = field_tuple
+        if type_groups:
+            out[page_type.strip()] = type_groups
+    return out

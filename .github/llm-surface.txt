@@ -63,6 +63,7 @@ src/athenaeum/decision_answers.py::_judge_scope_sameness
 src/athenaeum/memory_class_backfill.py::classify_residual
 src/athenaeum/name_collisions.py::resolve_name_collisions
 src/athenaeum/page_description.py::describe_pages
+src/athenaeum/page_recompile_plan.py::_call_model
 src/athenaeum/pii_attribution.py::judge_contact_attribution
 src/athenaeum/provider.py::_AnthropicMessagesBoundary.create
 src/athenaeum/query_topics.py::extract_topics
@@ -88,6 +89,9 @@ src/athenaeum/contradictions.py::_DETECT_SYSTEM
 src/athenaeum/decay_bucket.py::DECAY_BUCKET_SYSTEM
 src/athenaeum/page_description.py::_DESCRIBE_SYSTEM
 src/athenaeum/page_description.py::_DESCRIBE_USER_TEMPLATE
+src/athenaeum/page_recompile_plan.py::PAGE_RECOMPILE_LABEL_SYSTEM
+src/athenaeum/page_recompile_plan.py::PAGE_RECOMPILE_PLAN_SYSTEM
+src/athenaeum/page_recompile_plan.py::PAGE_RECOMPILE_VERIFY_SYSTEM
 src/athenaeum/pii_attribution.py::CONTACT_ATTRIBUTION_JUDGE_SYSTEM
 src/athenaeum/query_topics.py::_SYSTEM_PROMPT
 src/athenaeum/query_topics.py::_USER_TEMPLATE
@@ -117,6 +121,9 @@ src/athenaeum/config.py::resolve_model
 src/athenaeum/contradictions.py::DEFAULT_CONTRADICTION_MODEL
 src/athenaeum/contradictions.py::_get_model
 src/athenaeum/decay_bucket.py::_get_classify_model
+src/athenaeum/page_recompile_plan.py::_get_label_model
+src/athenaeum/page_recompile_plan.py::_get_page_recompile_model
+src/athenaeum/page_recompile_plan.py::_get_verify_model
 src/athenaeum/pii_attribution.py::_get_attribution_model
 src/athenaeum/prompt_registry.py::_META_ROWS
 src/athenaeum/provider.py::resolve_max_tokens
@@ -183,6 +190,28 @@ src/athenaeum/shadow_parity.py::_wrap_with_ceiling_guard
 src/athenaeum/subject_population.py::build_tier2_confirm
 # proposes merges from a model call
 src/athenaeum/wiki_dedupe.py::propose_wiki_page_merges
+
+# --- hand-curated: R3/R4 — the page-recompile planner (athenaeum#2537).
+# Its one SDK call site is a shared helper (`_call_model`, designated by D1
+# above), so the three passes that BUILD each request and READ each answer
+# are invisible to D1. Each decides what the model is asked and what is done
+# with what it says. ---
+# builds and reads the chunked labelling request (and owns the unit-hash memo that decides whether a call is made at all)
+src/athenaeum/page_recompile_plan.py::label_units
+# assembles every fenced block of the plan request
+src/athenaeum/page_recompile_plan.py::build_plan_user_message
+# issues the plan call on the `page_recompile` knob
+src/athenaeum/page_recompile_plan.py::propose_plan
+# assembles the verify request: which sentences and which cited units reach the model
+src/athenaeum/page_recompile_plan.py::build_verify_user_message
+# reads the verify verdicts and decides whether the plan stands
+src/athenaeum/page_recompile_plan.py::verify_summary
+# reads the plan answer: every rule that can reject a model's routing decision
+src/athenaeum/page_recompile_plan.py::validate_plan
+# the code-side citation check a summary must pass before a model is ever asked to verify it
+src/athenaeum/page_recompile_plan.py::check_summary_citations
+# the normal form that decides whether a model-asserted duplicate is accepted
+src/athenaeum/page_recompile_plan.py::normalise_unit_text
 
 # --- hand-curated: R4 — response parsers. The shape a model answer is read into decides what
 # the rest of the pipeline does with it; a parser change moves outcomes

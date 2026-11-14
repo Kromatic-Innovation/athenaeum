@@ -1125,6 +1125,54 @@ class TestLoadConfig:
             r for r in caplog.records if "merge_worthiness_gate_enabled" in r.message
         ]
 
+    def test_oversize_page_action_split_warns_loudly_once_per_load(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#2550 AC4: unlike ``_REMOVED_CONFIG_KEYS`` above,
+        ``librarian.oversize_page_action`` is NOT a removed key -- it is
+        still read (``resolve_oversize_page_action``) -- only the ``split``
+        VALUE is deprecated. A stale ``athenaeum.yaml`` setting it loads
+        fine (the raw value passes through unchanged, same convention as
+        every removed key) and gets one loud, specific WARNING naming the
+        replacement knob. ``load_config`` itself is the once-per-run
+        checkpoint: calling it a second time (simulating a second run)
+        warns again, not zero times -- the warning is NOT deduplicated
+        process-wide, only naturally once-per-run because load_config
+        itself runs once per run."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  oversize_page_action: split\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+            cfg2 = load_config(tmp_path)
+        assert cfg["librarian"]["oversize_page_action"] == "split"
+        assert cfg2["librarian"]["oversize_page_action"] == "split"
+        matches = [
+            r
+            for r in caplog.records
+            if "oversize_page_action" in r.message and "athenaeum#2550" in r.message
+        ]
+        assert len(matches) == 2, caplog.text
+        assert "librarian.page_recompile.mode" in matches[0].message
+
+    def test_oversize_page_action_review_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  oversize_page_action: review\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            load_config(tmp_path)
+        assert not [r for r in caplog.records if "oversize_page_action" in r.message]
+
+    def test_oversize_page_action_absent_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "athenaeum.yaml").write_text("librarian:\n  max_files: 5\n")
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            load_config(tmp_path)
+        assert not [r for r in caplog.records if "oversize_page_action" in r.message]
+
     def test_vector_nested_merge(self, tmp_path: Path) -> None:
         (tmp_path / "athenaeum.yaml").write_text("vector:\n  provider: faiss\n")
         cfg = load_config(tmp_path)

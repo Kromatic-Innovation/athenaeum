@@ -468,6 +468,17 @@ class TestSubmitAnswerMatchesCli:
         _queue_coordinate_item(wiki_root, id_a="cli-a", id_b="cli-b")
         qid_cli = list_pending_decisions(wiki_root)[0]["id"]
 
+        # Issue athenaeum#2544: write_decision_answer now checks the id and
+        # pair are REAL (via validate_coordinate_answer), so the
+        # triage-side submission below needs its OWN genuine coordinate
+        # item, not a made-up id — seed a second pair for it.
+        _write_subject_page(wiki_root, uid="cli-c", subject="carol")
+        _write_subject_page(wiki_root, uid="cli-d", subject="carol")
+        _queue_coordinate_item(wiki_root, id_a="cli-c", id_b="cli-d")
+        qid_triage = next(
+            d["id"] for d in list_pending_decisions(wiki_root) if d["id"] != qid_cli
+        )
+
         payload = json.dumps(
             {"answers": [{"pair": "cli-a+cli-b", "dimensions": {"subject": {"cli-a": "alice"}}}]}
         )
@@ -490,11 +501,14 @@ class TestSubmitAnswerMatchesCli:
         cli_out = json.loads(capsys.readouterr().out)
         assert cli_out["ok"] is True
 
+        triage_payload = json.dumps(
+            {"answers": [{"pair": "cli-c+cli-d", "dimensions": {"subject": {"cli-c": "carol"}}}]}
+        )
         submission = submit_answer(
             knowledge_root,
-            decision_id="some-other-coordinate-id",
+            decision_id=qid_triage,
             decision_type="coordinate",
-            answer={"verdict": payload},
+            answer={"verdict": triage_payload},
         )
         assert submission.ok is True
 

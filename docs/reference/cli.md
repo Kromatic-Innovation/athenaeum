@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `recompile`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -44,6 +44,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions migrate`](#athenaeum-decisions-migrate) (command) — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
+- [`athenaeum decisions pending-answers`](#athenaeum-decisions-pending-answers) (command) — Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
 - [`athenaeum decisions propose-fold`](#athenaeum-decisions-propose-fold) (command) — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - [`athenaeum decisions provenance`](#athenaeum-decisions-provenance) (command) — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
@@ -105,11 +106,19 @@ python scripts/gen_cli_reference.py
 - [`athenaeum receipts attest-readout`](#athenaeum-receipts-attest-readout) (command) — Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
 - [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
+- [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, an applied-plan lister, and the applier and its undo, which DO write pages.
+- [`athenaeum recompile apply`](#athenaeum-recompile-apply) (command) — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
+- [`athenaeum recompile candidates`](#athenaeum-recompile-candidates) (command) — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- [`athenaeum recompile list`](#athenaeum-recompile-list) (command) — List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
+- [`athenaeum recompile plan`](#athenaeum-recompile-plan) (command) — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+- [`athenaeum recompile show`](#athenaeum-recompile-show) (command) — Print a recorded plan by its plan id.
+- [`athenaeum recompile undo`](#athenaeum-recompile-undo) (command) — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
 - [`athenaeum recover-parked`](#athenaeum-recover-parked) (command) — One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
 - [`athenaeum registry`](#athenaeum-registry) (command) — : compile the source-handle registry.json (entity uid → handle set) from wiki entity frontmatter. Deterministic, no LLM; emits a well-formed registry even when no handles are populated yet.
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch. The incremental delta is keyed off each file's whole-content hash, not off how its frontmatter is parsed, so a page whose on-disk text has not changed since it was last indexed is hash-matched and skipped even after a parser fix lands -- an index built before the block-list aliases:/tags: parser fix (commit 324bb3c4) keeps stale, empty aliases/tags columns for any page an --incremental run does not otherwise touch. Only --full re-parses every page from scratch and refills them. To check the result, run `SELECT COUNT(*) FROM wiki WHERE aliases != ''` against cache-dir/wiki-index.db (swap in tags for the other column). The vector backend disables onnxruntime's telemetry client at import, before it can start its background worker thread, to prevent a shutdown-time crash in that thread.
+- [`athenaeum relate`](#athenaeum-relate) (command) — Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum repair`](#athenaeum-repair) (command) — Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
@@ -122,7 +131,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
 - [`athenaeum session-end`](#athenaeum-session-end) (command) — Change-gated ingest + reindex for SessionEnd: compile this session's new raw intake, then refresh the index — a fast no-op (no LLM, no reindex) when nothing changed.
 - [`athenaeum spend`](#athenaeum-spend) (command) — Report LLM spend from the durable ledger ($ for API, tokens for subscription — never blended)
-- [`athenaeum split-oversize`](#athenaeum-split-oversize) (command) — Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
 - [`athenaeum status`](#athenaeum-status) (command) — Show knowledge base status
 - [`athenaeum stopwords`](#athenaeum-stopwords) (command) — Print the stopword list (one word per line). Used by the example UserPromptSubmit hook's regex fallback to stay in sync with the FTS5 query filter.
 - [`athenaeum storage`](#athenaeum-storage) (group) — Storage-surface operator tasks (migrate a page's PII off-corpus).
@@ -474,6 +482,7 @@ Subcommands:
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions migrate` — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
+- `athenaeum decisions pending-answers` — Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
 - `athenaeum decisions propose-fold` — Propose folding one or more source pages INTO a named canonical page. Derives merge_target_name from the canonical page's `name:` and write_kind from the corpus — no hand-built proposal. Dry-run by default; --apply to queue.
 - `athenaeum decisions provenance` — List EXECUTED merges from `wiki/_merge_provenance.jsonl` — which source pages each merge relied on.
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
@@ -492,6 +501,7 @@ Answer one queue item with a JSON object, validated against that item's publishe
 | `--id` | — | — | The decision id being answered. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--refuse-on-pending-conflict` | off (flag absent) | — | By default, an unapplied answer file already on disk for this id (or, for a merge, for another proposal whose sources overlap) is reported as a warning and the new answer is still written. Pass this to refuse instead — nothing is written. |
 | `--type` | — | — | The item's decision type, as reported by `athenaeum decisions list` — it selects the response schema the answer is checked against. |
 
 ## `athenaeum decisions budget`
@@ -556,6 +566,17 @@ Show the oldest pending decision (single block).
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |
+
+## `athenaeum decisions pending-answers`
+
+Read-only: list unapplied answer files already on disk for a decision id or a page, with timestamp and verdict. Never mutates.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--id` | — | — | A decision id — list unapplied answer files for this id. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--page` | — | — | A wiki page id (comparator id) — list unapplied coordinate/merge answer files naming this page. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum decisions propose-fold`
 
@@ -864,6 +885,7 @@ Enumerate every entity of a declared type matching field predicates — no query
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
 | `--cursor` | — | — | Opaque continuation token from a prior call's `next_cursor`. |
 | `--field` | `[]` | — | Additional declared field to include per hit (repeatable), beyond the always-present uid/type/name. |
+| `--include-split` | off (flag absent) | — | Include split-created sub-pages (`via: split`) — excluded by default since they inherit their parent's type. Pages attached via attach/fold/manual are always listed. |
 | `--limit` | `50` | — | Max rows to return (default: 50; 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sort` | `name` | — | Frontmatter field to sort by (default: name). |
@@ -1356,6 +1378,91 @@ Report unsealed ranges and seals that no longer verify, by partition and line ra
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
+## `athenaeum recompile`
+
+Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, an applied-plan lister, and the applier and its undo, which DO write pages.
+
+Subcommands:
+
+- `athenaeum recompile apply` — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
+- `athenaeum recompile candidates` — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- `athenaeum recompile list` — List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
+- `athenaeum recompile plan` — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+- `athenaeum recompile show` — Print a recorded plan by its plan id.
+- `athenaeum recompile undo` — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
+
+## `athenaeum recompile apply`
+
+Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Print the outcome as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--plan` | — | — | an exact plan id to apply |
+| `--uid` | — | — | uid of the page to apply the latest valid plan for |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum recompile candidates`
+
+Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile list`
+
+List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--applied` | off (flag absent) | — | List applied plans (currently the only listing mode). |
+| `--json` | off (flag absent) | — | Print the rows as a JSON array. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile plan`
+
+Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dry-run` | off (flag absent) | — | Run the planner but append nothing to the ledger. |
+| `--json` | off (flag absent) | — | Print the plan as JSON. |
+| `--no-verify` | off (flag absent) | — | Skip the verify-knob check of the parent summary. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--uid` | — | — | uid of the page to plan |
+
+## `athenaeum recompile show`
+
+Print a recorded plan by its plan id.
+
+**Positional arguments:**
+
+- `plan_id` — plan id, as printed by `recompile plan`
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Print the record as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile undo`
+
+Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
+
+**Positional arguments:**
+
+- `plan_id` — plan id of the apply to undo
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dry-run` | off (flag absent) | — | Report whether the undo would be direct, queued or refused, and why. Writes nothing -- no page, no ledger record, no decision item, no snapshot commit. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Print the outcome as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
 ## `athenaeum reconcile`
 
 Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
@@ -1420,6 +1527,19 @@ Rebuild the search index (FTS5 or vector, per config). --incremental (default) a
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
+## `athenaeum relate`
+
+Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--child` | — | — | The child page's uid. |
+| `--detach` | off (flag absent) | — | Remove --child's current parent relation. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--parent` | — | — | The parent page's uid to attach --child under. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
 ## `athenaeum repair`
 
 Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
@@ -1432,6 +1552,7 @@ Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --app
 | `--bounce-fold` | off (flag absent) | — | Fold slug-keyed bounce marks stranded by the pre- resolve path onto the person record that already lists the same address. Not included in --all — see module docstring. |
 | `--contact-records` | off (flag absent) | — | Fold contact records left behind by earlier merges onto the canonical uid's record, and retire slug-only duplicate copies of a uid's record. A copy holding values or facts the uid-named copy lacks is folded onto it first. Counts (and, for page-less uids, bare uids) only. Duplicates whose names or per-address validity differ are reported, never touched. Page-less uids with no merge record are reported, and retired only with --retire-pageless --apply. Not included in --all. |
 | `--contacts-root` | — | — | --bounce-fold / --contact-records: override the contacts surface root (defaults to the configured `pii` entity-class surface under --knowledge-root). |
+| `--fold-targets` | off (flag absent) | — | Rewrite a tombstone's dangling bare-slug `folded_into` (one stamped before 's fix, naming no file when the canonical lives at <uid>-<slug>.md) to the resolved canonical's filename stem, when the bare slug resolves to exactly one live page. Ambiguous (0 or >1 candidates) slugs are reported, never touched. Not included in --all. |
 | `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--knowledge-root` | — | — | Knowledge root for --backfill-sources / --bounce-fold (default: ~/knowledge); auto-memory is read from <root>/raw/auto-memory, and the contacts surface is resolved from it via the configured storage mapping unless --contacts-root overrides that. |
 | `--legacy-source-slugs` | off (flag absent) | — | Migrate legacy bare-slug `source:` values to typed `script:<slug>` form (/ design-lock §5). |
@@ -1613,20 +1734,6 @@ Report LLM spend from the durable ledger ($ for API, tokens for subscription —
 | `--reprice` | off (flag absent) | — | Recompute historical rows from their per-model token attribution at the CURRENT rates and report the delta against the stored figures. READ-ONLY — the ledger file is never modified. |
 | `--since` | `7d` | — | Lower bound: a window (7d / 24h / 30m / 2w) or an ISO date (2026-07-01). Default: 7d. |
 
-## `athenaeum split-oversize`
-
-Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Perform the splits. Without this flag nothing is written except --report. |
-| `--auto` | off (flag absent) | — | Also split every candidate over the hard ceiling without per-page approval. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--report` | — | — | Write per-page JSON detail here (never printed to stdout). |
-| `--uid` | `[]` | — | Operator-approved page to split (repeatable). |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
 ## `athenaeum status`
 
 Show knowledge base status
@@ -1634,7 +1741,9 @@ Show knowledge base status
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the kill-switch state (default: ~/.cache/athenaeum). Only affects the kill-switch line. |
+| `--json` | off (flag absent) | — | Emit the whole status snapshot as JSON on stdout instead of the human-readable report (the kill-switch line is suppressed so the output is parseable). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--verbose` | off (flag absent) | — | Also list the page names behind the page-recompile backlog counts. Without it the backlog block is counts only. |
 
 ## `athenaeum stopwords`
 
