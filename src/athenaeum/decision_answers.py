@@ -100,6 +100,7 @@ DecisionType = Literal[
     "coordinate",
     "auto-apply-threshold",
     "dimension-proposal",
+    "page-recompile",
 ]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
     (
@@ -110,6 +111,10 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
         "coordinate",
         "auto-apply-threshold",
         "dimension-proposal",
+        # Issue athenaeum#2547: a drafted page-recompile plan, answered
+        # `approve` / `approve-structure-only` / `reject`. See
+        # :func:`_apply_page_recompile_answer`.
+        "page-recompile",
     )
 )
 
@@ -1329,6 +1334,232 @@ def _apply_auto_apply_threshold_proposal_answer(
 
 
 
+def _apply_page_recompile_answer(
+    wiki_root: Path,
+    answer: DecisionAnswer,
+    *,
+    config: dict[str, Any] | None = None,
+    lock: "RunLock | None" = None,
+) -> DecisionAnswerOutcome:
+    """Apply one ``page-recompile`` decision answer (issue athenaeum#2547 AC8).
+
+    Three verdicts, per that AC and
+    :data:`athenaeum.page_recompile_queue.VERDICTS`:
+
+    * ``approve`` / ``approve-structure-only`` -- run the recompile applier
+      (:func:`athenaeum.page_recompile_apply.write_apply`) for the plan this
+      answer's ``decision_id`` names, then close the queue item. The item is
+      closed only AFTER a successful apply, so a refused apply leaves it
+      open and answerable again rather than closed with nothing done.
+    * ``reject`` -- close the item and suppress the page: nothing is
+      written, and :func:`athenaeum.page_recompile_queue.rejected_page_skip_reason`
+      keeps the nightly phase off that page until its content hash changes.
+
+    **Requires an active run lock**, the same refusal
+    :func:`_apply_coordinate_answer` makes for the same reason: an approve
+    WRITES pages in the knowledge store, and a write racing the nightly
+    librarian is the single-writer violation the lock exists to prevent. A
+    ``reject`` needs no lock -- it appends one ledger line and writes no
+    page -- and is deliberately not gated on one, so the safe answer is
+    always available.
+
+    **A page that moved since the plan was drafted is not applied, and is
+    re-planned** (the AC's own wording). The plan's pinned content hash is
+    what detects it: ``write_apply`` refuses a mismatch outright. This
+    function then closes the item as
+    :data:`~athenaeum.page_recompile_queue.STALE_KIND` rather than as a
+    rejection -- so the stale draft leaves the queue (no answer to it could
+    ever be applied) while recording NO suppression, which is what lets the
+    next nightly pass draft a fresh plan over the new bytes. Recording it as
+    a rejection instead would have frozen the page at exactly the moment it
+    was being actively edited.
+    """
+    from athenaeum.page_recompile_queue import (
+        VERDICT_APPROVE,
+        VERDICT_APPROVE_STRUCTURE_ONLY,
+        VERDICT_REJECT,
+        PageRecompileItemAlreadyResolved,
+        UnknownPageRecompileItem,
+        find_queued_plan,
+        record_page_recompile_approval,
+        record_page_recompile_rejection,
+        record_page_recompile_stale,
+    )
+
+    def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=message,
+        )
+
+    verdict = answer.verdict.strip().lower()
+    if verdict not in (
+        VERDICT_APPROVE,
+        VERDICT_APPROVE_STRUCTURE_ONLY,
+        VERDICT_REJECT,
+    ):
+        return _refuse(
+            "invalid_decision",
+            "verdict must be 'approve', 'approve-structure-only' or "
+            f"'reject', got {answer.verdict!r}",
+        )
+
+    item = find_queued_plan(wiki_root, plan_id=answer.decision_id)
+    if item is None:
+        return _refuse(
+            "id_not_found",
+            f"no queued page-recompile plan with id {answer.decision_id!r}",
+        )
+
+    if verdict == VERDICT_REJECT:
+        try:
+            record_page_recompile_rejection(
+                wiki_root, plan_id=answer.decision_id, note=answer.note
+            )
+        except PageRecompileItemAlreadyResolved as exc:
+            return _refuse("already_resolved", str(exc))
+        except UnknownPageRecompileItem as exc:
+            return _refuse("id_not_found", str(exc))
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=True,
+            error_code=None,
+            message=(
+                "page-recompile plan rejected; the page is skipped until its "
+                "content hash changes"
+            ),
+        )
+
+    if lock is None:
+        return _refuse(
+            "lock_required",
+            "approving a page-recompile plan writes pages and requires an "
+            "active run lock",
+        )
+
+    def _close_as_stale(reason: str) -> DecisionAnswerOutcome:
+        try:
+            record_page_recompile_stale(
+                wiki_root,
+                plan_id=answer.decision_id,
+                verdict=verdict,
+                reason=reason,
+                note=answer.note,
+            )
+        except (
+            PageRecompileItemAlreadyResolved,
+            UnknownPageRecompileItem,
+        ) as exc:  # pragma: no cover - find_queued_plan already matched
+            log.debug("decision_answers: stale record skipped: %s", exc)
+        return _refuse(
+            "plan_stale",
+            "the page changed since this plan was drafted, so nothing was "
+            f"applied and it will be re-planned: {reason}",
+        )
+
+    # The AC8 pin, checked HERE rather than inferred from the applier's
+    # refusal prose: the applier reports a stale plan as a reason string
+    # with no machine-readable code, and matching on prose would silently
+    # stop detecting it the day that sentence is reworded. The queued item
+    # records the content hash the plan was drafted over, so this is a
+    # direct comparison against the live page.
+    pinned = item.get("content_hash")
+    live, live_error = _page_recompile_live_hash(wiki_root, str(item.get("uid") or ""))
+    if live_error:
+        return _refuse("apply_refused", live_error)
+    if isinstance(pinned, str) and pinned and live != pinned:
+        return _close_as_stale(
+            "the page's content hash no longer matches the one the plan was "
+            "pinned to"
+        )
+
+    from athenaeum.page_recompile_apply import write_apply
+
+    outcome = write_apply(
+        wiki_root,
+        plan_id=answer.decision_id,
+        config=config,
+    )
+    if not outcome.ok:
+        # Defence in depth: the applier re-checks the same pin under the
+        # lock, so it can still catch a page that moved between the check
+        # above and the write. Its refusal for that case is the only one
+        # prefixed `stale:`. Every OTHER refusal leaves the item OPEN -- it
+        # may well be answerable once whatever blocked it is fixed.
+        if outcome.reason.startswith(_STALE_PLAN_REASON_PREFIX):
+            return _close_as_stale(outcome.reason)
+        return _refuse(
+            "apply_refused",
+            f"page-recompile plan was not applied: {outcome.reason}",
+        )
+
+    try:
+        record_page_recompile_approval(
+            wiki_root,
+            plan_id=answer.decision_id,
+            verdict=verdict,
+            note=answer.note,
+            extra={"created_uids": list(outcome.created_uids)},
+        )
+    except PageRecompileItemAlreadyResolved as exc:
+        return _refuse("already_resolved", str(exc))
+    except UnknownPageRecompileItem as exc:  # pragma: no cover - found above
+        return _refuse("id_not_found", str(exc))
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=(
+            f"page-recompile plan applied ({verdict}); "
+            f"{len(outcome.created_uids)} sub-page(s) created"
+        ),
+    )
+
+
+#: Issue athenaeum#2547 AC8: the prefix
+#: :func:`athenaeum.page_recompile_apply.write_apply` puts on its OWN
+#: content-hash-pin refusal, the one apply refusal that must close the queue
+#: item as stale rather than leave it open. Only a BACKSTOP -- the primary
+#: check is the direct hash comparison in
+#: :func:`_apply_page_recompile_answer`, which needs no agreement about
+#: wording at all -- so a reworded refusal degrades to "item stays open",
+#: never to "page silently rewritten".
+_STALE_PLAN_REASON_PREFIX = "stale:"
+
+
+def _page_recompile_live_hash(wiki_root: Path, uid: str) -> tuple[str, str]:
+    """``(content_hash, "")`` for the live page *uid*, or ``("", error)``.
+
+    The hash is :func:`athenaeum.page_recompile_plan.page_content_hash` over
+    the page BODY -- the same function the plan pinned itself with, so the
+    comparison in :func:`_apply_page_recompile_answer` is between two values
+    produced the same way.
+    """
+    from athenaeum.models import EntityIndex, parse_frontmatter
+    from athenaeum.page_recompile_plan import page_content_hash
+
+    if not uid:
+        return "", "the queued page-recompile item names no page uid"
+    path = EntityIndex(wiki_root).get_by_uid(uid)
+    if path is None:
+        return "", f"no page with uid {uid}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", f"unreadable page {uid}: {exc}"
+    _meta, body = parse_frontmatter(text)
+    return page_content_hash(body), ""
+
+
 def _apply_dimension_proposal_answer(
     knowledge_root: Path,
     wiki_root: Path,
@@ -1944,6 +2175,13 @@ def _raised_at_for(
                 if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
                     return str(rec.get("created_at") or "")
             return ""
+        if decision_type == "page-recompile":
+            from athenaeum.page_recompile_queue import find_queued_plan
+
+            item = find_queued_plan(wiki_root, plan_id=decision_id)
+            if item is None:
+                return ""
+            return str(item.get("created_at") or item.get("ts") or "")
     except Exception as exc:  # noqa: BLE001 - lookup is best-effort
         log.debug(
             "decision_answers: raised_at lookup skipped (%s): %s", type(exc).__name__, exc
@@ -2237,6 +2475,13 @@ def apply_decision_answers(
             # reaches THIS branch, never ``_apply_proposed_rule_answer``.
             outcome = _apply_dimension_proposal_answer(
                 wiki_root.parent, wiki_root, answer, config=config
+            )
+        elif answer.decision_type == "page-recompile":
+            # Issue athenaeum#2547: its own applier -- an approve runs the
+            # recompile applier under the caller's run lock and WRITES
+            # pages, which no other branch here does.
+            outcome = _apply_page_recompile_answer(
+                wiki_root, answer, config=config, lock=lock
             )
         else:  # pragma: no cover - unreachable: _load_decision_answer already
             # refuses any decision_type outside VALID_DECISION_TYPES as

@@ -4702,6 +4702,298 @@ def resolve_page_recompile_rejoin_fraction(config: dict[str, Any] | None = None)
     return DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION
 
 
+# ---------------------------------------------------------------------------
+# The nightly page-recompile phase's own knobs (issue athenaeum#2547, slice
+# S6 of athenaeum#2525). The phase is ON by default; every knob below is how
+# an operator bounds, narrows or switches it off. The TRIGGER threshold is
+# NOT here -- it is the existing ``librarian.page_size_threshold_chars``
+# (:func:`resolve_page_size_threshold_chars`), which is what decides whether
+# a page is a candidate at all; these knobs only decide what the nightly
+# phase does with the candidates that threshold already produced.
+# ---------------------------------------------------------------------------
+
+#: The nightly page-recompile phase's mode (issue athenaeum#2547 AC2), in
+#: order of increasing effect:
+#:
+#: * ``off`` -- the phase returns immediately: no client is built and no
+#:   model call is made. THE off switch for the whole pass.
+#: * ``shadow`` -- plans are drafted and recorded in
+#:   ``wiki/_page_recompiles.jsonl``, but no page is written and no decision
+#:   item is raised.
+#: * ``queue`` -- plans are drafted AND raised as ``page-recompile`` decision
+#:   items for an operator to approve, partly approve or reject.
+#: * ``auto`` -- reserved for the auto-apply slice of athenaeum#2525. Accepted
+#:   as a valid value here (so a config written for that slice does not fall
+#:   back and log a warning), and behaves exactly like ``queue`` until it
+#:   lands: this slice has "auto-apply without approval" explicitly out of
+#:   scope, so the safe reading of ``auto`` is "queue, pending the applier".
+PAGE_RECOMPILE_MODES: tuple[str, ...] = ("off", "shadow", "queue", "auto")
+
+#: Issue athenaeum#2547 AC2: ``queue`` -- the pass runs every night and asks
+#: before it rewrites a page. ``auto`` is the auto-apply slice's job to make
+#: the default, not this one's.
+DEFAULT_PAGE_RECOMPILE_MODE = "queue"
+
+
+def resolve_page_recompile_mode(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.page_recompile.mode`` (issue athenaeum#2547 AC2).
+
+    One of :data:`PAGE_RECOMPILE_MODES`. Env
+    ``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
+    ``librarian.page_recompile.mode`` > default
+    :data:`DEFAULT_PAGE_RECOMPILE_MODE`.
+
+    **An unknown value falls back to the default and logs a WARNING** (the
+    AC asks for exactly this). Deliberately not a hard error: a typo in one
+    optional key must not take the whole nightly run down, and the fallback
+    is the conservative mode (ask before writing), not the permissive one.
+    Case- and whitespace-insensitive, so ``Queue`` and `` queue `` resolve
+    rather than warning.
+    """
+    raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_MODE")
+    origin = "ATHENAEUM_PAGE_RECOMPILE_MODE"
+    if raw is None:
+        origin = "librarian.page_recompile.mode"
+        if isinstance(config, dict):
+            librarian_cfg = config.get("librarian")
+            if isinstance(librarian_cfg, dict):
+                section = librarian_cfg.get("page_recompile")
+                if isinstance(section, dict):
+                    raw = section.get("mode")
+    if raw is None:
+        return DEFAULT_PAGE_RECOMPILE_MODE
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate in PAGE_RECOMPILE_MODES:
+            return candidate
+    logger.warning(
+        "%s: unknown page-recompile mode %r; falling back to %r (valid: %s)",
+        origin,
+        raw,
+        DEFAULT_PAGE_RECOMPILE_MODE,
+        ", ".join(PAGE_RECOMPILE_MODES),
+    )
+    return DEFAULT_PAGE_RECOMPILE_MODE
+
+
+#: The plan scopes the nightly phase may apply WITHOUT an operator answer
+#: (issue athenaeum#2547 AC3). ``none`` applies nothing unattended;
+#: ``structure-only`` is the class the auto-apply slice of athenaeum#2525
+#: enables. READ ONLY in this slice -- the value is resolved and reported,
+#: and nothing acts on it until that slice lands.
+PAGE_RECOMPILE_AUTO_APPLY_CLASSES: tuple[str, ...] = ("none", "structure-only")
+
+#: Issue athenaeum#2547 AC3: ``none``. Nothing applies unattended in this
+#: slice ("auto-apply without approval" is out of scope), so the default has
+#: to be the class that authorises nothing.
+DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS = "none"
+
+
+def resolve_page_recompile_auto_apply_class(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.page_recompile.auto_apply_class`` (issue
+    athenaeum#2547 AC3).
+
+    One of :data:`PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
+    default precedence and same warn-and-fall-back-to-the-conservative-value
+    contract as :func:`resolve_page_recompile_mode`.
+
+    **Read, not yet acted on.** The AC states this plainly: the behaviour
+    ``structure-only`` enables ships in a later slice of the page-recompile
+    design, not in the one that adds this key. The key exists now so that
+    slice has a settled vocabulary and a settled default to switch on, and
+    so an operator can set it ahead of time without the value being
+    silently discarded.
+    """
+    raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS")
+    origin = "ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS"
+    if raw is None:
+        origin = "librarian.page_recompile.auto_apply_class"
+        if isinstance(config, dict):
+            librarian_cfg = config.get("librarian")
+            if isinstance(librarian_cfg, dict):
+                section = librarian_cfg.get("page_recompile")
+                if isinstance(section, dict):
+                    raw = section.get("auto_apply_class")
+    if raw is None:
+        return DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate in PAGE_RECOMPILE_AUTO_APPLY_CLASSES:
+            return candidate
+    logger.warning(
+        "%s: unknown page-recompile auto-apply class %r; falling back to %r "
+        "(valid: %s)",
+        origin,
+        raw,
+        DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS,
+        ", ".join(PAGE_RECOMPILE_AUTO_APPLY_CLASSES),
+    )
+    return DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS
+
+
+def _page_recompile_positive_int(
+    config: dict[str, Any] | None, key: str, default: int
+) -> int:
+    """``librarian.page_recompile.<key>`` as a positive int, else *default*.
+
+    The ONE validation contract every athenaeum#2547 budget key shares, and
+    deliberately the SAME one
+    :func:`resolve_page_size_threshold_chars` uses (that AC's own wording:
+    "each validated like ``librarian.page_size_threshold_chars``"): must be
+    an ``int`` that is not a ``bool`` -- ``max_pages_per_run: yes`` in yaml
+    must not silently become a budget of 1 -- and must be ``>= 1``.
+    Anything else (missing key, missing section, wrong type, zero, negative)
+    falls back to *default*.
+
+    Factored into one helper rather than five copies because all five keys
+    are the same shape; each public resolver below still cites its own key
+    in its own docstring, which is what
+    ``scripts/gen_config_reference.py`` reads.
+
+    Note that ``0`` is NOT how the pass is disabled -- it falls back to the
+    default like any other invalid value. ``mode: off``
+    (:func:`resolve_page_recompile_mode`) is the off switch.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                raw = section.get(key)
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                    return raw
+    return default
+
+
+#: Issue athenaeum#2547 AC4: the STEADY per-run page budget -- 3, the figure
+#: the operator ruling on athenaeum#2525 names for a corpus whose
+#: over-ceiling backlog has been cleared.
+DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN = 3
+
+
+def resolve_page_recompile_max_pages_per_run(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.max_pages_per_run`` (issue
+    athenaeum#2547 AC4): how many pages the nightly phase may PLAN in one
+    run once no candidate is over the hard ceiling.
+
+    Validated by :func:`_page_recompile_positive_int`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
+    """
+    return _page_recompile_positive_int(
+        config, "max_pages_per_run", DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+    )
+
+
+#: Issue athenaeum#2547 AC4: the OPENING per-run page budget -- 10, larger
+#: than the steady 3 for exactly as long as the corpus still holds a
+#: candidate over ``librarian.oversize_hard_ceiling_chars`` (the operator
+#: ruling on athenaeum#2525: "the budget is larger at first until the
+#: over-ceiling backlog is cleared and then 3 pages a run, both
+#: configurable").
+DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN = 10
+
+
+def resolve_page_recompile_opening_max_pages_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.opening_max_pages_per_run`` (issue
+    athenaeum#2547 AC4): the per-run page budget used while ANY candidate is
+    over the hard ceiling.
+
+    Validated by :func:`_page_recompile_positive_int`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
+    over-ceiling candidate remains, the steady
+    :func:`resolve_page_recompile_max_pages_per_run` applies instead -- the
+    switch is a property of the corpus, not a second knob.
+    """
+    return _page_recompile_positive_int(
+        config,
+        "opening_max_pages_per_run",
+        DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN,
+    )
+
+
+#: Issue athenaeum#2547 AC4: the per-run ceiling on how many characters of
+#: PAGE BODY the phase may feed to a model. 200,000 -- the steady 3-page
+#: budget with every page at the default hard ceiling of 40,000 chars is
+#: 120,000, so this clears the documented steady worst case with headroom
+#: for a corpus whose ceiling is set higher, while still refusing a
+#: pathological run. The issue fixes no figure for this key, so this is a
+#: reversible default: lower it to spend less per night, raise it to let
+#: the opening budget run at full width.
+DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN = 200_000
+
+
+def resolve_page_recompile_max_input_chars_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_input_chars_per_run`` (issue
+    athenaeum#2547 AC4): the per-run total of candidate page-body characters
+    the phase may plan over.
+
+    Checked BEFORE each page's first model call, against that page's own
+    body size, so it is a real pre-spend gate rather than an after-the-fact
+    report. A page that does not fit the remaining allowance is counted
+    ``skipped_budget`` and costs nothing.
+
+    Validated by :func:`_page_recompile_positive_int`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
+    """
+    return _page_recompile_positive_int(
+        config,
+        "max_input_chars_per_run",
+        DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN,
+    )
+
+
+#: Issue athenaeum#2547 AC4: the per-run ceiling on the phase's OWN model
+#: calls, counted against the run-level ``librarian.max_api_calls`` budget
+#: (the phase increments the same run-level ``TokenUsage``, so its calls are
+#: never invisible to the run's own ceiling). 40 -- one page at the default
+#: hard ceiling costs at most ~4 calls (two labelling chunks of eight units,
+#: one plan, one verify), so 40 covers the opening 10-page budget at full
+#: width. The issue fixes no figure for this key either, so this too is a
+#: reversible default.
+DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN = 40
+
+
+def resolve_page_recompile_max_api_calls_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_api_calls_per_run`` (issue
+    athenaeum#2547 AC4): how many model calls the nightly page-recompile
+    phase may make in one run.
+
+    Validated by :func:`_page_recompile_positive_int`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
+    """
+    return _page_recompile_positive_int(
+        config,
+        "max_api_calls_per_run",
+        DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN,
+    )
+
+
+#: Issue athenaeum#2547 AC4: how many UNANSWERED ``page-recompile`` decision
+#: items may stand before the phase stops raising new ones -- 5. A queue an
+#: operator is not keeping up with must not keep growing: drafting a plan
+#: nobody will read is spend with no outcome, so the phase makes no model
+#: call at all once the cap is reached.
+DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS = 5
+
+
+def resolve_page_recompile_max_open_items(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_recompile.max_open_items`` (issue
+    athenaeum#2547 AC4).
+
+    Validated by :func:`_page_recompile_positive_int`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
+    """
+    return _page_recompile_positive_int(
+        config, "max_open_items", DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
+    )
+
+
 def resolve_model_rates(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[float, float]]:

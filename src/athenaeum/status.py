@@ -279,13 +279,22 @@ class StatusInfo(TypedDict):
 #: starvation signal must not be shown the healthy-looking one.
 PAGE_RECOMPILE_NOT_AVAILABLE = "not available"
 
-#: The ``page_recompile`` fields that have NO producer yet -- the plan
-#: ledger (``plans_awaiting_approval``, ``applied_last_7_days``) and the
-#: nightly phase (``nights_since_progress``), both explicitly out of scope
-#: for issue athenaeum#2536. Each is ``None`` in :data:`StatusInfo` and
-#: prints as :data:`PAGE_RECOMPILE_NOT_AVAILABLE`. Named here so the test
-#: that pins "never as zero" enumerates them from the source of truth
-#: rather than from a second hand-maintained list.
+#: The ``page_recompile`` fields that are not produced by the candidate
+#: scan itself. Each is ``None`` in :data:`StatusInfo` and prints as
+#: :data:`PAGE_RECOMPILE_NOT_AVAILABLE` when its producer has nothing to
+#: say. Named here so the test that pins "never as zero" enumerates them
+#: from the source of truth rather than from a second hand-maintained list.
+#:
+#: Issue athenaeum#2547 gave two of the three a producer:
+#: ``plans_awaiting_approval`` and ``nights_since_progress`` are now filled
+#: from the page-recompile ledger whenever
+#: :func:`build_page_recompile_backlog` is given a *wiki_root* AND that
+#: ledger exists. They still report ``None`` when it does not -- "nothing
+#: has ever proposed a plan" and "the queue is empty" are different facts,
+#: and only the first is a starvation signal (see
+#: :func:`athenaeum.page_recompile_queue.plans_awaiting_approval`).
+#: ``applied_last_7_days`` is still unproduced: it was out of scope for
+#: athenaeum#2536 and athenaeum#2547 alike.
 PAGE_RECOMPILE_PENDING_FIELDS = (
     "plans_awaiting_approval",
     "applied_last_7_days",
@@ -404,7 +413,11 @@ def scan_page_backlog(
 
 
 def build_page_recompile_backlog(
-    scan: CandidateScan, *, threshold_chars: int, ceiling_chars: int
+    scan: CandidateScan,
+    *,
+    threshold_chars: int,
+    ceiling_chars: int,
+    wiki_root: Path | None = None,
 ) -> dict[str, object]:
     """The issue athenaeum#2536 backlog block, as one JSON-native dict.
 
@@ -422,8 +435,13 @@ def build_page_recompile_backlog(
       this case).
     * ``blocked`` / ``blocked_by_reason`` -- pages the pass cannot act on,
       with a count per reason (AC1).
-    * the three :data:`PAGE_RECOMPILE_PENDING_FIELDS`, always ``None`` here
-      (AC4) -- see that constant.
+    * the :data:`PAGE_RECOMPILE_PENDING_FIELDS`, which the candidate scan
+      cannot produce. With *wiki_root* given (issue athenaeum#2547 AC9),
+      ``plans_awaiting_approval`` and ``nights_since_progress`` are read off
+      the page-recompile ledger; each stays ``None`` when that ledger has
+      nothing to say, and ``applied_last_7_days`` stays ``None``
+      unconditionally. Without *wiki_root* all three are ``None``, which is
+      what every pre-athenaeum#2547 caller gets.
     * ``pages`` / ``blocked_pages`` -- the page NAMES behind the counts.
       :func:`format_status` prints them only under its ``verbose`` flag
       (AC7); they live in the dict because ``--json`` is a deliberate
@@ -456,6 +474,20 @@ def build_page_recompile_backlog(
     }
     for field in PAGE_RECOMPILE_PENDING_FIELDS:
         block[field] = None
+    if wiki_root is not None:
+        # Issue athenaeum#2547 AC9. Wrapped: the backlog block is a status
+        # read, and a torn or unreadable ledger must degrade to "not
+        # available" rather than break `athenaeum status`.
+        try:
+            from athenaeum.page_recompile_queue import (
+                nights_since_progress,
+                plans_awaiting_approval,
+            )
+
+            block["plans_awaiting_approval"] = plans_awaiting_approval(wiki_root)
+            block["nights_since_progress"] = nights_since_progress(wiki_root)
+        except Exception as exc:  # noqa: BLE001 - status must never raise
+            log.debug("page-recompile queue counts unavailable: %s", exc)
     return block
 
 
@@ -693,6 +725,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         page_walk.recompile,
         threshold_chars=threshold_chars,
         ceiling_chars=ceiling_chars,
+        wiki_root=wiki_root,
     )
 
     # Per-claim provenance post-check (issue athenaeum#1730). Same posture as the
