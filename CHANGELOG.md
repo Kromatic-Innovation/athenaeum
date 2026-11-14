@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Page recompile now runs in the nightly librarian run and is ON by
+  default: it makes model calls every night (up to 3 pages a run, 10 while
+  any page is still over the hard ceiling) and you turn it off with
+  `librarian.page_recompile.mode: off`.** The phase runs after the entity and
+  auto-memory phases and before finalize, is not reached by a merge-only or
+  cluster-only run, is skipped when the run deadline has already tripped,
+  re-checks that deadline between pages, refreshes the run-lock heartbeat
+  between pages, and carves out no share of the run's wall-clock budget for
+  itself. Four modes (`librarian.page_recompile.mode`): `off` builds no
+  client and makes no call, `shadow` drafts and records plans but writes no
+  page and raises no item, `queue` (the default) raises each plan as a
+  decision item, and `auto` is accepted and behaves as `queue` until the
+  unattended applier ships. An unknown mode falls back to the default and
+  logs a warning. Which pages are picked up is still decided by the existing
+  `librarian.page_size_threshold_chars`. Five new budget keys under
+  `librarian.page_recompile`: `max_pages_per_run` (3),
+  `opening_max_pages_per_run` (10, used while any candidate is over the hard
+  ceiling), `max_input_chars_per_run` (200000), `max_api_calls_per_run` (40,
+  counted against the run-level `librarian.max_api_calls`) and
+  `max_open_items` (5 — no new item is raised, and nothing is spent, while
+  that many are unanswered); plus `auto_apply_class` (`none` or
+  `structure-only`), read and reported today and acted on by the auto-apply
+  work. A new `page-recompile` decision type appears in `athenaeum
+  decisions` with verdicts `approve`, `approve-structure-only` and `reject`,
+  framed reversible-with-work and routed to the owner with a conservative
+  `reject` default; the item carries the plan outline (group names, unit
+  counts, sizes and first-line excerpts) and never a page body. `approve`
+  applies the plan through the recompile applier under the run lock;
+  `reject` writes nothing and skips the page until its content hash changes;
+  an answer against a page that changed since the plan was drafted is not
+  applied, drops out of the queue, and the page is re-planned. The run
+  summary reports `planned`, `queued`, `invalid`, `skipped_budget` and
+  `backlog`, spend is attributed per knob, and `athenaeum status` now fills
+  "plans awaiting approval" and "nights since progress" (athenaeum#2547).
+
 - `athenaeum recompile plan --uid <uid>` plans the recompilation of one
   oversized page — a model labels its units on the `classify` knob (cached by
   unit hash, so a re-plan over unchanged bytes makes no labelling call),
