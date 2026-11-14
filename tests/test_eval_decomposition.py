@@ -46,8 +46,6 @@ from athenaeum.name_structure import (
 from athenaeum.tiers import resolve_page_size_threshold_chars
 from tests.evals.corpus import build_corpus, load_redundant_clusters
 from tests.evals.decomposition import (
-    ROLE_SPLIT_FROM,
-    ROLE_SPLIT_INTO,
     TIER_SIZE_GATE,
     boundary_verdict,
     contains_fact,
@@ -224,58 +222,60 @@ def test_case_c_is_not_passing_by_accident(cases, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Case B -- where the split actually cuts
+# Case B -- where the (retired) split used to cut. See
+# test_case_b_no_longer_decomposes for the athenaeum#2550 regression pin.
 # ---------------------------------------------------------------------------
 
 
-def test_case_b_decomposes_along_its_facets(cases, tmp_path):
-    """The oversize page splits, and its children line up with the facets.
+def test_case_b_no_longer_decomposes(cases, tmp_path):
+    """Regression pin for issue athenaeum#2550: no deterministic path
+    decomposes Case B any more.
 
-    True here because Case B's top-level headings ARE its facets, one to
-    one. That is the favourable arrangement, stated as such in the fixture:
-    the result says the mechanism preserves a facet boundary it is handed,
-    not that it can find one.
+    Before that issue, this case's favourable arrangement (its top-level
+    headings ARE its facets, one to one) meant the reactive ``split``
+    disposition -- :func:`~tests.evals.decomposition.run_split_disposition`
+    -- reached Case B's ground-truth verdict: the mechanism preserved a
+    facet boundary it was handed, even though (Case A proves) it could not
+    find one on its own. athenaeum#2550 retired that disposition --
+    ``oversize_page_action: split`` now degrades to the same
+    flag-and-leave-untouched behaviour ``observe_default_disposition``
+    already uses -- so this favourable arrangement is no longer reachable
+    by anything this no-LLM measure can exercise; decomposition now lives
+    entirely in the (LLM-backed) ``librarian.page_recompile`` pipeline.
+
+    If a future deterministic path reaches Case B's verdict again, THAT is
+    the signal to flip this assertion and update
+    ``docs/measurements/decomposition-baseline-2026-09-10.md`` -- the same
+    convention ``test_the_gate_separates_size_from_facets`` above already
+    follows for Case A.
     """
     outcome = _outcome(cases[CASE_B], tmp_path)
     passed, detail = score_case(cases[CASE_B], outcome)
-    assert passed, detail
-    assert len(outcome.children) == len(cases[CASE_B].facets)
-
-
-def test_case_b_edges_name_the_split_and_not_term_overlap(cases, tmp_path):
-    """The hub/sub-page edges must be gradeable as SPLIT edges specifically.
-
-    Since athenaeum#1576 a compile-time writer stamps ``role: term-overlap``
-    on ordinary pages, and a hub and its facet children are the pages most
-    likely to attract one. Every edge is therefore checked by role name:
-    ``split-into`` from the hub to each child, ``split-from`` from each child
-    back to the hub, and nothing in the split's own output carrying any other
-    role.
-    """
-    outcome = _outcome(cases[CASE_B], tmp_path)
-    hub = cases[CASE_B].page.uid
-    edges = split_edges(outcome.edges)
-
-    assert {t for s, t, r in edges if s == hub and r == ROLE_SPLIT_INTO} == set(outcome.children)
-    assert {s for s, t, r in edges if t == hub and r == ROLE_SPLIT_FROM} == set(outcome.children)
-    assert len(edges) == len(outcome.edges), (
-        "the split replay wrote an edge with a role outside SPLIT_ROLES: "
-        f"{sorted(set(outcome.edges) - set(edges))}"
+    assert not passed, (
+        "Case B now reaches its ground-truth verdict through a deterministic "
+        "path again -- update docs/measurements/decomposition-baseline-"
+        f"2026-09-10.md with the new observation. ({detail})"
     )
-
-
-def test_no_original_content_is_dropped(cases, tmp_path):
-    """athenaeum#1248's own invariant, re-checked from this fixture's side.
-
-    Every ground-truth fact key survives somewhere -- hub or child. A
-    decomposition that produced tidy sub-pages by losing a facet's facts
-    would score well on alignment and be catastrophic in production.
-    """
-    outcome = _outcome(cases[CASE_B], tmp_path)
-    everywhere = outcome.hub_body + "\n".join(outcome.children.values())
-    for facet, keys in cases[CASE_B].facets.items():
+    assert outcome.decomposed is False
+    assert outcome.children == {}
+    assert outcome.flagged_needs_split is True
+    # The two invariants a REAL split used to need checking for -- edges
+    # named by role rather than inferred from athenaeum#1576's term-overlap
+    # writer, and no original content dropped across hub/child -- collapse
+    # to this when nothing is restructured at all: no split-family edge
+    # exists, and the hub (the only page there is now) still carries every
+    # fact verbatim, because it was never touched. Folded in here rather
+    # than kept as their own ``test_case_b_edges_name_the_split_and_not_
+    # term_overlap`` / ``test_no_original_content_is_dropped`` (removed by
+    # issue athenaeum#2550) -- a standalone test that can only ever pass
+    # vacuously, because the mechanism it names no longer runs, is exactly
+    # the "it split, somewhere" kind of non-measurement this module's own
+    # docstring warns against; stated explicitly here instead, next to the
+    # assertion that explains WHY it is vacuous now.
+    assert split_edges(outcome.edges) == []
+    for keys in cases[CASE_B].facets.values():
         for key in keys:
-            assert contains_fact(everywhere, key), f"{facet}: {key!r} was dropped by the split"
+            assert contains_fact(outcome.hub_body, key)
 
 
 # ---------------------------------------------------------------------------

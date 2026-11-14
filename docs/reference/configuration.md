@@ -2081,12 +2081,12 @@ No seed in ``_DEFAULTS``.
 
 Resolve ``librarian.oversize_hard_ceiling_chars``.
 
-The body size above which ``athenaeum split-oversize --auto`` splits a
-page without per-page approval; pages between the page-size threshold and
-this ceiling are split only when the operator names them with ``--uid``.
-Same validation contract as `resolve_page_size_threshold_chars`:
-must be ``>= 1`` (bool rejected as an int subclass); anything else falls
-back to `DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+The body size above which a page-recompile candidate is treated as
+most urgent -- see `DEFAULT_OVERSIZE_HARD_CEILING_CHARS`'s own
+comment for the current consumers. Same validation contract as
+`resolve_page_size_threshold_chars`: must be ``>= 1`` (bool
+rejected as an int subclass); anything else falls back to
+`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
 
 ### `resolve_page_flag_bytes`
 

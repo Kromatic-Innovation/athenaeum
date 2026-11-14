@@ -258,8 +258,9 @@ class TestIncludeSplitFlag:
         (wiki / "parent.md").write_text(
             "---\nuid: company-acme\ntype: company\nname: Acme\n---\n\nBody.\n"
         )
-        # Real shape `tiers.py:_build_split_child_pages` writes: only the
-        # legacy `split-from` row, no top-level `parent:` key.
+        # Real shape the now-retired `tiers.py:_build_split_child_pages`
+        # used to write (deleted by issue athenaeum#2550): only the legacy
+        # `split-from` row, no top-level `parent:` key.
         (wiki / "split.md").write_text(
             "---\nuid: company-acme-split\ntype: company\nname: Acme Split\n"
             "related:\n  - uid: company-acme\n    role: split-from\n---\n\nBody.\n"

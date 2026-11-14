@@ -2343,18 +2343,12 @@ def _apply_tier3_results(
 
     result.updated.extend(_admitted_updated_uids)
     result.escalated.extend(escalations)
-    # Issue athenaeum#1182: derived from the escalations just folded in above,
-    # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
-    # for why this is derived rather than an independent counter threaded
-    # through tier3_derive_actions's return tuple.
-    result.oversize_suppressed += sum(
-        1 for _e in escalations if _e.conflict_type == "oversize_page"
-    )
-    # Issue athenaeum#1248: same derivation, disjoint conflict_types — see
-    # ProcessingResult.oversize_split/oversize_log_demoted's docstrings.
-    result.oversize_split += sum(
-        1 for _e in escalations if _e.conflict_type == "oversize_split"
-    )
+    # Issue athenaeum#1248: derived from the escalations just folded in
+    # above, by conflict_type — see ProcessingResult.oversize_log_demoted's
+    # docstring for why this is derived rather than an independent counter
+    # threaded through tier3_derive_actions's return tuple. Issue
+    # athenaeum#2550 removed the sibling oversize_suppressed/oversize_split
+    # counting that used to sit here.
     result.oversize_log_demoted += sum(
         1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
     )
@@ -5855,19 +5849,15 @@ class RunContext:
     # `emit_run_summary` computes its own consecutive-run streak over.
     stalled_sources: list[str] = field(default_factory=list)
 
-    # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
+    # Issue athenaeum#1248: page-size-invariant log_demote moves. UNLIKE
     # total_matched (documented as synchronous-only above), this counter
     # covers BOTH transports: the synchronous entity loop (summed the same
     # way total_degraded/total_truncated are, below) AND the batch-API
     # transport's two independent merge-dispatch sites (assembly + the
     # sync_merges finalize fallback in athenaeum.batch), via
-    # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
-    total_oversize_suppressed: int = 0
-    #: Issue athenaeum#1248: same cross-transport threading as
-    #: total_oversize_suppressed above, for the split/log_demote
-    #: dispositions — see ProcessingResult.oversize_split/
-    #: oversize_log_demoted's docstrings.
-    total_oversize_split: int = 0
+    # BatchRunResult.oversize_log_demoted / BatchCollectResult.oversize_log_demoted.
+    # Issue athenaeum#2550 removed this field's two siblings,
+    # total_oversize_suppressed and total_oversize_split.
     total_oversize_log_demoted: int = 0
 
     #: Issue athenaeum#1866: run-wide counts of tier-0 person-hint verdicts,
@@ -8770,8 +8760,6 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_skipped += outcome.skipped
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
-    ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
-    ctx.total_oversize_split += outcome.oversize_split  # issue athenaeum#1248
     ctx.total_oversize_log_demoted += (
         outcome.oversize_log_demoted
     )  # issue athenaeum#1248
@@ -9208,12 +9196,6 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
-                    ctx.total_oversize_suppressed = (
-                        outcome.oversize_suppressed
-                    )  # issue athenaeum#1182
-                    ctx.total_oversize_split = (
-                        outcome.oversize_split
-                    )  # issue athenaeum#1248
                     ctx.total_oversize_log_demoted = (
                         outcome.oversize_log_demoted
                     )  # issue athenaeum#1248
@@ -9814,13 +9796,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.total_person_hint_verdicts[_verdict] = (
                                 ctx.total_person_hint_verdicts.get(_verdict, 0) + 1
                             )
-                        # Issue athenaeum#1182: same getattr-tolerance rationale as
+                        # Issue athenaeum#1248: same getattr-tolerance rationale as
                         # degraded/truncated/matched above.
-                        ctx.total_oversize_suppressed += getattr(
-                            result, "oversize_suppressed", 0
-                        )
-                        # Issue athenaeum#1248: same getattr-tolerance rationale.
-                        ctx.total_oversize_split += getattr(result, "oversize_split", 0)
                         ctx.total_oversize_log_demoted += getattr(
                             result, "oversize_log_demoted", 0
                         )
@@ -10284,28 +10261,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         if ctx.total_uid_bind_mismatch
                         else {}
                     ),
-                    # athenaeum#1182: pages the page-size invariant suppressed a
-                    # merge into this run (routed to "review" escalation
-                    # instead, page left unmodified). Only rendered when
-                    # non-zero, mirroring the degraded/truncated convention
-                    # immediately above.
-                    **(
-                        {"oversize_suppressed": ctx.total_oversize_suppressed}
-                        if ctx.total_oversize_suppressed
-                        else {}
-                    ),
-                    # athenaeum#1248: oversize pages the gate actually SPLIT (into a
-                    # hub + linked atomic pages) or DEMOTED to a log this run —
-                    # kept as separate fields from oversize_suppressed above so
-                    # a run summary makes clear which disposition fired for
-                    # each page, never conflating "escalated for a human" with
-                    # "already restructured automatically". Only rendered when
-                    # non-zero, same convention.
-                    **(
-                        {"oversize_split": ctx.total_oversize_split}
-                        if ctx.total_oversize_split
-                        else {}
-                    ),
+                    # athenaeum#1248: oversize pages the gate actually DEMOTED to
+                    # a log this run. Only rendered when non-zero, mirroring
+                    # the degraded/truncated convention above. Issue
+                    # athenaeum#2550 removed this field's two siblings,
+                    # ``oversize_suppressed`` (the retired "review escalates
+                    # and counts" shape, dead since athenaeum#2078) and
+                    # ``oversize_split`` (the retired reactive split
+                    # disposition), from this summary.
                     **(
                         {"oversize_log_demoted": ctx.total_oversize_log_demoted}
                         if ctx.total_oversize_log_demoted

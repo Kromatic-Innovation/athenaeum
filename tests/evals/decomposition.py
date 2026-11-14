@@ -8,31 +8,44 @@ leave alone a page that is merely LONG?
 What is graded, and against which tier
 --------------------------------------
 
-The shipped librarian has exactly one code path that decomposes a page:
-:func:`athenaeum.tiers.check_page_size_gate`, whose ``split`` disposition
-calls :func:`athenaeum.tiers._perform_oversize_page_split`. It is reached
-through that public gate here, never by calling the private split directly,
-so what this module grades is what production runs. Its trigger is
-``len(existing_body) > resolve_page_size_threshold_chars(config)`` -- SIZE,
-with no notion of a facet anywhere in it. That is the gap this layer exists
-to measure, so the measure must be able to say *which tier decided*
-(athenaeum#1581 AC2) and not merely *what happened*.
+Until issue athenaeum#2550, the shipped librarian had exactly one code path
+that decomposed a page: :func:`athenaeum.tiers.check_page_size_gate`, whose
+``split`` disposition called the since-deleted
+``athenaeum.tiers._perform_oversize_page_split``. That issue retired the
+reactive disposition outright (``oversize_page_action: split`` now resolves
+to ``review``) in favour of the unattended, LLM-driven
+``librarian.page_recompile`` pipeline -- which makes a real model call to
+label and group a page's units, so it is out of reach for this no-LLM,
+no-network measure. The size gate's trigger -- ``len(existing_body) >
+resolve_page_size_threshold_chars(config)``, SIZE with no notion of a facet
+anywhere in it -- is therefore now the measure for every disposition this
+module can still exercise deterministically, not just the shipped default.
+The measure must still say *which tier decided* (athenaeum#1581 AC2) and
+not merely *what happened*.
 
 Nothing is ever applied to a durable corpus
 -------------------------------------------
 
-Two separate readings, and both are taken (athenaeum#1581 AC4,
-``docs/north-star.md`` §2.7-2.8):
+Two readings used to diverge here (athenaeum#1581 AC4, ``docs/north-star.md``
+§2.7-2.8); since athenaeum#2550 they do not, which is itself part of what
+:func:`run_split_disposition` now demonstrates:
 
-* At the SHIPPED DEFAULT (``oversize_page_action: review``) the gate returns
-  an :class:`~athenaeum.models.EscalationItem` and leaves the page
-  byte-for-byte unmodified. :func:`observe_default_disposition` asserts that
-  reading: the proposal reaches the queue, the page on disk does not move.
-* At ``oversize_page_action: split`` the gate enacts the restructure, which
-  is the only way to see WHAT a decomposition proposal would contain. That
-  run happens in a caller-supplied ``tmp_path`` wiki materialized for the
-  case and thrown away after it -- :func:`assert_disposable` refuses to run
-  against anything under a real knowledge tree.
+* At the SHIPPED DEFAULT (``oversize_page_action: review``) an over-threshold
+  page is no longer refused (athenaeum#2078): the gate returns no
+  escalation, flags the page ``needs_split`` in the in-memory frontmatter,
+  and leaves the file byte-for-byte unmodified. :func:`observe_default_disposition`
+  asserts that reading.
+* At ``oversize_page_action: split`` the gate degrades to the SAME
+  flag-and-leave-untouched behaviour (issue athenaeum#2550) -- there is no
+  deterministic way left to see WHAT a decomposition proposal would
+  contain; that question now belongs to
+  ``librarian.page_recompile``'s own (LLM-backed) eval coverage, not this
+  one. :func:`run_split_disposition` is kept, rather than deleted, as the
+  regression pin for this fact -- see Case B below. It still runs in a
+  caller-supplied ``tmp_path`` wiki materialized for the case and thrown
+  away after it (:func:`assert_disposable` refuses to run against
+  anything under a real knowledge tree), even though nothing restructures
+  it any more.
 
 Facet alignment, not section count
 ----------------------------------
@@ -369,8 +382,10 @@ def observe_default_disposition(case: Case, root: Path) -> Outcome:
     returns no escalation, flags the page ``needs_split`` in the in-memory
     frontmatter the merge will render, and leaves the file byte-for-byte
     unmodified; an under-threshold page yields nothing at all. Either way no
-    page is restructured here, which is the invariant -- the split is the
-    operator-approved ``split-oversize`` pass that runs after the merge.
+    page is restructured here, which is the invariant -- since issue
+    athenaeum#2550 retired the reactive ``split-oversize`` pass that used
+    to run after the merge, no OTHER deterministic path restructures it
+    either any more (see :func:`run_split_disposition`).
     """
     wiki = materialize(case, root)
     path = wiki / f"{case.page.uid}.md"
@@ -402,11 +417,21 @@ def observe_default_disposition(case: Case, root: Path) -> Outcome:
 def run_split_disposition(case: Case, root: Path) -> Outcome:
     """Run the gate with ``oversize_page_action: split`` in a throwaway wiki.
 
-    This is the only shipped code path that expresses a decomposition, so it
-    is the only way to grade WHAT one would contain. It restructures pages,
-    which is why it runs against a materialized ``tmp_path`` corpus and why
-    :func:`assert_disposable` guards the root. What an operator would see for
-    these same cases is :func:`observe_default_disposition`'s proposal.
+    Before issue athenaeum#2550 this was the only shipped code path that
+    expressed a decomposition, which made it the only way to grade WHAT one
+    would contain. That issue retired the disposition: it now resolves to
+    ``review`` and the gate degrades to the SAME flag-and-leave-untouched
+    behaviour :func:`observe_default_disposition` observes, so this
+    function's return value is now expected to be indistinguishable from
+    that one's for every case (see ``test_case_b_no_longer_decomposes`` in
+    ``tests/test_eval_decomposition.py`` -- the regression pin for exactly
+    this fact). Kept as its own function, rather than deleted or merged
+    with the default-disposition one, so a future caller still exercises
+    the ``oversize_page_action: split`` config path specifically, and so a
+    future reactive-decomposition replacement has an obvious seam to
+    plug into. Still runs against a materialized ``tmp_path`` corpus
+    (:func:`assert_disposable` still guards the root), even though nothing
+    under it is restructured any more.
     """
     wiki = materialize(case, root)
     path = wiki / f"{case.page.uid}.md"

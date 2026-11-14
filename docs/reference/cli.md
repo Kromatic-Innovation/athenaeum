@@ -131,7 +131,6 @@ python scripts/gen_cli_reference.py
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
 - [`athenaeum session-end`](#athenaeum-session-end) (command) — Change-gated ingest + reindex for SessionEnd: compile this session's new raw intake, then refresh the index — a fast no-op (no LLM, no reindex) when nothing changed.
 - [`athenaeum spend`](#athenaeum-spend) (command) — Report LLM spend from the durable ledger ($ for API, tokens for subscription — never blended)
-- [`athenaeum split-oversize`](#athenaeum-split-oversize) (command) — Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
 - [`athenaeum status`](#athenaeum-status) (command) — Show knowledge base status
 - [`athenaeum stopwords`](#athenaeum-stopwords) (command) — Print the stopword list (one word per line). Used by the example UserPromptSubmit hook's regex fallback to stay in sync with the FTS5 query filter.
 - [`athenaeum storage`](#athenaeum-storage) (group) — Storage-surface operator tasks (migrate a page's PII off-corpus).
@@ -1734,20 +1733,6 @@ Report LLM spend from the durable ledger ($ for API, tokens for subscription —
 | `--path` | `~/knowledge` | — | Knowledge directory for config resolution (default: ~/knowledge). |
 | `--reprice` | off (flag absent) | — | Recompute historical rows from their per-model token attribution at the CURRENT rates and report the delta against the stored figures. READ-ONLY — the ledger file is never modified. |
 | `--since` | `7d` | — | Lower bound: a window (7d / 24h / 30m / 2w) or an ISO date (2026-07-01). Default: 7d. |
-
-## `athenaeum split-oversize`
-
-Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | off (flag absent) | — | Perform the splits. Without this flag nothing is written except --report. |
-| `--auto` | off (flag absent) | — | Also split every candidate over the hard ceiling without per-page approval. |
-| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
-| `--report` | — | — | Write per-page JSON detail here (never printed to stdout). |
-| `--uid` | `[]` | — | Operator-approved page to split (repeatable). |
-| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum status`
 

@@ -1,37 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue athenaeum#1182 — the page-size invariant. Issue athenaeum#1248 extends this
-suite for the ``split``/``log_demote`` dispositions.
+"""Issue athenaeum#1182 — the page-size invariant.
 
 Atomic pages must not be merged into indefinitely: a page whose existing
 body crosses ``librarian.page_size_threshold_chars`` must be refused a
-Tier-3 merge BEFORE the merge prompt is built or any model call is made,
-and must route to one of THREE dispositions instead of accepting another
-merge (issue athenaeum#1248): the shipped ``review`` default (escalate, leave
-the page unmodified), ``split`` (decompose into a hub + linked atomic
-pages), or ``log_demote`` (move the page into the preserved-log area via
-the same mechanism the ``preserve`` shape-rule disposition already uses).
+Tier-3 merge BEFORE the merge prompt is built or any model call is made.
+Since issue athenaeum#2078's operator ruling, the shipped ``review``
+default no longer refuses the merge at all: it flags the page
+``needs_split: true`` in place and lets the merge proceed, leaving the
+actual restructuring to a later pass. ``log_demote`` (move the page into
+the preserved-log area via the same mechanism the ``preserve`` shape-rule
+disposition already uses, issue athenaeum#1248) is the one disposition
+that still refuses the merge, by moving the page out of the wiki
+entirely. The THIRD disposition issue athenaeum#1248 introduced,
+``split`` (decompose into a hub + linked atomic pages), was retired by
+issue athenaeum#2550 in favour of the ``librarian.page_recompile``
+pipeline; ``librarian.oversize_page_action: split`` now reads as
+``review`` (one deprecation warning per run, covered in
+``tests/test_config.py`` against ``load_config``) -- see
+``tests/test_page_recompile.py`` for the relocated
+``_split_into_atomic_sections`` coverage and
+``tests/test_cli.py``/``tests/test_oversize_merge_2078.py`` for the
+removed ``athenaeum split-oversize`` command and its ``oversize_split``
+module.
 
 This suite covers:
   - the config resolvers (``librarian.page_size_threshold_chars`` /
     ``librarian.oversize_page_action``), mirroring the athenaeum#1168
     mention-density resolvers' validation contract exactly;
-  - ``check_page_size_gate`` itself (under/at/over threshold; ``review``;
-    ``split`` — a real multi-section fixture, the no-heading fallback, and
-    an induced mid-write failure proving atomicity; ``log_demote`` — a real
-    move, the unconfigured fallback, and an induced move failure proving
-    atomicity);
+  - ``check_page_size_gate`` itself (under/at/over threshold; ``review``'s
+    flag-and-allow-merge path; ``log_demote`` — a real move, the
+    unconfigured fallback, and an induced move failure proving
+    atomicity; the retired ``split`` value degrading to the same
+    flag-and-allow-merge path as ``review``, even when the real-split
+    call shape -- ``existing_path``/``wiki_root`` supplied -- is used);
   - the real dispatch site, ``tier3_derive_actions``'s "update" branch —
-    proving the suppression is REAL: no LLM call is made, and the page's
-    pending_updates/updated_uids stay empty, for all three dispositions;
-  - the run-summary counters (``ProcessingResult.oversize_suppressed`` /
-    ``oversize_split`` / ``oversize_log_demoted``, via
-    ``athenaeum.librarian._apply_tier3_results``), proving the three
-    dispositions are counted disjointly.
+    proving the merge suppression is REAL for ``log_demote`` (no LLM
+    call, pending_updates/updated_uids stay empty) and that ``review``/
+    retired-``split`` instead let the merge (and its LLM call) proceed,
+    flagged;
+  - the run-summary counter (``ProcessingResult.oversize_log_demoted``,
+    via ``athenaeum.librarian._apply_tier3_results``) -- the sibling
+    ``oversize_suppressed``/``oversize_split`` counters were removed by
+    issue athenaeum#2550 along with the escalation types they counted.
 
 The former read-only AC3 enumeration helper, ``enumerate_oversize_pages``,
 was removed (issue athenaeum#2436 -- 0 src callers; it duplicated
-:func:`athenaeum.oversize_split.find_split_candidates`'s walk). Its
-coverage moved to ``tests/test_oversize_split.py``.
+``oversize_split.find_split_candidates``'s walk, itself since retired).
 
 No LLM, no network.
 """
@@ -47,7 +61,6 @@ import yaml
 
 from athenaeum import pii
 from athenaeum import rules as rules_module
-from athenaeum import tiers as tiers_module
 from athenaeum.answers import ingest_answers
 from athenaeum.config import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 from athenaeum.librarian import _apply_tier3_results, process_one
@@ -123,42 +136,6 @@ def _make_split_fixture_page(wiki: Path, *, n_sections: int = 3) -> tuple[Path, 
     return path, meta, existing_body
 
 
-def _make_titled_split_fixture_page(
-    wiki: Path, *, name: str = "Big Project", n_sections: int = 5, uid: str = "aaaa1111"
-) -> tuple[Path, dict, str]:
-    """A compiled-page-shaped oversized fixture (issue athenaeum#2524): a
-    LONE top-level ``# <name>`` title heading, with its real structure
-    under ``##`` sections -- the shape that used to make the shallowest-
-    heading split cut at the title itself, yielding one child holding the
-    whole body and named ``<name>: <name>``."""
-    # 800 (not the 400 other fixtures in this module use) so even the
-    # single-section fixture (AC2's refusal case) clears the threshold on
-    # its own -- this helper has to work for n_sections=1 too.
-    sections = "\n\n".join(
-        f"## Key Contacts {i}\n\nUnique detail for section {i}. " + ("Filler prose. " * 800)
-        for i in range(n_sections)
-    )
-    body = (
-        f"# {name}\n\nIntro paragraph under the title, before any ## heading.\n\n"
-        + sections
-        + "\n"
-    )
-    frontmatter = (
-        "---\n"
-        f"uid: {uid}\n"
-        "type: project\n"
-        f"name: {name}\n"
-        "access: internal\n"
-        "tags:\n"
-        "  - active\n"
-        "---\n\n"
-    )
-    path = wiki / f"{uid}-{name.lower().replace(' ', '-')}.md"
-    path.write_text(frontmatter + body)
-    meta, existing_body = parse_frontmatter(path.read_text())
-    return path, meta, existing_body
-
-
 def _make_flat_fixture_page(wiki: Path) -> tuple[Path, dict, str]:
     """A real oversized page with NO markdown heading at all (issue
     athenaeum#1248) -- the shape ``split`` explicitly refuses (leaving it to
@@ -169,6 +146,65 @@ def _make_flat_fixture_page(wiki: Path) -> tuple[Path, dict, str]:
     path.write_text(frontmatter + body)
     meta, existing_body = parse_frontmatter(path.read_text())
     return path, meta, existing_body
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2550 AC3: the retired reactive split's two
+# fully-removable helpers have no remaining caller anywhere in src/ --
+# proven by scanning the real source text, not a hand-maintained list of
+# known call sites (which would only prove nobody ADDED a new call site
+# since the list was last updated, not that the functions are actually
+# gone).
+# ---------------------------------------------------------------------------
+
+
+class TestRetiredSplitHelpersHaveNoCaller:
+    """``_perform_oversize_page_split`` and ``_build_split_child_pages``
+    (issue athenaeum#1248) were deleted outright, not merely disconnected,
+    because nothing outside the reactive split path itself ever called
+    them (grep evidence in the issue's own implementation). Contrast
+    ``_split_into_atomic_sections``, their shared section-grouping helper,
+    which survives -- :func:`athenaeum.page_recompile.segment_page` is a
+    real, live caller -- so it is asserted present, not absent, and
+    relocated to :mod:`athenaeum.page_recompile` rather than deleted."""
+
+    _SRC_DIR = Path(__file__).resolve().parents[1] / "src" / "athenaeum"
+
+    def _call_sites(self, name: str) -> dict[str, int]:
+        """Lines that actually INVOKE/CONSTRUCT *name* (``name(`` as a whole
+        word, immediately followed by an opening paren) -- not a comment or
+        docstring mentioning the retired name for historical context.
+        Mirrors ``tests/test_exit_codes_doc_parity.py``'s
+        ``_modules_calling_acquire_or_exit`` convention exactly."""
+        needle = f"{name}("
+        hits: dict[str, int] = {}
+        for path in sorted(self._SRC_DIR.glob("*.py")):
+            count = 0
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                count += stripped.count(needle)
+            if count:
+                hits[path.name] = count
+        return hits
+
+    def test_perform_oversize_page_split_has_no_caller(self) -> None:
+        assert self._call_sites("_perform_oversize_page_split") == {}
+
+    def test_build_split_child_pages_has_no_caller(self) -> None:
+        assert self._call_sites("_build_split_child_pages") == {}
+
+    def test_split_child_page_dataclass_has_no_construction_site(self) -> None:
+        assert self._call_sites("_SplitChildPage") == {}
+
+    def test_split_into_atomic_sections_moved_not_deleted(self) -> None:
+        """Positive control: the shared helper these two called is a real
+        symbol with a real caller elsewhere, so the three asserts above
+        cannot pass merely because this test's own grep is broken."""
+        hits = self._call_sites("_split_into_atomic_sections")
+        assert hits.get("page_recompile.py", 0) >= 1
+        assert "tiers.py" not in hits  # relocated, not merely re-exported
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +262,19 @@ class TestResolveOversizePageAction:
         config = {"librarian": {"oversize_page_action": 1}}
         assert resolve_oversize_page_action(config) == "review"
 
+    def test_retired_split_value_resolves_to_review(self) -> None:
+        """Issue athenaeum#2550: the reactive ``split`` disposition is
+        retired -- a stale ``librarian.oversize_page_action: split`` now
+        resolves to ``"review"``, the same value an unrecognized action
+        falls back to, but via the dedicated, by-name mapping (see
+        ``_RETIRED_OVERSIZE_PAGE_ACTION_SPLIT``) rather than the generic
+        unknown-value path. The one-per-run deprecation warning this value
+        also triggers is covered in ``tests/test_config.py`` against
+        ``load_config``, not here -- this function is called once per
+        oversized page, not once per run."""
+        config = {"librarian": {"oversize_page_action": "split"}}
+        assert resolve_oversize_page_action(config) == "review"
+
 
 # ---------------------------------------------------------------------------
 # check_page_size_gate
@@ -274,22 +323,52 @@ class TestCheckPageSizeGate:
         assert result is None
         assert meta["needs_split"] is True
 
-    @pytest.mark.parametrize("reserved_action", ["split", "log_demote"])
-    def test_reserved_actions_without_path_degrade_to_flag_and_merge(
-        self, reserved_action: str
-    ) -> None:
-        """split/log_demote (issue athenaeum#1248) need existing_path/
-        wiki_root to do anything -- a caller that omits them (like the bare
-        calls throughout this class) gets exactly the same athenaeum#2078
+    def test_log_demote_without_path_degrades_to_flag_and_merge(self) -> None:
+        """log_demote (issue athenaeum#1248) needs existing_path/wiki_root
+        to do anything -- a caller that omits them (like the bare calls
+        throughout this class) gets exactly the same athenaeum#2078
         flag-and-allow-merge degraded behaviour as ``review``, never a
         raise."""
         action = _update_action(name="Big Page")
         body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
-        config = {"librarian": {"oversize_page_action": reserved_action}}
+        config = {"librarian": {"oversize_page_action": "log_demote"}}
         meta: dict = {}
         result = check_page_size_gate(action, body, "sessions/x.md", config, existing_meta=meta)
         assert result is None
         assert meta["needs_split"] is True
+
+    def test_split_degrades_to_flag_and_merge_even_with_path_supplied(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2550: unlike ``log_demote``, ``split`` degrades
+        to the flag-and-allow-merge path EVEN WHEN *existing_path* and
+        *wiki_root* are supplied -- the retired reactive split never runs
+        again, regardless of call-site shape. See
+        ``tests/test_page_size_gate.py::TestOversizePageSplit`` (removed by
+        this same issue) for the real-split fixtures this disposition used
+        to drive."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path, meta, existing_body = _make_split_fixture_page(wiki, n_sections=3)
+        before = path.read_text()
+
+        action = _update_action(name="Big Project", existing_uid="aaaa1111")
+        config = {"librarian": {"oversize_page_action": "split"}}
+
+        result = check_page_size_gate(
+            action,
+            existing_body,
+            "sessions/x.md",
+            config,
+            existing_path=path,
+            existing_meta=meta,
+            wiki_root=wiki,
+        )
+
+        assert result is None
+        assert meta["needs_split"] is True
+        assert path.read_text() == before  # byte-identical -- no split ran
+        assert list(wiki.glob("*.md")) == [path]  # no child pages written
 
     def test_custom_threshold_via_config(self) -> None:
         action = _update_action()
@@ -393,315 +472,6 @@ class TestTier3DeriveActionsPageSizeGate:
         assert updated_uids == ["a1b2c3d4"]
         assert len(pending_updates) == 1
         assert not any(e.conflict_type == "oversize_page" for e in escalations)
-
-
-# ---------------------------------------------------------------------------
-# Run-summary counter: ProcessingResult.oversize_suppressed
-# ---------------------------------------------------------------------------
-
-
-class TestOversizeSuppressedCounter:
-    def test_apply_tier3_results_counts_only_oversize_escalations(
-        self, tmp_path: Path
-    ) -> None:
-        from athenaeum.models import EntityIndex
-
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        index = EntityIndex(wiki_root)
-        raw = _make_raw("irrelevant")
-        result = ProcessingResult(raw_file=raw)
-
-        escalations = [
-            EscalationItem(
-                raw_ref="ref-1",
-                entity_name="Big Page",
-                conflict_type="oversize_page",
-                description="over threshold",
-            ),
-            EscalationItem(
-                raw_ref="ref-2",
-                entity_name="Someone",
-                conflict_type="ambiguous",
-                description="unrelated escalation",
-            ),
-        ]
-
-        _apply_tier3_results(
-            result,
-            new_entities=[],
-            pending_updates=[],
-            updated_uids=[],
-            escalations=escalations,
-            wiki_root=wiki_root,
-            index=index,
-            config=None,
-        )
-
-        assert result.oversize_suppressed == 1
-        assert len(result.escalated) == 2
-
-    def test_zero_when_no_oversize_escalations(self, tmp_path: Path) -> None:
-        from athenaeum.models import EntityIndex
-
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        index = EntityIndex(wiki_root)
-        raw = _make_raw("irrelevant")
-        result = ProcessingResult(raw_file=raw)
-
-        _apply_tier3_results(
-            result,
-            new_entities=[],
-            pending_updates=[],
-            updated_uids=[],
-            escalations=[],
-            wiki_root=wiki_root,
-            index=index,
-            config=None,
-        )
-
-        assert result.oversize_suppressed == 0
-
-
-# ---------------------------------------------------------------------------
-# Issue athenaeum#1248: check_page_size_gate — the "split" disposition
-# ---------------------------------------------------------------------------
-
-
-class TestOversizePageSplit:
-    def test_split_creates_hub_and_linked_child_pages(self, tmp_path: Path) -> None:
-        """A real multi-section oversized fixture (issue athenaeum#1248): every
-        section becomes its own atomic page, the original becomes a hub
-        with the SAME uid/name (so existing index keys/references still
-        resolve), and nothing from the original body is lost."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path, meta, existing_body = _make_split_fixture_page(wiki, n_sections=3)
-        assert len(existing_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-
-        action = _update_action(name="Big Project", existing_uid="aaaa1111")
-        config = {"librarian": {"oversize_page_action": "split"}}
-
-        result = check_page_size_gate(
-            action,
-            existing_body,
-            "sessions/x.md",
-            config,
-            existing_path=path,
-            existing_meta=meta,
-            wiki_root=wiki,
-        )
-
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_split"
-        assert "athenaeum#1248" in result.description
-
-        # The hub keeps the ORIGINAL identity — existing index keys and
-        # references (anything pointing at uid aaaa1111) still resolve.
-        assert path.exists()
-        hub_meta, hub_body = parse_frontmatter(path.read_text())
-        assert hub_meta["uid"] == "aaaa1111"
-        assert hub_meta["name"] == "Big Project"
-        assert len(hub_body) < len(existing_body)
-        assert "athenaeum#1248" in hub_body
-        # The intro paragraph (content before the first heading) is kept on
-        # the hub verbatim — nothing before the first heading is dropped.
-        assert "Intro paragraph about the page" in hub_body
-
-        children = [p for p in wiki.glob("*.md") if p != path]
-        assert len(children) == 3
-
-        # Round trip: every section's unique detail survives somewhere in
-        # the split output, and each child links back to the hub.
-        all_child_text = "\n".join(c.read_text() for c in children)
-        for i in range(3):
-            assert f"Unique detail for section {i}" in all_child_text
-
-        child_metas = [parse_frontmatter(c.read_text())[0] for c in children]
-        child_uids = {m["uid"] for m in child_metas}
-        for cm in child_metas:
-            assert any(
-                r.get("uid") == "aaaa1111" and r.get("role") == "split-from"
-                for r in cm.get("related", [])
-            )
-        hub_related_uids = {r["uid"] for r in hub_meta.get("related", [])}
-        assert child_uids <= hub_related_uids
-
-    def test_lone_title_heading_splits_at_the_section_level_not_the_title(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue athenaeum#2524 AC1: a page that opens with a single ``#
-        <Name>`` title and keeps its real sections under ``##`` must split
-        on the ``##`` sections -- five of them here -- not degenerate into
-        one child holding the whole body under the title heading."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path, meta, existing_body = _make_titled_split_fixture_page(
-            wiki, name="Big Project", n_sections=5
-        )
-        assert len(existing_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-
-        action = _update_action(name="Big Project", existing_uid="aaaa1111")
-        config = {"librarian": {"oversize_page_action": "split"}}
-
-        result = check_page_size_gate(
-            action,
-            existing_body,
-            "sessions/x.md",
-            config,
-            existing_path=path,
-            existing_meta=meta,
-            wiki_root=wiki,
-        )
-
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_split"
-
-        children = [p for p in wiki.glob("*.md") if p != path]
-        assert len(children) == 5  # athenaeum#2524 AC1: split on ## not on the lone #
-
-        child_metas = [parse_frontmatter(c.read_text())[0] for c in children]
-        child_names = {m["name"] for m in child_metas}
-        # athenaeum#2524 AC3: names come from the SECTION heading, never
-        # "<Name>: <Name>".
-        assert "Big Project: Big Project" not in child_names
-        for i in range(5):
-            assert f"Big Project: Key Contacts {i}" in child_names
-
-        # The title line and the intro paragraph under it fold into the
-        # hub as ordinary pre-heading content -- nothing is dropped.
-        hub_meta, hub_body = parse_frontmatter(path.read_text())
-        assert "Intro paragraph under the title" in hub_body
-
-    def test_single_resulting_child_is_refused_like_no_heading(self, tmp_path: Path) -> None:
-        """Issue athenaeum#2524 AC2: a lone ``# <Name>`` title with only ONE
-        ``##`` section beneath it would still yield exactly one child --
-        refused via the SAME degraded path the no-heading cohort already
-        uses (flag ``needs_split`` and let the merge proceed; the corpus is
-        otherwise untouched), not written as a one-child split."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path, meta, existing_body = _make_titled_split_fixture_page(
-            wiki, name="Lone Section Co", n_sections=1, uid="dddd4444"
-        )
-        before = path.read_text()
-
-        action = _update_action(name="Lone Section Co", existing_uid="dddd4444")
-        config = {"librarian": {"oversize_page_action": "split"}}
-
-        result = check_page_size_gate(
-            action,
-            existing_body,
-            "sessions/x.md",
-            config,
-            existing_path=path,
-            existing_meta=meta,
-            wiki_root=wiki,
-        )
-
-        assert result is None  # degraded to flag-and-merge, same as no-heading
-        assert meta["needs_split"] is True
-        assert path.read_text() == before
-        assert list(wiki.glob("*.md")) == [path]
-
-    def test_trailing_lone_shallow_heading_stays_its_own_section(self) -> None:
-        """Review finding on athenaeum#2524's PR: a lone heading at the
-        shallowest depth that comes AFTER deeper headings (e.g. ``##
-        Section A``, ``## Section B``, then a trailing ``# Appendix``)
-        does NOT span the whole body, so it must NOT be treated as a
-        title -- it stays an ordinary section boundary, and its text must
-        not be swallowed into the preceding ``## Section B`` child."""
-        body = (
-            "## Section A\n\nDetail A.\n\n"
-            "## Section B\n\nDetail B.\n\n"
-            "# Appendix\n\nAppendix detail.\n"
-        )
-        sections = tiers_module._split_into_atomic_sections(body)
-        headings = [heading for heading, _ in sections]
-        assert headings == ["Section A", "Section B", "Appendix"]
-
-        section_b_text = next(text for heading, text in sections if heading == "Section B")
-        appendix_text = next(text for heading, text in sections if heading == "Appendix")
-        assert "Appendix detail." not in section_b_text
-        assert "Appendix detail." in appendix_text
-        assert "Detail B." not in appendix_text
-
-    def test_split_without_headings_falls_back_to_review_untouched(
-        self, tmp_path: Path
-    ) -> None:
-        """No markdown heading to split on (issue athenaeum#1248's explicit
-        call: require headings, leave the no-heading cohort to athenaeum#1282) —
-        the page must be left COMPLETELY untouched, degrading to review."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path, meta, existing_body = _make_flat_fixture_page(wiki)
-        before = path.read_text()
-
-        action = _update_action(name="Huge Log", existing_uid="cccc3333")
-        config = {"librarian": {"oversize_page_action": "split"}}
-
-        result = check_page_size_gate(
-            action,
-            existing_body,
-            "sessions/x.md",
-            config,
-            existing_path=path,
-            existing_meta=meta,
-            wiki_root=wiki,
-        )
-
-        # athenaeum#2078: the degraded path flags the page and lets the merge run.
-        assert result is None
-        assert meta["needs_split"] is True
-        assert path.read_text() == before
-        assert list(wiki.glob("*.md")) == [path]
-
-    def test_split_failure_partway_rolls_back_and_leaves_page_byte_identical(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Induces a mid-split write failure (issue athenaeum#1248 AC: 'every
-        write either completes or leaves the page byte-identical'). The
-        SECOND ``atomic_write_text`` call (the second child page) raises —
-        the first child, already written, must be rolled back (unlinked)
-        and the original page must NEVER have been touched at all, since
-        the hub is written last. The gate must degrade to review."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path, meta, existing_body = _make_split_fixture_page(wiki, n_sections=3)
-        before = path.read_text()
-
-        real_atomic_write_text = tiers_module.atomic_write_text
-        calls = {"n": 0}
-
-        def _flaky_atomic_write_text(target: Path, text: str, **kwargs: object) -> None:
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise OSError("simulated disk failure mid-split")
-            real_atomic_write_text(target, text, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(tiers_module, "atomic_write_text", _flaky_atomic_write_text)
-
-        action = _update_action(name="Big Project", existing_uid="aaaa1111")
-        config = {"librarian": {"oversize_page_action": "split"}}
-
-        result = check_page_size_gate(
-            action,
-            existing_body,
-            "sessions/x.md",
-            config,
-            existing_path=path,
-            existing_meta=meta,
-            wiki_root=wiki,
-        )
-
-        # athenaeum#2078: a failed split degrades to flag-and-merge, not a refusal.
-        assert result is None  # did NOT split
-        assert meta["needs_split"] is True
-        assert path.read_text() == before  # byte-identical — hub never touched
-        # The rollback removed the one child that WAS written — no orphans.
-        assert list(wiki.glob("*.md")) == [path]
-        assert calls["n"] == 2  # confirms the induced failure actually fired
 
 
 # ---------------------------------------------------------------------------
@@ -862,7 +632,17 @@ class TestOversizePageLogDemote:
 
 
 class TestTier3DeriveActionsSplitAndLogDemote:
-    def test_split_via_real_dispatch_site_no_llm_call(self, wiki_dir: Path) -> None:
+    def test_retired_split_via_real_dispatch_site_merges_and_flags_instead(
+        self, wiki_dir: Path
+    ) -> None:
+        """Issue athenaeum#2550: ``librarian.oversize_page_action: split``
+        through the REAL dispatch site now behaves exactly like ``review``
+        -- the merge (and its LLM call) proceeds, the page is flagged
+        ``needs_split``, and no escalation is raised. Contrast with
+        ``test_log_demote_via_real_dispatch_site_no_llm_call`` below, the
+        one disposition that still suppresses the merge."""
+        import json
+
         oversized_sections = "\n\n".join(
             f"## Section {i}\n\n" + ("Detail prose. " * 400) for i in range(3)
         )
@@ -875,29 +655,31 @@ class TestTier3DeriveActionsSplitAndLogDemote:
         raw = _make_raw("New note about Acme Corp.")
         actions = [_update_action()]
         client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {"ops": [{"op": "append_section", "text": "New info landed."}]}
+                )
+            )
+        ]
+        response.stop_reason = "end_turn"
+        client.messages.create.return_value = response
         config = {"librarian": {"oversize_page_action": "split"}}
+        before_files = set(wiki_dir.glob("*.md"))
 
-        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+        _new, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw, actions, index, wiki_dir, client, config=config
         )
 
-        client.messages.create.assert_not_called()
-        assert new_entities == []
-        assert pending_updates == []
-        assert updated_uids == []
-        assert len(escalations) == 1
-        assert escalations[0].conflict_type == "oversize_split"
-
-        children = []
-        for p in wiki_dir.glob("*.md"):
-            m, _ = parse_frontmatter(p.read_text())
-            related = m.get("related", [])
-            if isinstance(related, list) and any(
-                isinstance(r, dict) and r.get("uid") == "a1b2c3d4" and r.get("role") == "split-from"
-                for r in related
-            ):
-                children.append(p)
-        assert len(children) == 3
+        client.messages.create.assert_called_once()
+        assert escalations == []
+        assert updated_uids == ["a1b2c3d4"]
+        meta, body = parse_frontmatter(pending_updates[0][1])
+        assert meta["needs_split"] is True
+        assert "New info landed." in body
+        # No split children were written -- the retired disposition never ran.
+        assert set(wiki_dir.glob("*.md")) == before_files
 
     def test_log_demote_via_real_dispatch_site_no_llm_call(self, wiki_dir: Path) -> None:
         oversized_body = "Fintech startup, Series B. " * 500
@@ -930,13 +712,22 @@ class TestTier3DeriveActionsSplitAndLogDemote:
 
 
 # ---------------------------------------------------------------------------
-# Issue athenaeum#1248: run-summary counters distinguish split/log_demote
-# from plain oversize_suppressed
+# Issue athenaeum#1182/#1248: the run-summary counter for log_demote.
+#
+# Issue athenaeum#2550 removed the sibling ``oversize_suppressed`` (the
+# retired ``review``-escalates-and-counts shape, dead since athenaeum#2078)
+# and ``oversize_split`` (the retired reactive-split shape) counters and
+# fields from ``models.py``/``batch.py``/``librarian.py`` and the run
+# summary. ``oversize_page``/``oversize_split`` remain valid
+# ``EscalationItem.conflict_type`` VALUES -- the archived-block parser
+# stays tolerant of them (see ``tests/test_oversize_merge_2078.py`` and
+# ``OVERSIZE_ESCALATION_CONFLICT_TYPES``) -- they are simply no longer
+# counted, and ``check_page_size_gate`` no longer produces them.
 # ---------------------------------------------------------------------------
 
 
-class TestOversizeDispositionCountersDistinguished:
-    def test_apply_tier3_results_counts_disjointly(self, tmp_path: Path) -> None:
+class TestOversizeLogDemotedCounter:
+    def test_apply_tier3_results_counts_only_log_demote(self, tmp_path: Path) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         index = EntityIndex(wiki_root)
@@ -975,8 +766,10 @@ class TestOversizeDispositionCountersDistinguished:
             config=None,
         )
 
-        assert result.oversize_suppressed == 1
-        assert result.oversize_split == 2
+        # Every escalation is still collected regardless of conflict_type --
+        # only the counting is gone for the two retired types.
+        assert not hasattr(result, "oversize_suppressed")
+        assert not hasattr(result, "oversize_split")
         assert result.oversize_log_demoted == 1
         assert len(result.escalated) == 5
 
@@ -1589,6 +1382,70 @@ class TestCollapseOversizeEscalationDuplicates:
         assert archive_text.index("sessions/0.md") < archive_text.index(
             "SOME OLDER ARCHIVED ENTRY"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2550 AC2: archived blocks of the retired ``oversize_page``/
+# ``oversize_split`` types must still parse. Neither type is produced by
+# live code any more (``check_page_size_gate`` never returns ``oversize_page``
+# since athenaeum#2078, and never returns ``oversize_split`` since this
+# issue retired the reactive split) -- but a corpus that ran an older
+# release can carry archived blocks of both, and the issue's own Plan says
+# to "keep the parser tolerant by leaving the type names in the set of
+# known archived types" (:data:`OVERSIZE_ESCALATION_CONFLICT_TYPES`,
+# unchanged by this issue).
+# ---------------------------------------------------------------------------
+
+
+class TestArchivedOversizeBlocksStillParse:
+    def test_one_of_each_retired_type_parses_from_the_archive_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A real ``_pending_questions_archive.md`` shape (issue athenaeum#1430's
+        ``_render_archive_block`` trailer), carrying one answered
+        ``oversize_page`` block and one answered ``oversize_split`` block
+        side by side -- both parse, with ``conflict_type`` intact, and
+        neither is silently dropped the way an unparseable block would be
+        by :func:`athenaeum.answers.parse_pending_questions`."""
+        from athenaeum.answers import parse_pending_questions
+
+        archive = tmp_path / "_pending_questions_archive.md"
+        oversize_page_block = (
+            '## [2026-09-01] Entity: "Old Hub Page" (from sessions/one.md)\n'
+            "- [x] over threshold?\n\nSplit it.\n\n"
+            "**Conflict type**: oversize_page\n"
+            "**Description**: over threshold, ref=sessions/one.md\n\n"
+            "**Archived**: 2026-09-02T00:00:00Z\n"
+        )
+        oversize_split_block = (
+            '## [2026-09-01] Entity: "Old Hub Page 2" (from sessions/two.md)\n'
+            "- [x] already split?\n\nAcknowledged.\n\n"
+            "**Conflict type**: oversize_split\n"
+            "**Description**: was split into linked atomic pages, "
+            "ref=sessions/two.md\n\n"
+            "**Archived**: 2026-09-02T00:00:00Z\n"
+        )
+        archive.write_text(
+            "# Answered Questions\n\n"
+            + oversize_page_block
+            + "\n\n---\n\n"
+            + oversize_split_block
+            + "\n",
+            encoding="utf-8",
+        )
+
+        parsed = parse_pending_questions(archive)
+
+        assert len(parsed) == 2
+        by_entity = {pq.entity: pq for pq in parsed}
+        assert by_entity["Old Hub Page"].conflict_type == "oversize_page"
+        assert by_entity["Old Hub Page"].answered is True
+        assert by_entity["Old Hub Page 2"].conflict_type == "oversize_split"
+        assert by_entity["Old Hub Page 2"].answered is True
+        # Both retired types are still members of the known-archived-types
+        # set the issue's Plan asked to leave untouched.
+        assert "oversize_page" in OVERSIZE_ESCALATION_CONFLICT_TYPES
+        assert "oversize_split" in OVERSIZE_ESCALATION_CONFLICT_TYPES
 
 
 # ---------------------------------------------------------------------------

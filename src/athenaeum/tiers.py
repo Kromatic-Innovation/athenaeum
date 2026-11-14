@@ -1487,9 +1487,9 @@ def _write_retired_names(wiki_root: Path, records_by_uid: dict[str, RetiredNameR
     """Persist *records_by_uid* to the sidecar via one atomic write.
 
     Uses :func:`~athenaeum.atomic_io.atomic_write_text` -- the same
-    same-dir-temp-file-then-``os.replace`` primitive
-    :func:`_perform_oversize_page_split` already uses for its own hub
-    rewrite -- so this write is torn-write-safe on its own. Raises
+    same-dir-temp-file-then-``os.replace`` primitive every other durable
+    rewrite in this module already uses -- so this write is
+    torn-write-safe on its own. Raises
     ``OSError`` on failure (never swallowed here); callers decide how to
     react, since this function is used on BOTH the write and the
     rollback-on-move-failure path, which need opposite fail-open/fail-closed
@@ -5657,8 +5657,8 @@ def parse_merge_ops_response(
     through. *target_type* (issue athenaeum#2216, keyword-only, ``None`` by
     default — NEVER ``""``) is the scrub's resolved target type: the caller
     must resolve it from the target page's OWN frontmatter
-    (``resolve_page_type(meta)``, matching the idiom at this module's own
-    ``_perform_oversize_page_split``) rather than pass ``action.entity_type``,
+    (``resolve_page_type(meta)``, matching the idiom other merge-dispatch
+    sites in this module already use) rather than pass ``action.entity_type``,
     which is always ``""`` on every merge action in this codebase (every
     ``kind="update"`` construction site in ``librarian.py`` sets it that
     way) — ``""`` is not ``None``, so it was wrongly tripping D3 ("target is
@@ -6573,28 +6573,43 @@ OVERSIZE_ESCALATION_CONFLICT_TYPES = frozenset(
 
 # The action an over-threshold page routes to instead of another merge.
 # "review" (issue athenaeum#1182) is the shipped DEFAULT and the only action
-# that ever runs unattended: it escalates and leaves the page byte-for-byte
-# unmodified. "split" and "log_demote" (issue athenaeum#1248) restructure a
-# durable operator page on disk, so BOTH require an explicit operator
-# config choice -- there is no yaml-typo path from "review" to either of
-# them, since resolve_oversize_page_action falls back to "review" for any
-# value outside this tuple. Both routes degrade back to "review" (page
-# left untouched) rather than raising whenever they cannot proceed -- no
-# preserved_log_dir configured (log_demote), no markdown heading to split
-# on, or only one resulting child page (split, issue athenaeum#1248 and
-# athenaeum#2524 -- the no-heading cohort is athenaeum#1282's job, not
-# this one's), or the filesystem operation itself failing partway
-# (see check_page_size_gate's docstring for the atomicity contract both
-# routes give).
-VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
+# that ever runs unattended: since issue athenaeum#2078's operator ruling, it
+# flags the page ``needs_split: true`` and lets the merge proceed (it no
+# longer escalates or leaves the page unmodified -- see
+# check_page_size_gate's docstring). "log_demote" (issue athenaeum#1248)
+# restructures a durable operator page on disk (moves it out of the wiki
+# entirely), so it requires an explicit operator config choice -- there is
+# no yaml-typo path from "review" to it, since resolve_oversize_page_action
+# falls back to "review" for any value outside this tuple. It degrades
+# back to "review" (page left untouched) rather than raising whenever it
+# cannot proceed -- no preserved_log_dir configured, or the filesystem
+# move itself failing partway (see check_page_size_gate's docstring for
+# the atomicity contract it gives).
+VALID_OVERSIZE_PAGE_ACTIONS = ("review", "log_demote")
 DEFAULT_OVERSIZE_PAGE_ACTION = "review"
+
+#: Issue athenaeum#2550: the retired reactive-split value. Still recognized
+#: by name here (rather than falling through the generic unknown-value
+#: path below) so a stale ``librarian.oversize_page_action: split`` keeps
+#: resolving to exactly what it already resolved to before this
+#: retirement -- "review" -- for the honest reason (the disposition is
+#: gone) rather than the dishonest one (the value looks like a typo). The
+#: one-per-run deprecation warning naming ``librarian.page_recompile.mode``
+#: fires in :func:`athenaeum.config.load_config`, not here -- this
+#: function is called once per oversized page, ``load_config`` once per
+#: run.
+_RETIRED_OVERSIZE_PAGE_ACTION_SPLIT = "split"
 
 
 def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:
     """Resolve ``librarian.oversize_page_action`` (issue athenaeum#1182).
 
-    One of :data:`VALID_OVERSIZE_PAGE_ACTIONS`. Any other value (unknown
-    string, wrong type, missing key/section) falls back to
+    One of :data:`VALID_OVERSIZE_PAGE_ACTIONS`, or the retired ``"split"``
+    value (issue athenaeum#2550), which resolves to ``"review"`` exactly
+    like every other unknown value -- but by name, not by falling through
+    the generic case, so the mapping survives even if this function's
+    fallback behaviour ever changes. Any other value (unknown string,
+    wrong type, missing key/section) falls back to
     :data:`DEFAULT_OVERSIZE_PAGE_ACTION` (``"review"``) -- the only action
     that is safe to run unattended; see :func:`check_page_size_gate`.
     """
@@ -6602,262 +6617,28 @@ def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
             raw = cfg.get("oversize_page_action")
+            if raw == _RETIRED_OVERSIZE_PAGE_ACTION_SPLIT:
+                return "review"
             if isinstance(raw, str) and raw in VALID_OVERSIZE_PAGE_ACTIONS:
                 return raw
     return DEFAULT_OVERSIZE_PAGE_ACTION
 
 
 # ---------------------------------------------------------------------------
-# Issue athenaeum#1248: the "split" and "log_demote" oversize-page dispositions.
+# Issue athenaeum#1248: the "log_demote" oversize-page disposition. (Issue
+# athenaeum#2550 retired this section's sibling "split" disposition --
+# `_perform_oversize_page_split`, `_build_split_child_pages` and the
+# `_SplitChildPage` dataclass are gone; `_split_into_atomic_sections`
+# below, their shared section grouping, moved to
+# `athenaeum.page_recompile`, its only remaining caller. See
+# `check_page_size_gate`'s docstring for the current contract.)
 # ---------------------------------------------------------------------------
 #
-# Both routes are performed as a SIDE EFFECT of check_page_size_gate firing
+# This route is performed as a SIDE EFFECT of check_page_size_gate firing
 # (below) -- there is no separate "apply the disposition" call the caller
-# has to remember to make. Both share one non-negotiable property: the
-# page they act on is either left COMPLETELY untouched, or the whole
-# operation lands. There is no code path that leaves a page half-written.
-
-
-@dataclass
-class _SplitChildPage:
-    """One atomic page `split` is about to write (issue athenaeum#1248) --
-    computed in full, including its render(), before ANY file on disk is
-    touched, so the write loop in :func:`_perform_oversize_page_split` does
-    pure I/O with no chance of a mid-computation failure after some pages
-    are already on disk."""
-
-    entity: WikiEntity
-    path: Path
-
-
-def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
-    """Split *body* into ``(heading_text, section_text)`` pairs at its
-    TOP-LEVEL markdown heading depth (issue athenaeum#1248) -- the
-    shallowest ``#``-count actually present in the body, e.g. every ``##``
-    if the page has no ``#``. A deeper heading (a ``###`` under a ``##``)
-    is a SUBSECTION and stays folded into its enclosing top-level
-    section's text verbatim, so a page using nested heading structure
-    splits into one atomic page per top-level section, not one per
-    subsection too.
-
-    Mirrors :func:`_split_into_sections`'s contract (verbatim substrings,
-    a leading ``("", preamble_text)`` pair for content before the first
-    heading) but scoped to one heading depth rather than every heading --
-    a deliberately separate function, not a parameterization of that one,
-    since that gate's section-scoped-merge use case has no notion of
-    "top level" and must not change behaviour here.
-
-    A body with no heading at all returns ``[]`` -- the caller (issue
-    athenaeum#1248's own explicit call, see :data:`VALID_OVERSIZE_PAGE_ACTIONS`'s
-    docstring) treats this as "cannot split", not as "split into one
-    section": a heading-less oversized page is left to the existing
-    ``review`` route (the no-headings cohort is issue athenaeum#1282's job).
-
-    The presumptive top level is the FIRST heading's own depth, not the
-    shallowest depth occurring anywhere in the body. A boundary match is
-    any heading AT OR SHALLOWER than that depth (``<=``, not ``==``) --
-    so a heading that is merely shallower than the first one but appears
-    LATER (e.g. a trailing ``# Appendix`` after ``## Section A`` / ``##
-    Section B``) is still an ordinary section boundary, not grounds to
-    re-derive the top level from it; it does not get swallowed into the
-    preceding section's text (issue athenaeum#2524's review finding on
-    this exact shape).
-
-    Issue athenaeum#2524: when there is exactly ONE such boundary match,
-    it can only be the first heading itself (every boundary match is, by
-    construction, at or shallower than the first heading's own depth, and
-    the first heading always qualifies) -- i.e. it genuinely spans the
-    whole body. That is a page TITLE (e.g. a lone ``# <Name>`` carrying
-    the whole body), not a section to split on -- it has nothing to be
-    split *from* at its own depth. In that case the split depth moves one
-    level down, to the shallowest depth actually present BENEATH that
-    lone heading, so a ``# Name`` page whose real structure lives under
-    ``##`` splits on the ``##`` headings instead of yielding one child
-    holding the entire body. The lone title heading and any text
-    before/after it at that depth folds into the leading ``("",
-    preamble_text)`` pair like any other pre-heading content, so it stays
-    on the hub rather than becoming a same-named child. If nothing is
-    nested beneath the lone heading, the depth is left alone (the
-    caller's exactly-one-child refusal below is what catches that case,
-    the same way it catches the no-heading case).
-    """
-    matches = list(_SECTION_HEADING_RE.finditer(body))
-    if not matches:
-        return []
-    top_level = len(matches[0].group(1))
-    top_matches = [m for m in matches if len(m.group(1)) <= top_level]
-    if len(top_matches) == 1:
-        deeper = [m for m in matches if len(m.group(1)) > top_level]
-        if deeper:
-            top_level = min(len(m.group(1)) for m in deeper)
-            top_matches = [m for m in deeper if len(m.group(1)) == top_level]
-    sections: list[tuple[str, str]] = []
-    if top_matches[0].start() > 0:
-        sections.append(("", body[: top_matches[0].start()]))
-    for i, m in enumerate(top_matches):
-        end = top_matches[i + 1].start() if i + 1 < len(top_matches) else len(body)
-        sections.append((m.group(2).strip(), body[m.start() : end]))
-    return sections
-
-
-def _build_split_child_pages(
-    *,
-    sections: list[tuple[str, str]],
-    parent_uid: str,
-    parent_name: str,
-    parent_type: str,
-    parent_access: str,
-    parent_tags: list[str],
-    wiki_root: Path,
-    today: str,
-) -> tuple[list[_SplitChildPage], str, list[dict[str, str]]]:
-    """Build one new :class:`WikiEntity` per non-preamble section (issue
-    athenaeum#1248) plus the hub body text that links back to all of them.
-    Pure -- writes nothing. Returns ``(children, hub_body,
-    child_related_for_hub)``: the last item is the list of ``related``
-    entries the hub's OWN frontmatter should gain (one ``split-into`` row
-    per child), kept separate from each child's own ``related`` (a single
-    ``split-from`` row pointing back at the parent) since the two entities'
-    frontmatter are written to different files.
-
-    Content before the first heading (the ``("", ...)`` pair, if present)
-    has no heading text to name a child page after, so it stays on the HUB
-    verbatim instead of becoming a child -- still fully preserved, just
-    not atomized (issue athenaeum#1248's "no existing content is dropped").
-    """
-    children: list[_SplitChildPage] = []
-    child_related: list[dict[str, str]] = []
-    preamble = ""
-    link_lines: list[str] = []
-    for heading, text in sections:
-        if not heading:
-            preamble = text.strip()
-            continue
-        child_uid = generate_uid()
-        child_name = f"{parent_name}: {heading}"
-        entity = WikiEntity(
-            uid=child_uid,
-            type=parent_type,
-            name=child_name,
-            access=parent_access,
-            tags=list(parent_tags),
-            related=[{"uid": parent_uid, "role": "split-from"}],
-            created=today,
-            updated=today,
-            body=text.strip() + "\n",
-            source=f"oversize-page-split:{parent_uid}:{today}",
-        )
-        children.append(_SplitChildPage(entity=entity, path=wiki_root / entity.filename))
-        child_related.append({"uid": child_uid, "role": "split-into"})
-        link_lines.append(f"- [[{child_uid}|{child_name}]]")
-
-    hub_paragraphs = [
-        "This page exceeded the page-size threshold and was split into "
-        f"linked pages on {today} (issue athenaeum#1248, "
-        "`librarian.oversize_page_action: split`). All original content "
-        "is preserved in full across the linked pages below -- nothing "
-        "was dropped.",
-    ]
-    if preamble:
-        hub_paragraphs.append(preamble)
-    hub_paragraphs.append("\n".join(link_lines))
-    hub_body = "\n\n".join(hub_paragraphs) + "\n"
-    return children, hub_body, child_related
-
-
-def _perform_oversize_page_split(
-    *,
-    action: EntityAction,
-    existing_body: str,
-    existing_meta: dict[str, Any],
-    existing_path: Path,
-    wiki_root: Path,
-) -> bool:
-    """Split *existing_path* into one atomic child page per top-level
-    markdown section, leaving the original as a hub (issue athenaeum#1248).
-
-    Returns ``True`` on a fully-committed split. Returns ``False`` -- with
-    *existing_path* and the whole corpus otherwise UNTOUCHED -- when
-    *existing_body* has no markdown heading to split on at all, OR (issue
-    athenaeum#2524) when splitting would yield exactly ONE child page --
-    the lone-title-heading degenerate case that used to rename the whole
-    body ``<Name>: <Name>`` instead of actually splitting it. Both are the
-    SAME refusal: the caller falls back to the ``review`` disposition
-    either way.
-
-    **Atomicity contract (issue athenaeum#1248 AC).** Every child page is
-    computed FIRST (:func:`_build_split_child_pages`, pure, no I/O), then
-    written one at a time via :func:`~athenaeum.atomic_io.atomic_write_text`
-    -- itself a same-dir temp-file-then-``os.replace``, so each individual
-    file write is torn-write-safe on its own. The hub (*existing_path*) is
-    rewritten LAST, only after every child has landed. If any child write
-    raises, *existing_path* has NEVER been touched -- the split is aborted
-    right there, every child written so far in THIS call is unlinked
-    (best-effort), and the exception propagates. If the hub write itself
-    raises, the same rollback removes every child that was written. Either
-    way, a caller that catches the propagated exception always finds the
-    corpus in exactly one of two states: fully split (hub + every child
-    present), or fully unsplit (*existing_path* byte-identical to before
-    this call, no child page left on disk) -- never a partial split.
-    """
-    sections = _split_into_atomic_sections(existing_body)
-    # Refuse (same degraded path) on no heading to split on at all, AND
-    # (issue athenaeum#2524) on exactly one resulting child -- a lone
-    # title heading with nothing to split alongside it is "cannot split",
-    # not "split into one section that just gets renamed".
-    child_count = sum(1 for heading, _ in sections if heading)
-    if child_count <= 1:
-        return False
-
-    today = date.today().isoformat()
-    parent_uid = str(existing_meta.get("uid") or "")
-    parent_name = str(existing_meta.get("name") or action.name)
-    parent_type = str(existing_meta.get("type") or action.entity_type or "")
-    parent_access = str(existing_meta.get("access") or action.access or "internal")
-    raw_tags = existing_meta.get("tags")
-    parent_tags = list(raw_tags) if isinstance(raw_tags, list) else []
-    raw_related = existing_meta.get("related")
-    parent_related = list(raw_related) if isinstance(raw_related, list) else []
-
-    children, hub_body, child_related = _build_split_child_pages(
-        sections=sections,
-        parent_uid=parent_uid,
-        parent_name=parent_name,
-        parent_type=parent_type,
-        parent_access=parent_access,
-        parent_tags=parent_tags,
-        wiki_root=wiki_root,
-        today=today,
-    )
-
-    written: list[Path] = []
-    try:
-        for child in children:
-            atomic_write_text(child.path, child.entity.render())
-            written.append(child.path)
-
-        hub_meta = dict(existing_meta)
-        hub_meta["updated"] = today
-        # Issue athenaeum#2078: the split IS the disposition the
-        # ``needs_split`` flag asked for; the hub no longer needs one.
-        hub_meta.pop("needs_split", None)
-        hub_meta["related"] = parent_related + child_related
-        hub_content = render_frontmatter(hub_meta) + "\n" + hub_body
-        atomic_write_text(existing_path, hub_content)
-    except Exception:
-        for path in written:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        raise
-
-    log.info(
-        "oversize-page-gate: split %s into %d linked page(s) (issue athenaeum#1248)",
-        existing_path.name,
-        len(children),
-    )
-    return True
+# has to remember to make. The page it acts on is either left COMPLETELY
+# untouched, or the whole operation lands. There is no code path that
+# leaves a page half-written.
 
 
 def _perform_oversize_log_demote(
@@ -7010,47 +6791,57 @@ def check_page_size_gate(
     what :func:`tier3_merge` / :func:`tier3_merge_params` would echo into the
     merge prompt.
 
-    Returns ``None`` when the page is at or under
-    :func:`resolve_page_size_threshold_chars` -- the caller proceeds with the
-    merge exactly as before, byte-for-byte unchanged from pre-athenaeum#1182
-    behaviour.
+    Returns ``None`` in two cases, both of which let the caller proceed with
+    the merge exactly as it was about to: the page is at or under
+    :func:`resolve_page_size_threshold_chars` (byte-for-byte unchanged from
+    pre-athenaeum#1182 behaviour), or the page is over threshold and this
+    call's disposition does not refuse the merge -- which, since issue
+    athenaeum#2078's operator ruling ("allow the merges, even when the pages
+    are oversized... merges happen first, then splitting into sub-pages"),
+    is every disposition except a `log_demote` that actually moves the page
+    (below). In that second over-threshold case the page is flagged
+    ``needs_split: true`` on the caller's own *existing_meta* dict IN
+    PLACE; the flag only ever reaches disk if the merge itself produces a
+    body the caller writes. :func:`athenaeum.page_recompile.find_recompile_candidates`
+    (via ``athenaeum recompile candidates``) is the read-only scan over
+    pages carrying this flag; this gate never splits anything itself.
 
-    Returns an :class:`~athenaeum.models.EscalationItem` when the page is
-    over threshold. In every case the caller MUST NOT dispatch the merge
-    this call was about to make; instead it appends the returned item to
-    its escalations so :func:`tier4_escalate` surfaces the page (and the
-    observation that would have been merged) in ``_pending_questions.md``
-    rather than losing it. ``conflict_type`` on the returned item tells the
-    caller which disposition actually fired, so run-summary counters can
-    tell them apart (issue athenaeum#1248):
+    Returns an :class:`~athenaeum.models.EscalationItem` ONLY when
+    :func:`resolve_oversize_page_action` resolves to ``"log_demote"``,
+    the caller supplied *existing_path*/*wiki_root* (both keyword-only),
+    and :func:`_perform_oversize_log_demote` actually moved the page --
+    ``conflict_type="oversize_log_demote"``. The caller MUST NOT dispatch
+    the merge this call was about to make in that one case; instead it
+    appends the returned item to its escalations so :func:`tier4_escalate`
+    surfaces the page (and the observation that would have been merged) in
+    ``_pending_questions.md`` rather than losing it. Every other shape --
+    ``log_demote`` configured but unable to proceed (no
+    ``preserved_log_dir``, or the move failed and was rolled back), or a
+    caller that omits *existing_path*/*wiki_root* -- falls through to the
+    flag-and-allow-merge path above. *existing_meta* is the page's
+    already-parsed frontmatter dict (the caller has it in hand from the
+    same ``parse_frontmatter`` call that produced *existing_body* -- this
+    function never re-reads the file itself); ``None``/missing keys fall
+    back to *action*'s own fields.
 
-    - ``"oversize_page"`` -- the ``review`` disposition (the shipped
-      default, and also the graceful fallback below): the page is left
-      byte-for-byte unmodified.
-    - ``"oversize_split"`` -- ``librarian.oversize_page_action: split``
-      fired and the page WAS split into a hub plus linked atomic child
-      pages on disk (:func:`_perform_oversize_page_split`).
-    - ``"oversize_log_demote"`` -- ``librarian.oversize_page_action:
-      log_demote`` fired and the page WAS moved into the preserved-log
-      area (:func:`_perform_oversize_log_demote`).
+    Issue athenaeum#2550 retired the reactive ``split`` disposition this
+    docstring used to describe here: ``librarian.oversize_page_action:
+    split`` now resolves to ``"review"`` (see
+    :func:`resolve_oversize_page_action`), with one deprecation warning per
+    run (:func:`athenaeum.config.load_config`) naming
+    ``librarian.page_recompile.mode`` -- the unattended nightly
+    page-recompile pass, and the ``athenaeum recompile`` operator surface,
+    are the replacement. ``_split_into_atomic_sections`` (the heading
+    grouping the old split reused) now lives in
+    :mod:`athenaeum.page_recompile`, its only remaining caller.
 
-    ``split``/``log_demote`` are only attempted when the caller supplies
-    *existing_path* and *wiki_root* (both keyword-only) -- a call site that
-    omits them (e.g. an older/simpler caller, or most of this module's own
-    test suite) gets ``review`` behaviour for every action, identical to
-    this function's pre-athenaeum#1248 contract. *existing_meta* is the
-    page's already-parsed frontmatter dict (the caller has it in hand from
-    the same ``parse_frontmatter`` call that produced *existing_body* --
-    this function never re-reads the file itself); ``None``/missing keys
-    fall back to *action*'s own fields.
-
-    Neither route ever runs unattended in a way that could raise past this
-    function on its own -- see :func:`_perform_oversize_page_split` and
-    :func:`_perform_oversize_log_demote` for their own atomicity/rollback
-    contracts. A genuine ``OSError`` from either (disk full, permission
-    denied, no space for the temp file, ...) is caught here and degrades to
-    the ``review`` disposition, page left untouched, rather than taking the
-    whole run down over one oversized page.
+    :func:`_perform_oversize_log_demote` never runs unattended in a way
+    that could raise past this function on its own -- see that function
+    for its own atomicity/rollback contract. A genuine ``OSError`` from it
+    (disk full, permission denied, no space for the temp file, ...) is
+    caught here and degrades to the flag-and-allow-merge path, page left
+    untouched, rather than taking the whole run down over one oversized
+    page.
     """
     threshold = resolve_page_size_threshold_chars(config)
     if len(existing_body) <= threshold:
@@ -7058,46 +6849,6 @@ def check_page_size_gate(
 
     configured_action = resolve_oversize_page_action(config)
     meta = existing_meta
-
-    if configured_action == "split" and existing_path is not None and wiki_root is not None:
-        try:
-            split_ok = _perform_oversize_page_split(
-                action=action,
-                existing_body=existing_body,
-                existing_meta=meta,
-                existing_path=existing_path,
-                wiki_root=wiki_root,
-            )
-        except OSError:
-            log.warning(
-                "oversize-page-gate: split of %s failed partway and was "
-                "rolled back -- falling back to review (issue athenaeum#1248)",
-                existing_path.name,
-            )
-            split_ok = False
-        if split_ok:
-            log.info(
-                "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
-                "page=%s source=%s action=split",
-                action.name,
-                source_ref,
-            )
-            return EscalationItem(
-                raw_ref=source_ref,
-                entity_name=action.name,
-                conflict_type="oversize_split",
-                description=(
-                    f"Page {action.name!r} was over the page-size threshold "
-                    "and has been automatically split into linked atomic "
-                    "pages (issue athenaeum#1248); the original page is now "
-                    "a hub linking to them. The new observation from "
-                    f"{source_ref} was not merged this run; it follows so "
-                    f"it is not lost:\n\n{action.observations[:2000]}"
-                ),
-            )
-        # No heading to split on, or the split failed and was rolled back --
-        # fall through to the review disposition below; the page is
-        # untouched either way.
 
     if configured_action == "log_demote" and existing_path is not None and wiki_root is not None:
         try:
@@ -7133,7 +6884,8 @@ def check_page_size_gate(
         # fall through to the review disposition below; the page is
         # untouched either way.
 
-    # "review" (the shipped default), OR split/log_demote was requested but
+    # "review" (the shipped default, and the retired "split" value's new
+    # target -- issue athenaeum#2550), OR log_demote was requested but
     # could not proceed for any of the reasons documented above.
     #
     # Issue athenaeum#2078 AC1 (operator ruling, 2026-10-15): the merge is no
@@ -7147,9 +6899,12 @@ def check_page_size_gate(
     # exact dict) and return ``None`` so the merge proceeds normally. The
     # flag only ever reaches disk if the merge itself produces a body the
     # caller writes -- a failed/declined merge never persists this local
-    # ``meta`` mutation. ``decompose-page --flagged`` (issue athenaeum#2078
-    # AC3) is the operator-facing split pass over pages carrying this flag;
-    # this gate never splits anything itself.
+    # ``meta`` mutation. ``athenaeum recompile`` (``candidates``/``plan``/
+    # ``apply``) is the operator-facing pass over pages carrying this flag
+    # (issue athenaeum#2550 retired the previous, mismatched reference to
+    # ``decompose-page --flagged`` here -- that command has no such flag;
+    # the real reader was always ``athenaeum split-oversize``, itself
+    # retired by the same issue); this gate never splits anything itself.
     meta["needs_split"] = True
     log.info(
         "T3 merge allowed into oversized page, flagged needs_split "

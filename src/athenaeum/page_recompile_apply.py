@@ -20,14 +20,15 @@ page stays a REAL parent, with a summary and its identity intact, with
 sub-pages beneath it linked both ways -- it must NOT degrade into an empty
 link hub. The pass MAY merge near-duplicate sections, with every citation
 and footnote from the merged originals surviving and the originals
-reachable through the undo snapshot. This is the fix for
-:func:`athenaeum.tiers._perform_oversize_page_split`'s two defects named in
-the issue: that function replaces the parent body with a fixed notice plus
-a link list, and it slices by heading offset so a trailing footnote block
-lands only on the last child.
+reachable through the undo snapshot. This is the fix for the retired
+reactive split's (``tiers._perform_oversize_page_split``, deleted by issue
+athenaeum#2550) two defects named in the issue: that function replaced the
+parent body with a fixed notice plus a link list, and it sliced by
+heading offset so a trailing footnote block landed only on the last
+child.
 
-**Compute-first, write-last, same discipline as
-:func:`athenaeum.tiers._perform_oversize_page_split`.** Every sub-page's
+**Compute-first, write-last -- the same discipline the retired reactive
+split followed.** Every sub-page's
 full rendered text, and the parent's full new text, are built in memory by
 :func:`compute_apply` before any file on disk is touched. New sub-pages are
 written first (each via :func:`athenaeum.atomic_io.atomic_write_text`,
@@ -136,13 +137,20 @@ Imports :mod:`athenaeum.page_relations` (L3) for the relation primitives
 this module reuses rather than duplicates, :mod:`athenaeum.config` (L2),
 :mod:`athenaeum.atomic_io`, :mod:`athenaeum.footnote_markers` and
 :mod:`athenaeum.models` (all L1/L0), and :mod:`athenaeum.store` (L0/L1) for
-:class:`~athenaeum.store.FilesystemStore`.
+:class:`~athenaeum.store.FilesystemStore`. Issue athenaeum#2550 AC6 added a
+function-local import of :mod:`athenaeum.answers` and :mod:`athenaeum.tiers`
+(both L4, same-layer) inside :func:`_archive_oversize_notices_for_applied_plan`
+-- the oversize-family notice archived there is matched/removed with the
+same primitives :func:`~athenaeum.tiers.tier4_escalate`'s own dedup and
+:func:`~athenaeum.tiers.close_moot_notices` already use, rather than a
+third parallel implementation.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -215,6 +223,8 @@ from athenaeum.page_relations import (
 )
 from athenaeum.screening import more_restrictive
 from athenaeum.store import FilesystemStore, now_iso
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # The ledger (AC9): one new record kind in the SAME file page_recompile_plan
@@ -1569,8 +1579,9 @@ def compute_apply(
     # ONE write rather than one `set_relation` call per child -- a repeated
     # double-write per child would rewrite the parent N times with
     # intermediate (not-yet-final) content, breaking the "parent written
-    # once, last, with its final body" contract this module (and
-    # tiers.py:_perform_oversize_page_split before it) relies on.
+    # once, last, with its final body" contract this module (and the
+    # retired reactive split, tiers.py:_perform_oversize_page_split,
+    # before it) relies on.
     new_children = [ChildRef(uid=sp.uid, via="split") for sp in sub_pages]
     all_children = list(existing_relations.children) + new_children
     all_children.sort(key=lambda c: c.uid)
@@ -1939,6 +1950,61 @@ def _cross_page_approval_refusal(
     )
 
 
+def _archive_oversize_notices_for_applied_plan(
+    wiki_root: Path, *, name: str, plan_id: str
+) -> int:
+    """Archive any open oversize-family notice for *name* once a recompile
+    plan has applied to its page (issue athenaeum#2550 AC6).
+
+    An unanswered :data:`~athenaeum.tiers.OVERSIZE_ESCALATION_CONFLICT_TYPES`
+    block (``oversize_page``, ``oversize_split`` or ``oversize_log_demote``)
+    is a record that a page needed restructuring; a plan just landing on
+    that same page is exactly the restructuring it was asking for, so the
+    notice is stale. Archived through
+    :func:`athenaeum.tiers.archive_pending_blocks` with a reason naming
+    *plan_id*, never silently deleted.
+
+    Matched by the page's ``name:`` (the same free-text key
+    :func:`~athenaeum.tiers.tier4_escalate`'s own oversize-family dedup
+    already keys on -- there is no uid field on a ``PendingQuestion``).
+
+    A notice still carrying a parked observation
+    (``pq.recovered_observation``) is left OPEN, same carve-out
+    :func:`~athenaeum.tiers.close_moot_notices` already applies: the
+    observation it is protecting was never merged anywhere, so closing the
+    notice would be the only place that text was held.
+
+    Returns the number of blocks archived (``0`` when there is no pending
+    file, no *name*, or no matching unanswered notice without a parked
+    observation).
+    """
+    if not name:
+        return 0
+    pending_path = wiki_root / "_pending_questions.md"
+    if not pending_path.exists():
+        return 0
+    from athenaeum.answers import parse_pending_questions
+    from athenaeum.tiers import OVERSIZE_ESCALATION_CONFLICT_TYPES, archive_pending_blocks
+
+    questions = parse_pending_questions(pending_path)
+    to_archive = {
+        pq.raw_block
+        for pq in questions
+        if not pq.answered
+        and pq.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES
+        and pq.entity == name
+        and not pq.recovered_observation
+    }
+    if not to_archive:
+        return 0
+    return archive_pending_blocks(
+        pending_path,
+        questions,
+        to_archive,
+        reason=f"page recompile plan {plan_id} applied to this page (issue athenaeum#2550)",
+    )
+
+
 def write_apply(
     wiki_root: Path,
     *,
@@ -2172,6 +2238,44 @@ def write_apply(
     # caught rather than assumed away.
     units_by_id_for_postcheck = {unit.unit_id: unit for unit in segment.units}
     post_issues: list[PlanIssue] = list(attach_issues)
+
+    # Issue athenaeum#2550 AC6: the plan just applied is exactly what an
+    # open oversize-family notice for this page was asking a human to
+    # arrange -- archive it now rather than leaving it open over a page
+    # that has already been restructured. Covers both this function's
+    # callers: the operator-approved ``recompile apply`` CLI path AND the
+    # athenaeum#2549 nightly auto-apply path, since both land here.
+    #
+    # Issue athenaeum#2581 (Seer finding on PR athenaeum#2581, review of
+    # athenaeum#2550): this runs AFTER every page is written and the
+    # journal is already removed, so a failure here (a parse error in
+    # ``_pending_questions.md``, an ``OSError`` mid-rewrite) must NEVER
+    # propagate out of this function -- doing so would skip the ledger
+    # record and the snapshot commit below, leaving the wiki in exactly
+    # the state athenaeum#2548's own undo reasoning calls worse than
+    # refusing up front: already restructured, with no durable record
+    # that it happened. Archiving a stale notice is best-effort cleanup,
+    # not part of the apply's own correctness -- caught broadly (an
+    # ``OSError`` from the rewrite and a parse-shape error from a
+    # corrupt pending file are both plausible and both equally NOT a
+    # reason to lose the apply's own record) and reported the same way
+    # every other "the write happened, and here is what is off about
+    # it" case already is: appended to ``post_issues``, never raised,
+    # ``ok`` left ``True``.
+    try:
+        _archive_oversize_notices_for_applied_plan(
+            wiki_root, name=str(page_meta.get("name") or ""), plan_id=resolved_plan_id
+        )
+    except Exception as exc:  # noqa: BLE001 -- best-effort cleanup, see comment above
+        log.warning(
+            "page-recompile apply %s: archiving the oversize-family notice for "
+            "%s failed (issue athenaeum#2550/#2581) -- the plan itself still "
+            "applied successfully: %s",
+            resolved_plan_id,
+            plan.uid,
+            exc,
+        )
+        post_issues.append(PlanIssue("post-write-oversize-notice-archive-failed", plan.uid))
     reread_parent = computed.parent_path.read_text(encoding="utf-8")
     _, reread_parent_body = parse_frontmatter(reread_parent)
     if not computed.attachments and reread_parent != computed.parent_text:

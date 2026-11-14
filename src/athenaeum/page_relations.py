@@ -17,9 +17,10 @@ parent carries one ``related`` row per child of the form
 :func:`remove_relation` removes it. Each writes both pages in one
 all-or-nothing operation via :func:`_write_both_or_rollback` — if the second
 write raises, the first page is restored to its own pre-call bytes before
-the exception propagates, mirroring the atomicity contract
-``tiers.py:_perform_oversize_page_split`` already gives its own children:
-both new pages are computed in full (:func:`read_relations`,
+the exception propagates, mirroring the atomicity contract the retired
+reactive split (``tiers.py:_perform_oversize_page_split``, deleted by
+issue athenaeum#2550) gave its own children: both new pages are computed
+in full (:func:`read_relations`,
 :func:`apply_breadcrumb`, :func:`apply_sub_pages_section`) before either
 file on disk is touched.
 
@@ -492,9 +493,10 @@ def set_relation(wiki_root: Path, *, child_uid: str, parent_uid: str, via: str) 
         )
 
     # Everything below is pure computation -- no file on disk is touched
-    # until _write_both_or_rollback, mirroring
-    # tiers.py:_perform_oversize_page_split's "compute both pages fully
-    # before any write" discipline.
+    # until _write_both_or_rollback, mirroring the retired reactive split's
+    # (tiers.py:_perform_oversize_page_split, deleted by issue
+    # athenaeum#2550) "compute both pages fully before any write"
+    # discipline.
     #
     # _clear_child_parent_pointer also drops a pre-existing legacy
     # split-from row naming this same parent -- a child moving from the

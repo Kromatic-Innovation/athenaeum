@@ -1262,3 +1262,197 @@ class TestAC11MergeNearDuplicatesKnob:
         units = {u.unit_id: u for u in segment_page(body).units}
         assert units[ids[1]].text in sub_body
         assert units[ids[2]].text in sub_body
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2550 AC6: applying a plan archives any open
+# oversize-family notice for that page -- unless the notice still carries
+# a parked observation, which must stay open.
+# ---------------------------------------------------------------------------
+
+
+def _write_pending_block(wiki: Path, block: str) -> Path:
+    pending = wiki / "_pending_questions.md"
+    pending.write_text("# Pending Questions\n\n" + block + "\n", encoding="utf-8")
+    return pending
+
+
+class TestOversizeNoticeArchivedOnApply:
+    def _oversize_block(self, entity: str, *, conflict_type: str = "oversize_page") -> str:
+        return (
+            f'## [2026-09-01] Entity: "{entity}" (from sessions/one.md)\n'
+            "- [ ] over threshold?\n\n"
+            f"**Conflict type**: {conflict_type}\n"
+            "**Description**: over threshold, ref=sessions/one.md\n"
+        )
+
+    def test_applying_a_plan_archives_the_open_notice_for_that_page(
+        self, wiki: Path
+    ) -> None:
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(wiki, self._oversize_block("Acme"))
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        after_pending = pending.read_text(encoding="utf-8")
+        assert "oversize_page" not in after_pending
+        archive = wiki / "_pending_questions_archive.md"
+        assert archive.exists()
+        archive_text = archive.read_text(encoding="utf-8")
+        assert "oversize_page" in archive_text
+        assert outcome.plan_id in archive_text  # reason names the plan id
+        assert "athenaeum#2550" in archive_text
+
+    @pytest.mark.parametrize("conflict_type", ["oversize_split", "oversize_log_demote"])
+    def test_archives_oversize_split_and_log_demote_too(
+        self, wiki: Path, conflict_type: str
+    ) -> None:
+        """The dedup FAMILY (:data:`athenaeum.tiers.OVERSIZE_ESCALATION_CONFLICT_TYPES`),
+        not just ``oversize_page`` -- an entity could carry any one of the
+        three depending on which disposition last fired for it (or, for
+        ``oversize_split``, a block left over from before that
+        disposition's own retirement)."""
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(
+            wiki, self._oversize_block("Acme", conflict_type=conflict_type)
+        )
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True, conflict_type
+        assert conflict_type not in pending.read_text(encoding="utf-8")
+
+    def test_notice_for_a_different_page_is_left_alone(self, wiki: Path) -> None:
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(wiki, self._oversize_block("Some Other Page"))
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert "Some Other Page" in pending.read_text(encoding="utf-8")
+        assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def test_notice_with_a_parked_observation_stays_open(self, wiki: Path) -> None:
+        """AC6's negative case: a notice that still carries a parked
+        observation is left OPEN -- that text was never merged anywhere,
+        so archiving the notice would be the only place it was held."""
+        from athenaeum.answers import render_observation_field
+
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        block = (
+            '## [2026-09-01] Entity: "Acme" (from sessions/one.md)\n'
+            "- [ ] over threshold?\n\n"
+            "**Conflict type**: oversize_page\n"
+            "**Description**: over threshold, ref=sessions/one.md\n"
+            f"{render_observation_field('A fact that was never merged anywhere.')}\n"
+        )
+        pending = _write_pending_block(wiki, block)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        after_pending = pending.read_text(encoding="utf-8")
+        assert "oversize_page" in after_pending  # still open
+        assert "A fact that was never merged anywhere." in after_pending
+        assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def test_no_pending_file_is_a_silent_noop(self, wiki: Path) -> None:
+        """No ``_pending_questions.md`` at all must not block or alter the
+        apply -- the hook is additive, never a precondition."""
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def _init_git_repo(self, root: Path) -> None:
+        subprocess.run(
+            ["git", "init", "-b", "develop"], cwd=root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+
+    def test_archive_failure_is_best_effort_and_never_loses_the_apply(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2581 (Seer finding on the athenaeum#2550 PR): a
+        failure while archiving the oversize notice (an ``OSError`` from
+        ``archive_pending_blocks``, or any other exception the rewrite can
+        raise) must NOT propagate out of ``write_apply``. Every page is
+        already restructured and the journal already removed by the time
+        this hook runs, so letting the exception through would skip the
+        ledger record and the snapshot commit below it -- leaving the wiki
+        in neither the pre-image nor a recorded post-apply state, which is
+        exactly the outcome athenaeum#2548's own undo reasoning calls worse
+        than refusing up front. The apply itself genuinely succeeded, so
+        ``ok`` stays ``True``; the failure is reported through
+        ``post_write_issues``, the established channel for "the write
+        happened, and here is what is off about it".
+
+        Against the pre-fix code (the call unguarded, no try/except) this
+        test fails with the monkeypatched ``OSError`` propagating out of
+        ``write_apply`` itself -- observed directly before writing the fix:
+        ``outcome.ok`` was never reached because the call raised.
+        """
+        from athenaeum import tiers as tiers_module
+
+        knowledge = wiki.parent
+        knowledge.mkdir(parents=True, exist_ok=True)
+        self._init_git_repo(knowledge)
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        subprocess.run(["git", "add", "-A"], cwd=knowledge, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "seed"], cwd=knowledge, check=True, capture_output=True
+        )
+        before_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=knowledge, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        _simple_plan(wiki)
+        _write_pending_block(wiki, self._oversize_block("Acme"))
+
+        def _raise(*_a: object, **_kw: object) -> int:
+            raise OSError("simulated failure archiving the oversize notice")
+
+        monkeypatch.setattr(tiers_module, "archive_pending_blocks", _raise)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert any(
+            issue.code == "post-write-oversize-notice-archive-failed"
+            for issue in outcome.post_write_issues
+        ), outcome.post_write_issues
+
+        # The ledger record and snapshot commit still landed -- the apply's
+        # own authoritative record is intact despite the archive failure.
+        assert outcome.snapshot_sha is not None
+        assert outcome.snapshot_sha != before_sha
+        after_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=knowledge, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert after_sha == outcome.snapshot_sha
+        records = [
+            json.loads(line)
+            for line in (wiki / "_page_recompiles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        apply_records = [r for r in records if r.get("kind") == "apply"]
+        assert len(apply_records) == 1
+        assert apply_records[0]["uid"] == "page0001"
+
+        # The notice itself was NOT archived -- the failed rewrite left it
+        # exactly where it was, which is the honest outcome: best-effort
+        # cleanup that failed, not a cleanup that silently landed anyway.
+        pending = wiki / "_pending_questions.md"
+        assert "oversize_page" in pending.read_text(encoding="utf-8")
+        assert not (wiki / "_pending_questions_archive.md").exists()

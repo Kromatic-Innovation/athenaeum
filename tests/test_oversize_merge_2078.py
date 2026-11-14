@@ -3,8 +3,12 @@
 recover parked observations whose text was dropped.
 
 Covers AC1 (gate flags instead of refusing), AC2 (append-mode full-echo),
-AC3 (split pass), AC4 (observation round-trip), AC5 (recover-parked) and AC6
-(moot closure). No LLM, no network.
+AC4 (observation round-trip), AC5 (recover-parked) and AC6 (moot closure).
+AC3 (the reactive split pass over flagged pages, and the ``athenaeum
+split-oversize`` CLI it was invoked through) was retired by issue
+athenaeum#2550 -- see ``tests/test_page_size_gate.py`` for the resulting
+flag-and-allow-merge behaviour and ``tests/test_cli.py`` for the command's
+removal coverage. No LLM, no network.
 """
 
 from __future__ import annotations
@@ -294,140 +298,6 @@ class TestAC6MootClosure:
         pending = self._setup(tmp_path, _legacy_block("drive/gone.md"))
         assert reresolve_open_questions(pending, client=None) == 1
         assert parse_pending_questions(pending) == []
-
-
-# --------------------------------------------------------------------------
-# AC3 split pass
-# --------------------------------------------------------------------------
-
-
-def _page(wiki: Path, uid: str, name: str, *, sections: int, flagged: bool = False) -> Path:
-    body = "Intro.\n\n" + "\n\n".join(
-        f"## Section {i}\n\nDetail {i}. " + "Filler prose. " * 300 for i in range(sections)
-    )
-    flag = "needs_split: true\n" if flagged else ""
-    path = wiki / f"{uid}-{name}.md"
-    path.write_text(f"---\nuid: {uid}\ntype: project\nname: {name}\n{flag}---\n\n{body}\n")
-    return path
-
-
-def _titled_page(
-    wiki: Path, uid: str, name: str, *, sections: int, flagged: bool = True
-) -> Path:
-    """Same shape as :func:`_page` but with a LONE top-level ``# <name>``
-    title ahead of the ``##`` sections (issue athenaeum#2524) -- the
-    compiled-page shape that used to make the CLI's split route cut at
-    the title instead of the sections."""
-    body = (
-        f"# {name}\n\nIntro under the title.\n\n"
-        + "\n\n".join(
-            f"## Section {i}\n\nDetail {i}. " + "Filler prose. " * 400 for i in range(sections)
-        )
-    )
-    flag = "needs_split: true\n" if flagged else ""
-    path = wiki / f"{uid}-{name}.md"
-    path.write_text(f"---\nuid: {uid}\ntype: project\nname: {name}\n{flag}---\n\n{body}\n")
-    return path
-
-
-class TestAC3SplitPass:
-    def test_titled_page_splits_on_sections_not_the_lone_title(self, tmp_path: Path) -> None:
-        """Issue athenaeum#2524 AC1, through the CLI's own caller
-        (:func:`split_pages`, not just the reactive gate): a lone ``#
-        <name>`` title with three ``##`` sections splits into three
-        children named off the SECTION heading, never ``<name>: <name>``
-        (AC3)."""
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path = _titled_page(wiki, "aaaa1111", "big", sections=3, flagged=True)
-        (out,) = split_pages(wiki, uids={"aaaa1111"}, auto=False, dry_run=False)
-        assert out.status == "split"
-        children = [p for p in wiki.glob("*.md") if p != path]
-        assert len(children) == 3
-        child_names = {parse_frontmatter(c.read_text())[0]["name"] for c in children}
-        assert "big: big" not in child_names
-        for i in range(3):
-            assert f"big: Section {i}" in child_names
-
-    def test_titled_page_with_one_section_is_refused_as_no_heading(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue athenaeum#2524 AC2, through the CLI's own caller: a lone
-        title with only ONE section would still yield exactly one child --
-        refused via the same ``no_heading`` outcome/path the heading-less
-        cohort already uses, nothing written."""
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path = _titled_page(wiki, "dddd4444", "lone", sections=1, flagged=True)
-        before = path.read_text()
-        (out,) = split_pages(wiki, uids={"dddd4444"}, auto=False, dry_run=False)
-        assert out.status == "no_heading"
-        assert path.read_text() == before
-        assert list(wiki.glob("*.md")) == [path]
-
-    def test_uid_approved_split_and_flag_cleared(self, tmp_path: Path) -> None:
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        path = _page(wiki, "aaaa1111", "big", sections=3, flagged=True)
-        (out,) = split_pages(wiki, uids={"aaaa1111"}, auto=False, dry_run=False)
-        assert out.status == "split"
-        meta, body = parse_frontmatter(path.read_text())
-        assert "needs_split" not in meta
-        assert len(list(wiki.glob("*.md"))) == 4  # hub + 3 children
-        assert "Detail 1." not in body  # moved to a child
-
-    def test_unapproved_flagged_page_is_only_reported(self, tmp_path: Path) -> None:
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        _page(wiki, "aaaa1111", "big", sections=3, flagged=True)
-        (out,) = split_pages(wiki, uids=set(), auto=True, dry_run=False)
-        assert out.status == "not_approved"
-        assert len(list(wiki.glob("*.md"))) == 1
-
-    def test_auto_splits_only_over_hard_ceiling(self, tmp_path: Path) -> None:
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        _page(wiki, "aaaa1111", "big", sections=3, flagged=True)
-        cfg = {"librarian": {"oversize_hard_ceiling_chars": 5000}}
-        (out,) = split_pages(wiki, uids=set(), auto=True, config=cfg, dry_run=False)
-        assert out.status == "split"
-
-    def test_dry_run_writes_nothing_and_headingless_is_reported(self, tmp_path: Path) -> None:
-        from athenaeum.oversize_split import split_pages
-
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        a = _page(wiki, "aaaa1111", "big", sections=3, flagged=True)
-        before = a.read_text()
-        (out,) = split_pages(wiki, uids={"aaaa1111"}, auto=False, dry_run=True)
-        assert out.status == "would_split" and a.read_text() == before
-        flat = wiki / "bbbb2222-flat.md"
-        flat.write_text(
-            "---\nuid: bbbb2222\nname: flat\nneeds_split: true\n---\n\n" + "x " * 6000
-        )
-        results = split_pages(wiki, uids={"bbbb2222"}, auto=False, dry_run=False)
-        outs = {o.uid: o.status for o in results}
-        assert outs["bbbb2222"] == "no_heading"
-
-    def test_cli_dry_run_prints_counts_only(self, tmp_path: Path, capsys) -> None:
-        from athenaeum.cli import main
-
-        root = tmp_path / "k"
-        (root / "wiki").mkdir(parents=True)
-        _page(root / "wiki", "aaaa1111", "secretname", sections=3, flagged=True)
-        assert main(["split-oversize", "--path", str(root)]) == 0
-        out = capsys.readouterr().out
-        assert "candidates:" in out and "secretname" not in out
 
 
 # --------------------------------------------------------------------------
