@@ -465,6 +465,56 @@ def test_refuses_source_equals_into(tmp_path: Path) -> None:
     assert rc == 2
 
 
+def test_refuses_rejected_pair(tmp_path: Path) -> None:
+    """athenaeum#2546 ("honoured everywhere" — propose-fold's own refusal):
+    --into and a --source linked by merge_rejected_with must be refused
+    before anything is queued, on --apply as well as dry-run.
+    """
+    wiki, canonical, src_b, src_c = _seed(tmp_path)
+    # src_b previously rejected merging with the canonical.
+    src_b.write_text(
+        "---\nname: Springer Maria\ntype: concept\n"
+        'merge_rejected_with: ["Maria Springer"]\n'
+        "---\nthin dup b\n",
+        encoding="utf-8",
+    )
+
+    rc, out = _run(
+        [
+            "decisions",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "maria-springer",
+            "--source",
+            "springer-maria",
+        ]
+    )
+    assert rc == 2
+    assert "merge_rejected_with" in out
+
+    # --apply refuses identically — nothing queued.
+    rc_apply, out_apply = _run(
+        [
+            "decisions",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "maria-springer",
+            "--source",
+            "springer-maria",
+            "--apply",
+        ]
+    )
+    assert rc_apply == 2
+    assert "merge_rejected_with" in out_apply
+    assert not (wiki / "_pending_merges.md").exists()
+
+
 def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> None:
     """A page whose filename matches neither the bare-slug form nor its OWN
     `<uid>-<slug>.md` form (no `uid:` frontmatter here at all, so the

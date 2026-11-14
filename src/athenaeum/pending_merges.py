@@ -106,6 +106,10 @@ from athenaeum.decision_framing import (
     WIDEN_CANDIDATES_LABEL,
     match_widen_candidate,
 )
+from athenaeum.declared_relationships import (
+    DeclaredRelationshipFacts,
+    merge_rejection_conflict,
+)
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
     UNIVERSAL_MARKER,
@@ -502,6 +506,52 @@ def find_fold_target_collisions(
         for fpath in find_identity_pages(merge_target_name, wiki_root)
         if fpath.resolve() != canonical_resolved and fpath.resolve() not in other_resolved
     ]
+
+
+def find_merge_rejection_conflict(paths: list[Path]) -> tuple[Path, Path] | None:
+    """First pair of *paths* mutually linked by ``merge_rejected_with:``, or
+    ``None`` (issue athenaeum#2546, "honoured everywhere" — ``propose-fold``'s
+    own refusal, before a proposal is ever queued).
+
+    Reads each path's CURRENT frontmatter fresh (name, ``aliases:`` and
+    ``merge_rejected_with:``) and delegates the actual pairwise check to
+    :func:`athenaeum.declared_relationships.merge_rejection_conflict`, so
+    this is a thin disk-reading adapter, not a second implementation of the
+    match — alias-aware exactly like
+    :func:`~athenaeum.declared_relationships.declared_relationship`, so a
+    link recorded against one of *paths*' pre-rename name, or a page since
+    folded into one of them, is still caught. A missing/unreadable file
+    reads as an empty-identity page (never raises, never itself the cause
+    of a false conflict).
+    """
+    facts: list[DeclaredRelationshipFacts] = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        meta, _ = parse_frontmatter(text)
+        if not isinstance(meta, dict):
+            meta = {}
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        facts.append(
+            DeclaredRelationshipFacts(name=name, merge_rejected_with=rejected, aliases=aliases)
+        )
+    conflict = merge_rejection_conflict(facts)
+    if conflict is None:
+        return None
+    i, j = conflict
+    return paths[i], paths[j]
 
 
 def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
@@ -2185,6 +2235,50 @@ def _apply_fold_into_existing(
                     "overwritten."
                 ),
             }
+
+    # Step -1b.5 (issue athenaeum#2546, "honoured everywhere"): refuse the
+    # fold outright when the canonical and any folded-away source -- or two
+    # folded-away sources -- are linked by merge_rejected_with, directly or
+    # through a fold chain (an entry naming one side's PRIOR identity,
+    # reachable via that side's aliases:). This is the actual enforcement
+    # point: the comparator's Gate 1 only ever sees ONE pair at a time and
+    # would happily approve A+X and, separately, B+X, each uniting a
+    # rejected A/B pair transitively once both land on X. Unconditional --
+    # applies to an auto-applied fold exactly as to a human-approved one,
+    # the same posture as the tombstone checks just above.
+    def _rejection_facts(meta: dict[str, Any]) -> DeclaredRelationshipFacts:
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        return DeclaredRelationshipFacts(name=name, merge_rejected_with=rejected, aliases=aliases)
+
+    _rejection_members = [target_path, *[Path(s) for s in folded_sources]]
+    _rejection_facts_list = [_rejection_facts(prior_meta)] + [
+        _rejection_facts(source_metas[s]) for s in folded_sources
+    ]
+    _conflict = merge_rejection_conflict(_rejection_facts_list)
+    if _conflict is not None:
+        i, j = _conflict
+        return {
+            "ok": False,
+            "error_code": "fold_rejected_pair",
+            "message": (
+                f"{_rejection_members[i]} and {_rejection_members[j]} are linked "
+                "by merge_rejected_with (an operator previously rejected merging "
+                "them); refusing to fold them onto the same canonical page, "
+                "directly or through this fold chain. Revoke the link first "
+                "(athenaeum decisions revoke-merge-rejection) if the ruling no "
+                "longer applies."
+            ),
+        }
 
     # Step -1c (issue athenaeum#716): coordinate widening + the narrowing-
     # invariant refusal. Parse the draft's OWN frontmatter (it may carry
