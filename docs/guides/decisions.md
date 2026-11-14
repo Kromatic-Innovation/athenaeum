@@ -101,6 +101,9 @@ athenaeum decisions propose-fold --into PAGE --source PAGE [--source PAGE ...] [
                                                     # propose folding one or more source pages INTO a
                                                     # named canonical page. Dry-run by default.
 athenaeum decisions provenance [--canonical-slug S] [--merge-id ID] [--json]
+athenaeum decisions revoke-merge-rejection --a PAGE --b PAGE [--apply]
+                                                    # reverse a previous reject verdict between two
+                                                    # pages. Dry-run by default.
 ```
 
 **`revalidate` is the first move for "is the merge queue healthy?"** It
@@ -143,6 +146,37 @@ wiki entity.
 Re-running with no new `[x]` blocks is a no-op. Malformed blocks are
 preserved in place and logged to stderr, so a corrupt entry can't poison
 the rest of the file.
+
+## I want a rejected merge to stop coming back
+
+Rejecting a merge or fold question (either way — editing the file, or
+`resolve_merge(..., "reject")` via MCP) does more than flip a checkbox: it
+writes a durable `merge_rejected_with:` link onto the two pages, naming
+each other. That link means "an operator looked at these two and ruled
+they are NOT the same thing" — a fact, not a similarity score, and it
+never expires on its own.
+
+Every merge path honors it before proposing or applying anything: the
+nightly similarity clusterer splits a linked pair out of a candidate
+group rather than letting a third page unite them indirectly,
+`propose-fold` refuses to queue a fold naming both sides, and approving a
+queued fold is refused outright if it would unite them — whether directly
+or because one side has since been folded into (or renamed from) the
+other. The link survives both of those: folding a page into a canonical
+carries its rejections forward, and renaming a page (or folding a source
+into it) keeps the old name resolvable, so a link written before the
+rename still matches.
+
+Because the link never expires, reversing a prior ruling is a deliberate
+step, not a side effect of approving something else:
+
+```bash
+athenaeum decisions revoke-merge-rejection --a PAGE --b PAGE --apply
+```
+
+This removes the link from both pages (whichever side(s) still carry it)
+so the pair becomes proposable again on the next run. Leave off `--apply`
+to see what would change first.
 
 ## See also
 

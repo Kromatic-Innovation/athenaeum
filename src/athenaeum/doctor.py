@@ -663,6 +663,80 @@ def check_page_relations(wiki_root: Path) -> CheckResult:
     )
 
 
+def check_merge_rejected_with_targets(wiki_root: Path) -> CheckResult:
+    """A ``merge_rejected_with:`` entry naming no live page (issue
+    athenaeum#2546 AC4) -- e.g. the page it named was removed by hand
+    outside the fold/rename primitives (both of which keep an old identity
+    resolvable via ``aliases:``, so a routine rename or fold never trips
+    this). Read-only: parses existing frontmatter only, same as
+    :func:`check_page_relations`.
+
+    Resolution is identity-extended exactly like
+    :func:`athenaeum.declared_relationships.declared_relationship` -- an
+    entry matching ANY live page's ``name:`` OR one of its ``aliases:``
+    counts as resolved -- via
+    :func:`athenaeum.declared_relationships.unresolved_merge_rejected_with`,
+    so this reuses the one primitive rather than re-deriving the match.
+    """
+    from athenaeum.declared_relationships import (
+        DeclaredRelationshipFacts,
+        unresolved_merge_rejected_with,
+    )
+    from athenaeum.models import parse_frontmatter
+
+    if not wiki_root.is_dir():
+        return CheckResult(
+            name="merge_rejected_with_targets", status="ok", detail="0 dangling link(s)"
+        )
+
+    facts: list[DeclaredRelationshipFacts] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        if name or rejected:
+            facts.append(
+                DeclaredRelationshipFacts(
+                    name=name, merge_rejected_with=rejected, aliases=aliases
+                )
+            )
+
+    dangling = unresolved_merge_rejected_with(facts)
+    if not dangling:
+        return CheckResult(
+            name="merge_rejected_with_targets", status="ok", detail="0 dangling link(s)"
+        )
+    shown = ", ".join(f"{page!r} -> {entry!r}" for page, entry in dangling[:5])
+    if len(dangling) > 5:
+        shown += f", ... ({len(dangling) - 5} more)"
+    return CheckResult(
+        name="merge_rejected_with_targets",
+        status="fail",
+        detail=f"{len(dangling)} dangling merge_rejected_with link(s): {shown}",
+        fix=(
+            "the named page no longer exists under wiki/ with that name or "
+            "alias -- fix the frontmatter by hand, or revoke the stale link "
+            "with `athenaeum decisions revoke-merge-rejection --apply`"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration + rendering.
 # ---------------------------------------------------------------------------
@@ -703,6 +777,7 @@ def run_checks(
         check_last_compile(resolved_cache_dir),
         check_schedule_state(home=home),
         check_page_relations(knowledge_root / "wiki"),
+        check_merge_rejected_with_targets(knowledge_root / "wiki"),
     ]
 
 
