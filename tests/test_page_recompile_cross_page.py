@@ -217,6 +217,47 @@ def _move_one_section(wiki: Path, **kwargs: Any) -> tuple[RecompilePlan, str]:
     )
 
 
+class _VerifyStubClient:
+    """The minimum the applier's merge re-verification needs: one canned
+    "every sentence supported" answer. The same stub shape
+    ``tests/test_page_recompile_apply.py`` uses -- no network, no key."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.messages = _VerifyStubMessages(self)
+
+
+class _VerifyStubMessages:
+    def __init__(self, client: _VerifyStubClient) -> None:
+        self._client = client
+
+    def create(self, **kwargs: Any) -> Any:
+        self._client.calls.append(kwargs)
+        return _VerifyStubResponse(
+            json.dumps({"sentences": [{"index": 0, "verdict": "supported"}]})
+        )
+
+
+class _VerifyStubUsage:
+    input_tokens = 11
+    output_tokens = 7
+    cache_creation_input_tokens = 0
+    cache_read_input_tokens = 0
+
+
+class _VerifyStubBlock:
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _VerifyStubResponse:
+    def __init__(self, text: str) -> None:
+        self.content = [_VerifyStubBlock(text)]
+        self.usage = _VerifyStubUsage()
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
@@ -1271,6 +1312,91 @@ class TestAC9ApproveStructureOnlyAppliesOnlyTheStructurePart:
         ).ok
 
         assert other.read_bytes() == before
+
+    def test_a_merge_is_still_verified_under_approve_structure_only(
+        self, wiki: Path
+    ) -> None:
+        """``client`` and ``verdict`` are orthogonal arguments on the same
+        applier call, and both are load-bearing: the client re-verifies a
+        ``merge`` group's model-written text (athenaeum#2547's
+        ``_page_recompile_verify_client``), the verdict decides WHICH parts
+        of the plan are applied. ``merge`` is a structure-only verb, so a
+        plan that both merges and moves must still verify the merge under
+        ``approve-structure-only`` -- routing THROUGH the verify seam, not
+        around it -- while refusing the move.
+        """
+        merge_body = (
+            _LEAD + "\n\n"
+            "## Pricing A\n\nWidgets cost ten pounds each across the catalogue.[^src-2]\n\n"
+            "## Pricing B\n\nWidget pricing is twelve euros per unit in the euro zone.[^src-3]\n\n"
+            "## Session Notes\n\n" + _NOTES + "\n\n"
+            "[^src-1]: **Source:** doc-a\n"
+            "[^src-2]: **Source:** doc-b\n"
+            "[^src-3]: **Source:** doc-c\n"
+        )
+        _write_page(wiki, uid="page0003", name="Acme Three", body=merge_body)
+        target = _write_page(wiki, uid="target03", name="Notes", body="Notes live here.\n")
+        segment = segment_page(merge_body)
+        ids = [u.unit_id for u in segment.units]
+        merged_text = "Widgets cost ten pounds, or twelve euros in the euro zone.[^src-2][^src-3]"
+        plan = validate_plan(
+            {
+                "groups": [
+                    {"key": "g1", "name": "Pricing", "description": "Prices.", "confidence": 0.9}
+                ],
+                "assignments": [
+                    {"unit": ids[0], "disposition": "parent"},
+                    {"unit": ids[1], "disposition": "merge:g1"},
+                    {"unit": ids[2], "disposition": "merge:g1"},
+                    {"unit": ids[3], "disposition": "move:target03"},
+                ],
+                "merges": [{"group": "g1", "text": merged_text}],
+                "page_actions": [],
+                "summary": _SUMMARY,
+            },
+            segment,
+            merge_body,
+            uid="page0003",
+            content_hash=page_content_hash(merge_body),
+            known_uids=["target03"],
+        )
+        assert plan.issues == ()
+        plan_id = append_plan_record(plan, wiki)
+        queue_plan_for_approval(
+            wiki,
+            plan_id=plan_id,
+            plan=plan,
+            outline=build_plan_outline(
+                plan, segment.units, page_name="Acme Three", page_chars=len(merge_body)
+            ),
+        )
+        target_before = target.read_bytes()
+        client = _VerifyStubClient()
+
+        outcome = write_apply(
+            wiki,
+            plan_id=plan_id,
+            client=client,
+            config=_CONFIG,
+            verdict=VERDICT_APPROVE_STRUCTURE_ONLY,
+        )
+
+        assert outcome.ok, (outcome.reason, outcome.issues)
+        # The verify call really was made -- with no client the applier
+        # records `merge-verify-unavailable` and refuses the whole plan.
+        assert client.calls
+        assert len(outcome.created_uids) == 1
+        _meta, created_body = parse_frontmatter(
+            _page_by_uid(wiki, outcome.created_uids[0]).read_text(encoding="utf-8")
+        )
+        assert merged_text in created_body
+        # ...and the move was still refused: the target is untouched and the
+        # unit stayed on the parent.
+        assert target.read_bytes() == target_before
+        _meta, parent_body = parse_frontmatter(
+            (wiki / "page0003.md").read_text(encoding="utf-8")
+        )
+        assert _NOTES in parent_body
 
     def test_plain_approve_does_apply_the_cross_page_part(self, wiki: Path) -> None:
         """The contrast that makes the verdict mean something."""
