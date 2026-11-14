@@ -150,6 +150,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -222,6 +223,8 @@ from athenaeum.page_relations import (
 )
 from athenaeum.screening import more_restrictive
 from athenaeum.store import FilesystemStore, now_iso
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # The ledger (AC9): one new record kind in the SAME file page_recompile_plan
@@ -2229,22 +2232,50 @@ def write_apply(
             )
     _remove_journal(wiki_root)
 
-    # Issue athenaeum#2550 AC6: the plan just applied is exactly what an
-    # open oversize-family notice for this page was asking a human to
-    # arrange -- archive it now rather than leaving it open over a page
-    # that has already been restructured. Covers both this function's
-    # callers: the operator-approved ``recompile apply`` CLI path AND the
-    # athenaeum#2549 nightly auto-apply path, since both land here.
-    _archive_oversize_notices_for_applied_plan(
-        wiki_root, name=str(page_meta.get("name") or ""), plan_id=resolved_plan_id
-    )
-
     # AC5/AC6: re-run the conservation and marker-resolution checks AGAINST
     # THE RE-READ BYTES -- not the in-memory values already trusted above --
     # so a defect in the write path itself (encoding, atomic_write_text) is
     # caught rather than assumed away.
     units_by_id_for_postcheck = {unit.unit_id: unit for unit in segment.units}
     post_issues: list[PlanIssue] = list(attach_issues)
+
+    # Issue athenaeum#2550 AC6: the plan just applied is exactly what an
+    # open oversize-family notice for this page was asking a human to
+    # arrange -- archive it now rather than leaving it open over a page
+    # that has already been restructured. Covers both this function's
+    # callers: the operator-approved ``recompile apply`` CLI path AND the
+    # athenaeum#2549 nightly auto-apply path, since both land here.
+    #
+    # Issue athenaeum#2581 (Seer finding on PR athenaeum#2581, review of
+    # athenaeum#2550): this runs AFTER every page is written and the
+    # journal is already removed, so a failure here (a parse error in
+    # ``_pending_questions.md``, an ``OSError`` mid-rewrite) must NEVER
+    # propagate out of this function -- doing so would skip the ledger
+    # record and the snapshot commit below, leaving the wiki in exactly
+    # the state athenaeum#2548's own undo reasoning calls worse than
+    # refusing up front: already restructured, with no durable record
+    # that it happened. Archiving a stale notice is best-effort cleanup,
+    # not part of the apply's own correctness -- caught broadly (an
+    # ``OSError`` from the rewrite and a parse-shape error from a
+    # corrupt pending file are both plausible and both equally NOT a
+    # reason to lose the apply's own record) and reported the same way
+    # every other "the write happened, and here is what is off about
+    # it" case already is: appended to ``post_issues``, never raised,
+    # ``ok`` left ``True``.
+    try:
+        _archive_oversize_notices_for_applied_plan(
+            wiki_root, name=str(page_meta.get("name") or ""), plan_id=resolved_plan_id
+        )
+    except Exception as exc:  # noqa: BLE001 -- best-effort cleanup, see comment above
+        log.warning(
+            "page-recompile apply %s: archiving the oversize-family notice for "
+            "%s failed (issue athenaeum#2550/#2581) -- the plan itself still "
+            "applied successfully: %s",
+            resolved_plan_id,
+            plan.uid,
+            exc,
+        )
+        post_issues.append(PlanIssue("post-write-oversize-notice-archive-failed", plan.uid))
     reread_parent = computed.parent_path.read_text(encoding="utf-8")
     _, reread_parent_body = parse_frontmatter(reread_parent)
     if not computed.attachments and reread_parent != computed.parent_text:

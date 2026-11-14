@@ -1371,3 +1371,88 @@ class TestOversizeNoticeArchivedOnApply:
 
         assert outcome.ok is True
         assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def _init_git_repo(self, root: Path) -> None:
+        subprocess.run(
+            ["git", "init", "-b", "develop"], cwd=root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+
+    def test_archive_failure_is_best_effort_and_never_loses_the_apply(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2581 (Seer finding on the athenaeum#2550 PR): a
+        failure while archiving the oversize notice (an ``OSError`` from
+        ``archive_pending_blocks``, or any other exception the rewrite can
+        raise) must NOT propagate out of ``write_apply``. Every page is
+        already restructured and the journal already removed by the time
+        this hook runs, so letting the exception through would skip the
+        ledger record and the snapshot commit below it -- leaving the wiki
+        in neither the pre-image nor a recorded post-apply state, which is
+        exactly the outcome athenaeum#2548's own undo reasoning calls worse
+        than refusing up front. The apply itself genuinely succeeded, so
+        ``ok`` stays ``True``; the failure is reported through
+        ``post_write_issues``, the established channel for "the write
+        happened, and here is what is off about it".
+
+        Against the pre-fix code (the call unguarded, no try/except) this
+        test fails with the monkeypatched ``OSError`` propagating out of
+        ``write_apply`` itself -- observed directly before writing the fix:
+        ``outcome.ok`` was never reached because the call raised.
+        """
+        from athenaeum import tiers as tiers_module
+
+        knowledge = wiki.parent
+        knowledge.mkdir(parents=True, exist_ok=True)
+        self._init_git_repo(knowledge)
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        subprocess.run(["git", "add", "-A"], cwd=knowledge, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "seed"], cwd=knowledge, check=True, capture_output=True
+        )
+        before_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=knowledge, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        _simple_plan(wiki)
+        _write_pending_block(wiki, self._oversize_block("Acme"))
+
+        def _raise(*_a: object, **_kw: object) -> int:
+            raise OSError("simulated failure archiving the oversize notice")
+
+        monkeypatch.setattr(tiers_module, "archive_pending_blocks", _raise)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert any(
+            issue.code == "post-write-oversize-notice-archive-failed"
+            for issue in outcome.post_write_issues
+        ), outcome.post_write_issues
+
+        # The ledger record and snapshot commit still landed -- the apply's
+        # own authoritative record is intact despite the archive failure.
+        assert outcome.snapshot_sha is not None
+        assert outcome.snapshot_sha != before_sha
+        after_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=knowledge, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert after_sha == outcome.snapshot_sha
+        records = [
+            json.loads(line)
+            for line in (wiki / "_page_recompiles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        apply_records = [r for r in records if r.get("kind") == "apply"]
+        assert len(apply_records) == 1
+        assert apply_records[0]["uid"] == "page0001"
+
+        # The notice itself was NOT archived -- the failed rewrite left it
+        # exactly where it was, which is the honest outcome: best-effort
+        # cleanup that failed, not a cleanup that silently landed anyway.
+        pending = wiki / "_pending_questions.md"
+        assert "oversize_page" in pending.read_text(encoding="utf-8")
+        assert not (wiki / "_pending_questions_archive.md").exists()
