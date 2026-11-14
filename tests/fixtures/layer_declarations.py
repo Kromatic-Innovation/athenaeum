@@ -275,6 +275,11 @@ MODULE_LAYER: dict[str, int] = {
     # "Layering: L4 domain/pipeline, the same layer as its S1 sibling
     # athenaeum.page_recompile").
     "page_recompile_plan": 4,
+    # Issue athenaeum#2540 (page-recompile slice S4): the atomic applier for
+    # structure-only plans (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings athenaeum.page_recompile
+    # and athenaeum.page_recompile_plan").
+    "page_recompile_apply": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,
