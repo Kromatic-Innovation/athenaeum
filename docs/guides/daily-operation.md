@@ -167,6 +167,60 @@ hold — the JSON response carries a `refused` marker and the sentinel stays
 on disk. `--force` overrides the check when you deliberately need to clear
 a hold that belongs to another party.
 
+## I want to undo a recompile I just applied
+
+`athenaeum recompile apply` rewrites one oversized page into a parent plus
+sub-pages, and prints the plan id it applied. `athenaeum recompile undo`
+takes that plan id back out again. Check what it would do first — the dry
+run writes nothing at all:
+
+```bash
+athenaeum recompile undo --dry-run <plan-id>
+athenaeum recompile undo <plan-id>
+```
+
+Both forms take the run lock, so an undo never races the nightly compile;
+they exit 75 while another process holds it.
+
+There are exactly three outcomes, and the dry run names the one you would
+get plus the reason for it:
+
+- **direct** — every page the apply touched still holds exactly what the
+  apply wrote. Each one is restored byte for byte from the pre-image the
+  apply recorded, the sub-pages it created are deleted, and the whole undo
+  lands as one commit in the knowledge store. A merged section's originals
+  come back verbatim.
+- **queued** — a page has been edited since the apply (or its pre-image is
+  no longer in the store's git objects, which happens when the page was
+  never committed before the apply ran). Nothing is written. One item goes
+  into the pending-decisions queue carrying a diff of the pre-image against
+  what is on disk now, so you can see exactly what a restore would
+  discard. Answer it with `athenaeum decisions`.
+- **refused** — another page already links to one of the created
+  sub-pages, so deleting it would leave a dangling link. The command
+  reports how many such links there are and changes nothing. Re-point
+  those links first, then undo.
+
+A page restored by an undo is not re-planned while it still holds the
+restored text, so an unattended pass cannot immediately re-apply what you
+just undid. Editing the page lifts that on its own — the skip is a content
+comparison, not a timer.
+
+**The coarse fallback.** When undo reports queued or refused and you want
+the apply gone regardless, revert the apply's own snapshot commit in the
+knowledge store. Each apply makes exactly one commit, subject
+`page-recompile apply <uid> (<plan-id>)`:
+
+```bash
+git -C <knowledge_root> log --oneline --grep="page-recompile apply"
+git -C <knowledge_root> revert <commit-sha>
+```
+
+That reverses the whole apply — including any merged section's originals,
+which is why the originals stay reachable through that commit — but it
+reverts the page wholesale, so any later edit to the page is reverted with
+it. That is the trade the finer-grained command exists to avoid.
+
 ## See also
 
 - Guides — [Answering pending decisions](decisions.md) · [Upgrading](upgrading.md) · [Troubleshooting](troubleshooting.md)

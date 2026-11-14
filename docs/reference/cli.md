@@ -111,6 +111,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum recompile candidates`](#athenaeum-recompile-candidates) (command) — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
 - [`athenaeum recompile plan`](#athenaeum-recompile-plan) (command) — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - [`athenaeum recompile show`](#athenaeum-recompile-show) (command) — Print a recorded plan by its plan id.
+- [`athenaeum recompile undo`](#athenaeum-recompile-undo) (command) — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
 - [`athenaeum recover-parked`](#athenaeum-recover-parked) (command) — One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
@@ -1387,6 +1388,7 @@ Subcommands:
 - `athenaeum recompile candidates` — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
 - `athenaeum recompile plan` — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - `athenaeum recompile show` — Print a recorded plan by its plan id.
+- `athenaeum recompile undo` — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
 
 ## `athenaeum recompile apply`
 
@@ -1433,6 +1435,22 @@ Print a recorded plan by its plan id.
 |---|---|---|---|
 | `--json` | off (flag absent) | — | Print the record as JSON. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile undo`
+
+Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
+
+**Positional arguments:**
+
+- `plan_id` — plan id of the apply to undo
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dry-run` | off (flag absent) | — | Report whether the undo would be direct, queued or refused, and why. Writes nothing -- no page, no ledger record, no decision item, no snapshot commit. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Print the outcome as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum reconcile`
 
