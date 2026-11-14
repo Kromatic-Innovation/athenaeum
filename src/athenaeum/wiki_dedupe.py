@@ -576,16 +576,20 @@ def find_wiki_page_clusters(
         embeddings=embeddings,
         embedder_sources=embedder_sources,
     )
-    clusters = _split_rejected_pairs(clusters, files, wiki_root)
+    clusters = _split_rejected_pairs(clusters, files, wiki_root, config=config)
     return [c for c in clusters if len(c.member_paths) >= 2]
 
 
 def _split_rejected_pairs(
-    clusters: list[Cluster], files: Sequence[AutoMemoryFile], wiki_root: Path
+    clusters: list[Cluster],
+    files: Sequence[AutoMemoryFile],
+    wiki_root: Path,
+    *,
+    config: dict[str, Any] | None,
 ) -> list[Cluster]:
     """Drop a cluster member whenever it and another member of the SAME
-    cluster are linked by ``merge_rejected_with:`` (issue athenaeum#2546,
-    "the clusterer" honouring the never-merge link).
+    cluster are linked by a still-in-force ``merge_rejected_with:`` (issue
+    athenaeum#2546, "the clusterer" honouring the never-merge link).
 
     A pure similarity pass has no concept of a human ruling -- without
     this, a cluster containing a rejected pair {A, B} would reach the
@@ -596,6 +600,18 @@ def _split_rejected_pairs(
     from the RAW cluster closes that hole before any pair reaches the
     comparator at all.
 
+    Cooldown-aware (issue athenaeum#2077/#2107, pre-existing): a rejection
+    is only treated as a conflict here when :func:`athenaeum.prior_rulings
+    .match_rulings` does NOT report it as ``expired`` with no ``in_force``
+    record -- i.e. a pair with a queued-and-resolved rejection whose
+    ``librarian.rejected_merge_cooldown_days`` has lapsed is left for the
+    pair loop's own (already-existing) lapsed-rejection handling instead of
+    being dropped here. A ``merge_rejected_with:`` entry with NO matching
+    ``_pending_merges.md``/archive record at all (hand-authored frontmatter,
+    or athenaeum#2546's own durable link with no decay) has nothing to
+    expire, so it is always treated as a conflict -- this is what keeps
+    the default (`rejected_merge_cooldown_days=0`, "never expires") durable.
+
     Iterative: dropping one member of a pair can still leave two OTHER
     members of the same cluster in conflict, so this re-scans until no
     conflicting pair remains among the survivors. A cluster that
@@ -603,6 +619,16 @@ def _split_rejected_pairs(
     function's caller, which already drops every size-1 cluster for the
     same "no signal" reason).
     """
+    from athenaeum.config import resolve_rejected_merge_cooldown_days
+    from athenaeum.prior_rulings import load_prior_rulings, match_rulings
+
+    prior_rulings = load_prior_rulings(wiki_root)
+    cooldown_days = resolve_rejected_merge_cooldown_days(config)
+
+    def _still_binding(name_i: str, name_j: str) -> bool:
+        match = match_rulings(prior_rulings, [name_i, name_j], cooldown_days=cooldown_days)
+        return not (match.expired is not None and match.in_force is None)
+
     by_relpath: dict[str, AutoMemoryFile] = {}
     for am in files:
         try:
@@ -625,20 +651,31 @@ def _split_rejected_pairs(
             live = [p for p in members if p not in dropped]
             for i, p_i in enumerate(live):
                 for p_j in live[i + 1 :]:
-                    if (
+                    if not (
                         name_slugs[p_j] in rejected_slugs[p_i]
                         or name_slugs[p_i] in rejected_slugs[p_j]
                     ):
+                        continue
+                    if not _still_binding(Path(p_i).name, Path(p_j).name):
                         log.info(
-                            "wiki-dedupe clusterer: dropping %s from cluster %s -- "
-                            "merge_rejected_with links it to %s (athenaeum#2546)",
+                            "wiki-dedupe clusterer: merge_rejected_with between %s "
+                            "and %s has lapsed (cooldown); leaving both in cluster "
+                            "%s for a fresh comparison (athenaeum#2546/#2077)",
+                            p_i,
                             p_j,
                             cluster.cluster_id,
-                            p_i,
                         )
-                        dropped.add(p_j)
-                        progressed = True
-                        break
+                        continue
+                    log.info(
+                        "wiki-dedupe clusterer: dropping %s from cluster %s -- "
+                        "merge_rejected_with links it to %s (athenaeum#2546)",
+                        p_j,
+                        cluster.cluster_id,
+                        p_i,
+                    )
+                    dropped.add(p_j)
+                    progressed = True
+                    break
                 if progressed:
                     break
         remaining = [p for p in members if p not in dropped]
