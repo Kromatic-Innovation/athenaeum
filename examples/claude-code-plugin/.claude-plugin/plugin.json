@@ -1,0 +1,22 @@
+{
+  "name": "athenaeum",
+  "version": "0.23.5",
+  "description": "Append-only knowledge sidecar for Claude Code: remember/recall via the athenaeum MCP server, plus the passive SessionStart/UserPromptSubmit recall hooks, all run through a pinned athenaeum release via uv -- no system-wide pip install required.",
+  "author": {
+    "name": "Kromatic Innovation",
+    "email": "open-source@kromatic.com"
+  },
+  "homepage": "https://github.com/Kromatic-Innovation/athenaeum",
+  "repository": "https://github.com/Kromatic-Innovation/athenaeum",
+  "license": "Apache-2.0",
+  "keywords": ["knowledge-management", "memory", "recall", "mcp"],
+  "userConfig": {
+    "knowledgePath": {
+      "type": "string",
+      "title": "Knowledge base path",
+      "description": "Where athenaeum reads/writes raw observations and the compiled wiki. Default matches athenaeum serve's own --path default (~/knowledge). See this plugin's README, 'Supplying a real path', for why this value is NOT substituted into .mcp.json automatically.",
+      "default": "~/knowledge"
+    }
+  },
+  "_versionPinNote": "This 'version' field is the SINGLE pinned athenaeum package version this plugin runs via uv (see hooks/launcher.sh) -- not an independent plugin-semver. tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_pyproject fails CI if this drifts from pyproject.toml's [project].version. Bump both together at the weekly release (see README.md, 'Version-bump rule')."
+}

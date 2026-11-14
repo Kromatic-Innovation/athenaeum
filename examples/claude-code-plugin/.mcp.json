@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "athenaeum": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/launcher.sh",
+      "args": ["serve"]
+    }
+  }
+}
