@@ -65,9 +65,9 @@ from athenaeum.page_recompile_queue import (
     queue_plan_for_approval,
 )
 from athenaeum.page_recompile_undo import (
+    REASON_PAGE_CHANGED,
     UNDO_DIRECT,
     UNDO_QUEUED,
-    REASON_PAGE_CHANGED,
     find_apply_record,
     write_undo,
 )
@@ -134,7 +134,10 @@ def _write_page(wiki: Path, *, uid: str, name: str, body: str, **extra: Any) -> 
 
 
 def _seed(
-    wiki: Path, *, source_extra: dict[str, Any] | None = None, target_extra: dict[str, Any] | None = None
+    wiki: Path,
+    *,
+    source_extra: dict[str, Any] | None = None,
+    target_extra: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, Path]:
     """The three pages every test here needs: the recompiled SOURCE, an
     existing move/attach TARGET, and a third unrelated page."""
@@ -154,7 +157,9 @@ def _seed(
         aliases=["BC Ltd"],
         **(target_extra or {}),
     )
-    other = _write_page(wiki, uid="other001", name="Gamma Ltd", body="Gamma Ltd is a distributor.\n")
+    other = _write_page(
+        wiki, uid="other001", name="Gamma Ltd", body="Gamma Ltd is a distributor.\n"
+    )
     return source, target, other
 
 
