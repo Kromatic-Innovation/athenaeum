@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An approved page recompile can now act across pages: it can move a
+  genuinely misfiled section onto the existing page it belongs on, split
+  one off into a new standalone page that is not a sub-page, attach an
+  existing standalone page under a parent, and move an alias.** Every one of
+  those actions classes the whole plan `cross-page`, and a `cross-page` plan
+  is never written without an approved `page-recompile` decision item — in
+  every mode, `auto` included, and not from `athenaeum recompile apply`
+  either. The verdict `approve-structure-only` applies only the in-page
+  restructure of such a plan and leaves the other units on the parent.
+  `move:<uid>` inserts the units verbatim before the target's footnote
+  block, under their own headings and with no wrapper heading, leaving the
+  target's frontmatter identity and existing content alone; their footnote
+  definitions travel with them and are renumbered if a label is already
+  taken. A move is refused outright when the target is readable more widely
+  than the source (a coarser `access:` level, an `audience:` role the source
+  does not grant, or world-readable against a source that is not), and is
+  never refused for size — a target pushed over
+  `librarian.page_size_threshold_chars` is flagged `needs_split` and becomes
+  a candidate on the next scan. A unit that carries no citation and lands on
+  another page gains one relocation footnote naming the page it came from and
+  the plan id; a unit that already cites something gains nothing. A
+  standalone page gets a new uid and a name and type validated against the
+  deployment's own schema, with no relation to the source page; a proposed
+  name that already matches an existing page's name or alias is turned into a
+  move instead. Attaching goes through the one relation writer with
+  `via: attach`, changes no body text beyond the breadcrumb and the Sub-pages
+  rendering, and never renames the attached page. Aliases stay on the parent
+  unless the approved plan lists an alias move. The ledger records every
+  touched page with its pre and post content hash and its pre-image blob id,
+  and `athenaeum recompile undo` reverses the lot: moved units are removed
+  from their targets, created standalone pages are deleted, and an attach is
+  undone by a detach — with a target edited since the apply sent to the
+  queued path instead, carrying a diff (athenaeum#2548).
 - **Page recompile now runs in the nightly librarian run and is ON by
   default: it makes model calls every night (up to 3 pages a run, 10 while
   any page is still over the hard ceiling) and you turn it off with
