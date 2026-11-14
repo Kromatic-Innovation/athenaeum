@@ -10,8 +10,8 @@ on two hosts, with no login environment.
 | # | Acceptance criterion | Result |
 |---|---|---|
 | 1 | macOS: `install` loads a launchd unit, a scheduled tick compiles a pending raw file with no login environment, run log shows the key source resolved | **Pass** (see note on "key source resolved") |
-| 2 | Linux: the same with the cron or systemd entry | **Pass for cron** in a container. **systemd: not run.** |
-| 3 | `remove` leaves no unit, entry or generated file behind, checked by listing unit locations before and after | **Partial.** No unit or entry remains on either host and the platform listings return to baseline for those. Run logs remain (both hosts) and an empty crontab remains (Linux). See AC3. |
+| 2 | Linux: the same with the cron or systemd entry | **Pass for cron** in a container. **systemd: not run**; split to athenaeum#2597 by operator ruling. |
+| 3 | `remove` leaves no unit, entry or generated file behind, checked by listing unit locations before and after | **Pass** by operator ruling. No unit or entry remains on either host and the platform listings return to baseline. Run logs remain and an empty crontab remains (Linux); the ruling is that leftover run logs do not fail this criterion, and log cleanup is follow-up athenaeum#2596. See AC3. |
 | 4 | `doctor` reports scheduled after install and unscheduled after remove, both hosts | **Pass** |
 | 5 | Counter-example: no key source, `install` refuses and says why | **Pass** on both hosts |
 | 6 | Dated report with host OS versions, version, repeatable steps, results | This document |
@@ -37,7 +37,8 @@ the cache directory given to `install`).
 - Because a container has no systemd, `detect_platform()` selected `cron` on
   Linux by itself. The systemd user-timer generator was **not exercised on a
   real host**; AC2 passes through the cron option the issue allows. A host with
-  a systemd user session is still unverified.
+  a systemd user session is still unverified; that verification is split to
+  athenaeum#2597 by operator ruling.
 
 ## Key source
 
@@ -150,7 +151,7 @@ unit at a real knowledge root.
   `wiki/auto-lighthouse.md` exist.
 - systemd was not run (no systemd in the container).
 
-### AC3: `remove`, partial
+### AC3: `remove`, pass by operator ruling
 
 Unit and entry: gone on both hosts, and re-listing the platform's unit
 locations returned to baseline.
@@ -172,10 +173,9 @@ Residue the criterion's wording ("no generated file behind") would count:
   file, not "no crontab" as at baseline (`crontab -l` prints nothing instead of
   `no crontab for <user>`).
 
-Whether the log files count as "generated files" is a ruling for the issue
-owner: on one reading the criterion is met (nothing `install` wrote remains,
-apart from the Linux log directory it also creates), on the stricter reading it
-fails for run logs. Reported as partial rather than chosen silently.
+**Operator ruling:** the leftover run logs do not fail AC3. Cleaning them up
+(and, if wanted, the empty crontab) is follow-up athenaeum#2596. The first
+draft of this report called the criterion partial pending that ruling.
 
 ### AC4: `doctor`, passes on both hosts
 
@@ -204,7 +204,7 @@ Filed:
 
 Not filed (judgment calls, for the issue owner):
 
-- Run logs and the empty crontab left by `remove` (AC3 above).
+- The empty crontab left by `remove`; run-log cleanup is athenaeum#2596.
 - The key is embedded in plain text in the unit (plist mode 0600, crontab line
   readable by the owning user via `crontab -l`). Probably the documented trade
   for "no login shell", but worth a line in the docs. The systemd unit file's
