@@ -550,7 +550,12 @@ def classify_plan_scope(
     :data:`STRUCTURE_ONLY_VERBS` and there is no page-level action at all.
     ``move`` and ``standalone`` are cross-page (one names another page's
     uid, the other mints a page outside this parent), and ``attach`` /
-    ``attach-self-under`` are cross-page by construction.
+    ``attach-self-under`` are cross-page by construction. An ALIAS MOVE
+    (:data:`ALIAS_MOVE_VERB`, issue athenaeum#2548 AC8) is a page action
+    like any other, so it is covered by the first clause with no extra
+    case: "any page action at all" is already the rule, and that is why
+    the alias-move grammar was given the page-action shape rather than a
+    field of its own.
     """
     if any(True for _ in page_actions):
         return SCOPE_CROSS_PAGE
@@ -559,6 +564,179 @@ def classify_plan_scope(
         if verb not in STRUCTURE_ONLY_VERBS:
             return SCOPE_CROSS_PAGE
     return SCOPE_STRUCTURE_ONLY
+
+
+# ---------------------------------------------------------------------------
+# Cross-page actions (issue athenaeum#2548, slice S7).
+# ---------------------------------------------------------------------------
+
+#: The alias-move action's verb, written ``move-alias:<target uid>:<alias>``
+#: in :attr:`RecompilePlan.page_actions` (issue athenaeum#2548 AC8/AC12).
+#: A uid is 8 hex characters (:func:`athenaeum.models.generate_uid`) and so
+#: never contains a colon, which is what makes
+#: :func:`split_disposition`-then-partition unambiguous for an alias that
+#: does.
+#:
+#: **Deliberately NOT a member of** :data:`PAGE_ACTIONS`. That frozenset is
+#: the MODEL-facing vocabulary ``validate_plan`` accepts, and the packaged
+#: ``page_recompile_plan.md`` prompt does not teach this action -- so a
+#: model cannot propose an alias move, and a plan drafted by this pass
+#: never carries one. AC12's default ("aliases stay on the parent") is
+#: therefore the only behaviour the nightly pass can produce; the grammar
+#: exists so an operator-authored or later-slice plan record CAN list one,
+#: and so :func:`classify_plan_scope` classes such a plan cross-page
+#: (AC8) and :mod:`athenaeum.page_recompile_apply` carries it out under an
+#: approved decision item like every other cross-page action.
+ALIAS_MOVE_VERB = "move-alias"
+
+
+def parse_alias_move(action: str) -> tuple[str, str] | None:
+    """``"move-alias:<uid>:<alias>"`` -> ``(uid, alias)``, else ``None``.
+
+    ``None`` for any other verb and for a malformed argument (no second
+    colon, an empty uid or an empty alias) -- a caller treats that as "not
+    an alias move" and its own page-action validation reports it.
+    """
+    verb, argument = split_disposition(action)
+    if verb != ALIAS_MOVE_VERB:
+        return None
+    uid, sep, alias = argument.partition(":")
+    if not sep:
+        return None
+    uid = uid.strip()
+    alias = alias.strip()
+    if not uid or not alias:
+        return None
+    return uid, alias
+
+
+#: :class:`PlanIssue` codes :func:`resolve_standalone_groups` can add.
+STANDALONE_NAME_IS_SOURCE_CODE = "standalone-name-is-the-source-page"
+STANDALONE_NAME_INACTIVE_CODE = "standalone-name-resolves-to-inactive-page"
+STANDALONE_NAME_NO_UID_CODE = "standalone-name-resolves-to-a-page-with-no-uid"
+
+
+def resolve_standalone_groups(plan: RecompilePlan, index: EntityIndex) -> RecompilePlan:
+    """Resolve every ``standalone:<group>``'s PROPOSED NAME against existing
+    names and aliases, converting a hit into a ``move`` (issue
+    athenaeum#2548 AC5).
+
+    The AC's own wording: "The proposed name is resolved against existing
+    names and aliases first; a hit converts the action to a move."
+    :meth:`athenaeum.models.EntityIndex.lookup` is keyed by name AND by
+    every alias, so one call covers both -- the same reuse
+    :func:`build_page_shortlist` already relies on.
+
+    Run HERE, in the planner, rather than at apply time, for two reasons.
+    The recorded plan (and therefore the decision item an operator answers,
+    and the plan sibling slice athenaeum#2549 reads) then states the action
+    that will actually be taken; and an operator who approved "create a new
+    page" must never have that silently become "write onto an existing
+    page" after the fact -- :func:`athenaeum.page_recompile_apply.compute_apply`
+    REFUSES a standalone whose name already resolves, rather than
+    converting it a second time.
+
+    Two resolutions are refused rather than converted, each with its own
+    issue code so the refusal is greppable:
+
+    * the name resolves to the page being planned
+      (:data:`STANDALONE_NAME_IS_SOURCE_CODE`) -- a page cannot be the
+      target of its own move, and minting a second page under the parent's
+      own name would make the index ambiguous;
+    * the name resolves to a page carrying no ``uid:``
+      (:data:`STANDALONE_NAME_NO_UID_CODE`) -- such a page cannot be a move
+      target, and a second live page under a name the index already
+      resolves would make its name lookup ambiguous. See the call site for
+      why :meth:`athenaeum.models.EntityIndex.get_by_uid`, not
+      ``entry.uid``'s truthiness, is the discriminator;
+    * the name resolves to an INACTIVE page
+      (:data:`STANDALONE_NAME_INACTIVE_CODE`, tombstoned / retired /
+      superseded per :func:`athenaeum.page_relations.is_inactive_relation_target`,
+      the same composite predicate the candidate scan and the relation
+      writer already use) -- moving content onto a page the corpus has
+      retired would bury it, and creating a live page under a retired
+      page's name would resurrect a name deliberately taken out of use.
+    """
+    from athenaeum.models import parse_frontmatter
+    from athenaeum.page_relations import is_inactive_relation_target
+
+    groups_by_key = {group.key: group for group in plan.groups}
+    wanted = {
+        argument
+        for _unit_id, disposition in plan.dispositions
+        for verb, argument in (split_disposition(disposition),)
+        if verb == "standalone" and argument
+    }
+    if not wanted:
+        return plan
+
+    converted: dict[str, str] = {}
+    issues = list(plan.issues)
+    for group_key in sorted(wanted):
+        group = groups_by_key.get(group_key)
+        name = (group.name if group is not None else "").strip()
+        if not name:
+            continue
+        entry = index.lookup(name)
+        if entry is None:
+            continue
+        if entry.uid == plan.uid:
+            issues.append(PlanIssue(STANDALONE_NAME_IS_SOURCE_CODE, group_key))
+            continue
+        # :attr:`athenaeum.models.IndexEntry.uid` is ``uid or name`` (see
+        # ``EntityIndex._apply_record``), so for a page that carries a
+        # ``name:`` but NO ``uid:`` it holds the page's NAME. Such an entry
+        # is therefore not a usable move target: `get_by_uid` indexes only
+        # pages that really have a uid, so converting here would mint
+        # ``move:<name>``, pass validation (which already ran, and whose
+        # `known_uids` this conversion is not re-checked against), be
+        # queued as a valid plan -- and then be refused at apply time with
+        # `move-target-missing`.
+        #
+        # `get_by_uid` is the discriminator, and it is the SAME lookup the
+        # applier resolves a move target with, so plan time and apply time
+        # cannot disagree. A uid-less hit is REFUSED rather than left
+        # standalone: minting a second live page under a name the index
+        # already resolves would make `_by_name` ambiguous (it is
+        # last-write-wins), which is a worse outcome than declining and
+        # saying why. Giving the corpus page a uid makes the name a real
+        # move target on the next pass.
+        path = index.get_by_uid(entry.uid)
+        if path is None:
+            issues.append(PlanIssue(STANDALONE_NAME_NO_UID_CODE, group_key))
+            continue
+        meta: dict[str, Any] = {}
+        try:
+            parsed, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            meta = parsed
+        if is_inactive_relation_target(meta):
+            issues.append(PlanIssue(STANDALONE_NAME_INACTIVE_CODE, group_key))
+            continue
+        converted[group_key] = entry.uid
+
+    if not converted and len(issues) == len(plan.issues):
+        return plan
+
+    # A plain loop, never a comprehension with a walrus: a walrus inside a
+    # comprehension binds in the ENCLOSING scope, the exact defect
+    # ``page_recompile_undo.compute_undo``'s own comment records.
+    rewritten: list[tuple[str, str]] = []
+    for unit_id, disposition in plan.dispositions:
+        verb, argument = split_disposition(disposition)
+        if verb == "standalone" and argument in converted:
+            rewritten.append((unit_id, f"move:{converted[argument]}"))
+        else:
+            rewritten.append((unit_id, disposition))
+    dispositions = tuple(rewritten)
+    return replace(
+        plan,
+        dispositions=dispositions,
+        issues=tuple(issues),
+        scope=classify_plan_scope(dispositions, plan.page_actions),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1656,6 +1834,13 @@ def plan_page(
         content_hash=page_content_hash(body),
         known_uids=[candidate.uid for candidate in shortlist],
     )
+    # AC5 of issue athenaeum#2548: a ``standalone`` group whose proposed
+    # name already names an existing page (by name OR by alias) is a MOVE,
+    # not a new page. Resolved here, before the record is appended, so the
+    # plan an operator answers states the action that will be taken -- see
+    # :func:`resolve_standalone_groups` for why this is the planner's job
+    # and not the applier's.
+    plan = resolve_standalone_groups(plan, page_index)
     if verify and plan.summary:
         plan = verify_summary(plan, segment, client, config=config, usage=usage)
 
@@ -1670,6 +1855,7 @@ def plan_page(
 
 
 __all__ = [
+    "ALIAS_MOVE_VERB",
     "ARG_DISPOSITIONS",
     "BARE_DISPOSITIONS",
     "LABEL_CHUNK_UNITS",
@@ -1685,6 +1871,9 @@ __all__ = [
     "PLAN_KNOB",
     "SCOPE_CROSS_PAGE",
     "SCOPE_STRUCTURE_ONLY",
+    "STANDALONE_NAME_INACTIVE_CODE",
+    "STANDALONE_NAME_IS_SOURCE_CODE",
+    "STANDALONE_NAME_NO_UID_CODE",
     "STRUCTURE_ONLY_VERBS",
     "UNDO_KIND",
     "VERIFY_KNOB",
@@ -1708,10 +1897,12 @@ __all__ = [
     "label_units",
     "normalise_unit_text",
     "page_content_hash",
+    "parse_alias_move",
     "plan_page",
     "propose_plan",
     "read_label_cache",
     "read_page_recompile_ledger",
+    "resolve_standalone_groups",
     "split_disposition",
     "split_summary_sentences",
     "summary_definition_labels",
