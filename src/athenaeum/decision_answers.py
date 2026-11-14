@@ -1350,7 +1350,12 @@ def _apply_page_recompile_answer(
       (:func:`athenaeum.page_recompile_apply.write_apply`) for the plan this
       answer's ``decision_id`` names, then close the queue item. The item is
       closed only AFTER a successful apply, so a refused apply leaves it
-      open and answerable again rather than closed with nothing done.
+      open and answerable again rather than closed with nothing done. The
+      verdict is passed THROUGH to the applier (issue athenaeum#2548): it
+      is what authorises a cross-page plan (AC8), and
+      ``approve-structure-only`` additionally applies only the
+      structure-only part of one, leaving the units bound for another page
+      on the parent (AC9).
     * ``reject`` -- close the item and suppress the page: nothing is
       written, and :func:`athenaeum.page_recompile_queue.rejected_page_skip_reason`
       keeps the nightly phase off that page until its content hash changes.
@@ -1485,6 +1490,13 @@ def _apply_page_recompile_answer(
         wiki_root,
         plan_id=answer.decision_id,
         config=config,
+        # Issue athenaeum#2548: the operator's answer, which is what
+        # authorises a CROSS-PAGE plan at all (AC8 -- the applier refuses
+        # one with no approving verdict, in every mode) and which of the
+        # two approving verdicts it is (AC9 -- `approve-structure-only`
+        # applies only the structure-only part and leaves the other units
+        # on the parent). A structure-only plan is unaffected by either.
+        verdict=verdict,
     )
     if not outcome.ok:
         # Defence in depth: the applier re-checks the same pin under the

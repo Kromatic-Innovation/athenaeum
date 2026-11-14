@@ -74,11 +74,60 @@ exactly like a page edited since the apply -- it writes nothing and queues
 a decision item -- which is correct conservative behaviour, not a gap to
 code around here.
 
-**Out of scope (per the issue).** ``move``/``attach``/``attach-self-under``
-(cross-page actions -- :func:`compute_apply` refuses any plan whose
-:attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope` is not
-:data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY`), standalone
-pages, undo, the nightly phase, and auto-apply.
+**Cross-page actions, added by issue athenaeum#2548 (slice S7).** This
+module was structure-only: it refused any plan whose
+:attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope` was not
+:data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY`. It now also
+carries out the four cross-page actions and an alias move, under one extra
+condition the structure-only path does not have: an **approved
+``page-recompile`` decision item**. :func:`_cross_page_approval_refusal` is
+that gate, and it consults no mode -- AC8 requires the refusal to hold in
+every mode, ``auto`` included.
+
+The four, and the one AC that shapes each:
+
+* ``move:<uid>`` -- the units are inserted VERBATIM on the target before
+  its footnote block, under their own headings, with no wrapper heading and
+  no edit to anything already there; their footnote definitions travel with
+  them, renumbered on collision (AC1, :func:`_build_relocated_body` /
+  :func:`_insert_relocated`). The move is REFUSED when the target's read
+  scope is wider than the source's (AC2, :func:`access_widening_reason`),
+  and is never refused for SIZE -- a target that ends up over the threshold
+  is flagged ``needs_split`` and becomes a candidate instead (AC4).
+* ``standalone:<group>`` -- a new page with a new uid and a name and type
+  validated against the deployment schema, with NO relation to the source
+  page (AC5). A proposed name that already resolves is converted to a
+  ``move`` by the planner
+  (:func:`athenaeum.page_recompile_plan.resolve_standalone_groups`) and
+  refused here, never converted a second time.
+* ``attach:<uid>`` / ``attach-self-under:<uid>`` -- the relation is set
+  through :func:`athenaeum.page_relations.set_relation` with
+  ``via="attach"``, which changes no body text beyond the breadcrumb and
+  the Sub-pages rendering, and never renames the attached page (AC6).
+* ``move-alias:<uid>:<alias>`` -- an alias leaves the parent ONLY when the
+  plan lists it (AC12).
+
+A unit that carries no citation and lands on another page gets one added
+relocation footnote naming the page it came from and the plan id (AC3,
+:func:`relocation_note`); a unit that already cites something gets nothing
+added.
+
+**Out of scope (per both issues).** Undo (:mod:`athenaeum.page_recompile_undo`),
+the nightly phase, auto-apply, renaming an attached page, and rewriting a
+target page's existing content.
+
+**One residual limit, deliberately not closed here.** The AC10 journal
+covers CREATED pages: a process killed between two writes has its new
+pages unlinked by :func:`rollback_stale_journal`. An existing move target
+is not a pure addition, so the journal cannot reverse it the same way --
+within the process :func:`write_apply` restores every already-written
+target from :attr:`TargetPageEdit.pre_text` if a later write raises, but a
+SIGKILL has no such moment. The visible consequence is the conservative
+one: the target keeps its moved units while the parent still has them too,
+which the next scan sees as duplication and the apply's own snapshot
+commit can revert wholesale. Recording pre-image TEXT in the journal would
+close it and is a bigger question than this slice should settle (it would
+put page bodies in a sidecar file).
 
 Layering: L4 domain/pipeline, the same layer as its siblings
 :mod:`athenaeum.page_recompile` and :mod:`athenaeum.page_recompile_plan`
@@ -97,6 +146,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclasses_replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -107,11 +157,12 @@ from athenaeum.config import (
     resolve_page_recompile_min_parent_chars,
     resolve_page_size_threshold_chars,
 )
-from athenaeum.footnote_markers import INLINE_MARKER_RE, parse_footnote_definitions
+from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
 from athenaeum.models import (
     EntityIndex,
     TokenUsage,
     WikiEntity,
+    effective_audience,
     generate_uid,
     parse_frontmatter,
     render_frontmatter,
@@ -123,6 +174,7 @@ from athenaeum.page_recompile import (
     segment_page,
 )
 from athenaeum.page_recompile_plan import (
+    PAGE_ACTIONS,
     PAGE_RECOMPILE_LEDGER_VERSION,
     SCOPE_STRUCTURE_ONLY,
     MergedSection,
@@ -134,22 +186,34 @@ from athenaeum.page_recompile_plan import (
     find_plan_record,
     normalise_unit_text,
     page_content_hash,
+    parse_alias_move,
     read_page_recompile_ledger,
     split_disposition,
     split_summary_sentences,
     verify_summary,
 )
+from athenaeum.page_recompile_queue import (
+    QUEUE_KIND,
+    VERDICT_APPROVE,
+    VERDICT_APPROVE_STRUCTURE_ONLY,
+)
 from athenaeum.page_relations import (
     ROLE_CHILD,
     ChildRef,
+    RelationError,
+    _ancestor_uids,
     _children_display_rows,
     _index_pages_by_uid,
     _is_child_relation_row,
+    _read_meta,
     _related_rows,
     apply_breadcrumb,
     apply_sub_pages_section,
+    is_inactive_relation_target,
     read_relations,
+    set_relation,
 )
+from athenaeum.screening import more_restrictive
 from athenaeum.store import FilesystemStore, now_iso
 
 # ---------------------------------------------------------------------------
@@ -371,6 +435,184 @@ def _first_colliding_label(pairs: Iterable[tuple[str, str]]) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cross-page text and access primitives (issue athenaeum#2548, slice S7).
+# ---------------------------------------------------------------------------
+
+
+def _label_namespace(body: str) -> set[str]:
+    """Every footnote label *body* already occupies -- definitions AND bare
+    inline refs alike.
+
+    Same rule :func:`athenaeum.page_decompose._next_numeric_label` applies
+    for the same reason: a dangling ref with no definition still owns its
+    label, and handing it to an incoming unit would silently re-point an
+    existing marker at relocated content.
+    """
+    used = set(parse_footnote_definitions(body))
+    used |= {match.group(1) for match in INLINE_MARKER_RE.finditer(body)}
+    return used
+
+
+def _free_label(used: "set[str]", preferred: str) -> str:
+    """*preferred* if it is free on a destination, else ``<preferred>-2``,
+    ``-3``, ... (AC1's "renumbered on collision").
+
+    Suffixing rather than renumbering to the next free INTEGER (which is
+    what :func:`athenaeum.page_decompose._next_numeric_label` does for a
+    single bullet) keeps the relocated marker legible against its source:
+    ``src-2`` arriving on a page that already has its own ``src-2`` becomes
+    ``src-2-2``, so a reader of the destination can still see which label
+    the definition travelled under.
+    """
+    if preferred not in used:
+        return preferred
+    suffix = 2
+    while f"{preferred}-{suffix}" in used:
+        suffix += 1
+    return f"{preferred}-{suffix}"
+
+
+def _renumber_markers(text: str, mapping: "Mapping[str, str]") -> str:
+    """Rewrite every inline ``[^old]`` in *text* whose label *mapping*
+    renames (AC1). A label absent from *mapping* is left exactly as it is,
+    so a unit whose labels did not collide is byte-identical.
+
+    :func:`athenaeum.page_decompose._renumber` is the model named by
+    :func:`_first_colliding_label`'s own docstring; it rewrites EVERY marker
+    on a bullet to one label because a bullet carries exactly one fact. A
+    unit can cite several, so this is the per-label form of the same edit.
+    """
+    if not mapping:
+        return text
+
+    def _replace(match: "re.Match[str]") -> str:
+        label = match.group(1)
+        return f"[^{mapping.get(label, label)}]"
+
+    return INLINE_MARKER_RE.sub(_replace, text)
+
+
+def _append_marker(text: str, label: str) -> str:
+    """Append one ``[^label]`` marker to *text*'s last non-blank character,
+    preserving its trailing whitespace exactly (AC3).
+
+    Appending INSIDE the trailing newlines rather than after them keeps the
+    marker attached to the prose it annotates: a marker on its own line
+    after a blank line would render as a new paragraph.
+    """
+    stripped = text.rstrip()
+    return f"{stripped}[^{label}]{text[len(stripped) :]}"
+
+
+def relocation_note(source_name: str, source_uid: str, plan_id: str) -> str:
+    """The AC3 relocation footnote's definition text: the page the unit came
+    from and the plan that moved it.
+
+    Public because it is the one place the wording lives -- a test asserting
+    AC3 reads it from here rather than restating a sentence that would then
+    be free to drift.
+    """
+    return (
+        f"**Relocated from:** [[{source_uid}|{source_name}]] "
+        f"by page-recompile plan {plan_id or '(unrecorded)'}"
+    )
+
+
+def _insert_relocated(
+    target_body: str, section: str, definition_lines: "Sequence[str]"
+) -> str:
+    """Place *section* and *definition_lines* into *target_body* (AC1).
+
+    The same placement rule as :func:`athenaeum.page_decompose._insert_fact`,
+    which the issue's Plan names: the incoming content goes immediately
+    BEFORE the first footnote-definition line (so it reads as the last of
+    the page's prose, never as part of the bibliography) and the incoming
+    definitions go immediately after the LAST one (so the bibliography stays
+    one contiguous block). A target with no footnote definitions at all gets
+    both appended.
+
+    *section* is inserted VERBATIM, under its own headings, with no wrapper
+    heading added -- AC1's own words. Nothing already on *target_body* is
+    rewritten.
+    """
+    lines = target_body.split("\n")
+    block = section.rstrip("\n").split("\n") if section.strip() else []
+    definitions = [line for line in definition_lines if line.strip()]
+    if not block and not definitions:
+        return target_body
+
+    def_indices = [index for index, line in enumerate(lines) if FOOTNOTE_DEF_RE.match(line)]
+    if not def_indices:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if block:
+            lines.extend([""] + block)
+        if definitions:
+            lines.extend([""] + definitions)
+        lines.append("")
+        return "\n".join(lines)
+
+    first, last = def_indices[0], def_indices[-1]
+    shift = 0
+    if block:
+        lines[first:first] = block + [""]
+        shift = len(block) + 1
+    if definitions:
+        insert_at = last + shift + 1
+        lines[insert_at:insert_at] = definitions
+    return "\n".join(lines)
+
+
+def access_widening_reason(
+    source_meta: "Mapping[str, Any]", target_meta: "Mapping[str, Any]"
+) -> str:
+    """Why *target_meta*'s read scope is WIDER than *source_meta*'s, or ``""``
+    (AC2 -- a hard refusal, never a warning).
+
+    Three independent ways a destination can be wider, checked in order of
+    how much they widen:
+
+    1. the target is world-readable (``access: open``) and the source is
+       not;
+    2. the target grants an ``audience:`` role the source does not -- the
+       fine-grained half of the athenaeum#312 read-scoping control, which a
+       coarse ``access:`` comparison alone would miss entirely;
+    3. the target's coarse ``access:`` level is less restrictive than the
+       source's, per :func:`athenaeum.screening.more_restrictive` (the
+       repo's one ordering of ``open`` < ``internal`` < ``confidential`` <
+       ``personal``, reused rather than re-ranked here).
+
+    **An absent or malformed ``access:`` on the target reads as WIDEST**,
+    because ``more_restrictive`` ranks an unknown level below ``open``. That
+    is the fail-closed direction for this check: a move onto a page whose
+    access cannot be established is refused rather than assumed safe.
+    """
+    source_access = str(source_meta.get("access") or "")
+    target_access = str(target_meta.get("access") or "")
+    source_roles, source_public = effective_audience(dict(source_meta))
+    target_roles, target_public = effective_audience(dict(target_meta))
+    if target_public and not source_public:
+        return (
+            f"the target is world-readable (access: {target_access or '(none)'}) "
+            f"and the source is not (access: {source_access or '(none)'})"
+        )
+    extra_roles = sorted(target_roles - source_roles)
+    if extra_roles:
+        return (
+            "the target grants audience role(s) the source does not: "
+            + ", ".join(extra_roles)
+        )
+    if source_access.strip().lower() != target_access.strip().lower() and (
+        more_restrictive(target_access, source_access) == source_access
+    ):
+        return (
+            f"the target's access ({target_access or '(none)'}) is wider than "
+            f"the source's ({source_access or '(none)'})"
+        )
+    return ""
+
+
 def _derive_description(summary: str) -> str:
     """A one-line ``description:`` for the recompiled parent (AC2).
 
@@ -395,6 +637,188 @@ def _str_field(meta: Mapping[str, Any], key: str) -> str | None:
     """
     value = meta.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _declared_types(wiki_root: Path) -> frozenset[str]:
+    """Every type name this DEPLOYMENT accepts (issue athenaeum#2548 AC5):
+    the operator-editable ``wiki/_schema/types.md`` registry union the
+    package's own :data:`athenaeum.schemas.KNOWN_TYPES`.
+
+    Both halves, because the two legitimately drift in either direction --
+    :func:`athenaeum.entity_schema.declared_entity_classes`'s own docstring
+    records a real corpus where a live class was absent from ``types.md``.
+    A standalone page is refused only when its type is in NEITHER, which is
+    the same union :func:`athenaeum.schemas.validate_wiki_meta` warns
+    against.
+    """
+    from athenaeum.entity_schema import declared_entity_classes
+    from athenaeum.schemas import KNOWN_TYPES
+
+    return frozenset(KNOWN_TYPES) | declared_entity_classes(wiki_root)
+
+
+def _schema_validation_issue(
+    rendered: str, declared_types: "frozenset[str]", name: str
+) -> PlanIssue | None:
+    """A :class:`PlanIssue` when *rendered*'s frontmatter does not validate
+    against the deployment schema (issue athenaeum#2548 AC5), else ``None``.
+
+    Runs the SAME gate :mod:`athenaeum.page_decompose` and
+    :mod:`athenaeum.intake` run on a page they create
+    (:func:`athenaeum.schemas.validate_wiki_meta`), with this deployment's
+    declared types passed in so a legitimately-declared type does not warn.
+    Only the error SHAPE is carried into the issue detail -- never
+    ``str(exc)``, which embeds the offending value and would put corpus
+    content into a CLI error (the rule
+    :func:`athenaeum.page_decompose._validation_error_shape` exists for).
+    """
+    from pydantic import ValidationError
+
+    from athenaeum.page_decompose import _validation_error_shape
+    from athenaeum.schemas import validate_wiki_meta
+
+    meta, _body = parse_frontmatter(rendered)
+    if not isinstance(meta, dict):
+        return PlanIssue("standalone-frontmatter-not-a-mapping", name)
+    try:
+        validate_wiki_meta(dict(meta), declared_types=sorted(declared_types))
+    except ValidationError as exc:
+        return PlanIssue("standalone-schema-invalid", f"{name}: {_validation_error_shape(exc)}")
+    return None
+
+
+@dataclass(frozen=True)
+class _RelocatedBody:
+    """The text one destination receives from a set of relocated units."""
+
+    section: str
+    definitions: tuple[str, ...]
+    inserted_texts: tuple[str, ...]
+
+
+def _build_relocated_body(
+    *,
+    unit_ids: "Sequence[str]",
+    units_by_id: "Mapping[str, Any]",
+    source_definitions: "Mapping[str, str]",
+    destination_body: str,
+    source_name: str,
+    source_uid: str,
+    plan_id: str,
+) -> _RelocatedBody:
+    """The section and footnote definitions *unit_ids* contribute to one
+    destination (issue athenaeum#2548 AC1/AC3).
+
+    Three rules, all of them AC text:
+
+    * every unit's text is copied VERBATIM, under its own headings, with no
+      wrapper heading added -- the ONLY edits are footnote renumbering and
+      the AC3 relocation marker, each of which an AC explicitly permits;
+    * a definition whose label is already taken on *destination_body* with
+      DIFFERENT text is renumbered (:func:`_free_label`) and every marker
+      citing it in the moved text is rewritten (:func:`_renumber_markers`);
+      a label free on the destination, or already there with the identical
+      definition, travels unchanged and is not duplicated;
+    * a unit that carries NO citation gets exactly one added relocation
+      footnote naming the page it came from and the plan id
+      (:func:`relocation_note`). A unit that already carries one gets
+      nothing added. All the uncited units landing on one destination share
+      ONE definition -- the fact being recorded is identical for each of
+      them -- so each unit still carries exactly one added marker.
+    """
+    used = _label_namespace(destination_body)
+    destination_definitions = parse_footnote_definitions(destination_body)
+    mapping: dict[str, str] = {}
+    definitions: list[str] = []
+
+    for unit_id in unit_ids:
+        for label in units_by_id[unit_id].footnote_labels:
+            if label in mapping:
+                continue
+            text = source_definitions.get(label, "")
+            if label in used and destination_definitions.get(label) != text:
+                mapping[label] = _free_label(used, label)
+            else:
+                mapping[label] = label
+            used.add(mapping[label])
+            if destination_definitions.get(mapping[label]) != text:
+                definitions.append(f"[^{mapping[label]}]: {text}")
+
+    relocation_label = ""
+    inserted: list[str] = []
+    for unit_id in unit_ids:
+        unit = units_by_id[unit_id]
+        if unit.footnote_labels:
+            inserted.append(_renumber_markers(unit.text, mapping))
+            continue
+        if not relocation_label:
+            relocation_label = _free_label(used, f"reloc-{plan_id}" if plan_id else "reloc")
+            used.add(relocation_label)
+            definitions.append(
+                f"[^{relocation_label}]: "
+                f"{relocation_note(source_name, source_uid, plan_id)}"
+            )
+        inserted.append(_append_marker(unit.text, relocation_label))
+
+    return _RelocatedBody(
+        section=_join_units(inserted),
+        definitions=tuple(definitions),
+        inserted_texts=tuple(inserted),
+    )
+
+
+def _attachment_issues(
+    index_map: "Mapping[str, Path]",
+    *,
+    child_uid: str,
+    parent_uid: str,
+    prospective_children: "Mapping[str, Sequence[str]]",
+) -> list[PlanIssue]:
+    """Every reason :func:`athenaeum.page_relations.set_relation` would
+    refuse this attach, checked BEFORE any page is written (issue
+    athenaeum#2548 AC6).
+
+    ``set_relation`` is the one writer and it is the one that enforces
+    these invariants -- but it raises at WRITE time, and this module's whole
+    discipline is that every refusal is known before the first byte lands.
+    So the same five conditions are re-asked here from the same primitives
+    (:func:`athenaeum.page_relations.read_relations`,
+    :func:`~athenaeum.page_relations._ancestor_uids`,
+    :func:`~athenaeum.page_relations.is_inactive_relation_target`), never
+    from a second copy of the rules. ``set_relation`` is still the one that
+    writes, and :func:`write_apply` still reports a refusal from it, so
+    this is a pre-check, not a replacement.
+
+    *prospective_children* lets the caller declare children a page is about
+    to GAIN in this same apply (the recompiled parent's new sub-pages),
+    which disk cannot yet show: without it an ``attach-self-under`` on a
+    page that is simultaneously being split would pass here and then be
+    refused by ``set_relation`` after the parent had already been written.
+    """
+    child_path = index_map.get(child_uid)
+    if child_path is None:
+        return [PlanIssue("attach-unknown-page", child_uid)]
+    parent_path = index_map.get(parent_uid)
+    if parent_path is None:
+        return [PlanIssue("attach-unknown-page", parent_uid)]
+
+    parent_meta = _read_meta(parent_path)
+    if child_uid == parent_uid or child_uid in _ancestor_uids(index_map, parent_meta):
+        return [PlanIssue("attach-would-form-a-cycle", f"{child_uid} under {parent_uid}")]
+    if is_inactive_relation_target(parent_meta):
+        return [PlanIssue("attach-parent-inactive", parent_uid)]
+
+    child_relations = read_relations(_read_meta(child_path))
+    if child_relations.parent is not None and child_relations.parent.uid != parent_uid:
+        return [PlanIssue("attach-child-already-has-a-parent", child_uid)]
+    if read_relations(parent_meta).parent is not None:
+        return [PlanIssue("attach-would-nest-three-levels", parent_uid)]
+    child_children = list(prospective_children.get(child_uid, [])) or [
+        c.uid for c in child_relations.children
+    ]
+    if child_children:
+        return [PlanIssue("attach-would-nest-three-levels", child_uid)]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +855,74 @@ class MergeAccounting:
     unit_hashes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class NewStandalonePage:
+    """One ``standalone:<group>`` page, fully rendered and not yet written
+    (issue athenaeum#2548 AC5).
+
+    A sibling of :class:`NewSubPage` with ONE structural difference, which
+    is the whole point of the action: it carries no ``parent:`` key, no
+    breadcrumb and no ``related`` row, so it has no relation to the source
+    page at all.
+    """
+
+    uid: str
+    name: str
+    description: str
+    group_key: str
+    path: Path
+    text: str
+    unit_ids: tuple[str, ...]
+    #: The exact section text written for each unit, AFTER any footnote
+    #: renumbering and any AC3 relocation marker -- what a post-write check
+    #: can assert appears byte-for-byte in the written body.
+    inserted_texts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TargetPageEdit:
+    """One EXISTING page receiving moved units (issue athenaeum#2548 AC1), or
+    an alias (AC12), computed in full and not yet written."""
+
+    uid: str
+    name: str
+    path: Path
+    #: The target's RAW on-disk bytes before the edit -- the ledger's
+    #: ``pre_blob_id`` source, and what :func:`write_apply` restores if a
+    #: LATER write in the same apply fails. Raw, never a re-render, for the
+    #: reason :attr:`ComputedApply.parent_pre_text` documents.
+    pre_text: str
+    text: str
+    pre_content_hash: str
+    unit_ids: tuple[str, ...]
+    inserted_texts: tuple[str, ...]
+    #: ``True`` when the edit pushed the target over
+    #: ``librarian.page_size_threshold_chars`` and it was flagged
+    #: ``needs_split`` (AC4). Never a refusal.
+    needs_split_flagged: bool = False
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """One ``attach`` / ``attach-self-under`` relation to set (issue
+    athenaeum#2548 AC6), through
+    :func:`athenaeum.page_relations.set_relation` with ``via="attach"``."""
+
+    child_uid: str
+    parent_uid: str
+    action: str
+    via: str = "attach"
+
+
+@dataclass(frozen=True)
+class AliasMove:
+    """One alias moving off the parent and onto *target_uid* (issue
+    athenaeum#2548 AC12). Only ever present when the plan LISTS it."""
+
+    alias: str
+    target_uid: str
+
+
 @dataclass
 class ComputedApply:
     """Everything :func:`write_apply` needs to write, computed in full
@@ -453,6 +945,15 @@ class ComputedApply:
     sub_pages: tuple[NewSubPage, ...] = ()
     merges: tuple[MergeAccounting, ...] = ()
     parent_unit_ids: tuple[str, ...] = ()
+    #: Cross-page outputs (issue athenaeum#2548). All four are empty for a
+    #: structure-only plan, and for a cross-page plan applied under the
+    #: ``approve-structure-only`` verdict (which downgrades every
+    #: cross-page disposition to ``parent`` and drops every page action --
+    #: see :func:`compute_apply`).
+    standalone_pages: tuple[NewStandalonePage, ...] = ()
+    targets: tuple[TargetPageEdit, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
+    alias_moves: tuple[AliasMove, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -477,6 +978,9 @@ def compute_apply(
     config: dict[str, Any] | None,
     client: Any,
     usage: TokenUsage | None,
+    index: EntityIndex | None = None,
+    plan_id: str = "",
+    structure_only: bool = False,
 ) -> ComputedApply:
     """Validate *plan* against the LIVE page a second time and build every
     output page in memory (AC2-AC8).
@@ -499,11 +1003,40 @@ def compute_apply(
     Returns a :class:`ComputedApply` with ``issues`` populated and nothing
     else meaningful when any check fails -- the caller never writes in that
     case.
+
+    *index* resolves a ``move``/``attach`` uid to a live page and a
+    ``standalone`` name to an existing one (issue athenaeum#2548). Omitted,
+    every cross-page target is unresolvable, which makes a cross-page plan
+    refuse rather than silently apply as if it had no targets -- the same
+    safe-posture default :func:`athenaeum.page_recompile_plan.validate_plan`
+    takes for its own ``known_uids``.
+
+    *structure_only* (AC9) is the ``approve-structure-only`` verdict: every
+    ``move``/``standalone`` disposition is downgraded to ``parent`` and
+    every page action is dropped, so the structure-only part of a cross-page
+    plan is applied and the other units are left on the parent. It is a
+    DOWNGRADE, never an upgrade -- it can only ever write less than the
+    plan says.
     """
     issues: list[PlanIssue] = []
     units_by_id = {unit.unit_id: unit for unit in segment.units}
     groups_by_key = {group.key: group for group in plan.groups}
     merges_by_group = {merge.group: merge for merge in plan.merges}
+
+    if structure_only:
+        # AC9: the structure-only PART of this plan. Units routed off the
+        # page entirely stay where they are; every page-level action is
+        # dropped. Nothing else about the plan changes, so the whole
+        # structure-only machinery below runs unmodified -- this is the one
+        # and only place the verdict has an effect.
+        downgraded: list[tuple[str, str]] = []
+        for unit_id, disposition in plan.dispositions:
+            verb, _argument = split_disposition(disposition)
+            if verb in ("move", "standalone"):
+                downgraded.append((unit_id, "parent"))
+            else:
+                downgraded.append((unit_id, disposition))
+        plan = dataclasses_replace(plan, dispositions=tuple(downgraded), page_actions=())
 
     merge_near_duplicates = resolve_page_recompile_merge_near_duplicates(config)
 
@@ -522,6 +1055,10 @@ def compute_apply(
     group_order: list[str] = []
     group_items: dict[str, list[tuple[str, str]]] = {}
     duplicate_units: dict[str, str] = {}
+    move_order: list[str] = []
+    move_items: dict[str, list[str]] = {}
+    standalone_order: list[str] = []
+    standalone_items: dict[str, list[str]] = {}
     for unit_id, disposition in effective:
         verb, argument = split_disposition(disposition)
         if unit_id not in units_by_id:
@@ -535,11 +1072,22 @@ def compute_apply(
             group_items.setdefault(argument, []).append((verb, unit_id))
         elif verb == "duplicate":
             duplicate_units[unit_id] = argument
+        elif verb == "move":
+            # Issue athenaeum#2548 AC1. Ordered by FIRST appearance, so the
+            # write order over targets is page order and therefore
+            # reproducible.
+            if argument not in move_order:
+                move_order.append(argument)
+            move_items.setdefault(argument, []).append(unit_id)
+        elif verb == "standalone":
+            # Issue athenaeum#2548 AC5.
+            if argument not in standalone_order:
+                standalone_order.append(argument)
+            standalone_items.setdefault(argument, []).append(unit_id)
         else:
-            # Cross-page verbs (move/standalone/attach/attach-self-under)
-            # cannot appear in a structure-only plan by construction
-            # (classify_plan_scope); a plan this function is even called
-            # with carries one anyway only if something upstream is broken.
+            # Nothing else is a per-unit disposition: `attach` /
+            # `attach-self-under` are PAGE actions, and any other verb
+            # means something upstream is broken.
             issues.append(PlanIssue("unsupported-disposition", disposition))
     if issues:
         return ComputedApply(issues=tuple(issues))
@@ -559,6 +1107,14 @@ def compute_apply(
             assigned[f"merge:{group_key}"] = merge_ids
     for unit_id in duplicate_units:
         assigned[f"duplicate:{unit_id}"] = [unit_id]
+    # AC10 of issue athenaeum#2548: the conservation check covers move
+    # targets and standalone pages too -- each destination is its own
+    # bucket, so a unit routed to one is accounted for exactly where it
+    # lands and nowhere else.
+    for target_uid, moved_ids in move_items.items():
+        assigned[f"move:{target_uid}"] = list(moved_ids)
+    for group_key, standalone_ids in standalone_items.items():
+        assigned[f"standalone:{group_key}"] = list(standalone_ids)
 
     conservation = check_conservation([u.unit_id for u in segment.units], assigned)
     for unit_id in conservation.missing:
@@ -771,6 +1327,243 @@ def compute_apply(
     if issues:
         return ComputedApply(issues=tuple(issues))
 
+    # -----------------------------------------------------------------
+    # Issue athenaeum#2548: standalone pages (AC5), move targets
+    # (AC1-AC4), page actions (AC6/AC7) and alias moves (AC12).
+    # -----------------------------------------------------------------
+    threshold_chars = resolve_page_size_threshold_chars(config)
+    standalone_pages: list[NewStandalonePage] = []
+    if standalone_order:
+        declared_types = _declared_types(wiki_root)
+        for group_key in standalone_order:
+            group = groups_by_key.get(group_key)
+            name = (group.name if group is not None else "").strip()
+            if not name:
+                issues.append(PlanIssue("standalone-missing-name", group_key))
+                continue
+            # AC5: a name that already resolves is a MOVE, and the planner
+            # (`page_recompile_plan.resolve_standalone_groups`) converts it
+            # before the plan is recorded. Reaching here means the plan an
+            # operator APPROVED said "create a new page" over a name that
+            # now resolves -- refused, never silently converted, because
+            # converting would apply something they did not approve.
+            if index is not None and index.lookup(name) is not None:
+                issues.append(PlanIssue("standalone-name-already-exists", name))
+                continue
+            if parent_type and parent_type not in declared_types:
+                issues.append(PlanIssue("standalone-type-not-declared", parent_type))
+                continue
+            built = _build_relocated_body(
+                unit_ids=standalone_items[group_key],
+                units_by_id=units_by_id,
+                source_definitions=original_definitions,
+                destination_body="",
+                source_name=parent_name,
+                source_uid=parent_uid,
+                plan_id=plan_id,
+            )
+            entity = WikiEntity(
+                uid=generate_uid(),
+                type=parent_type,
+                name=name,
+                access=parent_access,
+                tags=list(parent_tags),
+                related=[],
+                created=today,
+                updated=today,
+                # AC5: no relation to the source page -- no `parent:` key,
+                # no breadcrumb, no `related` row. That absence IS the
+                # action: a standalone page is not a child.
+                # `lstrip` because `_insert_relocated`'s empty-destination
+                # branch separates the incoming section from what was there
+                # before -- and on a brand-new page there was nothing, so
+                # the separator would render as a blank first line.
+                body=_insert_relocated("", built.section, built.definitions).lstrip("\n"),
+                source=f"page-recompile-standalone:{parent_uid}:{today}",
+                provenance_scope=_str_field(page_meta, "provenance_scope"),
+                claimed_scope=_str_field(page_meta, "claimed_scope"),
+                subject=_str_field(page_meta, "subject"),
+            )
+            rendered = entity.render()
+            schema_issue = _schema_validation_issue(rendered, declared_types, name)
+            if schema_issue is not None:
+                issues.append(schema_issue)
+                continue
+            standalone_pages.append(
+                NewStandalonePage(
+                    uid=entity.uid,
+                    name=name,
+                    description=group.description if group is not None else "",
+                    group_key=group_key,
+                    path=wiki_root / entity.filename,
+                    text=rendered,
+                    unit_ids=tuple(standalone_items[group_key]),
+                    inserted_texts=built.inserted_texts,
+                )
+            )
+
+    target_edits: dict[str, TargetPageEdit] = {}
+    for target_uid in move_order:
+        target_path = index.get_by_uid(target_uid) if index is not None else None
+        if target_path is None:
+            issues.append(PlanIssue("move-target-missing", target_uid))
+            continue
+        if target_uid == parent_uid:
+            issues.append(PlanIssue("move-target-is-the-source-page", target_uid))
+            continue
+        try:
+            target_text = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            issues.append(PlanIssue("move-target-unreadable", target_uid))
+            continue
+        target_meta, target_body = parse_frontmatter(target_text)
+        if not isinstance(target_meta, dict):
+            issues.append(PlanIssue("move-target-frontmatter-not-a-mapping", target_uid))
+            continue
+        if is_inactive_relation_target(target_meta):
+            issues.append(PlanIssue("move-target-inactive", target_uid))
+            continue
+        # AC2: a HARD refusal, with no write, never a warning.
+        widening = access_widening_reason(page_meta, target_meta)
+        if widening:
+            issues.append(
+                PlanIssue("move-target-access-wider", f"{target_uid}: {widening}")
+            )
+            continue
+        built = _build_relocated_body(
+            unit_ids=move_items[target_uid],
+            units_by_id=units_by_id,
+            source_definitions=original_definitions,
+            destination_body=target_body,
+            source_name=parent_name,
+            source_uid=parent_uid,
+            plan_id=plan_id,
+        )
+        new_target_body = _insert_relocated(target_body, built.section, built.definitions)
+        # AC1: the target's frontmatter IDENTITY is unchanged -- `updated`
+        # is bookkeeping (and the same bump `page_decompose._bump_and_render`
+        # makes when it attaches a fact to a target), `needs_split` is AC4.
+        new_target_meta: dict[str, Any] = dict(target_meta)
+        new_target_meta["updated"] = today
+        over_threshold = len(new_target_body) > threshold_chars
+        if over_threshold:
+            # AC4: flagged, and therefore a candidate on the next scan. The
+            # move is NOT refused for size.
+            new_target_meta["needs_split"] = True
+        target_edits[target_uid] = TargetPageEdit(
+            uid=target_uid,
+            name=str(target_meta.get("name") or target_uid),
+            path=target_path,
+            pre_text=target_text,
+            text=render_frontmatter(new_target_meta) + "\n" + new_target_body,
+            pre_content_hash=page_content_hash(target_body),
+            unit_ids=tuple(move_items[target_uid]),
+            inserted_texts=built.inserted_texts,
+            needs_split_flagged=over_threshold,
+        )
+    if issues:
+        return ComputedApply(issues=tuple(issues))
+
+    # AC6/AC7/AC12: page-level actions.
+    index_map = _index_pages_by_uid(wiki_root)
+    prospective_children = {
+        parent_uid: [c.uid for c in existing_relations.children] + [sp.uid for sp in sub_pages]
+    }
+    attachments: list[Attachment] = []
+    alias_moves: list[AliasMove] = []
+    raw_parent_aliases = page_meta.get("aliases")
+    parent_aliases = (
+        [a for a in raw_parent_aliases if isinstance(a, str)]
+        if isinstance(raw_parent_aliases, list)
+        else []
+    )
+    for action in plan.page_actions:
+        pair = parse_alias_move(action)
+        if pair is not None:
+            alias_target_uid, alias_text = pair
+            if alias_text not in parent_aliases:
+                issues.append(PlanIssue("alias-move-alias-not-on-the-page", alias_text))
+                continue
+            if alias_target_uid not in index_map:
+                issues.append(PlanIssue("alias-move-target-missing", alias_target_uid))
+                continue
+            alias_target_meta = _read_meta(index_map[alias_target_uid])
+            if is_inactive_relation_target(alias_target_meta):
+                issues.append(PlanIssue("alias-move-target-inactive", alias_target_uid))
+                continue
+            alias_widening = access_widening_reason(page_meta, alias_target_meta)
+            if alias_widening:
+                issues.append(
+                    PlanIssue(
+                        "alias-move-target-access-wider",
+                        f"{alias_target_uid}: {alias_widening}",
+                    )
+                )
+                continue
+            alias_moves.append(AliasMove(alias=alias_text, target_uid=alias_target_uid))
+            continue
+        verb, argument = split_disposition(action)
+        if verb not in PAGE_ACTIONS or not argument:
+            issues.append(PlanIssue("unknown-page-action", action))
+            continue
+        if verb == "attach":
+            child_uid, attach_parent_uid = argument, parent_uid
+        else:  # attach-self-under
+            child_uid, attach_parent_uid = parent_uid, argument
+        attach_issues = _attachment_issues(
+            index_map,
+            child_uid=child_uid,
+            parent_uid=attach_parent_uid,
+            prospective_children=prospective_children,
+        )
+        if attach_issues:
+            issues.extend(attach_issues)
+            continue
+        attachments.append(
+            Attachment(child_uid=child_uid, parent_uid=attach_parent_uid, action=action)
+        )
+    if issues:
+        return ComputedApply(issues=tuple(issues))
+
+    # AC12: an alias leaves the parent ONLY when the plan listed it, and it
+    # lands on the named target in the same apply.
+    moved_aliases = {move.alias for move in alias_moves}
+    for move in alias_moves:
+        edit = target_edits.get(move.target_uid)
+        if edit is None:
+            alias_path = index_map[move.target_uid]
+            alias_meta_raw, alias_body = parse_frontmatter(
+                alias_path.read_text(encoding="utf-8")
+            )
+            alias_meta = dict(alias_meta_raw) if isinstance(alias_meta_raw, dict) else {}
+            edit = TargetPageEdit(
+                uid=move.target_uid,
+                name=str(alias_meta.get("name") or move.target_uid),
+                path=alias_path,
+                pre_text=alias_path.read_text(encoding="utf-8"),
+                text="",
+                pre_content_hash=page_content_hash(alias_body),
+                unit_ids=(),
+                inserted_texts=(),
+            )
+            base_meta, base_body = alias_meta, alias_body
+        else:
+            base_meta_raw, base_body = parse_frontmatter(edit.text)
+            base_meta = dict(base_meta_raw) if isinstance(base_meta_raw, dict) else {}
+        raw_existing = base_meta.get("aliases")
+        existing = (
+            [a for a in raw_existing if isinstance(a, str)]
+            if isinstance(raw_existing, list)
+            else []
+        )
+        if move.alias not in existing:
+            existing.append(move.alias)
+        base_meta["aliases"] = existing
+        base_meta["updated"] = today
+        target_edits[move.target_uid] = dataclasses_replace(
+            edit, text=render_frontmatter(base_meta) + "\n" + base_body
+        )
+
     # AC4: new children linked via the page_relations.py writer's shape
     # (`via="split"`), folded together with any pre-existing children in
     # ONE write rather than one `set_relation` call per child -- a repeated
@@ -825,14 +1618,31 @@ def compute_apply(
     )
     new_parent_body = apply_sub_pages_section(parent_core, display_rows)
 
-    # AC2: frontmatter byte-identical outside exactly these four keys.
+    # AC2: frontmatter byte-identical outside exactly these four keys --
+    # plus `aliases`, and then ONLY when the plan listed an alias move
+    # (issue athenaeum#2548 AC12).
     new_meta: dict[str, Any] = dict(page_meta)
     new_meta["updated"] = today
     new_meta["description"] = _derive_description(plan.summary)
-    new_meta["related"] = new_related
-    threshold = resolve_page_size_threshold_chars(config)
-    if len(new_parent_body) <= threshold:
+    if new_related:
+        new_meta["related"] = new_related
+    else:
+        new_meta.pop("related", None)
+    # Issue athenaeum#2548 AC7: `needs_split` is re-evaluated only when
+    # content actually LEFT the parent. A plan whose only action is
+    # `attach-self-under` (every unit stays, no group, no move, no
+    # standalone) routes nothing away, so the flag is left exactly as it
+    # was -- clearing it would assert a page had been split when it had
+    # not, and that flag is what puts the page back on the candidate scan.
+    units_left_the_parent = bool(group_order or move_order or standalone_order)
+    if units_left_the_parent and len(new_parent_body) <= threshold_chars:
         new_meta.pop("needs_split", None)
+    if moved_aliases:
+        remaining_aliases = [a for a in parent_aliases if a not in moved_aliases]
+        if remaining_aliases:
+            new_meta["aliases"] = remaining_aliases
+        else:
+            new_meta.pop("aliases", None)
     new_parent_text = render_frontmatter(new_meta) + "\n" + new_parent_body
 
     return ComputedApply(
@@ -845,6 +1655,10 @@ def compute_apply(
         sub_pages=tuple(sub_pages),
         merges=tuple(merge_accounting),
         parent_unit_ids=tuple(parent_unit_ids),
+        standalone_pages=tuple(standalone_pages),
+        targets=tuple(target_edits[uid] for uid in sorted(target_edits)),
+        attachments=tuple(attachments),
+        alias_moves=tuple(alias_moves),
     )
 
 
@@ -968,10 +1782,22 @@ def _build_ledger_record(
     computed: ComputedApply,
     pre_parent_hash: str,
     post_parent_hash: str,
+    target_post_hashes: "Mapping[str, str] | None" = None,
+    attach_pages: "Sequence[Mapping[str, Any]]" = (),
 ) -> dict[str, Any]:
     """The AC9 record: pre/post content hash and the pre-image git blob id
     for every touched page, the created uids, which units landed where, and
-    the merged groups' original unit ids/hashes."""
+    the merged groups' original unit ids/hashes.
+
+    Issue athenaeum#2548 AC10 widens "every touched page" to the move
+    targets, the created standalone pages, and the two pages an ``attach``
+    writes -- each with the same four fields, so
+    :mod:`athenaeum.page_recompile_undo` needs no new reader to reverse
+    them. *target_post_hashes* and *attach_pages* are measured AFTER the
+    write (and, for the attach pair, after
+    :func:`athenaeum.page_relations.set_relation`), because that is the only
+    moment they are true.
+    """
     pages: list[dict[str, Any]] = [
         {
             "uid": uid,
@@ -993,13 +1819,43 @@ def _build_ledger_record(
                 "units": list(sp.unit_ids),
             }
         )
+    for standalone in computed.standalone_pages:
+        pages.append(
+            {
+                "uid": standalone.uid,
+                "path": str(standalone.path),
+                "pre_content_hash": "",
+                "post_content_hash": page_content_hash(
+                    parse_frontmatter(standalone.text)[1]
+                ),
+                "pre_blob_id": "",
+                "units": list(standalone.unit_ids),
+            }
+        )
+    for target in computed.targets:
+        pages.append(
+            {
+                "uid": target.uid,
+                "path": str(target.path),
+                "pre_content_hash": target.pre_content_hash,
+                "post_content_hash": (target_post_hashes or {}).get(target.uid, ""),
+                "pre_blob_id": _git_blob_id(target.pre_text.encode("utf-8")),
+                "units": list(target.unit_ids),
+            }
+        )
+    recorded_uids = {str(row.get("uid") or "") for row in pages}
+    for row in attach_pages:
+        if str(row.get("uid") or "") in recorded_uids:
+            continue
+        pages.append(dict(row))
     return {
         "v": PAGE_RECOMPILE_LEDGER_VERSION,
         "kind": APPLY_KIND,
         "id": plan_id,
         "ts": now_iso(),
         "uid": uid,
-        "created_uids": [sp.uid for sp in computed.sub_pages],
+        "created_uids": [sp.uid for sp in computed.sub_pages]
+        + [sp.uid for sp in computed.standalone_pages],
         "pages": pages,
         "merges": [
             {
@@ -1010,7 +1866,76 @@ def _build_ledger_record(
             }
             for m in computed.merges
         ],
+        # Issue athenaeum#2548 AC11: what an undo has to reverse that a
+        # pre-image restore alone does not NAME -- the relations an attach
+        # set (undone by a detach) and the aliases a plan moved.
+        "moves": [
+            {"uid": t.uid, "units": list(t.unit_ids)}
+            for t in computed.targets
+            if t.unit_ids
+        ],
+        "attachments": [
+            {"child": a.child_uid, "parent": a.parent_uid, "via": a.via, "action": a.action}
+            for a in computed.attachments
+        ],
+        "alias_moves": [
+            {"alias": a.alias, "target": a.target_uid} for a in computed.alias_moves
+        ],
     }
+
+
+#: The two verdicts that authorise a write (issue athenaeum#2548 AC8),
+#: read off :mod:`athenaeum.page_recompile_queue`'s own vocabulary rather
+#: than restated as literals here -- the queue module owns the verdict
+#: words, and three string literals agreeing by eye is how they drift.
+APPROVING_VERDICTS: frozenset[str] = frozenset(
+    {VERDICT_APPROVE, VERDICT_APPROVE_STRUCTURE_ONLY}
+)
+
+
+def _cross_page_approval_refusal(
+    wiki_root: Path,
+    *,
+    plan_id: str,
+    verdict: str,
+    ledger_path: Path | None,
+) -> str:
+    """Why a CROSS-PAGE plan may not be applied, or ``""`` (issue
+    athenaeum#2548 AC8: "never applied without an approved decision item,
+    in every mode").
+
+    Two independent halves, because either alone is forgeable:
+
+    * the caller must present an approving *verdict*. Only
+      :func:`athenaeum.decision_answers._apply_page_recompile_answer` has
+      one, which is what keeps ``athenaeum recompile apply`` -- an operator
+      naming a uid directly -- from applying a cross-page plan behind the
+      decision queue's back.
+    * the ledger must hold a :data:`~athenaeum.page_recompile_queue.QUEUE_KIND`
+      record for this plan id, so the plan really was RAISED as an item.
+      Without this a caller passing ``verdict="approve"`` could apply a
+      plan nobody was ever asked about.
+
+    **The run MODE is deliberately not consulted.** ``mode`` decides
+    whether the nightly phase drafts and raises a plan at all; it has no
+    say over whether an answered plan may be written. Reading it here would
+    make the refusal mode-dependent, and AC8 requires it to hold in every
+    mode -- ``auto`` included.
+    """
+    if verdict.strip().lower() not in APPROVING_VERDICTS:
+        return (
+            "cross-page plan: refused, because a plan that moves units to "
+            "another page, creates a standalone page, attaches a page or "
+            "moves an alias is only ever applied through an approved "
+            f"page-recompile decision item (verdict given: {verdict!r})"
+        )
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        if record.get("kind") == QUEUE_KIND and str(record.get("id") or "") == plan_id:
+            return ""
+    return (
+        "cross-page plan: refused, because no page-recompile decision item "
+        f"was ever raised for plan {plan_id}"
+    )
 
 
 def write_apply(
@@ -1022,14 +1947,33 @@ def write_apply(
     config: dict[str, Any] | None = None,
     ledger_path: Path | None = None,
     now: date | None = None,
+    verdict: str = "",
 ) -> ApplyOutcome:
-    """Apply ONE structure-only recompile plan end to end (issue athenaeum#2540).
+    """Apply ONE recompile plan end to end (issues athenaeum#2540, athenaeum#2548).
 
     Rolls back a stale journal first (AC10), resolves and re-validates the
-    plan (AC1, :func:`compute_apply`), writes every sub-page then the parent
-    LAST under journal protection, re-verifies the written pages, appends
-    the AC9 ledger record, and makes one snapshot commit
+    plan (AC1, :func:`compute_apply`), writes every NEW page, then every
+    existing move target, then the parent LAST under journal protection,
+    sets any attach relation, re-verifies the written pages, appends the
+    AC9 ledger record, and makes one snapshot commit
     (:meth:`athenaeum.store.FilesystemStore.snapshot`).
+
+    *verdict* is the operator's answer, supplied by
+    :func:`athenaeum.decision_answers._apply_page_recompile_answer` (issue
+    athenaeum#2548). A **structure-only** plan ignores it: it needs no
+    approval beyond the existing run lock, exactly as before. A
+    **cross-page** plan is refused outright unless *verdict* is an
+    approving one AND this plan was genuinely raised as a
+    ``page-recompile`` decision item -- see
+    :func:`_cross_page_approval_refusal` for why both halves are checked
+    here rather than trusted from the caller.
+
+    ``approve-structure-only`` then applies only the structure-only PART of
+    such a plan (AC9). That is DERIVED from *verdict* here rather than
+    taken as a second parameter on purpose: two arguments that have to
+    agree are two arguments that can disagree, and the failure mode of
+    disagreeing is applying a cross-page action under a verdict that
+    authorised only the in-page restructure.
     """
     rollback_stale_journal(wiki_root)
 
@@ -1040,12 +1984,19 @@ def write_apply(
         return ApplyOutcome(ok=False, reason=error, plan_id=resolved_plan_id, uid=uid)
 
     if plan.scope != SCOPE_STRUCTURE_ONLY:
-        return ApplyOutcome(
-            ok=False,
-            reason=f"plan scope is {plan.scope!r}, not structure-only",
+        refusal = _cross_page_approval_refusal(
+            wiki_root,
             plan_id=resolved_plan_id,
-            uid=plan.uid,
+            verdict=verdict,
+            ledger_path=ledger_path,
         )
+        if refusal:
+            return ApplyOutcome(
+                ok=False,
+                reason=refusal,
+                plan_id=resolved_plan_id,
+                uid=plan.uid,
+            )
 
     index = EntityIndex(wiki_root)
     page_path = index.get_by_uid(plan.uid)
@@ -1092,6 +2043,9 @@ def write_apply(
         config=config,
         client=client,
         usage=usage,
+        index=index,
+        plan_id=resolved_plan_id,
+        structure_only=verdict.strip().lower() == VERDICT_APPROVE_STRUCTURE_ONLY,
     )
     if not computed.ok:
         return ApplyOutcome(
@@ -1104,7 +2058,12 @@ def write_apply(
 
     assert computed.parent_path is not None  # ok implies this is set
 
-    new_paths = [sp.path for sp in computed.sub_pages]
+    # The Plan's write order, in one place: NEW pages first (sub-pages then
+    # standalone pages -- a pure addition either way), then every existing
+    # move target, then the parent LAST.
+    new_paths = [sp.path for sp in computed.sub_pages] + [
+        sp.path for sp in computed.standalone_pages
+    ]
     _write_journal(
         wiki_root,
         plan_id=resolved_plan_id,
@@ -1115,12 +2074,29 @@ def write_apply(
     )
 
     written: list[Path] = []
+    restored: list[TargetPageEdit] = []
     try:
         for sp in computed.sub_pages:
             atomic_write_text(sp.path, sp.text)
             written.append(sp.path)
+        for standalone in computed.standalone_pages:
+            atomic_write_text(standalone.path, standalone.text)
+            written.append(standalone.path)
+        for target in computed.targets:
+            atomic_write_text(target.path, target.text)
+            restored.append(target)
         atomic_write_text(computed.parent_path, computed.parent_text)
     except Exception:
+        # An existing target is NOT a pure addition, so unlinking is not the
+        # reversal: its own pre-image is already in hand
+        # (:attr:`TargetPageEdit.pre_text`), which is what makes a failure
+        # part-way through the target run recoverable in process rather than
+        # only through the journal.
+        for target in reversed(restored):
+            try:
+                atomic_write_text(target.path, target.pre_text)
+            except OSError:  # pragma: no cover - defensive
+                pass
         for p in written:
             try:
                 p.unlink()
@@ -1128,6 +2104,49 @@ def write_apply(
                 pass
         _remove_journal(wiki_root)
         raise
+
+    # AC6: the relation is set through page_relations.py's own writer, with
+    # `via="attach"`, AFTER the parent has its final body -- `set_relation`
+    # re-reads both pages from disk and edits only the breadcrumb and the
+    # Sub-pages block, so composing it on top of the final body is what
+    # keeps the attach from changing any other body text. Every refusal it
+    # can make was already pre-checked by `_attachment_issues`; a residual
+    # one is reported as a post-write issue rather than silently dropped.
+    attach_issues: list[PlanIssue] = []
+    attach_pages: list[dict[str, Any]] = []
+    for attachment in computed.attachments:
+        pair_pre: dict[str, tuple[Path, str]] = {}
+        for pair_uid in (attachment.child_uid, attachment.parent_uid):
+            pair_path = index.get_by_uid(pair_uid)
+            if pair_path is not None:
+                pair_pre[pair_uid] = (pair_path, pair_path.read_text(encoding="utf-8"))
+        try:
+            set_relation(
+                wiki_root,
+                child_uid=attachment.child_uid,
+                parent_uid=attachment.parent_uid,
+                via=attachment.via,
+            )
+        except (RelationError, ValueError) as exc:
+            attach_issues.append(
+                PlanIssue(
+                    "attach-refused",
+                    f"{attachment.child_uid} under {attachment.parent_uid}: {exc}",
+                )
+            )
+            continue
+        for pair_uid, (pair_path, pre_text) in pair_pre.items():
+            _, post_body = parse_frontmatter(pair_path.read_text(encoding="utf-8"))
+            attach_pages.append(
+                {
+                    "uid": pair_uid,
+                    "path": str(pair_path),
+                    "pre_content_hash": page_content_hash(parse_frontmatter(pre_text)[1]),
+                    "post_content_hash": page_content_hash(post_body),
+                    "pre_blob_id": _git_blob_id(pre_text.encode("utf-8")),
+                    "units": [],
+                }
+            )
     _remove_journal(wiki_root)
 
     # AC5/AC6: re-run the conservation and marker-resolution checks AGAINST
@@ -1135,10 +2154,16 @@ def write_apply(
     # so a defect in the write path itself (encoding, atomic_write_text) is
     # caught rather than assumed away.
     units_by_id_for_postcheck = {unit.unit_id: unit for unit in segment.units}
-    post_issues: list[PlanIssue] = []
+    post_issues: list[PlanIssue] = list(attach_issues)
     reread_parent = computed.parent_path.read_text(encoding="utf-8")
     _, reread_parent_body = parse_frontmatter(reread_parent)
-    if reread_parent != computed.parent_text:
+    if not computed.attachments and reread_parent != computed.parent_text:
+        # Skipped when an attach ran: `set_relation` legitimately rewrote
+        # the parent's breadcrumb or Sub-pages block on top of the body this
+        # function wrote, so a byte comparison against the pre-attach text
+        # would report every successful attach as a write-path defect. The
+        # unit-presence and marker-resolution checks below still run, and
+        # they are the ones that would catch content loss.
         post_issues.append(PlanIssue("post-write-byte-mismatch", plan.uid))
     for unit_id in computed.parent_unit_ids:
         if units_by_id_for_postcheck[unit_id].text not in reread_parent_body:
@@ -1159,6 +2184,35 @@ def write_apply(
         if not marker_check.ok:
             post_issues.append(PlanIssue("post-write-dangling-marker", sp.uid))
 
+    # Issue athenaeum#2548: the same three post-write checks over every
+    # standalone page and every move target, against the RE-READ bytes.
+    for standalone in computed.standalone_pages:
+        reread_text = standalone.path.read_text(encoding="utf-8")
+        _, reread_body = parse_frontmatter(reread_text)
+        if reread_text != standalone.text:
+            post_issues.append(PlanIssue("post-write-byte-mismatch", standalone.uid))
+        for section in standalone.inserted_texts:
+            if section not in reread_body:
+                post_issues.append(PlanIssue("post-write-unit-missing", standalone.uid))
+        if not check_marker_resolution(reread_body).ok:
+            post_issues.append(PlanIssue("post-write-dangling-marker", standalone.uid))
+
+    target_post_hashes: dict[str, str] = {}
+    attach_touched = {a.child_uid for a in computed.attachments} | {
+        a.parent_uid for a in computed.attachments
+    }
+    for target in computed.targets:
+        reread_text = target.path.read_text(encoding="utf-8")
+        _, reread_body = parse_frontmatter(reread_text)
+        target_post_hashes[target.uid] = page_content_hash(reread_body)
+        if target.uid not in attach_touched and reread_text != target.text:
+            post_issues.append(PlanIssue("post-write-byte-mismatch", target.uid))
+        for section in target.inserted_texts:
+            if section not in reread_body:
+                post_issues.append(PlanIssue("post-write-unit-missing", target.uid))
+        if not check_marker_resolution(reread_body).ok:
+            post_issues.append(PlanIssue("post-write-dangling-marker", target.uid))
+
     pre_parent_hash = plan.content_hash
     post_parent_hash = page_content_hash(reread_parent_body)
     ledger_record = _build_ledger_record(
@@ -1167,6 +2221,8 @@ def write_apply(
         computed=computed,
         pre_parent_hash=pre_parent_hash,
         post_parent_hash=post_parent_hash,
+        target_post_hashes=target_post_hashes,
+        attach_pages=attach_pages,
     )
     target_ledger = (
         ledger_path if ledger_path is not None else default_page_recompile_ledger_path(wiki_root)
@@ -1183,7 +2239,8 @@ def write_apply(
         reason="applied",
         plan_id=resolved_plan_id,
         uid=plan.uid,
-        created_uids=tuple(sp.uid for sp in computed.sub_pages),
+        created_uids=tuple(sp.uid for sp in computed.sub_pages)
+        + tuple(sp.uid for sp in computed.standalone_pages),
         snapshot_sha=snapshot_sha,
         ledger_record_id=resolved_plan_id,
         post_write_issues=tuple(post_issues),
@@ -1192,12 +2249,19 @@ def write_apply(
 
 __all__ = [
     "APPLY_KIND",
+    "APPROVING_VERDICTS",
     "JOURNAL_FILENAME",
+    "AliasMove",
     "ApplyOutcome",
+    "Attachment",
     "ComputedApply",
     "MergeAccounting",
+    "NewStandalonePage",
     "NewSubPage",
+    "TargetPageEdit",
+    "access_widening_reason",
     "compute_apply",
+    "relocation_note",
     "renormalise_heading",
     "rollback_stale_journal",
     "write_apply",
