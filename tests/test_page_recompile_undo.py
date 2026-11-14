@@ -1343,11 +1343,18 @@ class TestOutOfScopeAndDefensive:
     """The issue's out-of-scope boundary, and the ledger shapes this module
     must not act on."""
 
-    def test_a_plan_whose_scope_is_not_structure_only_is_refused(self, wiki: Path) -> None:
-        """The applier refuses a cross-page plan, so an apply record for one
-        can only come from a hand-edited ledger -- and undo of cross-page
-        moves is explicitly out of scope for this slice."""
-        plan_id, _before, _snapshot = _applied(wiki)
+    def test_a_cross_page_scope_is_no_longer_a_refusal(self, wiki: Path) -> None:
+        """Issue athenaeum#2548 AC11 made cross-page applies real, so this
+        module's old ``plan_scope_not_structure_only`` refusal is gone: the
+        undo is decided from the apply record's own pages, not from the
+        plan's scope word.
+
+        The round trip for a real cross-page apply (a move onto an existing
+        target) lives in ``tests/test_page_recompile_cross_page.py``; this
+        case pins only that the scope word itself no longer blocks anything,
+        so the refusal cannot quietly come back.
+        """
+        plan_id, before, _snapshot = _applied(wiki)
         ledger = wiki / "_page_recompiles.jsonl"
         lines = ledger.read_text(encoding="utf-8").splitlines()
         rewritten = []
@@ -1357,13 +1364,12 @@ class TestOutOfScopeAndDefensive:
                 record["plan"]["scope"] = "cross-page"
             rewritten.append(json.dumps(record, sort_keys=True))
         ledger.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-        after_apply = _page_bytes(wiki)
 
         outcome = write_undo(wiki, plan_id=plan_id, config=None)
 
-        assert outcome.action == UNDO_REFUSED
-        assert outcome.reason == "plan_scope_not_structure_only"
-        assert _page_bytes(wiki) == after_apply
+        assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
+        assert outcome.reason != "plan_scope_not_structure_only"
+        assert _page_bytes(wiki) == before
 
     def test_an_already_deleted_created_page_is_not_a_blocker(self, wiki: Path) -> None:
         """Undo wanted to delete it and someone already did: there is nothing

@@ -79,11 +79,25 @@ page it writes* -- ``related`` rows with ``role: "child"`` plus a
 breadcrumb line in each CREATED sub-page. Restoring the parent from its
 pre-image therefore removes the parent-side rows and the Sub-pages
 section byte-exactly, and deleting a created sub-page removes the
-child-side row with the file. :func:`athenaeum.page_relations.remove_relation`
-is deliberately NOT called: it REWRITES the parent (to re-render its
-Sub-pages section), which would undo the byte-exact restore this module
-just made and defeat AC1's own round-trip test. This module invents no
-rewrite-record format the applier never writes.
+child-side row with the file. For a SPLIT's own relations
+:func:`athenaeum.page_relations.remove_relation` is deliberately NOT
+called: it REWRITES the parent (to re-render its Sub-pages section), which
+would undo the byte-exact restore this module just made and defeat AC1's
+own round-trip test. This module invents no rewrite-record format the
+applier never writes.
+
+**An ATTACH is the one relation a pre-image restore does not name, and it
+is undone by a detach (issue athenaeum#2548 AC11).** ``attach`` /
+``attach-self-under`` relate the recompiled page to a page OUTSIDE the
+apply, through :func:`athenaeum.page_relations.set_relation`, and the
+applier records the pair on its ``attachments`` ledger rows. So for those
+-- and only those -- :func:`write_undo` calls
+:func:`athenaeum.page_relations.remove_relation` first, BEFORE the
+pre-image restores, so the detach's own two-page rewrite is then
+overwritten by the authoritative pre-images rather than the other way
+round. Both attached pages are also ordinary ``pages`` rows, so an attach
+onto a page someone has since edited blocks the undo like any other
+changed page instead of being silently reverted.
 
 **Why "a later page links to a created sub-page" (AC4) is checkable at
 all.** A created sub-page's uid did not exist before the apply, so any
@@ -118,11 +132,16 @@ skip is NOT here: it reads this record from the module that owns the
 ledger (:func:`athenaeum.page_recompile_plan.undone_page_skip_reason`),
 because the reverse import would make the planner and this module a cycle.
 
-**Out of scope (per the issue).** Undo of moves to other pages and of
-standalone pages (a sibling slice adds those with the actions themselves),
-and any time-based expiry of undo. A plan whose scope is not
-``structure-only`` is refused here, the same refusal the applier makes --
-there is nothing this module could have applied.
+**Cross-page applies, added by issue athenaeum#2548 AC11.** Moves to other
+pages, created standalone pages and attaches were out of scope for
+athenaeum#2541 because the applier could not perform them, and a plan whose
+scope was not ``structure-only`` was refused here for that reason. Slice S7
+makes them real, and they need almost nothing new from this module: a move
+target is an ordinary ``pages`` row whose pre-image restore is exactly
+"remove the moved units", a created standalone page is an ordinary
+``created_uids`` deletion, and a target edited since the apply takes the
+same queued path every other changed page does. The one addition is the
+detach above. Still out of scope: any time-based expiry of undo.
 
 Layering: L4 domain/pipeline, the same layer as its siblings
 :mod:`athenaeum.page_recompile`, :mod:`athenaeum.page_recompile_plan` and
@@ -139,6 +158,7 @@ function-locally in :func:`_queue_undo_proposal`, mirroring
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 import subprocess
 from collections.abc import Mapping
@@ -151,22 +171,24 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.page_recompile_apply import APPLY_KIND, _git_blob_id
 from athenaeum.page_recompile_plan import (
     PAGE_RECOMPILE_LEDGER_VERSION,
-    SCOPE_STRUCTURE_ONLY,
     UNDO_KIND,
     _append_record,
     default_page_recompile_ledger_path,
-    find_plan_record,
     page_content_hash,
     read_page_recompile_ledger,
 )
 from athenaeum.page_relations import (
     _LEGACY_ROLE_CHILD_NAMES_PARENT,
+    RelationError,
     _discover_wiki_pages,
     _index_pages_by_uid,
     _related_rows,
     read_relations,
+    remove_relation,
 )
 from athenaeum.store import FilesystemStore, now_iso
+
+log = logging.getLogger(__name__)
 
 #: :attr:`UndoOutcome.action` values. ``direct`` and ``queued`` are
 #: :mod:`athenaeum.unfold`'s own two, named identically on purpose -- this is
@@ -550,6 +572,14 @@ class PageDeletion:
     path: Path
 
 
+@dataclass(frozen=True)
+class AttachmentUndo:
+    """One ``attach`` relation to detach (issue athenaeum#2548 AC11)."""
+
+    child_uid: str
+    parent_uid: str
+
+
 @dataclass
 class ComputedUndo:
     """Everything :func:`write_undo` needs, computed before any write."""
@@ -559,6 +589,8 @@ class ComputedUndo:
     plan_id: str = ""
     uid: str = ""
     restores: tuple[PageRestore, ...] = ()
+    #: Relations an ``attach`` set, detached before the restores run.
+    attachments: tuple[AttachmentUndo, ...] = ()
     #: One per created sub-page to delete. A created page already gone from
     #: disk is not listed -- there is nothing left to delete.
     deletions: tuple[PageDeletion, ...] = ()
@@ -596,22 +628,23 @@ def compute_undo(
             uid=str(record.get("uid") or ""),
         )
 
-    plan_record = find_plan_record(plan_id, wiki_root, ledger_path=ledger_path)
-    plan_dict = plan_record.get("plan") if isinstance(plan_record, dict) else None
-    if isinstance(plan_dict, dict):
-        scope = str(plan_dict.get("scope") or "")
-        if scope and scope != SCOPE_STRUCTURE_ONLY:
-            # The applier refuses a plan whose scope is not structure-only, so
-            # an apply record for one should not exist -- but the ledger is
-            # append-only and hand-editable, and this module must not be the
-            # one that acts on a cross-page plan it cannot reverse.
-            return ComputedUndo(
-                action=UNDO_REFUSED,
-                reason="plan_scope_not_structure_only",
-                plan_id=plan_id,
-                uid=str(record.get("uid") or ""),
-            )
-
+    # Issue athenaeum#2548 AC11: a CROSS-PAGE apply is undoable, and this
+    # function needs no new machinery to reverse it. The applier records
+    # every page it touched -- move targets, created standalone pages and
+    # the two pages an attach wrote -- as ordinary ``pages`` rows with a
+    # pre-image blob id, so the loop below restores a move target's
+    # pre-image (which is what REMOVES the moved units from it) and deletes
+    # a created standalone page exactly as it does a created sub-page. The
+    # one thing a pre-image restore does not NAME is the relation an attach
+    # set, which :func:`write_undo` detaches through
+    # :func:`athenaeum.page_relations.remove_relation`.
+    #
+    # The scope refusal this check replaced (``plan_scope_not_structure_only``,
+    # issue athenaeum#2541) was correct while cross-page applies could not
+    # happen: an apply record for one could then only come from a
+    # hand-edited ledger. It is now a legitimate record, and refusing it
+    # would leave exactly the applies that touch the most pages with no
+    # undo at all.
     uid = str(record.get("uid") or "")
     created = _created_uids(record)
     created_set = set(created)
@@ -795,7 +828,26 @@ def compute_undo(
         uid=uid,
         restores=tuple(restores),
         deletions=tuple(deletions),
+        attachments=_record_attachments(record),
     )
+
+
+def _record_attachments(record: "Mapping[str, Any]") -> tuple[AttachmentUndo, ...]:
+    """The ``attach`` pairs an apply record names (issue athenaeum#2548
+    AC11). Tolerant of an absent or malformed field -- every apply record
+    written before slice S7 has none."""
+    raw = record.get("attachments")
+    if not isinstance(raw, list):
+        return ()
+    out: list[AttachmentUndo] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        child = str(row.get("child") or "")
+        parent = str(row.get("parent") or "")
+        if child and parent:
+            out.append(AttachmentUndo(child_uid=child, parent_uid=parent))
+    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1036,23 @@ def write_undo(
             # degrades to an empty string rather than a KeyError.
             queued_item_id=str(item.get("decision_id") or item.get("id") or ""),
         )
+
+    # AC11 of issue athenaeum#2548: "an attach is undone by a detach", and
+    # it runs FIRST -- `remove_relation` rewrites both sides of the pair,
+    # so the authoritative pre-image restores below must land on top of it,
+    # not under it. A refusal here is never fatal: the restore that follows
+    # reproduces the pre-image bytes regardless, and the only way
+    # `remove_relation` refuses is that the relation is already gone.
+    for attachment in computed.attachments:
+        try:
+            remove_relation(wiki_root, child_uid=attachment.child_uid)
+        except RelationError as exc:
+            log.debug(
+                "page-recompile undo: detach of %s from %s skipped: %s",
+                attachment.child_uid,
+                attachment.parent_uid,
+                exc,
+            )
 
     # Parents first, created pages last -- see the module docstring.
     for restore in computed.restores:
