@@ -192,6 +192,7 @@ Evidence, kept out of the reading path.
   [render, Haiku](measurements/routed-section-arm-2026-11-06/north-star-render-haiku.md),
   [artifact manifest, higher tier](measurements/routed-section-arm-2026-11-06/manifest-sonnet.md),
   [artifact manifest, Haiku](measurements/routed-section-arm-2026-11-06/manifest-haiku.md).
+- [Clean-machine first-recall test (Linux, PyPI quick start)](measurements/clean-machine-first-recall-linux-2026-11-14.md) — fresh-container run of the README quick start; the fact compiled but a new session could not recall it until the search backend was changed by hand.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
