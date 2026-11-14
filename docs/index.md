@@ -198,6 +198,7 @@ Evidence, kept out of the reading path.
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
 - [Recall relevance floor sweep](measurements/recall-relevance-floor-sweep.md)
 - [Recall hybrid RRF fusion — real-embedder sweep](measurements/recall-hybrid-fusion-sweep.md)
+- [Follow-through on real sessions](measurements/follow-through-real-sessions-2026-11-14.md) — whether pushed pages were opened afterward, by interactive and headless population and session length; rates and counts only.
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
