@@ -117,6 +117,22 @@ pins down the FORM of `userConfig` but not its security properties, and
 this repo has no network access to Claude Code's own documentation to
 confirm the latter from the primary source. Specifically:
 
+**`knowledgePath` IS NOT WIRED YET — setting it currently does nothing.**
+Declaring a `userConfig` field only lets an operator SET a value; it does
+not, by itself, make anything read that value. `.mcp.json`'s `athenaeum`
+server entry does not reference `knowledgePath` at all, so `athenaeum
+serve` always falls back to its own `--path` default (`~/knowledge`)
+regardless of what an operator enters here. The blocker is the same
+network/login gap as above: whatever substitution syntax Claude Code uses
+to thread a `userConfig` value into a `.mcp.json` command/arg/env
+(something like `${CLAUDE_PLUGIN_USER_CONFIG_...}`, by analogy with the
+confirmed-real `${CLAUDE_PLUGIN_ROOT}`) could not be verified here, so
+nothing was guessed into `.mcp.json` rather than risk shipping an unverified
+token that silently fails to substitute. Wiring this is part of
+athenaeum#2308's clean-machine pass, which does have a live Claude Code
+session to confirm the real syntax against. Until that lands, treat this
+field as documentation of intent, not a working control.
+
 - **Established:** `userConfig` values of `type: "string"`/`"boolean"` are
   the mechanism Claude Code plugins use to collect a user-supplied setting,
   with a `default` and (for enums) `options`. The one real example found
