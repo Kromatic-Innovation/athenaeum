@@ -48,7 +48,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum.librarian import process_one
-from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage, parse_frontmatter
+from athenaeum.models import (
+    ClassifiedEntity,
+    EntityIndex,
+    RawFile,
+    TokenUsage,
+    parse_frontmatter,
+    render_frontmatter,
+    stamp_tombstone,
+)
 from athenaeum.tiers import (
     DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS,
     CreateNameCollisionError,
@@ -113,6 +121,34 @@ def _write_page(
     lines.append(body)
     path = wiki / filename
     path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _write_tombstone_page(
+    wiki: Path,
+    filename: str,
+    *,
+    uid: str,
+    name: str,
+    folded_into: str,
+    type_: str | None = None,
+    aliases: list[str] | None = None,
+    body: str = "Some content.\n",
+) -> Path:
+    """Write a page already folded into *folded_into* (issue athenaeum#2527
+    review follow-up), stamped via the real :func:`athenaeum.models.
+    stamp_tombstone` — not a hand-written ``status: folded`` block — so the
+    fixture carries exactly the three keys (``status``, ``folded_into``,
+    ``embedded``) the real fold path writes."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    meta: dict[str, object] = {"uid": uid, "name": name}
+    if type_ is not None:
+        meta["type"] = type_
+    if aliases:
+        meta["aliases"] = aliases
+    meta = stamp_tombstone(meta, folded_into)
+    path = wiki / filename
+    path.write_text(render_frontmatter(meta) + "\n" + body, encoding="utf-8")
     return path
 
 
@@ -552,6 +588,55 @@ class TestValidateCreateNameShortNameAliasAware:
         with pytest.raises(CreateNameCollisionError) as exc_info:
             validate_create_name("ford", index=index, entity_type="company")
         assert exc_info.value.existing_uid == "co-1"
+
+    def test_tombstone_only_match_still_escalates(self, tmp_path: Path) -> None:
+        """Review follow-up (issue athenaeum#2527): a page already folded
+        away keeps its pre-fold `name:`/`aliases:` on disk but no longer
+        answers to them — its fold target does. Before this issue a short
+        token that only hit a tombstone always escalated (the old code
+        never consulted the index at all); this must still escalate, not
+        fold the new observation onto a dead page's uid."""
+        wiki = tmp_path / "wiki"
+        _write_tombstone_page(
+            wiki,
+            "cwc-ghost.md",
+            uid="ghost-1",
+            name="cwc",
+            folded_into="cwc-platform",
+            type_="concept",
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameEscalatedError) as exc_info:
+            validate_create_name("cwc", index=index, entity_type="concept")
+        assert exc_info.value.reason == "short single lowercase token (<= 7 chars)"
+
+    def test_tombstone_plus_one_live_match_is_treated_as_the_single_match(
+        self, tmp_path: Path
+    ) -> None:
+        """A tombstone sharing the token alongside exactly one LIVE page
+        must not inflate the count to 2+ — it is excluded entirely, so
+        this still resolves as a single-match collision."""
+        wiki = tmp_path / "wiki"
+        _write_tombstone_page(
+            wiki,
+            "cwc-ghost.md",
+            uid="ghost-1",
+            name="cwc",
+            folded_into="cwc-platform",
+            type_="concept",
+        )
+        _write_page(
+            wiki,
+            "cwc-platform.md",
+            uid="live-1",
+            name="CWC Platform",
+            type_="concept",
+            aliases=["cwc"],
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("cwc", index=index, entity_type="concept")
+        assert exc_info.value.existing_uid == "live-1"
 
     def test_no_index_supplied_is_byte_identical(self) -> None:
         """Default `index=None`: every pre-athenaeum#2527 caller that does

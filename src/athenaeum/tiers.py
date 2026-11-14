@@ -132,6 +132,7 @@ from athenaeum.models import (
     WikiEntity,
     cache_usage_counts,
     generate_uid,
+    is_tombstone,
     parse_frontmatter,
     render_frontmatter,
     resolve_page_type,
@@ -1291,18 +1292,44 @@ def _find_short_name_matches(
     and is excluded. A candidate with no ``type:`` of its own is kept —
     its type is unconfirmed, not conflicting.
 
+    A tombstoned page (:func:`~athenaeum.models.is_tombstone`) is excluded,
+    unlike :meth:`~athenaeum.models.EntityIndex.lookup` (which does not
+    filter tombstones at all, for the ordinary name-collision path this
+    function is deliberately NOT reusing — see this function's own
+    docstring above). A fold tombstone keeps its pre-fold ``name:``/
+    ``aliases:`` on disk (same reason :func:`athenaeum.name_collisions.
+    scan_name_collisions` excludes tombstones from ITS groups), but it no
+    longer "answers to" that name — its fold target does. Before this
+    issue, a short token that only matched a tombstone's name/alias always
+    escalated (the old code never consulted the index at all); folding the
+    new observation into a dead page's uid here, via this issue's own new
+    disambiguate path, would be a NEW and strictly less safe outcome than
+    pre-issue behaviour (issue athenaeum#2527 review). Deliberately a skip,
+    not a "follow ``folded_into`` to the live survivor" resolution: that is
+    new user-facing behaviour this issue never asked for, and the
+    conservative choice — same as a zero-match token — is to escalate, not
+    to guess a page the fold machinery itself did not settle before this
+    scan runs. :meth:`EntityIndex.read_page_record`'s *keys* must therefore
+    include ``status``/``folded_into`` (added to :attr:`EntityIndex._INDEX_KEYS`
+    here, since that constant's own selective set has no reason to carry
+    them for ITS callers — see its docstring) or :func:`is_tombstone` would
+    always see an empty, stripped-down ``meta`` and never fire.
+
     Returns matches sorted by path, for determinism.
     """
     token_key = token.strip().lower()
     entity_type_key = entity_type.strip().lower() if entity_type else ""
+    read_keys = EntityIndex._INDEX_KEYS | {"status", "folded_into"}
     matches: list[_ShortNameMatch] = []
     for fpath in sorted(Path(wiki_root).glob("*.md")):
         if fpath.name.startswith("_"):
             continue
-        parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
+        parsed = EntityIndex.read_page_record(fpath, keys=read_keys)
         if parsed is None:
             continue
-        record, _meta = parsed
+        record, meta = parsed
+        if is_tombstone(meta):
+            continue
         keys = {record.name.strip().lower()}
         keys.update(alias.strip().lower() for alias in record.aliases)
         if token_key not in keys:
