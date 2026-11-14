@@ -198,8 +198,11 @@ get plus the reason for it:
   discard. Answer it with `athenaeum decisions`.
 - **refused** — another page already links to one of the created
   sub-pages, so deleting it would leave a dangling link. The command
-  reports how many such links there are and changes nothing. Re-point
-  those links first, then undo.
+  reports how many such links there are, and where each one is, and
+  changes nothing. Re-point those links first, then undo. All four ways a
+  page can reference another count: a `related` row, a `parent:` key, a
+  `[[uid|Label]]` wikilink, and an ordinary markdown inline link whose
+  target is the sub-page's own `uid-slug.md` filename.
 
 A page restored by an undo is not re-planned while it still holds the
 restored text, so an unattended pass cannot immediately re-apply what you

@@ -67,7 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds it), nothing is written and one pending-decisions item is raised
   carrying a unified diff of the pre-image against what is on disk now.
   When any other page already links to a created sub-page, undo is refused
-  and reports how many such links there are. A page restored by an undo is
+  and reports how many such links there are, counting all four reference
+  shapes — a `related` row, a `parent:` key, a `[[uid]]` wikilink and an
+  ordinary markdown link to the sub-page's `uid-slug.md` file — de-duplicated so the two
+  spellings of one parent relation count once. An apply record missing
+  either content hash blocks the undo rather than restoring over an edit
+  or writing an undo record the re-apply guard could not honour. A page restored by an undo is
   not re-planned while its content hash still matches the restored
   pre-image, so an unattended pass cannot re-apply what was just undone —
   a content comparison, not a timer, lifted by any later edit.
