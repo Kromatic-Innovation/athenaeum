@@ -2112,6 +2112,87 @@ Read ``athenaeum status``'s chars-based page-recompile backlog block
 (``page_recompile`` in ``--json``) instead; this knob and its
 ``Oversized pages (warn/flag)`` status line go away in that release.
 
+### `resolve_page_recompile_auto_apply_class`
+
+- **YAML path:** `librarian.page_recompile.auto_apply_class`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS`
+- **CLI flag:** —
+- **Default:** `'none'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.auto_apply_class`` (AC3).
+
+One of `PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
+default precedence and same warn-and-fall-back-to-the-conservative-value
+contract as `resolve_page_recompile_mode`.
+
+**Read, not yet acted on.** The AC states this plainly: the behaviour
+``structure-only`` enables ships in a later slice of the page-recompile
+design, not in the one that adds this key. The key exists now so that
+slice has a settled vocabulary and a settled default to switch on, and
+so an operator can set it ahead of time without the value being
+silently discarded.
+
+### `resolve_page_recompile_max_api_calls_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_api_calls_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `40`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_api_calls_per_run`` (AC4): how many model calls the nightly page-recompile
+phase may make in one run.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
+
+### `resolve_page_recompile_max_input_chars_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_input_chars_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `200000`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_input_chars_per_run`` (AC4): the per-run total of candidate page-body characters
+the phase may plan over.
+
+Checked BEFORE each page's first model call, against that page's own
+body size, so it is a real pre-spend gate rather than an after-the-fact
+report. A page that does not fit the remaining allowance is counted
+``skipped_budget`` and costs nothing.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
+
+### `resolve_page_recompile_max_open_items`
+
+- **YAML path:** `librarian.page_recompile.max_open_items`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_open_items`` (AC4).
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
+
+### `resolve_page_recompile_max_pages_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_pages_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `3`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_pages_per_run`` (AC4): how many pages the nightly phase may PLAN in one
+run once no candidate is over the hard ceiling.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
+
 ### `resolve_page_recompile_merge_near_duplicates`
 
 - **YAML path:** `librarian.page_recompile.merge_near_duplicates`
@@ -2149,6 +2230,45 @@ editorial judgement call, not a cost/behavior toggle an operator needs to
 flip from a shell one-off. Must be a non-negative, non-bool int; anything
 else (missing key/section, wrong type, negative) falls back to
 `DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS`.
+
+### `resolve_page_recompile_mode`
+
+- **YAML path:** `librarian.page_recompile.mode`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_MODE`
+- **CLI flag:** —
+- **Default:** `'queue'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.mode`` (AC2).
+
+One of `PAGE_RECOMPILE_MODES`. Env
+``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
+``librarian.page_recompile.mode`` > default
+`DEFAULT_PAGE_RECOMPILE_MODE`.
+
+**An unknown value falls back to the default and logs a WARNING** (the
+AC asks for exactly this). Deliberately not a hard error: a typo in one
+optional key must not take the whole nightly run down, and the fallback
+is the conservative mode (ask before writing), not the permissive one.
+Case- and whitespace-insensitive, so ``Queue`` and `` queue `` resolve
+rather than warning.
+
+### `resolve_page_recompile_opening_max_pages_per_run`
+
+- **YAML path:** `librarian.page_recompile.opening_max_pages_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `10`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.opening_max_pages_per_run`` (AC4): the per-run page budget used while ANY candidate is
+over the hard ceiling.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
+over-ceiling candidate remains, the steady
+`resolve_page_recompile_max_pages_per_run` applies instead -- the
+switch is a property of the corpus, not a second knob.
 
 ### `resolve_page_recompile_rejoin_fraction`
 

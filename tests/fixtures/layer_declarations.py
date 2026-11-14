@@ -286,6 +286,15 @@ MODULE_LAYER: dict[str, int] = {
     # athenaeum.page_recompile, athenaeum.page_recompile_plan and
     # athenaeum.page_recompile_apply").
     "page_recompile_undo": 4,
+    # Issue athenaeum#2547 (page-recompile slice S6): the nightly pass's own
+    # policy -- budget, modes, deadline and suppression (own docstring
+    # states "Layering: L4 domain/pipeline, the same layer as every other
+    # page_recompile* module and as athenaeum.audit_queue").
+    "page_recompile_nightly": 4,
+    # Issue athenaeum#2547 (page-recompile slice S6): the approval queue a
+    # drafted plan is raised through (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings").
+    "page_recompile_queue": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,

@@ -1538,8 +1538,18 @@ def plan_page(
     ledger_path: Path | None = None,
     record: bool = True,
     verify: bool = True,
+    usage: TokenUsage | None = None,
 ) -> PlanRunResult:
     """Plan one page end to end and append the shadow record (AC11).
+
+    *usage* (issue athenaeum#2547): the caller's own accumulator, so a
+    caller that makes several plan calls in one run -- the nightly phase --
+    gets ONE total with every call still tagged by the knob that made it
+    (:meth:`athenaeum.models.TokenUsage.add`'s ``knob=``), and the run-level
+    ``max_api_calls`` ceiling and the spend ledger both see this function's
+    calls. Omitted, a fresh :class:`~athenaeum.models.TokenUsage` is used
+    and returned on :attr:`PlanRunResult.usage`, which is what every
+    pre-athenaeum#2547 caller already does.
 
     Reads the page, decides whether this pass may act on it at all
     (:func:`athenaeum.page_recompile.classify_page_text`), segments it with
@@ -1571,7 +1581,7 @@ def plan_page(
     from athenaeum.page_recompile import BlockedPage, classify_page_text, segment_page
     from athenaeum.page_relations import is_inactive_relation_target
 
-    usage = TokenUsage()
+    usage = usage if usage is not None else TokenUsage()
     page_index = index if index is not None else EntityIndex(wiki_root)
     path = page_index.get_by_uid(uid)
     if path is None:

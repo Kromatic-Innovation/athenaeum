@@ -143,6 +143,7 @@ from athenaeum.config import (
     resolve_heartbeat_interval,
     resolve_intake_runtime_floor,
     resolve_model_rates,
+    resolve_page_recompile_mode,
     resolve_person_registry_root,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -5508,6 +5509,17 @@ class RunContext:
     # mirroring ``rule_proposals_summary``'s "disabled phase never touches
     # this field" contract immediately above).
     audit_nightly_drain_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2547: run-summary counts from
+    # ``_run_page_recompile_phase``
+    # (:meth:`athenaeum.page_recompile_nightly.PageRecompileRunSummary.to_dict`).
+    # ``None`` until that phase runs -- including when
+    # ``librarian.page_recompile.mode`` is ``off``, the one gate that makes
+    # this phase a no-op -- so "didn't run" stays distinguishable from "ran
+    # and planned nothing", the same contract
+    # ``rule_proposals_summary``/``audit_nightly_drain_summary`` document
+    # above. Unlike those two, this phase is ON by default: a ``None`` here
+    # on a normal nightly run means the mode was explicitly switched off.
+    page_recompile_summary: dict[str, Any] | None = None
     # Issue athenaeum#2020: run-summary counts from
     # ``_run_signal_mining_phase`` (``None`` until that phase runs,
     # including when its config gate --
@@ -7420,6 +7432,125 @@ def _run_audit_nightly_drain_phase(ctx: RunContext) -> None:
             summary.stale_remaining,
             summary.cost_usd,
         )
+
+
+def _run_page_recompile_phase(ctx: RunContext) -> None:
+    """Nightly page-recompile pass (issue athenaeum#2547, slice S6 of
+    athenaeum#2525) -- the first thing in the nightly run that acts on an
+    oversized page at all.
+
+    Delegates entirely to
+    :func:`athenaeum.page_recompile_nightly.run_nightly_page_recompile` --
+    the candidate walk, the per-run budget, the mode handling, the
+    suppression checks and the queueing all live there (see that module's
+    docstring); this function is only the librarian wiring, modelled on
+    :func:`_run_rule_proposal_phase` directly above for client construction,
+    knob attribution and deadline participation.
+
+    **ON by default, unlike every other phase in this family.** The three
+    phases above it are opt-in because each adds recurring unattended spend
+    an operator must consciously accept. The operator ruling on
+    athenaeum#2525 made the opposite call here, and gave the reason: nothing
+    in the nightly run acted on an oversized page, so a pass that is off by
+    default would have left the page-size invariant permanently unenforced.
+    The gate is therefore ``librarian.page_recompile.mode: off``
+    (:func:`~athenaeum.config.resolve_page_recompile_mode`) -- and on that
+    value this function returns BEFORE building a client, so ``off`` really
+    does cost nothing, not merely nothing visible (athenaeum#2547 AC2).
+    The default mode is ``queue``: a plan is drafted and raised as a
+    ``page-recompile`` decision item, and no page is written without an
+    operator's answer.
+
+    **Placement** (AC1): called from ``run()`` after the entity-tier and
+    auto-memory phases and immediately before the finalize phase, beside the
+    other late LLM-spend phases -- so it is NOT reached by a ``merge_only``
+    or ``cluster_only`` run (both return above this call site, same as
+    finalize), and it runs only after the phases that claim the shared
+    deadline first have had it. Skipped whenever ``ctx.deadline_tripped``,
+    mirroring the auto-memory block's own guard: a run that already blew its
+    wall-clock budget must not open a brand-new LLM knob afterward.
+
+    **Deadline participation carves NO share of its own** -- the operator
+    ruling on athenaeum#2525 says so outright, and the reason is exactly the
+    one :func:`_run_rule_proposal_phase`'s docstring gives for itself: a
+    fresh share taken by a phase that runs LAST would extend the run's total
+    wall-clock time past ``max_runtime``, which is the one thing
+    ``run_deadline`` exists to bound. It participates in
+    ``ctx.run_deadline`` directly instead: skipped entirely when already
+    expired, and re-checked between pages via ``deadline_check`` so a run
+    that trips the deadline partway through the backlog stops cleanly.
+
+    **Heartbeat** (AC10): ``ctx.tick_heartbeat`` is passed through and called
+    between pages, so a long pass refreshes the run lock's heartbeat and is
+    never mistaken for wedged -- the same per-boundary tick the entity loop
+    makes per file.
+
+    **Spend-ledger accounting** (AC9): the phase's calls are recorded into
+    ``ctx.usage`` by :func:`~athenaeum.page_recompile_plan.plan_page`, which
+    tags each one with the knob that made it, so a page-recompile night is
+    attributed correctly by ``athenaeum spend --by-knob`` and counts against
+    the run's own ``max_api_calls`` ceiling. The knob's resolved
+    provider/model are recorded into
+    ``ctx.knob_providers``/``ctx.knob_models`` so
+    ``spend.record_spend_per_knob_provider`` attributes this phase's spend to
+    its own knob rather than the unmodeled default. As with every other
+    phase, the finalize phase's single ledger write covers these tokens; this
+    phase writes no spend row itself.
+    """
+    mode = resolve_page_recompile_mode(ctx.config)
+    if mode == "off":
+        ctx.run_profile.append(("page-recompile", 0.0, {"reason": "off"}))
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.run_profile.append(
+            ("page-recompile", 0.0, {"reason": "deadline-tripped", "mode": mode})
+        )
+        return
+
+    _start = time.monotonic()
+    try:
+        from athenaeum.page_recompile_nightly import (
+            PAGE_RECOMPILE_KNOB,
+            run_nightly_page_recompile,
+        )
+        from athenaeum.page_recompile_plan import _get_page_recompile_model
+
+        _provider = resolve_provider(
+            ctx.config, knob=PAGE_RECOMPILE_KNOB, default=ctx.provider
+        )
+        ctx.knob_providers[PAGE_RECOMPILE_KNOB] = _provider
+        ctx.knob_models[PAGE_RECOMPILE_KNOB] = _get_page_recompile_model(ctx.config)
+        client = build_llm_client(
+            ctx.config,
+            knob=PAGE_RECOMPILE_KNOB,
+            api_key=ctx.api_key,
+            max_retries=3,
+        )
+        summary = run_nightly_page_recompile(
+            ctx.wiki_root,
+            client=client,
+            config=ctx.config,
+            now=ctx.now.date() if ctx.now is not None else None,
+            usage=ctx.usage,
+            deadline_check=ctx.deadline_exceeded,
+            heartbeat=ctx.tick_heartbeat,
+            dry_run=ctx.dry_run,
+        )
+    except Exception:
+        # A defect in this phase must never change a run's exit code; every
+        # other late phase in this family is wrapped the same way
+        # (`log.exception` re-raises nothing, so BLE001 does not fire on a
+        # bare `except Exception:` that logs the traceback).
+        log.exception("page-recompile phase failed; continuing run")
+        ctx.run_profile.append(
+            ("page-recompile", time.monotonic() - _start, {"reason": "failed"})
+        )
+        return
+
+    ctx.page_recompile_summary = summary.to_dict()
+    ctx.run_profile.append(
+        ("page-recompile", time.monotonic() - _start, summary.as_profile_fields())
+    )
 
 
 def _run_signal_mining_phase(ctx: RunContext) -> None:
@@ -12022,6 +12153,18 @@ def run(
     # entity/auto-memory have already spent whatever `ctx.run_deadline`
     # allowed — see `_run_audit_nightly_drain_phase`'s own docstring.
     _run_audit_nightly_drain_phase(ctx)
+
+    # Phase: the nightly page-recompile pass (issue athenaeum#2547) — the
+    # ONE phase in this late family that is ON by default, because until it
+    # landed nothing in the nightly run acted on an oversized page at all
+    # (operator ruling on athenaeum#2525). Its off switch is
+    # `librarian.page_recompile.mode: off`, and its default mode (`queue`)
+    # writes no page without an operator's answer. Runs here, after
+    # entity/auto-memory and immediately before finalize, and is not
+    # reached by a merge_only/cluster_only run — see
+    # `_run_page_recompile_phase`'s own docstring for the full ordering,
+    # deadline and no-reserved-share rationale.
+    _run_page_recompile_phase(ctx)
 
     # Phase: self-tuning loop mining + dimension-proposal drafting (issue
     # athenaeum#2020) — config-gated OFF by default

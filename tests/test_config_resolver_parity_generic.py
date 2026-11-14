@@ -238,6 +238,17 @@ _CLOSED_VOCABULARY_VALUE = frozenset(
         # this generically: the vocabulary is two specific words. Covered
         # directly by TestClosedVocabularyResolversDirect below.
         "resolve_serve_transport",
+        # Issue athenaeum#2547: only "off"/"shadow"/"queue"/"auto" are valid
+        # page-recompile modes, and only "none"/"structure-only" are valid
+        # auto-apply classes, so every generic sentinel -- of any type -- is
+        # out-of-vocabulary and correctly returns the default, reading
+        # identically to "never read the key". Same shape as
+        # ``resolve_serve_transport`` above and the same treatment: covered
+        # directly by TestClosedVocabularyResolversDirect below, on BOTH
+        # channels (each of these reads an env var too, so each is skipped
+        # by the env-var check as well as the yaml one).
+        "resolve_page_recompile_mode",
+        "resolve_page_recompile_auto_apply_class",
     }
 )
 
@@ -864,6 +875,72 @@ class TestClosedVocabularyResolversDirect:
         # every unrecognised value lands on the transport that binds nothing.
         monkeypatch.setenv("ATHENAEUM_SERVE_TRANSPORT", "htttp")
         assert config_mod.resolve_serve_transport(None) == "stdio"
+
+    def test_page_recompile_mode_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PAGE_RECOMPILE_MODE", raising=False)
+        resolved = config_mod.resolve_page_recompile_mode(
+            {"librarian": {"page_recompile": {"mode": "shadow"}}}
+        )
+        assert resolved == "shadow"
+
+    def test_page_recompile_mode_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "off")
+        assert config_mod.resolve_page_recompile_mode(None) == "off"
+
+    def test_page_recompile_mode_env_beats_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "off")
+        resolved = config_mod.resolve_page_recompile_mode(
+            {"librarian": {"page_recompile": {"mode": "queue"}}}
+        )
+        assert resolved == "off"
+
+    def test_page_recompile_mode_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing direction: a typo must not become a more
+        # permissive mode than the operator asked for. "queue" asks before
+        # it writes anything.
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "auto-apply-everything")
+        assert config_mod.resolve_page_recompile_mode(None) == "queue"
+
+    def test_page_recompile_auto_apply_class_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", raising=False)
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(
+            {"librarian": {"page_recompile": {"auto_apply_class": "structure-only"}}}
+        )
+        assert resolved == "structure-only"
+
+    def test_page_recompile_auto_apply_class_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "structure-only")
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(None)
+        assert resolved == "structure-only"
+
+    def test_page_recompile_auto_apply_class_env_beats_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "none")
+        resolved = config_mod.resolve_page_recompile_auto_apply_class(
+            {"librarian": {"page_recompile": {"auto_apply_class": "structure-only"}}}
+        )
+        assert resolved == "none"
+
+    def test_page_recompile_auto_apply_class_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing direction: a typo must not authorise an
+        # unattended page rewrite.
+        monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "anything")
+        assert config_mod.resolve_page_recompile_auto_apply_class(None) == "none"
 
     def test_sibling_widening_classes_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch

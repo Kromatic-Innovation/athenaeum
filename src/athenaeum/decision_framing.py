@@ -285,6 +285,40 @@ def _approve_reject_schema(*, description: str) -> dict[str, Any]:
     }
 
 
+def _page_recompile_schema() -> dict[str, Any]:
+    """The three-verdict answer schema for ``page-recompile`` (issue
+    athenaeum#2547 AC7).
+
+    A third token rather than a free-text note, because
+    ``approve-structure-only`` is a materially different instruction to the
+    applier from ``approve``: it authorises the in-page restructure and
+    withholds authorisation from anything that would touch ANOTHER page. In
+    this slice that distinction is load-bearing in one direction only --
+    cross-page moves have no applier yet (they are their own sibling issue
+    under athenaeum#2525), so the verdict is what makes "apply only the part
+    that exists" sayable instead of silently ignored.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["approve", "approve-structure-only", "reject"],
+                "description": (
+                    "approve = carry out the whole plan; "
+                    "approve-structure-only = carry out only the in-page "
+                    "restructure, authorising nothing that touches another "
+                    "page; reject = discard the plan and leave the page "
+                    "alone until it changes."
+                ),
+            },
+            "note": _NOTE_PROPERTY,
+        },
+        "required": ["verdict"],
+        "additionalProperties": False,
+    }
+
+
 def _merge_verdict_schema(*, description: str) -> dict[str, Any]:
     """The ``merge`` decision type's three-token answer schema.
 
@@ -661,6 +695,40 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "different source record. Whether to widen that page type's "
             "schema (and how) is deployment policy, not something the "
             "misfit count alone can decide."
+        ),
+    },
+    "page-recompile": {
+        # Issue athenaeum#2547 AC7. `reversible-with-work`, not
+        # `reversible`: approving this REWRITES a page and creates sub-pages,
+        # and undoing it is a real operation
+        # (`athenaeum.page_recompile_undo`) that restores each touched page
+        # from the recorded pre-image blob -- cheap when nothing has edited
+        # the page since, and a human-adjudicated diff when something has.
+        # That is precisely "reversible, but not for free", and it is the
+        # same class `merge` carries for the same reason.
+        "reversibility": REVERSIBILITY_REVERSIBLE_WITH_WORK,
+        # Whether a page SHOULD be cut into a parent plus sub-pages is an
+        # editorial judgement about the operator's own corpus, not something
+        # the planner's confidence settles -- the same reasoning as
+        # "proposed-rule"/"dimension-proposal". The page-size threshold says
+        # the page is too big; it does not say this is the right way to cut
+        # it.
+        "routing": ROUTING_AUTHORITY,
+        "schema": _page_recompile_schema(),
+        # The conservative default athenaeum#2547 AC7 names explicitly.
+        "default_action": "reject (leave the page as it is)",
+        "default_consequences": (
+            "The oversized page stays oversized: it keeps breaching the "
+            "page-size invariant, keeps appearing in the recompile backlog, "
+            "and keeps being re-planned on a later run once its content "
+            "changes. Nothing is rewritten and nothing is lost."
+        ),
+        "rationale": (
+            "A page grew past the page-size threshold and the recompile "
+            "planner drafted a way to cut it into a parent plus sub-pages. "
+            "Approving rewrites real pages, so the plan is shown as an "
+            "outline -- group names, unit counts, sizes and first-line "
+            "excerpts -- and waits for a human."
         ),
     },
 }
@@ -1134,6 +1202,14 @@ ANSWERABLE_AS: dict[str, str] = {
     # inbound applier's decision_type are the SAME string for this type
     # (no translation needed, matching merge/audit/proposed-rule/coordinate).
     "dimension-proposal": "dimension-proposal",
+    # Issue athenaeum#2547: self-mapped, like every type whose outbound
+    # queue tag and inbound applier type are the same string. Answerable
+    # from day one (unlike "dimension-proposal" pre-ratification): the
+    # applier -- `athenaeum.decision_answers._apply_page_recompile_answer`
+    # -- lands in the same slice that raises the item, because an item
+    # nobody can answer would just be a second, slower way of leaving an
+    # oversized page alone.
+    "page-recompile": "page-recompile",
 }
 
 

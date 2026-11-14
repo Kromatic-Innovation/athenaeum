@@ -144,6 +144,28 @@ bad day into an unbounded bill, and two overlapping runs writing the same store 
 correctness bug. Every run takes a single-writer lock and enforces a hard per-run API
 budget. → [modules/librarian](docs/modules/librarian.md)
 
+**Page recompile is on by default.** A page that keeps growing becomes a page nobody can
+read and the compiler cannot merge into cleanly. Every night the
+librarian looks for pages over `librarian.page_size_threshold_chars` (the one setting that
+decides which pages are picked up), cuts the biggest few into a parent page plus linked
+sub-pages, and asks you before it rewrites anything. **This costs model calls every night**:
+up to `librarian.page_recompile.max_pages_per_run` pages a run (3, or
+`opening_max_pages_per_run` — 10 — while any page is still over the hard ceiling), bounded
+further by `max_input_chars_per_run` and `max_api_calls_per_run`, and it stops raising new
+questions once `max_open_items` (5) are unanswered. Plans arrive in `athenaeum decisions` as
+`page-recompile` items you approve or reject; nothing is written without your answer, and an
+applied recompile is reversible with `athenaeum recompile undo`. **To turn it off, set the
+one setting `librarian.page_recompile.mode` to `off`:**
+
+```yaml
+librarian:
+  page_recompile:
+    mode: off     # off | shadow | queue (default) | auto
+```
+
+`shadow` keeps drafting plans and recording them without asking or writing, which is the
+cheapest way to see what the pass would do. → [guides/daily-operation](docs/guides/daily-operation.md)
+
 **Recall happens without being asked.** Memory an agent has to remember to look things up
 in is memory that goes unused. A sidecar injects the relevant slice of the wiki into
 context on every turn, no tool call required. → [guides/sidecar](docs/guides/sidecar.md)
