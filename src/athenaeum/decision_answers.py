@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1490,12 +1491,20 @@ def _apply_page_recompile_answer(
         wiki_root,
         plan_id=answer.decision_id,
         config=config,
+        client=_page_recompile_verify_client(item, config),
         # Issue athenaeum#2548: the operator's answer, which is what
         # authorises a CROSS-PAGE plan at all (AC8 -- the applier refuses
         # one with no approving verdict, in every mode) and which of the
         # two approving verdicts it is (AC9 -- `approve-structure-only`
         # applies only the structure-only part and leaves the other units
         # on the parent). A structure-only plan is unaffected by either.
+        #
+        # Orthogonal to `client` above, and both are needed on the same
+        # call: the client is what lets a MERGE group's text be re-verified,
+        # the verdict is what decides WHICH parts of the plan are applied at
+        # all. `approve-structure-only` over a plan that both merges and
+        # moves therefore still verifies the merge and still refuses the
+        # move.
         verdict=verdict,
     )
     if not outcome.ok:
@@ -1506,9 +1515,16 @@ def _apply_page_recompile_answer(
         # may well be answerable once whatever blocked it is fixed.
         if outcome.reason.startswith(_STALE_PLAN_REASON_PREFIX):
             return _close_as_stale(outcome.reason)
+        # Name the applier's own issue CODES, not just its generic reason:
+        # `compute_apply`'s refusal reason for a re-validation failure is
+        # the fixed string "plan rejected at apply time", and the codes
+        # (`merge-verify-unavailable`, `parent-too-thin`, ...) are the only
+        # part that tells an operator what to do about it.
+        codes = ", ".join(sorted({issue.code for issue in outcome.issues}))
+        detail = f"{outcome.reason} ({codes})" if codes else outcome.reason
         return _refuse(
             "apply_refused",
-            f"page-recompile plan was not applied: {outcome.reason}",
+            f"page-recompile plan was not applied: {detail}",
         )
 
     try:
@@ -1546,6 +1562,50 @@ def _apply_page_recompile_answer(
 #: wording at all -- so a reworded refusal degrades to "item stays open",
 #: never to "page silently rewritten".
 _STALE_PLAN_REASON_PREFIX = "stale:"
+
+
+def _page_recompile_verify_client(
+    item: Mapping[str, Any], config: dict[str, Any] | None
+) -> Any | None:
+    """The ``verify``-knob client :func:`write_apply` needs, or ``None``.
+
+    **The one place in this module that may construct an LLM client**, and
+    the deliberate exception to :func:`apply_decision_answers`'s "no model
+    call, ever" note. The reason is the applier's, not this module's:
+    :func:`athenaeum.page_recompile_apply.compute_apply` re-verifies each
+    ``merge`` group's model-written text against the units that feed it, and
+    with no client it records a ``merge-verify-unavailable`` issue and
+    refuses the whole plan. Without this, approving ANY plan carrying a
+    merge group -- the planner's default behaviour
+    (``librarian.page_recompile.merge_near_duplicates``) -- would always be
+    refused, which would make athenaeum#2547's "approve applies the plan
+    through the applier" true only for the subset of plans that happen to
+    merge nothing.
+
+    **Lazy, and keyed on the plan's own outline.** The queued item already
+    records which groups are merges, so a plan with none builds no client
+    and makes no call -- the module's invariant still holds for every answer
+    that does not need the check, which is most of them. Built the same way
+    ``athenaeum recompile apply`` builds it (``knob="verify"``), so the two
+    approval paths verify a merge identically rather than one being stricter
+    than the other. Returns ``None`` when nothing is configured (no
+    ``ANTHROPIC_API_KEY``), which the applier then reports as
+    ``merge-verify-unavailable`` -- the honest outcome, and the item stays
+    open rather than being closed with nothing done.
+    """
+    outline = item.get("outline")
+    if not isinstance(outline, Mapping):
+        return None
+    groups = outline.get("groups")
+    if not isinstance(groups, list):
+        return None
+    if not any(
+        isinstance(group, Mapping) and group.get("merged") for group in groups
+    ):
+        return None
+    from athenaeum.provider import build_llm_client
+
+    return build_llm_client(config, knob="verify")
 
 
 def _page_recompile_live_hash(wiki_root: Path, uid: str) -> tuple[str, str]:
@@ -2304,8 +2364,14 @@ def apply_decision_answers(
     deleted (it stays as its own audit trail), and no other file in the
     batch is affected (athenaeum#908 D5/AC5/AC6).
 
-    Takes **no LLM client and makes no model call, ever** — every dispatch
-    branch above is a mechanical file/ledger operation.
+    Takes **no LLM client** — every dispatch branch above is a mechanical
+    file/ledger operation, with ONE narrow exception since issue
+    athenaeum#2547: approving a ``page-recompile`` plan that carries a
+    ``merge`` group builds a ``verify``-knob client so the applier can
+    re-check that group's text against its feeder units, because the
+    applier refuses the plan outright without one. Every other answer, and
+    every ``page-recompile`` plan with no merge group, still makes no model
+    call at all. See :func:`_page_recompile_verify_client`.
 
     Args:
         wiki_root: Directory holding ``_pending_questions.md`` /
