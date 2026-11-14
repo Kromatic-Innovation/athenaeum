@@ -167,14 +167,20 @@ hold — the JSON response carries a `refused` marker and the sentinel stays
 on disk. `--force` overrides the check when you deliberately need to clear
 a hold that belongs to another party.
 
-## The nightly run keeps asking me to recompile a page
+## The nightly run just recompiled a page / keeps asking me to
 
 That is the page-recompile pass, and it is **on by default**. Every night,
 after the entity and auto-memory phases and before the run finalizes, the
-librarian looks for pages the page-size invariant says are too big, drafts a
-plan for cutting the biggest few into a parent page plus linked sub-pages,
-and raises each plan as a `page-recompile` item in `athenaeum decisions`.
-Nothing is rewritten until you answer one.
+librarian looks for pages the page-size invariant says are too big and drafts
+a plan for cutting the biggest few into a parent page plus linked sub-pages.
+A plan that only restructures the page itself — nothing moved to another
+page, nothing attached, no alias moved — is **applied right then, with no
+item raised at all**: that is the default (`mode: auto`,
+`auto_apply_class: structure-only`), relying on the undo path rather than
+your answer. A plan that touches another page, or whose page carries a
+`type:` you listed in `never_auto_types`, is still drafted and raised as a
+`page-recompile` item in `athenaeum decisions`, and nothing in that class is
+rewritten until you answer one.
 
 **Which pages get picked up** is decided by one existing setting:
 `librarian.page_size_threshold_chars`. A page whose body exceeds it — or one
@@ -185,7 +191,7 @@ updated, then the largest.
 **What it costs.** The pass makes real model calls every night: a cheap
 labelling pass over the page's sections, one planning call, and one call that
 checks each sentence of the proposed parent summary against the sections it
-cites. Five knobs bound it, all under `librarian.page_recompile`:
+cites. Six knobs bound it, all under `librarian.page_recompile`:
 
 | Key | Default | What it bounds |
 |---|---|---|
@@ -194,6 +200,7 @@ cites. Five knobs bound it, all under `librarian.page_recompile`:
 | `max_input_chars_per_run` | 200000 | Total page-body characters fed to a model per run |
 | `max_api_calls_per_run` | 40 | The pass's own model calls per run, counted against the run's `librarian.max_api_calls` |
 | `max_open_items` | 5 | Unanswered `page-recompile` items before the pass stops raising new ones — and stops spending |
+| `max_auto_applies_per_run` | 3 (same as `max_pages_per_run`) | Unattended writes per run in `mode: auto` -- a structure-only plan found after this is spent waits for a later run, applied or queued either |
 
 The larger opening budget is not a second knob you have to remember to change:
 it applies automatically while the corpus still holds an over-ceiling page and
@@ -209,7 +216,8 @@ The pass takes no reserved share of the run's wall-clock budget. It runs last,
 so it simply uses what the earlier phases left, is skipped entirely when the
 run deadline has already tripped, and re-checks the deadline between pages.
 
-**Three answers**, on each item:
+**Three answers**, on each QUEUED item (a plan that was auto-applied never
+reaches this list at all):
 
 - **approve** — carry out the plan. The parent keeps its identity and a cited
   summary, the sub-pages are created and linked both ways, and it all lands
@@ -229,27 +237,38 @@ the queue, and the pass drafts a fresh plan for the new text on a later run.
 ```yaml
 librarian:
   page_recompile:
-    mode: queue     # off | shadow | queue (default) | auto
+    mode: auto     # off | shadow | queue | auto (default)
 ```
 
 - `off` — **the off switch.** The phase returns before it even builds a model
   client, so it costs nothing at all.
 - `shadow` — plans are drafted and recorded, but no page is written and no
   item is raised. The cheapest way to see what the pass would propose.
-- `queue` — the default, described above.
-- `auto` — accepted, and currently behaves exactly like `queue`. The
-  unattended applier it is reserved for has not shipped;
-  `librarian.page_recompile.auto_apply_class` (`none` or `structure-only`) is
-  likewise read and reported today but acted on by that later work, not now.
+- `queue` — every plan is raised for your answer, structure-only or not.
+  Set this to go back to asking before every write.
+- `auto` — **the default.** A structure-only plan that passes every
+  validation is applied unattended, exactly as described above; everything
+  else (cross-page, a `never_auto_types` page, or
+  `auto_apply_class: none`) is still queued. Which class may apply
+  unattended is `librarian.page_recompile.auto_apply_class` (`none` or
+  `structure-only`, default `structure-only`), and
+  `librarian.page_recompile.never_auto_types` (default empty) names page
+  `type:` values whose plans always go to the queue regardless.
 
-Where the pass stands is in `athenaeum status`, under *Page recompile
-backlog*: how many candidates there are, how many plans are awaiting your
-approval, and how many nights it has been since the pass last made progress.
+See what the pass has actually done with `athenaeum recompile list
+--applied` (plan id, uid, when, and the counts of sub-pages created and
+sections merged) or in `athenaeum status`, under *Page recompile backlog*:
+how many candidates there are, how many plans are awaiting your approval,
+how many were applied in the last 7 days, and how many nights it has been
+since the pass last made progress.
 
 ## I want to undo a recompile I just applied
 
 `athenaeum recompile apply` rewrites one oversized page into a parent plus
-sub-pages, and prints the plan id it applied. `athenaeum recompile undo`
+sub-pages, and prints the plan id it applied; an unattended `mode: auto`
+write works the exact same way and leaves the exact same kind of record, so
+the steps below undo either one — find the plan id with `athenaeum recompile
+list --applied` if you don't already have it. `athenaeum recompile undo`
 takes that plan id back out again. Check what it would do first — the dry
 run writes nothing at all:
 

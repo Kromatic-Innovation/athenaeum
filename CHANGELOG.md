@@ -19,10 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between pages, and carves out no share of the run's wall-clock budget for
   itself. Four modes (`librarian.page_recompile.mode`): `off` builds no
   client and makes no call, `shadow` drafts and records plans but writes no
-  page and raises no item, `queue` (the default) raises each plan as a
-  decision item, and `auto` is accepted and behaves as `queue` until the
-  unattended applier ships. An unknown mode falls back to the default and
-  logs a warning. Which pages are picked up is still decided by the existing
+  page and raises no item, `queue` raises each plan as a decision item, and
+  `auto` applies a valid structure-only plan unattended and queues
+  everything else — see the behaviour-change entry below for what that
+  means by default. An unknown mode falls back to the default and logs a
+  warning. Which pages are picked up is still decided by the existing
   `librarian.page_size_threshold_chars`. Five new budget keys under
   `librarian.page_recompile`: `max_pages_per_run` (3),
   `opening_max_pages_per_run` (10, used while any candidate is over the hard
@@ -30,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counted against the run-level `librarian.max_api_calls`) and
   `max_open_items` (5 — no new item is raised, and nothing is spent, while
   that many are unanswered); plus `auto_apply_class` (`none` or
-  `structure-only`), read and reported today and acted on by the auto-apply
-  work. A new `page-recompile` decision type appears in `athenaeum
+  `structure-only`), which decides which plans mode `auto` may apply
+  unattended. A new `page-recompile` decision type appears in `athenaeum
   decisions` with verdicts `approve`, `approve-structure-only` and `reject`,
   framed reversible-with-work and routed to the owner with a conservative
   `reject` default; the item carries the plan outline (group names, unit
@@ -607,6 +608,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_apply_fold_into_existing`) are unaffected.
 
 ### Changed
+
+- **Page recompile now restructures oversized pages automatically by
+  default; this is a real behaviour change, not just a new feature.**
+  `librarian.page_recompile.mode` defaults to `auto` (was `queue`) and
+  `librarian.page_recompile.auto_apply_class` defaults to `structure-only`
+  (was `none`): on an unconfigured install, the nightly pass now writes a
+  structure-only plan — a parent summary plus sub-pages, nothing moved to
+  another page, attached, or alias-moved — the moment it passes every
+  validation, with no decision item raised at all. A plan that touches
+  another page, or whose page carries a `type:` listed in the new
+  `librarian.page_recompile.never_auto_types` (default empty), is still
+  queued for your answer exactly as before, and a new
+  `librarian.page_recompile.max_auto_applies_per_run` (default equal to
+  the steady per-run page budget, 3) separately bounds how many of those
+  unattended writes happen in one run. See what the pass has done with
+  `athenaeum recompile list --applied` or `athenaeum status` (now fills
+  "applied in the last 7 days"); undo one with `athenaeum recompile undo
+  <plan-id>` — the same reversible path an operator-approved apply already
+  used. Set `librarian.page_recompile.mode: queue` to go back to asking
+  before every write, or `mode: off` to turn the whole pass off
+  (athenaeum#2549).
 
 - The startup pricing preflight now also covers the `page_recompile` and
   `verify` model knobs, because it is derived from the registered knob set.

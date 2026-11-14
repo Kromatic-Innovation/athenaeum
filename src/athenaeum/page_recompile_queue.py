@@ -352,11 +352,19 @@ def plans_awaiting_approval(
     return len(list_pending_page_recompile_plans(wiki_root, ledger_path=ledger_path))
 
 
+#: :data:`athenaeum.page_recompile_apply.APPLY_KIND`'s own value
+#: (``"apply"``), duplicated as a literal rather than imported: that module
+#: imports THIS one (for the queue it reads/writes), so the reverse edge
+#: would be a cycle (``tests/test_import_graph_acyclic.py`` allows none).
+#: Shared by :data:`PROGRESS_KINDS` and :func:`applied_last_7_days` so both
+#: readers of the apply kind agree by construction, not by eye.
+_APPLY_KIND = "apply"
+
 #: The ledger kinds that count as the pass having made PROGRESS on a night:
 #: a plan drafted, a plan raised for approval, or a plan applied. Deliberately
 #: not ``label`` (a cached labelling call is not progress on a page) and not
 #: ``undo`` (that is an operator reversing progress).
-PROGRESS_KINDS: frozenset[str] = frozenset({PLAN_KIND, QUEUE_KIND, "apply"})
+PROGRESS_KINDS: frozenset[str] = frozenset({PLAN_KIND, QUEUE_KIND, _APPLY_KIND})
 
 
 def nights_since_progress(
@@ -395,6 +403,47 @@ def nights_since_progress(
         return None
     today = now or date.today()
     return max(0, (today - latest).days)
+
+
+def applied_last_7_days(
+    wiki_root: Path,
+    *,
+    now: date | None = None,
+    ledger_path: Path | None = None,
+) -> int | None:
+    """How many page-recompile plans were APPLIED in the last 7 days
+    (issue athenaeum#2549 AC6), or ``None`` when no ledger exists at all --
+    the same "nothing has ever happened" vs. "a real zero" contract
+    :func:`plans_awaiting_approval` gives for its own field.
+
+    Counts :data:`_APPLY_KIND` records -- the SAME kind an operator-approved
+    ``athenaeum recompile apply`` and an unattended auto-apply both write
+    (:func:`athenaeum.page_recompile_apply.write_apply` appends exactly one
+    per successful apply, regardless of who authorised it), so this figure
+    reports every page actually rewritten, not only the auto-applies this
+    slice adds. The window is the 7 calendar days ending today, inclusive of
+    both ends; a record whose timestamp cannot be parsed is ignored rather
+    than treated as today.
+    """
+    target = _ledger_target(wiki_root, ledger_path)
+    if not target.exists():
+        return None
+    today = now or date.today()
+    cutoff = today.toordinal() - 6
+    count = 0
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        if record.get("kind") != _APPLY_KIND:
+            continue
+        stamp = record.get("ts") or record.get("created_at")
+        if not isinstance(stamp, str) or not stamp:
+            continue
+        try:
+            seen = date.fromisoformat(stamp[:10])
+        except ValueError:
+            continue
+        if seen.toordinal() >= cutoff:
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +666,7 @@ __all__ = [
     "VERDICT_REJECT",
     "PageRecompileItemAlreadyResolved",
     "UnknownPageRecompileItem",
+    "applied_last_7_days",
     "build_plan_outline",
     "find_queued_plan",
     "list_pending_page_recompile_plans",

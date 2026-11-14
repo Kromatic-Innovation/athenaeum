@@ -903,11 +903,13 @@ class TestClosedVocabularyResolversDirect:
     def test_page_recompile_mode_drops_out_of_vocabulary_values(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The load-bearing direction: a typo must not become a more
-        # permissive mode than the operator asked for. "queue" asks before
-        # it writes anything.
+        # The load-bearing direction: a typo must fall back to the DEFAULT
+        # mode, not some other one chosen ad hoc. As of athenaeum#2549 the
+        # default is "auto" -- the operator ruling on athenaeum#2525 made
+        # unattended structure-only recompiles the safe-by-construction
+        # install default, not a special case a typo should dodge.
         monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_MODE", "auto-apply-everything")
-        assert config_mod.resolve_page_recompile_mode(None) == "queue"
+        assert config_mod.resolve_page_recompile_mode(None) == "auto"
 
     def test_page_recompile_auto_apply_class_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch
@@ -937,10 +939,14 @@ class TestClosedVocabularyResolversDirect:
     def test_page_recompile_auto_apply_class_drops_out_of_vocabulary_values(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The load-bearing direction: a typo must not authorise an
-        # unattended page rewrite.
+        # The load-bearing direction: a typo must fall back to the DEFAULT
+        # class, not some other one chosen ad hoc. As of athenaeum#2549 the
+        # default is "structure-only" -- the class the write-side approval
+        # interlock (athenaeum#2548) already lets apply with no verdict at
+        # all, so a typo here authorises nothing beyond what the applier
+        # itself already treats as safe.
         monkeypatch.setenv("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS", "anything")
-        assert config_mod.resolve_page_recompile_auto_apply_class(None) == "none"
+        assert config_mod.resolve_page_recompile_auto_apply_class(None) == "structure-only"
 
     def test_sibling_widening_classes_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch

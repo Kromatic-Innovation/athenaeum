@@ -106,9 +106,10 @@ python scripts/gen_cli_reference.py
 - [`athenaeum receipts attest-readout`](#athenaeum-receipts-attest-readout) (command) — Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
 - [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
-- [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, and the applier and its undo, which DO write pages.
+- [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, an applied-plan lister, and the applier and its undo, which DO write pages.
 - [`athenaeum recompile apply`](#athenaeum-recompile-apply) (command) — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum recompile candidates`](#athenaeum-recompile-candidates) (command) — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- [`athenaeum recompile list`](#athenaeum-recompile-list) (command) — List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
 - [`athenaeum recompile plan`](#athenaeum-recompile-plan) (command) — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - [`athenaeum recompile show`](#athenaeum-recompile-show) (command) — Print a recorded plan by its plan id.
 - [`athenaeum recompile undo`](#athenaeum-recompile-undo) (command) — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
@@ -1380,12 +1381,13 @@ Report unsealed ranges and seals that no longer verify, by partition and line ra
 
 ## `athenaeum recompile`
 
-Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, and the applier and its undo, which DO write pages.
+Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, a plan viewer, an applied-plan lister, and the applier and its undo, which DO write pages.
 
 Subcommands:
 
 - `athenaeum recompile apply` — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
 - `athenaeum recompile candidates` — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
+- `athenaeum recompile list` — List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
 - `athenaeum recompile plan` — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - `athenaeum recompile show` — Print a recorded plan by its plan id.
 - `athenaeum recompile undo` — Undo an applied recompile plan: restores every page the apply touched from its recorded pre-image and deletes the sub-pages it created. If any touched page changed since the apply, it writes nothing and raises a decision item carrying a diff per changed page; if another page already links to a created sub-page, it refuses and reports how many such links there are. Runs under the run lock; exits 75 while another process holds it.
@@ -1409,6 +1411,16 @@ Scan for active pages over librarian.page_size_threshold_chars or flagged needs_
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum recompile list`
+
+List recompile plans (AC6). --applied lists every applied plan -- manual or unattended alike -- with its plan id, uid, timestamp, and the counts of sub-pages created and sections merged. Read-only: no run lock, no writes, no LLM call.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--applied` | off (flag absent) | — | List applied plans (currently the only listing mode). |
+| `--json` | off (flag absent) | — | Print the rows as a JSON array. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum recompile plan`

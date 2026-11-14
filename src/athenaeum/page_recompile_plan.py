@@ -1111,6 +1111,18 @@ PLAN_KIND = "plan"
 #: module needs.
 UNDO_KIND = "undo"
 
+#: Record kind for a plan that passed the planner's own validation but was
+#: refused by ``write_apply``'s deeper, write-time one (issue athenaeum#2580,
+#: a Seer finding on athenaeum#2549's PR). WRITTEN by
+#: :mod:`athenaeum.page_recompile_nightly`'s auto-apply path only, and READ
+#: here by :func:`invalid_plan_skip_reason` -- same cross-module ownership
+#: shape as :data:`UNDO_KIND` above, and for the same reason: the writer
+#: would otherwise have to import this module's own ``PLAN_KIND``/ledger
+#: machinery, and this module would have to import the writer's module to
+#: learn the string, which is the cycle ``tests/test_import_graph_acyclic.py``
+#: forbids.
+APPLY_REFUSAL_KIND = "apply-refused"
+
 
 def default_page_recompile_ledger_path(wiki_root: Path) -> Path:
     """Default ledger path: ``<wiki_root>/_page_recompiles.jsonl``."""
@@ -1194,6 +1206,51 @@ def find_plan_record(
     return match
 
 
+def record_apply_refusal(
+    wiki_root: Path,
+    *,
+    plan_id: str,
+    uid: str,
+    content_hash: str,
+    reason: str,
+    ledger_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Append an :data:`APPLY_REFUSAL_KIND` record (issue athenaeum#2580, a
+    Seer finding on athenaeum#2549's PR): *plan_id* passed the planner's own
+    validation but was refused by ``write_apply``'s deeper, write-time one
+    (:func:`athenaeum.page_recompile_apply.compute_apply`).
+
+    Written by :mod:`athenaeum.page_recompile_nightly`'s auto-apply path
+    ONLY, for an unattended write specifically -- a refusal reached through
+    the ``queue``/``approve`` path already has its own outcome reporting
+    (the decision item simply stays open, answerable again) and needs no
+    suppression, because there IS an operator who will see it stay open.
+    The unattended path has no such operator, so without this record a
+    DETERMINISTIC refusal (the same structural reason every night, over
+    unchanged bytes -- the issue's own example: a ``move`` target that
+    already has a parent) would be re-planned, and the model re-called,
+    on every subsequent run, burning a ``max_auto_applies_per_run`` slot
+    each time for nothing. :func:`invalid_plan_skip_reason` reads this
+    record back, pinned to *content_hash*, exactly as it already reads an
+    invalid :data:`PLAN_KIND` record.
+    """
+    target = (
+        ledger_path if ledger_path is not None else default_page_recompile_ledger_path(wiki_root)
+    )
+    record: dict[str, Any] = {
+        "v": PAGE_RECOMPILE_LEDGER_VERSION,
+        "kind": APPLY_REFUSAL_KIND,
+        "id": plan_id,
+        "ts": now_iso(now),
+        "uid": uid,
+        "content_hash": content_hash,
+        "reason": reason,
+    }
+    _append_record(target, record)
+    return record
+
+
 def undone_page_skip_reason(
     wiki_root: Path,
     *,
@@ -1247,6 +1304,88 @@ def undone_page_skip_reason(
             else:
                 # A later undo whose pre-image is NOT what the page holds now
                 # clears an earlier skip rather than leaving it latched.
+                reason = ""
+    return reason
+
+
+def invalid_plan_skip_reason(
+    wiki_root: Path,
+    *,
+    uid: str,
+    body: str,
+    ledger_path: Path | None = None,
+) -> str:
+    """Why *uid* must NOT be planned again yet, or ``""`` (issue
+    athenaeum#2549 AC4, widened by issue athenaeum#2580 -- a Seer finding on
+    athenaeum#2549's own PR -- to cover a write-time refusal too).
+
+    A plan that failed validation or verification is a RESULT, not a
+    transient miss -- re-planning the SAME bytes every night would spend a
+    full labelling-plus-plan(-plus-verify) call to arrive at the identical
+    invalid plan, for a page no auto-apply or queue item will ever act on
+    until it changes. Two ledger kinds record that result, read together
+    here in ledger order so the LAST one wins regardless of which kind it
+    is:
+
+    * :data:`PLAN_KIND` -- :func:`plan_page` appends one for EVERY attempt,
+      valid or not (:func:`append_plan_record`), and this function reads
+      the LAST one for *uid* pinned to the page's current content hash,
+      honouring it only when that record's OWN plan was invalid (AC4's
+      original case: the planner's own validation or verification
+      rejected it).
+    * :data:`APPLY_REFUSAL_KIND` (athenaeum#2580) -- a plan that PASSED the
+      planner's checks but was refused by ``write_apply``'s deeper,
+      write-time one (:func:`~athenaeum.page_recompile_apply.compute_apply`,
+      issue athenaeum#2549's own text covers this: "fails validation OR
+      verification" -- a write-time refusal is a validation failure too,
+      just a later and deeper one). Appended by
+      :mod:`athenaeum.page_recompile_nightly`'s auto-apply path via
+      :func:`record_apply_refusal`. Without this, a DETERMINISTIC refusal
+      (the same structural reason every night) would be re-planned, and
+      the model re-called, on every subsequent run.
+
+    **A hash comparison, never a timestamp or a permanent block** -- the
+    same contract, for the same reason, as :func:`undone_page_skip_reason`
+    and :func:`~athenaeum.page_recompile_queue.rejected_page_skip_reason`:
+    the moment the page's content differs the hash stops matching and
+    planning resumes on its own. The LAST matching record wins, ACROSS BOTH
+    KINDS TOGETHER (ledger order, not kind-then-order) -- a later valid
+    :data:`PLAN_KIND` record over the SAME hash (a re-run with a different
+    model answer, say) clears an earlier refusal of either kind, and a
+    later refusal over a hash a valid plan once covered reinstates the
+    skip: the ledger is append-only, so the newest word on a given hash is
+    the one that governs.
+    """
+    current = page_content_hash(body)
+    reason = ""
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        kind = record.get("kind")
+        if kind == PLAN_KIND:
+            plan_dict = record.get("plan")
+            if not isinstance(plan_dict, dict) or plan_dict.get("uid") != uid:
+                continue
+            pinned = plan_dict.get("content_hash")
+            hash_matches = isinstance(pinned, str) and pinned and pinned == current
+            if hash_matches and plan_dict.get("valid") is False:
+                reason = (
+                    f"a page-recompile plan ({record.get('id') or 'unknown'}) for "
+                    "this page failed validation and it has not changed since; "
+                    "it is skipped until its content hash differs"
+                )
+            else:
+                reason = ""
+        elif kind == APPLY_REFUSAL_KIND:
+            if record.get("uid") != uid:
+                continue
+            pinned = record.get("content_hash")
+            hash_matches = isinstance(pinned, str) and pinned and pinned == current
+            if hash_matches:
+                reason = (
+                    f"a page-recompile plan ({record.get('id') or 'unknown'}) for "
+                    "this page was refused at apply time and it has not changed "
+                    "since; it is skipped until its content hash differs"
+                )
+            else:
                 reason = ""
     return reason
 
@@ -1856,6 +1995,7 @@ def plan_page(
 
 __all__ = [
     "ALIAS_MOVE_VERB",
+    "APPLY_REFUSAL_KIND",
     "ARG_DISPOSITIONS",
     "BARE_DISPOSITIONS",
     "LABEL_CHUNK_UNITS",
@@ -1894,6 +2034,7 @@ __all__ = [
     "classify_plan_scope",
     "default_page_recompile_ledger_path",
     "find_plan_record",
+    "invalid_plan_skip_reason",
     "label_units",
     "normalise_unit_text",
     "page_content_hash",
@@ -1902,6 +2043,7 @@ __all__ = [
     "propose_plan",
     "read_label_cache",
     "read_page_recompile_ledger",
+    "record_apply_refusal",
     "resolve_standalone_groups",
     "split_disposition",
     "split_summary_sentences",

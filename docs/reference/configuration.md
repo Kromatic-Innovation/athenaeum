@@ -2117,21 +2117,23 @@ Read ``athenaeum status``'s chars-based page-recompile backlog block
 - **YAML path:** `librarian.page_recompile.auto_apply_class`
 - **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS`
 - **CLI flag:** —
-- **Default:** `'none'`
+- **Default:** `'structure-only'`
 - **Precedence:** environment variable > `athenaeum.yaml` > code default
 
-Resolve ``librarian.page_recompile.auto_apply_class`` (AC3).
+Resolve ``librarian.page_recompile.auto_apply_class`` (AC3, AC1).
 
 One of `PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
-default precedence and same warn-and-fall-back-to-the-conservative-value
-contract as `resolve_page_recompile_mode`.
+default precedence and same warn-and-fall-back-to-the-default contract
+as `resolve_page_recompile_mode`.
 
-**Read, not yet acted on.** The AC states this plainly: the behaviour
-``structure-only`` enables ships in a later slice of the page-recompile
-design, not in the one that adds this key. The key exists now so that
-slice has a settled vocabulary and a settled default to switch on, and
-so an operator can set it ahead of time without the value being
-silently discarded.
+**Read AND acted on, as of **: in mode ``auto``
+(`resolve_page_recompile_mode`), `athenaeum.page_recompile_nightly`
+applies a plan unattended only when this resolves to ``structure-only``
+AND the plan's own `athenaeum.page_recompile_plan.RecompilePlan.scope`
+is `athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` -- this
+knob narrows which plans the phase MAY apply; it never widens what a
+plan's own scope already permits, and a ``cross-page`` plan is queued
+regardless of its value.
 
 ### `resolve_page_recompile_max_api_calls_per_run`
 
@@ -2146,6 +2148,27 @@ phase may make in one run.
 
 Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
+
+### `resolve_page_recompile_max_auto_applies_per_run`
+
+- **YAML path:** `librarian.page_recompile.max_auto_applies_per_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `3`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.max_auto_applies_per_run`` (AC5): how many plans the nightly phase may APPLY
+unattended in one run, in mode ``auto``.
+
+A structure-only plan that would otherwise auto-apply but finds this
+bound already spent in the current run is neither applied nor queued
+(`athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` plans under
+``auto_apply_class: structure-only`` are never queued, by the same
+reasoning `resolve_page_recompile_auto_apply_class` gives) -- it
+waits for a later run, when the bound resets.
+
+Validated by `_page_recompile_budget_value`; default
+`DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN`.
 
 ### `resolve_page_recompile_max_input_chars_per_run`
 
@@ -2236,10 +2259,11 @@ else (missing key/section, wrong type, negative) falls back to
 - **YAML path:** `librarian.page_recompile.mode`
 - **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_MODE`
 - **CLI flag:** —
-- **Default:** `'queue'`
+- **Default:** `'auto'`
 - **Precedence:** environment variable > `athenaeum.yaml` > code default
 
-Resolve ``librarian.page_recompile.mode`` (AC2).
+Resolve ``librarian.page_recompile.mode`` (AC2,
+ AC1).
 
 One of `PAGE_RECOMPILE_MODES`. Env
 ``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
@@ -2248,10 +2272,36 @@ One of `PAGE_RECOMPILE_MODES`. Env
 
 **An unknown value falls back to the default and logs a WARNING** (the
 AC asks for exactly this). Deliberately not a hard error: a typo in one
-optional key must not take the whole nightly run down, and the fallback
-is the conservative mode (ask before writing), not the permissive one.
-Case- and whitespace-insensitive, so ``Queue`` and `` queue `` resolve
-rather than warning.
+optional key must not take the whole nightly run down. The fallback is
+the DEFAULT mode, not necessarily the most conservative one -- as of
+ that is ``auto``, which the operator ruling on
+ made the safe-by-construction choice: it only ever writes
+a ``structure-only`` plan that passed every validation, and every write
+is reversible with ``athenaeum recompile undo``. Case- and
+whitespace-insensitive, so ``Queue`` and `` queue `` resolve rather than
+warning.
+
+### `resolve_page_recompile_never_auto_types`
+
+- **YAML path:** `librarian.page_recompile.never_auto_types`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.never_auto_types`` (AC8): page ``type:`` values (`athenaeum.models.resolve_page_type`)
+whose plans always go to the queue, never the unattended applier,
+regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
+
+Yaml only, like `resolve_model_rates` and
+`resolve_excluded_fields_config` -- a whole list of operator-named
+types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
+A non-list value, or a non-dict ``page_recompile`` section, resolves to
+`DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
+entry within an otherwise-valid list is dropped rather than rejecting
+the whole list, the same per-entry tolerance
+`resolve_excluded_fields_config` already applies to its own list
+values.
 
 ### `resolve_page_recompile_opening_max_pages_per_run`
 

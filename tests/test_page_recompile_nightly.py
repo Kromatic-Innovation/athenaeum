@@ -251,6 +251,15 @@ def _config(**page_recompile: Any) -> dict[str, Any]:
         # the real 200-char floor comfortably, but pin it anyway so a test
         # that is not about that floor can never be confused by it.
         "min_parent_chars": 1,
+        # Pinned explicitly (issue athenaeum#2549 flipped the resolver's OWN
+        # default to "auto"): this file's tests are about the queue/approval
+        # mechanics athenaeum#2547/#2548 built, not the auto-apply this
+        # slice adds, and most call `_run(wiki, ...)`/`_phase_ctx(...)` with
+        # no `mode` of their own. Auto-apply coverage lives in its own file
+        # (`tests/test_page_recompile_auto_apply.py`); a caller here that
+        # DOES want it still gets it via `_config(mode="auto", ...)`, which
+        # `section.update` below still honours.
+        "mode": "queue",
     }
     section.update(page_recompile)
     return {
@@ -513,10 +522,12 @@ class TestAC2Modes:
                 == mode
             )
 
-    def test_the_default_in_this_slice_is_queue(self) -> None:
-        assert DEFAULT_PAGE_RECOMPILE_MODE == "queue"
-        assert resolve_page_recompile_mode(None) == "queue"
-        assert resolve_page_recompile_mode({}) == "queue"
+    def test_the_default_is_now_auto(self) -> None:
+        """Flipped by issue athenaeum#2549 AC1: ``queue`` was the default
+        through athenaeum#2547/#2548; ``auto`` is the default from here."""
+        assert DEFAULT_PAGE_RECOMPILE_MODE == "auto"
+        assert resolve_page_recompile_mode(None) == "auto"
+        assert resolve_page_recompile_mode({}) == "auto"
 
     def test_an_unknown_value_falls_back_to_the_default_and_warns(
         self, caplog: pytest.LogCaptureFixture
@@ -570,24 +581,35 @@ class TestAC2Modes:
         assert summary.queued == 1
         assert len(list_pending_page_recompile_plans(wiki)) == 1
 
-    def test_auto_behaves_as_queue_in_this_slice(self, wiki: Path) -> None:
-        """Out of scope for this slice: "auto-apply without approval". So
-        ``auto`` is accepted (a config written for the auto-apply slice does
-        not fall back and warn) and raises an item exactly like ``queue``,
-        writing no page."""
+    def test_auto_applies_a_structure_only_plan_unattended(self, wiki: Path) -> None:
+        """Superseded by issue athenaeum#2549: through athenaeum#2548,
+        ``auto`` was out of scope for "auto-apply without approval" and
+        behaved exactly like ``queue``. As of athenaeum#2549 (the default
+        auto_apply_class is ``structure-only``) it applies a valid
+        structure-only plan with no decision item at all -- full coverage
+        of the new behaviour lives in
+        ``tests/test_page_recompile_auto_apply.py``; this is the local
+        update of what this class used to assert."""
         uids = _seed(wiki, count=1)
         before = (wiki / f"{uids[0]}.md").read_text(encoding="utf-8")
         summary = _run(wiki, config=_config(mode="auto"))
-        assert summary.queued == 1
-        assert (wiki / f"{uids[0]}.md").read_text(encoding="utf-8") == before
+        assert summary.applied == 1
+        assert summary.queued == 0
+        assert list_pending_page_recompile_plans(wiki) == []
+        assert (wiki / f"{uids[0]}.md").read_text(encoding="utf-8") != before
 
 
 # ---------------------------------------------------------------------------
-# AC3: auto_apply_class is READ in this slice.
+# AC3: auto_apply_class, its vocabulary and its default. Issue athenaeum#2549
+# gave it the behaviour (in mode "auto") that this class's name used to say
+# it didn't have yet -- see tests/test_page_recompile_auto_apply.py for that
+# coverage. What stays here is the resolver's own vocabulary/default/warn
+# contract, plus the fact that in mode "queue" the class has no effect at
+# all (it is only ever consulted in mode "auto").
 # ---------------------------------------------------------------------------
 
 
-class TestAC3AutoApplyClassIsReadOnly:
+class TestAC3AutoApplyClass:
     def test_the_two_classes_are_accepted(self) -> None:
         assert PAGE_RECOMPILE_AUTO_APPLY_CLASSES == ("none", "structure-only")
         for value in PAGE_RECOMPILE_AUTO_APPLY_CLASSES:
@@ -598,8 +620,11 @@ class TestAC3AutoApplyClassIsReadOnly:
                 == value
             )
 
-    def test_the_default_is_none(self) -> None:
-        assert resolve_page_recompile_auto_apply_class(None) == "none"
+    def test_the_default_is_now_structure_only(self) -> None:
+        """Flipped by issue athenaeum#2549 AC1: ``none`` was the default
+        through athenaeum#2547; ``structure-only`` is the default from
+        here."""
+        assert resolve_page_recompile_auto_apply_class(None) == "structure-only"
 
     def test_an_unknown_value_falls_back_and_warns(
         self, caplog: pytest.LogCaptureFixture
@@ -608,19 +633,22 @@ class TestAC3AutoApplyClassIsReadOnly:
             resolved = resolve_page_recompile_auto_apply_class(
                 {"librarian": {"page_recompile": {"auto_apply_class": "everything"}}}
             )
-        assert resolved == "none"
+        assert resolved == "structure-only"
         assert caplog.records
 
-    def test_it_is_read_and_reported_but_changes_nothing(self, wiki: Path) -> None:
-        """READ in this slice: the resolved value reaches the run summary,
-        and setting it to ``structure-only`` still writes no page and still
-        raises an item -- the behaviour it enables is the auto-apply slice's
-        job."""
+    def test_in_mode_queue_the_class_has_no_effect(self, wiki: Path) -> None:
+        """``auto_apply_class`` is only ever consulted in mode ``auto``
+        (:func:`athenaeum.page_recompile_nightly.run_nightly_page_recompile`);
+        in mode ``queue`` every plan is raised as a decision item regardless
+        of its value."""
         uids = _seed(wiki, count=1)
         before = (wiki / f"{uids[0]}.md").read_text(encoding="utf-8")
-        summary = _run(wiki, config=_config(auto_apply_class="structure-only"))
+        summary = _run(
+            wiki, config=_config(mode="queue", auto_apply_class="structure-only")
+        )
         assert summary.auto_apply_class == "structure-only"
         assert summary.queued == 1
+        assert summary.applied == 0
         assert (wiki / f"{uids[0]}.md").read_text(encoding="utf-8") == before
 
 
@@ -1532,7 +1560,7 @@ class TestAC11Documentation:
         ).read_text(encoding="utf-8")
         keys = {
             "mode": repr(DEFAULT_PAGE_RECOMPILE_MODE),
-            "auto_apply_class": "'none'",
+            "auto_apply_class": repr(resolve_page_recompile_auto_apply_class(None)),
             "max_pages_per_run": str(DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN),
             "opening_max_pages_per_run": str(
                 DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN

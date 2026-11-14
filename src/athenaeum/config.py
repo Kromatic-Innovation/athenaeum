@@ -4722,21 +4722,26 @@ def resolve_page_recompile_rejoin_fraction(config: dict[str, Any] | None = None)
 #:   item is raised.
 #: * ``queue`` -- plans are drafted AND raised as ``page-recompile`` decision
 #:   items for an operator to approve, partly approve or reject.
-#: * ``auto`` -- reserved for the auto-apply slice of athenaeum#2525. Accepted
-#:   as a valid value here (so a config written for that slice does not fall
-#:   back and log a warning), and behaves exactly like ``queue`` until it
-#:   lands: this slice has "auto-apply without approval" explicitly out of
-#:   scope, so the safe reading of ``auto`` is "queue, pending the applier".
+#: * ``auto`` -- THE DEFAULT (issue athenaeum#2549). A plan that is
+#:   ``structure-only`` (:data:`athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY`)
+#:   and passes every validation is applied in the nightly phase with no
+#:   decision item, when :data:`PAGE_RECOMPILE_AUTO_APPLY_CLASSES`'
+#:   ``auto_apply_class`` is ``structure-only`` (also the default). A
+#:   cross-page plan is never auto-applied -- it is always queued, in every
+#:   mode, the same interlock athenaeum#2548 built. With ``auto_apply_class:
+#:   none``, ``auto`` queues everything, same as ``queue``.
 PAGE_RECOMPILE_MODES: tuple[str, ...] = ("off", "shadow", "queue", "auto")
 
-#: Issue athenaeum#2547 AC2: ``queue`` -- the pass runs every night and asks
-#: before it rewrites a page. ``auto`` is the auto-apply slice's job to make
-#: the default, not this one's.
-DEFAULT_PAGE_RECOMPILE_MODE = "queue"
+#: Issue athenaeum#2549: ``auto`` -- the operator ruling on athenaeum#2525 made
+#: unattended structure-only recompiles the default install behaviour, relying
+#: on the undo path rather than an operator's answer. ``queue`` (ask before
+#: every write) and ``off`` are both still one yaml line away.
+DEFAULT_PAGE_RECOMPILE_MODE = "auto"
 
 
 def resolve_page_recompile_mode(config: dict[str, Any] | None = None) -> str:
-    """Resolve ``librarian.page_recompile.mode`` (issue athenaeum#2547 AC2).
+    """Resolve ``librarian.page_recompile.mode`` (issues athenaeum#2547 AC2,
+    athenaeum#2549 AC1).
 
     One of :data:`PAGE_RECOMPILE_MODES`. Env
     ``ATHENAEUM_PAGE_RECOMPILE_MODE`` > yaml
@@ -4745,10 +4750,14 @@ def resolve_page_recompile_mode(config: dict[str, Any] | None = None) -> str:
 
     **An unknown value falls back to the default and logs a WARNING** (the
     AC asks for exactly this). Deliberately not a hard error: a typo in one
-    optional key must not take the whole nightly run down, and the fallback
-    is the conservative mode (ask before writing), not the permissive one.
-    Case- and whitespace-insensitive, so ``Queue`` and `` queue `` resolve
-    rather than warning.
+    optional key must not take the whole nightly run down. The fallback is
+    the DEFAULT mode, not necessarily the most conservative one -- as of
+    athenaeum#2549 that is ``auto``, which the operator ruling on
+    athenaeum#2525 made the safe-by-construction choice: it only ever writes
+    a ``structure-only`` plan that passed every validation, and every write
+    is reversible with ``athenaeum recompile undo``. Case- and
+    whitespace-insensitive, so ``Queue`` and `` queue `` resolve rather than
+    warning.
     """
     raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_MODE")
     origin = "ATHENAEUM_PAGE_RECOMPILE_MODE"
@@ -4778,31 +4787,38 @@ def resolve_page_recompile_mode(config: dict[str, Any] | None = None) -> str:
 
 #: The plan scopes the nightly phase may apply WITHOUT an operator answer
 #: (issue athenaeum#2547 AC3). ``none`` applies nothing unattended;
-#: ``structure-only`` is the class the auto-apply slice of athenaeum#2525
-#: enables. READ ONLY in this slice -- the value is resolved and reported,
-#: and nothing acts on it until that slice lands.
+#: ``structure-only`` (issue athenaeum#2549, the default) authorises the
+#: phase to apply a validated ``structure-only`` plan itself, with no
+#: decision item. A ``cross-page`` plan is never a member of either class's
+#: authorisation -- see :mod:`athenaeum.page_recompile_apply`'s approval
+#: interlock, which this knob never bypasses.
 PAGE_RECOMPILE_AUTO_APPLY_CLASSES: tuple[str, ...] = ("none", "structure-only")
 
-#: Issue athenaeum#2547 AC3: ``none``. Nothing applies unattended in this
-#: slice ("auto-apply without approval" is out of scope), so the default has
-#: to be the class that authorises nothing.
-DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS = "none"
+#: Issue athenaeum#2549: ``structure-only``. The operator ruling on
+#: athenaeum#2525 draws the unattended-write line at "touches no other
+#: page" -- exactly the scope :func:`athenaeum.page_recompile_plan.classify_plan_scope`
+#: already computes, and exactly the scope the applier already lets apply
+#: with no verdict at all (see ``write_apply``'s own docstring). ``none``
+#: still switches every plan back to the queue.
+DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS = "structure-only"
 
 
 def resolve_page_recompile_auto_apply_class(config: dict[str, Any] | None = None) -> str:
-    """Resolve ``librarian.page_recompile.auto_apply_class`` (issue
-    athenaeum#2547 AC3).
+    """Resolve ``librarian.page_recompile.auto_apply_class`` (issues
+    athenaeum#2547 AC3, athenaeum#2549 AC1).
 
     One of :data:`PAGE_RECOMPILE_AUTO_APPLY_CLASSES`. Same env > yaml >
-    default precedence and same warn-and-fall-back-to-the-conservative-value
-    contract as :func:`resolve_page_recompile_mode`.
+    default precedence and same warn-and-fall-back-to-the-default contract
+    as :func:`resolve_page_recompile_mode`.
 
-    **Read, not yet acted on.** The AC states this plainly: the behaviour
-    ``structure-only`` enables ships in a later slice of the page-recompile
-    design, not in the one that adds this key. The key exists now so that
-    slice has a settled vocabulary and a settled default to switch on, and
-    so an operator can set it ahead of time without the value being
-    silently discarded.
+    **Read AND acted on, as of athenaeum#2549**: in mode ``auto``
+    (:func:`resolve_page_recompile_mode`), :mod:`athenaeum.page_recompile_nightly`
+    applies a plan unattended only when this resolves to ``structure-only``
+    AND the plan's own :attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope`
+    is :data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` -- this
+    knob narrows which plans the phase MAY apply; it never widens what a
+    plan's own scope already permits, and a ``cross-page`` plan is queued
+    regardless of its value.
     """
     raw: Any = os.environ.get("ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS")
     origin = "ATHENAEUM_PAGE_RECOMPILE_AUTO_APPLY_CLASS"
@@ -5017,6 +5033,87 @@ def resolve_page_recompile_max_open_items(config: dict[str, Any] | None = None) 
                     section.get("max_open_items"), DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
                 )
     return DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
+
+
+#: Issue athenaeum#2549 AC5: how many plans the ``auto`` phase may APPLY
+#: unattended in one run -- separate from :data:`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`
+#: (how many it may PLAN), because an operator who wants the pass to keep
+#: drafting at the usual rate while applying more cautiously needs the two
+#: to move independently. Defaults to the SAME figure as the steady per-run
+#: page budget rather than a second hand-picked number: the operator ruling
+#: on athenaeum#2525 names no distinct figure for this knob, and "as many
+#: unattended writes as pages planned, by default" is the reading that adds
+#: no new behaviour of its own on an unconfigured install.
+DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN = DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+
+
+def resolve_page_recompile_max_auto_applies_per_run(
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve ``librarian.page_recompile.max_auto_applies_per_run`` (issue
+    athenaeum#2549 AC5): how many plans the nightly phase may APPLY
+    unattended in one run, in mode ``auto``.
+
+    A structure-only plan that would otherwise auto-apply but finds this
+    bound already spent in the current run is neither applied nor queued
+    (:data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` plans under
+    ``auto_apply_class: structure-only`` are never queued, by the same
+    reasoning :func:`resolve_page_recompile_auto_apply_class` gives) -- it
+    waits for a later run, when the bound resets.
+
+    Validated by :func:`_page_recompile_budget_value`; default
+    :data:`DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN`.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_auto_applies_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_AUTO_APPLIES_PER_RUN
+
+
+#: Issue athenaeum#2549 AC8: no page ``type:`` is exempted from unattended
+#: apply by default -- an operator opts a type OUT explicitly, rather than
+#: having to opt every type IN.
+DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES: tuple[str, ...] = ()
+
+
+def resolve_page_recompile_never_auto_types(
+    config: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Resolve ``librarian.page_recompile.never_auto_types`` (issue
+    athenaeum#2549 AC8): page ``type:`` values (:func:`athenaeum.models.resolve_page_type`)
+    whose plans always go to the queue, never the unattended applier,
+    regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
+
+    Yaml only, like :func:`resolve_model_rates` and
+    :func:`resolve_excluded_fields_config` -- a whole list of operator-named
+    types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
+    A non-list value, or a non-dict ``page_recompile`` section, resolves to
+    :data:`DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
+    entry within an otherwise-valid list is dropped rather than rejecting
+    the whole list, the same per-entry tolerance
+    :func:`resolve_excluded_fields_config` already applies to its own list
+    values.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    librarian_cfg = config.get("librarian")
+    if not isinstance(librarian_cfg, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    section = librarian_cfg.get("page_recompile")
+    if not isinstance(section, dict):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    raw = section.get("never_auto_types")
+    if not isinstance(raw, list):
+        return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
+    return tuple(
+        entry.strip() for entry in raw if isinstance(entry, str) and entry.strip()
+    )
 
 
 def resolve_model_rates(
