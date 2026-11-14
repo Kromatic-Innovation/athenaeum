@@ -2144,7 +2144,7 @@ silently discarded.
 Resolve ``librarian.page_recompile.max_api_calls_per_run`` (AC4): how many model calls the nightly page-recompile
 phase may make in one run.
 
-Validated by `_page_recompile_positive_int`; default
+Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
 
 ### `resolve_page_recompile_max_input_chars_per_run`
@@ -2163,7 +2163,7 @@ body size, so it is a real pre-spend gate rather than an after-the-fact
 report. A page that does not fit the remaining allowance is counted
 ``skipped_budget`` and costs nothing.
 
-Validated by `_page_recompile_positive_int`; default
+Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
 
 ### `resolve_page_recompile_max_open_items`
@@ -2176,7 +2176,7 @@ Validated by `_page_recompile_positive_int`; default
 
 Resolve ``librarian.page_recompile.max_open_items`` (AC4).
 
-Validated by `_page_recompile_positive_int`; default
+Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
 
 ### `resolve_page_recompile_max_pages_per_run`
@@ -2190,7 +2190,7 @@ Validated by `_page_recompile_positive_int`; default
 Resolve ``librarian.page_recompile.max_pages_per_run`` (AC4): how many pages the nightly phase may PLAN in one
 run once no candidate is over the hard ceiling.
 
-Validated by `_page_recompile_positive_int`; default
+Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
 
 ### `resolve_page_recompile_merge_near_duplicates`
@@ -2264,7 +2264,7 @@ rather than warning.
 Resolve ``librarian.page_recompile.opening_max_pages_per_run`` (AC4): the per-run page budget used while ANY candidate is
 over the hard ceiling.
 
-Validated by `_page_recompile_positive_int`; default
+Validated by `_page_recompile_budget_value`; default
 `DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
 over-ceiling candidate remains, the steady
 `resolve_page_recompile_max_pages_per_run` applies instead -- the

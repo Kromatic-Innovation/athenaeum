@@ -4831,37 +4831,35 @@ def resolve_page_recompile_auto_apply_class(config: dict[str, Any] | None = None
     return DEFAULT_PAGE_RECOMPILE_AUTO_APPLY_CLASS
 
 
-def _page_recompile_positive_int(
-    config: dict[str, Any] | None, key: str, default: int
-) -> int:
-    """``librarian.page_recompile.<key>`` as a positive int, else *default*.
+def _page_recompile_budget_value(raw: Any, default: int) -> int:
+    """*raw* as a positive int, else *default*.
 
     The ONE validation contract every athenaeum#2547 budget key shares, and
-    deliberately the SAME one
-    :func:`resolve_page_size_threshold_chars` uses (that AC's own wording:
-    "each validated like ``librarian.page_size_threshold_chars``"): must be
-    an ``int`` that is not a ``bool`` -- ``max_pages_per_run: yes`` in yaml
-    must not silently become a budget of 1 -- and must be ``>= 1``.
-    Anything else (missing key, missing section, wrong type, zero, negative)
-    falls back to *default*.
+    deliberately the SAME one :func:`resolve_page_size_threshold_chars`
+    uses (that AC's own wording: "each validated like
+    ``librarian.page_size_threshold_chars``"): must be an ``int`` that is
+    not a ``bool`` -- ``max_pages_per_run: yes`` in yaml must not silently
+    become a budget of 1 -- and must be ``>= 1``. Anything else (``None``
+    for a missing key, wrong type, zero, negative) falls back to *default*.
 
-    Factored into one helper rather than five copies because all five keys
-    are the same shape; each public resolver below still cites its own key
-    in its own docstring, which is what
-    ``scripts/gen_config_reference.py`` reads.
+    Takes the already-looked-up VALUE, not the config dict and a key name.
+    Each of the five resolvers below therefore spells its own
+    ``librarian`` / ``page_recompile`` / leaf lookup out in its own body,
+    the way the three ``page_recompile`` resolvers directly above already
+    do, and only the validation is shared. That is not duplication for its
+    own sake: ``tests/test_config_resolver_parity_generic.py`` reconstructs
+    a resolver's yaml nesting from the string literals in its OWN body
+    (following a private helper only one level, and then only as a flat
+    literal list whose order it has to guess), so a resolver that hides its
+    section literals behind a delegating helper reads to that gate as a
+    resolver whose yaml key is dead.
 
     Note that ``0`` is NOT how the pass is disabled -- it falls back to the
     default like any other invalid value. ``mode: off``
     (:func:`resolve_page_recompile_mode`) is the off switch.
     """
-    if isinstance(config, dict):
-        librarian_cfg = config.get("librarian")
-        if isinstance(librarian_cfg, dict):
-            section = librarian_cfg.get("page_recompile")
-            if isinstance(section, dict):
-                raw = section.get(key)
-                if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
-                    return raw
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw
     return default
 
 
@@ -4876,12 +4874,18 @@ def resolve_page_recompile_max_pages_per_run(config: dict[str, Any] | None = Non
     athenaeum#2547 AC4): how many pages the nightly phase may PLAN in one
     run once no candidate is over the hard ceiling.
 
-    Validated by :func:`_page_recompile_positive_int`; default
+    Validated by :func:`_page_recompile_budget_value`; default
     :data:`DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN`.
     """
-    return _page_recompile_positive_int(
-        config, "max_pages_per_run", DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
-    )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_pages_per_run"), DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_PAGES_PER_RUN
 
 
 #: Issue athenaeum#2547 AC4: the OPENING per-run page budget -- 10, larger
@@ -4900,17 +4904,22 @@ def resolve_page_recompile_opening_max_pages_per_run(
     athenaeum#2547 AC4): the per-run page budget used while ANY candidate is
     over the hard ceiling.
 
-    Validated by :func:`_page_recompile_positive_int`; default
+    Validated by :func:`_page_recompile_budget_value`; default
     :data:`DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN`. Once no
     over-ceiling candidate remains, the steady
     :func:`resolve_page_recompile_max_pages_per_run` applies instead -- the
     switch is a property of the corpus, not a second knob.
     """
-    return _page_recompile_positive_int(
-        config,
-        "opening_max_pages_per_run",
-        DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN,
-    )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("opening_max_pages_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_OPENING_MAX_PAGES_PER_RUN
 
 
 #: Issue athenaeum#2547 AC4: the per-run ceiling on how many characters of
@@ -4936,14 +4945,19 @@ def resolve_page_recompile_max_input_chars_per_run(
     report. A page that does not fit the remaining allowance is counted
     ``skipped_budget`` and costs nothing.
 
-    Validated by :func:`_page_recompile_positive_int`; default
+    Validated by :func:`_page_recompile_budget_value`; default
     :data:`DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN`.
     """
-    return _page_recompile_positive_int(
-        config,
-        "max_input_chars_per_run",
-        DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN,
-    )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_input_chars_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_INPUT_CHARS_PER_RUN
 
 
 #: Issue athenaeum#2547 AC4: the per-run ceiling on the phase's OWN model
@@ -4964,14 +4978,19 @@ def resolve_page_recompile_max_api_calls_per_run(
     athenaeum#2547 AC4): how many model calls the nightly page-recompile
     phase may make in one run.
 
-    Validated by :func:`_page_recompile_positive_int`; default
+    Validated by :func:`_page_recompile_budget_value`; default
     :data:`DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN`.
     """
-    return _page_recompile_positive_int(
-        config,
-        "max_api_calls_per_run",
-        DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN,
-    )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_api_calls_per_run"),
+                    DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN,
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_API_CALLS_PER_RUN
 
 
 #: Issue athenaeum#2547 AC4: how many UNANSWERED ``page-recompile`` decision
@@ -4986,12 +5005,18 @@ def resolve_page_recompile_max_open_items(config: dict[str, Any] | None = None) 
     """Resolve ``librarian.page_recompile.max_open_items`` (issue
     athenaeum#2547 AC4).
 
-    Validated by :func:`_page_recompile_positive_int`; default
+    Validated by :func:`_page_recompile_budget_value`; default
     :data:`DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS`.
     """
-    return _page_recompile_positive_int(
-        config, "max_open_items", DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
-    )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            section = librarian_cfg.get("page_recompile")
+            if isinstance(section, dict):
+                return _page_recompile_budget_value(
+                    section.get("max_open_items"), DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
+                )
+    return DEFAULT_PAGE_RECOMPILE_MAX_OPEN_ITEMS
 
 
 def resolve_model_rates(
