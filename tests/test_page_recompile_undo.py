@@ -914,6 +914,65 @@ class TestAC7DryRunReportsAndWritesNothing:
         assert payload["snapshot_sha"] is None
         assert _page_bytes(wiki) == after_apply
 
+    def test_the_queued_cli_report_names_each_blocking_page(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC7 asks the report to say WHY, so the human-readable rendering of
+        the queued outcome is part of the deliverable, not decoration."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        parent = wiki / "page0001.md"
+        meta, body = parse_frontmatter(parent.read_text(encoding="utf-8"))
+        parent.write_text(render_frontmatter(meta) + "\n" + body + "\nEdited.\n", encoding="utf-8")
+
+        rc = cli_main(
+            ["recompile", "undo", plan_id, "--dry-run", "--path", str(wiki.parent)]
+        )
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert f"outcome:     {UNDO_QUEUED} ({REASON_PAGE_CHANGED})" in out
+        assert "page0001: " + REASON_PAGE_CHANGED in out
+        assert "would raise one decision item" in out
+
+    def test_the_refused_cli_report_prints_the_link_count(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        _write_page(wiki, uid="later001", name="Later", body=f"[[{created_uid}]]\n")
+
+        rc = cli_main(["recompile", "undo", plan_id, "--path", str(wiki.parent)])
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert f"outcome:     {UNDO_REFUSED} (created_sub_page_has_inbound_links)" in out
+        assert "inbound links to created sub-pages: 1" in out
+        assert f"wikilink -> {created_uid}" in out
+
+    def test_the_queued_cli_json_exits_one_and_carries_the_diff(
+        self, wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        plan_id, _before, _snapshot = _applied(wiki)
+        parent = wiki / "page0001.md"
+        meta, body = parse_frontmatter(parent.read_text(encoding="utf-8"))
+        parent.write_text(render_frontmatter(meta) + "\n" + body + "\nEdited.\n", encoding="utf-8")
+
+        rc = cli_main(["recompile", "undo", plan_id, "--json", "--path", str(wiki.parent)])
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 1
+        assert payload["ok"] is False
+        assert payload["action"] == UNDO_QUEUED
+        assert payload["blocked"][0]["uid"] == "page0001"
+        assert "+Edited." in payload["blocked"][0]["diff"]
+        assert payload["queued_item_id"]
+
+    def test_the_cli_reports_a_missing_wiki_root(self, tmp_path: Path) -> None:
+        rc = cli_main(["recompile", "undo", "anything", "--path", str(tmp_path / "nope")])
+        assert rc == 1
+
     def test_a_dry_run_of_an_unknown_plan_id_exits_one(self, wiki: Path) -> None:
         wiki.mkdir(parents=True)
         rc = cli_main(

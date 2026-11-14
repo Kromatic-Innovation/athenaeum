@@ -767,7 +767,10 @@ def write_undo(
             plan_id=computed.plan_id,
             uid=computed.uid,
             blocked=computed.blocked,
-            queued_item_id=str(item.get("id") or ""),
+            # `raise_pending_question` names its id `decision_id` on the
+            # success path; `id` is accepted as a fallback so a future rename
+            # degrades to an empty string rather than a KeyError.
+            queued_item_id=str(item.get("decision_id") or item.get("id") or ""),
         )
 
     # Parents first, created pages last -- see the module docstring.
