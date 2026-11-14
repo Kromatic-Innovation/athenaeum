@@ -290,8 +290,8 @@ from before the upgrade, it is skipped with a logged warning rather than
 applied — the same fail-soft handling any other unrecognized decision type
 gets.
 
-This is unrelated to `split-oversize` and the deterministic heading-based
-page decomposition it drives, which are unaffected.
+This is unrelated to deterministic heading-based page decomposition, which
+is unaffected.
 
 ## I want to know about seven one-shot repair commands that are gone in 0.24.0
 
@@ -339,6 +339,29 @@ longer carry a handful of legacy keys that duplicated other fields:
 Nothing else changed: `ok`, `error_code`, `message`, `deferred`,
 `answer_file`, `decision_id`, `raw_block`, and `resolved_block` (where it
 already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
+
+## I want to know what replaced `split-oversize`
+
+`athenaeum split-oversize` is removed, along with the module behind it.
+Running it now prints which command replaces it and exits non-zero,
+rather than the generic "unrecognized command" error an older removal
+gets — there is no deprecation period, but the pointer is immediate: use
+`athenaeum recompile` (`candidates`, `plan`, `apply`) instead. It covers
+the same job (restructuring a page that has grown past the size
+invariant) through the maintained pipeline — a candidate scan, a
+shadow-only planner, and an applier that keeps the original page as a real
+parent with its own summary rather than degrading it into a bare link
+list, which the retired command's output sometimes did.
+
+`librarian.oversize_page_action: split` still loads — it is a value, not
+a key, so it is not covered by the removed-key warning above — but it now
+resolves to `review` instead of actually splitting anything, with one
+warning per run pointing at `librarian.page_recompile.mode`. Set that
+instead if you want pages restructured automatically: `mode: auto` with
+`auto_apply_class: structure-only` applies a validated plan unattended
+during the nightly run, the nearest equivalent to what the old `split`
+action and `--auto` flag did together. `librarian.oversize_page_action:
+log_demote` is unaffected and keeps its current meaning.
 
 ## See also
 

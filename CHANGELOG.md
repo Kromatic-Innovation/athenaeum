@@ -596,8 +596,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposals.heterogeneity_threshold` yaml key is now ignored with a
   warning, same as every other removed key; a pre-upgrade answer file
   naming the removed type is skipped the same way any other unrecognized
-  decision type is. `split-oversize` and page decomposition are
-  unaffected.
+  decision type is. Page decomposition is unaffected.
 
 - Removed the never-exposed `demote_oversize_pages` / `DemoteResult`
   operator-entrypoint helper from `tiers.py` and the unused
@@ -606,6 +605,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlapped with (`check_page_size_gate`'s reactive `log_demote`
   disposition, and the write-side alias recording in
   `_apply_fold_into_existing`) are unaffected.
+
+- Removed the reactive page-split disposition, the last oversized-page
+  path still standing once the `librarian.page_recompile` pipeline took
+  over the job (athenaeum#2550, slice S9 of the page-recompile design,
+  athenaeum#2525). `athenaeum split-oversize`, its `oversize_split.py`
+  module, and `dedup-oversize-escalations` (already gone since
+  athenaeum#2466) are all removed; invoking `split-oversize` now prints
+  which command replaces it (`athenaeum recompile`) and exits non-zero,
+  rather than the generic unrecognized-command error an older removal
+  gets. `check_page_size_gate`'s `split` branch, and the
+  `_perform_oversize_page_split`/`_build_split_child_pages` helpers it
+  alone called, are deleted from `tiers.py`; `librarian.oversize_page_action:
+  split` now reads as `review` (one warning per run, naming
+  `librarian.page_recompile.mode`, logged by `load_config`). The
+  `oversize_suppressed`/`oversize_split` run-summary counters are gone
+  from `models.py`/`batch.py`/`librarian.py` — `oversize_page`/
+  `oversize_split` remain valid, parseable archived-escalation types
+  (`OVERSIZE_ESCALATION_CONFLICT_TYPES` is unchanged), simply no longer
+  produced or counted. Applying a recompile plan now archives any open
+  oversize-family notice for that page (reason naming the plan id),
+  unless the notice still carries a parked observation, which stays
+  open. `log_demote` and `page_decompose.py`/the `page-split` decision
+  type are unaffected. See `docs/guides/upgrading.md` for the full
+  migration note.
 
 ### Changed
 
