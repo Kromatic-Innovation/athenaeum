@@ -221,13 +221,25 @@ def test_launcher_derives_the_same_pin_from_the_manifest() -> None:
 
 
 def _minimal_path_dir(tmp_path: Path, *, with_uv: bool) -> Path:
-    """A from-scratch PATH directory containing only ``env`` and ``bash``
-    (plus, optionally, an inert ``uv`` stub) -- never the real ``PATH``, so
-    this is true regardless of whether the box running CI happens to have
-    uv installed."""
+    """A from-scratch PATH directory -- never the real ``PATH``, so this is
+    true regardless of whether the box running CI happens to have uv
+    installed.
+
+    ``with_uv=False`` (AC3) builds a PATH containing ONLY ``env`` and
+    ``bash`` -- the uv-absent branch returns before touching the
+    filesystem, so nothing else is needed, and the absence of anything
+    else is itself part of what proves that branch never shells out.
+    ``with_uv=True`` additionally carries the small set of external
+    commands the lock-liveness/reclaim paths use (``mkdir``, ``rm``,
+    ``date``, ``cat``, ``kill``, ``nohup``) plus an inert ``uv`` stub --
+    every caller of ``with_uv=True`` exercises at least one of those
+    paths (issue athenaeum#2368 follow-up, PR athenaeum#2575 review)."""
     bin_dir = tmp_path / "minimal-bin"
     bin_dir.mkdir()
-    for tool in ("env", "bash"):
+    tools = ("env", "bash")
+    if with_uv:
+        tools += ("mkdir", "rm", "date", "cat", "kill", "nohup")
+    for tool in tools:
         real = shutil.which(tool)
         assert real, f"{tool} is not on the real PATH -- cannot build the test fixture"
         (bin_dir / tool).symlink_to(real)
@@ -280,13 +292,76 @@ def test_launcher_passthrough_mode_also_handles_uv_absent(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
+def _seed_live_lock(lock_dir: Path) -> subprocess.Popen[bytes]:
+    """Create ``lock_dir`` with a genuinely-running PID and a fresh
+    ``started-at`` timestamp -- what a real in-progress ``--prepare``
+    worker's lock looks like. The caller must terminate the returned
+    process."""
+    lock_dir.mkdir(parents=True)
+    proc = subprocess.Popen(["sleep", "30"])
+    (lock_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
+    (lock_dir / "started-at").write_text(str(int(time.time())), encoding="utf-8")
+    return proc
+
+
+def _seed_dead_lock(lock_dir: Path, *, started_at: int | None = None) -> None:
+    """Create ``lock_dir`` with a PID that is GENUINELY no longer running
+    (a short-lived subprocess, waited-on so it is fully reaped) plus a
+    ``started-at`` timestamp -- simulating a ``--prepare`` worker killed
+    before reaching its own ``rm -rf "$LOCK_DIR"`` cleanup (issue
+    athenaeum#2368 follow-up, PR athenaeum#2575 review)."""
+    lock_dir.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (lock_dir / "pid").write_text(str(dead.pid), encoding="utf-8")
+    recorded_start = int(time.time()) if started_at is None else started_at
+    (lock_dir / "started-at").write_text(str(recorded_start), encoding="utf-8")
+
+
 def test_ensure_ready_returns_fast_and_reports_preparing_while_a_build_is_pending(
     tmp_path: Path,
 ) -> None:
     bin_dir = _minimal_path_dir(tmp_path, with_uv=True)
     cache_dir = tmp_path / "cache"
     lock_dir = cache_dir / "claude-code-plugin" / "prepare.lock"
-    lock_dir.mkdir(parents=True)
+    live_proc = _seed_live_lock(lock_dir)
+    try:
+        started = time.monotonic()
+        result = _run_launcher(
+            "--ensure-ready", tmp_path=tmp_path, path_dir=bin_dir, cache_dir=cache_dir
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0
+        assert elapsed < 2.0, (
+            f"a pending first-run build must not block the hook: took {elapsed:.2f}s"
+        )
+        combined = result.stdout + result.stderr
+        assert "preparing" in combined.lower(), (
+            f"no 'still preparing' message while a build is pending: {combined!r}"
+        )
+        # The lock this test seeded must be left alone -- this invocation
+        # did not win the race to prepare a LIVE worker, so it must not
+        # touch the lock at all.
+        assert lock_dir.is_dir(), "the pending-build lock was removed by a non-owning invocation"
+    finally:
+        live_proc.terminate()
+        live_proc.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# PR athenaeum#2575 review: a lock whose owning worker died without ever
+# reaching its own cleanup must self-heal, not wedge every future session
+# in "still preparing" forever.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_ready_recovers_from_a_dead_prepare_worker(tmp_path: Path) -> None:
+    bin_dir = _minimal_path_dir(tmp_path, with_uv=True)
+    cache_dir = tmp_path / "cache"
+    lock_dir = cache_dir / "claude-code-plugin" / "prepare.lock"
+    _seed_dead_lock(lock_dir)
+    old_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
 
     started = time.monotonic()
     result = _run_launcher(
@@ -295,16 +370,63 @@ def test_ensure_ready_returns_fast_and_reports_preparing_while_a_build_is_pendin
     elapsed = time.monotonic() - started
 
     assert result.returncode == 0
-    assert elapsed < 2.0, (
-        f"a pending first-run build must not block the hook: took {elapsed:.2f}s"
-    )
+    assert elapsed < 2.0, f"recovering from a dead lock must not block the hook: {elapsed:.2f}s"
     combined = result.stdout + result.stderr
-    assert "preparing" in combined.lower(), (
-        f"no 'still preparing' message while a build is pending: {combined!r}"
+    assert "prepare" in combined.lower()
+    # Must be told apart from the plain "someone else is live" message --
+    # an operator reading the log should see this was a recovery, not a
+    # normal pending state.
+    assert "restarting" in combined.lower() or "previous attempt" in combined.lower(), (
+        f"no distinct recovery message for a dead-worker lock: {combined!r}"
     )
-    # The lock this test seeded must be left alone -- this invocation did
-    # not win the race to prepare, so it must not touch the lock at all.
-    assert lock_dir.is_dir(), "the pending-build lock was removed by a non-owning invocation"
+
+    # The reclaim must actually have happened: a NEW worker (new pid) now
+    # owns the lock, not the dead one this test seeded.
+    assert lock_dir.is_dir()
+    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
+    assert new_pid != old_pid, "the dead lock's pid was never replaced -- no worker was relaunched"
+
+    # The relaunched worker must actually run to completion against the
+    # inert uv stub (proof this isn't just message text with no real
+    # recovery behind it), well inside this test's own timeout.
+    prepare_log = cache_dir / "claude-code-plugin" / "prepare.log"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if prepare_log.is_file() and "prepare: ready" in prepare_log.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.1)
+    else:
+        log_text = prepare_log.read_text(encoding="utf-8") if prepare_log.is_file() else "<missing>"
+        pytest.fail(f"relaunched prepare worker never finished; log={log_text}")
+
+
+def test_ensure_ready_does_not_reclaim_a_genuinely_live_lock(tmp_path: Path) -> None:
+    """The regression guard for the fix above: staleness detection must not
+    be so eager that it stampedes a concurrent, genuinely-still-running
+    prepare worker."""
+    bin_dir = _minimal_path_dir(tmp_path, with_uv=True)
+    cache_dir = tmp_path / "cache"
+    lock_dir = cache_dir / "claude-code-plugin" / "prepare.lock"
+    live_proc = _seed_live_lock(lock_dir)
+    live_pid = str(live_proc.pid)
+    try:
+        result = _run_launcher(
+            "--ensure-ready", tmp_path=tmp_path, path_dir=bin_dir, cache_dir=cache_dir
+        )
+        assert result.returncode == 0
+        combined = result.stdout + result.stderr
+        assert "restarting" not in combined.lower()
+        assert "previous attempt" not in combined.lower()
+        assert (lock_dir / "pid").read_text(encoding="utf-8").strip() == live_pid, (
+            "a genuinely live lock's pid was overwritten -- it was wrongly reclaimed"
+        )
+        prepare_log = cache_dir / "claude-code-plugin" / "prepare.log"
+        assert not prepare_log.exists(), (
+            "a second prepare worker was started against a genuinely live lock"
+        )
+    finally:
+        live_proc.terminate()
+        live_proc.wait(timeout=5)
 
 
 def test_ensure_ready_reports_ready_once_the_marker_exists(tmp_path: Path) -> None:

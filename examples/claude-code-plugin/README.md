@@ -106,6 +106,34 @@ in reduced/FTS5-only mode) until a later session finds the marker.
 `tests/test_claude_code_plugin.py` drives this by creating the pending lock
 directly, with no real `uv` invocation needed to prove the fast return.
 
+### Recovering from an interrupted first run
+
+A first-time dependency build is exactly the long operation a user is most
+likely to interrupt — SIGKILL, closing the laptop, a reboot mid-build. If
+the `--prepare` worker dies before reaching its own cleanup line, the lock
+directory can survive it. Without a liveness check, every future
+`--ensure-ready` would read the bare presence of that directory as "still
+preparing" forever, with no self-recovery and no reason for an operator to
+know a stray cache directory is the cause (PR athenaeum#2575 review).
+
+`--ensure-ready` therefore records the worker's PID and a UTC-epoch start
+time inside the lock directory (`pid`, `started-at`) and, on seeing an
+existing lock, decides live vs. stale: **live** only if the recorded PID is
+readable AND currently running (`kill -0`) AND the recorded start time is
+within `STALE_LOCK_TIMEOUT_SECONDS` (`hooks/launcher.sh`, currently 1800s /
+30 minutes — picked with headroom over a realistic cold `uv` build on a
+slow link, deliberately not tight). Any missing or unreadable liveness
+datum reads as **stale**, never as live by default — a worker that died
+before writing its own PID file does not get mistaken for one still
+running. A stale lock is cleared and the prepare worker relaunched
+immediately, and the message says so explicitly ("previous attempt ...
+appears to have died ... restarting it"), distinct from the plain "still
+preparing" an operator sees while a worker is genuinely in flight.
+`tests/test_claude_code_plugin.py::test_ensure_ready_recovers_from_a_dead_prepare_worker`
+and `::test_ensure_ready_does_not_reclaim_a_genuinely_live_lock` cover both
+directions — recovery, and the regression guard against reclaiming (and
+thereby stampeding) a worker that is actually still running.
+
 ## `userConfig` and secrets — what we could and could not establish
 
 The manifest declares one `userConfig` field, `knowledgePath` (the
