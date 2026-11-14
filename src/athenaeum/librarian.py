@@ -7435,17 +7435,18 @@ def _run_audit_nightly_drain_phase(ctx: RunContext) -> None:
 
 
 def _run_page_recompile_phase(ctx: RunContext) -> None:
-    """Nightly page-recompile pass (issue athenaeum#2547, slice S6 of
-    athenaeum#2525) -- the first thing in the nightly run that acts on an
-    oversized page at all.
+    """Nightly page-recompile pass (issue athenaeum#2547, slice S6, and
+    issue athenaeum#2549, slice S8, of athenaeum#2525) -- the first thing in
+    the nightly run that acts on an oversized page at all.
 
     Delegates entirely to
     :func:`athenaeum.page_recompile_nightly.run_nightly_page_recompile` --
     the candidate walk, the per-run budget, the mode handling, the
-    suppression checks and the queueing all live there (see that module's
-    docstring); this function is only the librarian wiring, modelled on
-    :func:`_run_rule_proposal_phase` directly above for client construction,
-    knob attribution and deadline participation.
+    suppression checks, the auto-apply decision and the queueing all live
+    there (see that module's docstring); this function is only the
+    librarian wiring, modelled on :func:`_run_rule_proposal_phase` directly
+    above for client construction, knob attribution and deadline
+    participation.
 
     **ON by default, unlike every other phase in this family.** The three
     phases above it are opt-in because each adds recurring unattended spend
@@ -7457,9 +7458,13 @@ def _run_page_recompile_phase(ctx: RunContext) -> None:
     (:func:`~athenaeum.config.resolve_page_recompile_mode`) -- and on that
     value this function returns BEFORE building a client, so ``off`` really
     does cost nothing, not merely nothing visible (athenaeum#2547 AC2).
-    The default mode is ``queue``: a plan is drafted and raised as a
-    ``page-recompile`` decision item, and no page is written without an
-    operator's answer.
+    The default mode is ``auto`` (athenaeum#2549): a structure-only plan
+    that passes every validation is applied right here with no decision
+    item at all; every other plan -- ``cross-page`` always, and anything
+    else when ``auto_apply_class``/``never_auto_types`` says so -- is still
+    drafted and raised as a ``page-recompile`` decision item, and no page
+    outside the auto-applied class is ever written without an operator's
+    answer.
 
     **Placement** (AC1): called from ``run()`` after the entity-tier and
     auto-memory phases and immediately before the finalize phase, beside the
@@ -12154,14 +12159,16 @@ def run(
     # allowed — see `_run_audit_nightly_drain_phase`'s own docstring.
     _run_audit_nightly_drain_phase(ctx)
 
-    # Phase: the nightly page-recompile pass (issue athenaeum#2547) — the
-    # ONE phase in this late family that is ON by default, because until it
-    # landed nothing in the nightly run acted on an oversized page at all
+    # Phase: the nightly page-recompile pass (issue athenaeum#2547, and
+    # issue athenaeum#2549 for the auto-apply its default mode now does) —
+    # the ONE phase in this late family that is ON by default, because until
+    # it landed nothing in the nightly run acted on an oversized page at all
     # (operator ruling on athenaeum#2525). Its off switch is
-    # `librarian.page_recompile.mode: off`, and its default mode (`queue`)
-    # writes no page without an operator's answer. Runs here, after
-    # entity/auto-memory and immediately before finalize, and is not
-    # reached by a merge_only/cluster_only run — see
+    # `librarian.page_recompile.mode: off`; its default mode (`auto`)
+    # applies a validated structure-only plan with no decision item, and
+    # still writes no page outside that class without an operator's answer.
+    # Runs here, after entity/auto-memory and immediately before finalize,
+    # and is not reached by a merge_only/cluster_only run — see
     # `_run_page_recompile_phase`'s own docstring for the full ordering,
     # deadline and no-reserved-share rationale.
     _run_page_recompile_phase(ctx)

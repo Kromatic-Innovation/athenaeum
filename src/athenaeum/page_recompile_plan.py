@@ -1251,6 +1251,58 @@ def undone_page_skip_reason(
     return reason
 
 
+def invalid_plan_skip_reason(
+    wiki_root: Path,
+    *,
+    uid: str,
+    body: str,
+    ledger_path: Path | None = None,
+) -> str:
+    """Why *uid* must NOT be planned again yet, or ``""`` (issue
+    athenaeum#2549 AC4).
+
+    A plan that failed validation or verification is a RESULT, not a
+    transient miss -- re-planning the SAME bytes every night would spend a
+    full labelling-plus-plan(-plus-verify) call to arrive at the identical
+    invalid plan, for a page no auto-apply or queue item will ever act on
+    until it changes. :func:`plan_page` appends a :data:`PLAN_KIND` record
+    for EVERY attempt, valid or not (:func:`append_plan_record`), so no
+    second ledger kind is needed: this function reads the LAST such record
+    for *uid* and skips the page while its live body still hashes to that
+    record's pinned content hash AND that record's own plan was invalid.
+
+    **A hash comparison, never a timestamp or a permanent block** -- the
+    same contract, for the same reason, as :func:`undone_page_skip_reason`
+    and :func:`~athenaeum.page_recompile_queue.rejected_page_skip_reason`:
+    the moment the page's content differs the hash stops matching and
+    planning resumes on its own. The LAST matching record wins, and a
+    now-invalid record pinned to a hash the page no longer holds clears the
+    skip rather than latching it -- including when a LATER record for the
+    same hash turned out valid (a re-run with a different model answer, for
+    instance): the ledger is append-only, so the newest word on a given
+    hash is the one that governs.
+    """
+    current = page_content_hash(body)
+    reason = ""
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        if record.get("kind") != PLAN_KIND:
+            continue
+        plan_dict = record.get("plan")
+        if not isinstance(plan_dict, dict) or plan_dict.get("uid") != uid:
+            continue
+        pinned = plan_dict.get("content_hash")
+        hash_matches = isinstance(pinned, str) and pinned and pinned == current
+        if hash_matches and plan_dict.get("valid") is False:
+            reason = (
+                f"a page-recompile plan ({record.get('id') or 'unknown'}) for "
+                "this page failed validation and it has not changed since; "
+                "it is skipped until its content hash differs"
+            )
+        else:
+            reason = ""
+    return reason
+
+
 def read_label_cache(
     wiki_root: Path, *, ledger_path: Path | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -1894,6 +1946,7 @@ __all__ = [
     "classify_plan_scope",
     "default_page_recompile_ledger_path",
     "find_plan_record",
+    "invalid_plan_skip_reason",
     "label_units",
     "normalise_unit_text",
     "page_content_hash",

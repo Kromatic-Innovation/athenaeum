@@ -1,40 +1,68 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Page recompile: the nightly pass (issue athenaeum#2547, slice S6 of the
-page-recompile design, athenaeum#2525).
+"""Page recompile: the nightly pass (issue athenaeum#2547, slice S6, and
+issue athenaeum#2549, slice S8, of the page-recompile design, athenaeum#2525).
 
 Slices S1-S5 built the machinery: a candidate scan and segmenter
 (:mod:`athenaeum.page_recompile`), a planner
 (:mod:`athenaeum.page_recompile_plan`), an atomic applier
 (:mod:`athenaeum.page_recompile_apply`), an undo
-(:mod:`athenaeum.page_recompile_undo`) and an operator CLI. Until this
-slice, NOTHING in the nightly run acted on an oversized page -- every one
-of those was reachable only by an operator naming a uid. This module is the
-pass itself: it walks the candidate scan in its own order, spends a bounded
-budget planning the top of it, and raises each plan as a
+(:mod:`athenaeum.page_recompile_undo`) and an operator CLI. S6 (athenaeum#2547)
+made this module the first thing in the nightly run to act on an oversized
+page at all -- walking the candidate scan in its own order, spending a
+bounded budget planning the top of it, and raising each plan as a
 ``page-recompile`` decision item through
-:mod:`athenaeum.page_recompile_queue`.
+:mod:`athenaeum.page_recompile_queue`. S8 (athenaeum#2549, this slice) turns
+the switch the whole design was building toward: in the default mode, a
+``structure-only`` plan that passes every validation is applied right here,
+unattended, with no decision item at all.
 
-**All policy, no mechanism.** This module plans no page itself and writes
-no page at all: :func:`~athenaeum.page_recompile_plan.plan_page` does the
-planning and the queue module does the raising. What lives here is the
-decision about WHICH candidates to spend on and WHEN to stop -- the budget,
-the modes, the deadline and the suppression checks. Modelled on
-:func:`athenaeum.audit_queue.run_nightly_drain`: the librarian wiring
-(:func:`athenaeum.librarian._run_page_recompile_phase`) is a dozen lines
-that build a client and call this.
+**All policy, no mechanism.** This module plans no page itself:
+:func:`~athenaeum.page_recompile_plan.plan_page` does the planning, the
+queue module does the raising, and :func:`~athenaeum.page_recompile_apply.write_apply`
+does the one write this module makes on an operator's behalf. What lives
+here is the decision about WHICH candidates to spend on, WHEN to stop, and
+-- as of this slice -- WHICH drafted plans may be applied without being
+asked. Modelled on :func:`athenaeum.audit_queue.run_nightly_drain`: the
+librarian wiring (:func:`athenaeum.librarian._run_page_recompile_phase`) is
+a dozen lines that build a client and call this.
 
-**Four modes** (``librarian.page_recompile.mode``, default ``queue`` --
+**Four modes** (``librarian.page_recompile.mode``, default ``auto`` --
 see :func:`athenaeum.config.resolve_page_recompile_mode`):
 
 * ``off`` -- :func:`run_nightly_page_recompile` is never reached; the
   librarian phase returns before building a client. The off switch.
 * ``shadow`` -- plans are drafted and recorded, no page is written and no
   decision item is raised.
-* ``queue`` (the default) -- plans are drafted AND raised for approval.
-* ``auto`` -- accepted, and behaves as ``queue`` in this slice. Applying
-  without an operator answer is explicitly out of scope here; the slice
-  that lands the unattended applier is the one that gives ``auto`` its
-  distinct behaviour.
+* ``queue`` -- plans are drafted AND raised for approval.
+* ``auto`` (the default) -- drafts a plan for every candidate the budget
+  reaches, same as ``queue``, but a plan that is BOTH valid AND
+  :data:`~athenaeum.page_recompile_plan.SCOPE_STRUCTURE_ONLY` is applied
+  right here instead of queued, when
+  :func:`athenaeum.config.resolve_page_recompile_auto_apply_class` resolves
+  to ``structure-only`` (also the default) AND the page's own ``type:``
+  is not in :func:`athenaeum.config.resolve_page_recompile_never_auto_types`.
+  Every other plan in ``auto`` -- ``cross-page``, over the
+  ``max_auto_applies_per_run`` bound this run, a ``never_auto_types`` page,
+  or ``auto_apply_class: none`` -- is queued exactly as in ``queue``. See
+  "How a structure-only plan gets authorised" below.
+
+**How a structure-only plan gets authorised, without touching the
+athenaeum#2548 approval interlock.** :func:`~athenaeum.page_recompile_apply.write_apply`
+already has, from athenaeum#2548, an UNCONDITIONAL carve-out: a plan whose
+own :attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope` is
+``structure-only`` needs no *verdict* at all -- only a ``cross-page`` plan
+is gated on ``_cross_page_approval_refusal``'s two-part check (an approving
+verdict AND a ledger record proving it was actually raised). This module
+never passes a verdict, forged or otherwise, and never calls
+``write_apply`` for a plan it has not itself confirmed is
+``structure-only`` (read off the SAME :attr:`RecompilePlan.scope` the
+planner already set via
+:func:`~athenaeum.page_recompile_plan.classify_plan_scope` -- never
+re-derived here). A ``cross-page`` plan from this phase is routed to the
+UNCHANGED queue path, exactly as before, so the interlock is exercised for
+it exactly as it always was: this module adds a gate on TOP of the
+existing authorisation (deciding whether to call the already-safe
+``write_apply`` path at all), not a new way INTO it.
 
 **The budget, and why there are two page budgets.** The operator ruling on
 athenaeum#2525 asks for a larger budget "at first until the over-ceiling
@@ -45,7 +73,11 @@ candidate is over ``librarian.oversize_hard_ceiling_chars`` and
 ``max_pages_per_run`` once none is. Three further ceilings bound the same
 run -- ``max_input_chars_per_run``, ``max_api_calls_per_run`` and
 ``max_open_items`` -- and each is checked BEFORE the page's first model
-call, so a page refused by any of them costs nothing.
+call, so a page refused by any of them costs nothing. A FOURTH budget,
+``max_auto_applies_per_run`` (athenaeum#2549 AC5), bounds only the APPLY
+step: a structure-only plan found after the bound is already spent this run
+is neither applied nor queued -- it simply waits for a later run, when the
+bound resets.
 
 **No reserved share of the run deadline**, exactly as
 :func:`athenaeum.librarian._run_rule_proposal_phase`'s docstring argues for
@@ -60,8 +92,10 @@ Layering: L4 domain/pipeline, the same layer as every other
 ``page_recompile*`` module and as :mod:`athenaeum.audit_queue`, the
 nightly-phase body it is modelled on. Imports :mod:`athenaeum.config`
 (L2) and its L4 siblings :mod:`athenaeum.page_recompile`,
-:mod:`athenaeum.page_recompile_plan` and
-:mod:`athenaeum.page_recompile_queue` -- all at or below its own layer, so
+:mod:`athenaeum.page_recompile_plan`, :mod:`athenaeum.page_recompile_queue`
+and (function-local, inside :func:`run_nightly_page_recompile`, same as the
+``plan_page``/``EntityIndex`` imports already there)
+:mod:`athenaeum.page_recompile_apply` -- all at or below its own layer, so
 none of these edges needs an ``ALLOWED_UPWARD_EDGES`` entry.
 """
 
@@ -78,15 +112,21 @@ from athenaeum.config import (
     resolve_oversize_hard_ceiling_chars,
     resolve_page_recompile_auto_apply_class,
     resolve_page_recompile_max_api_calls_per_run,
+    resolve_page_recompile_max_auto_applies_per_run,
     resolve_page_recompile_max_input_chars_per_run,
     resolve_page_recompile_max_open_items,
     resolve_page_recompile_max_pages_per_run,
     resolve_page_recompile_mode,
+    resolve_page_recompile_never_auto_types,
     resolve_page_recompile_opening_max_pages_per_run,
     resolve_page_size_threshold_chars,
 )
 from athenaeum.page_recompile import RecompileCandidate, find_recompile_candidates
-from athenaeum.page_recompile_plan import page_content_hash
+from athenaeum.page_recompile_plan import (
+    SCOPE_STRUCTURE_ONLY,
+    invalid_plan_skip_reason,
+    page_content_hash,
+)
 from athenaeum.page_recompile_queue import (
     build_plan_outline,
     list_pending_page_recompile_plans,
@@ -106,10 +146,12 @@ PAGE_RECOMPILE_KNOB = "page_recompile"
 #: ``mode`` values under which the phase plans at all.
 _PLANNING_MODES: frozenset[str] = frozenset({"shadow", "queue", "auto"})
 
-#: ``mode`` values under which a drafted plan is RAISED as a decision item.
-#: ``auto`` is included because, in this slice, ``auto`` behaves as
-#: ``queue`` (see the module docstring) -- applying without an answer is out
-#: of scope here.
+#: ``mode`` values under which a drafted plan MAY be raised as a decision
+#: item. ``auto`` is included because it still queues every plan that is
+#: NOT auto-applied -- ``cross-page``, over the ``max_auto_applies_per_run``
+#: bound, a ``never_auto_types`` page, or ``auto_apply_class: none``. A plan
+#: that IS auto-applied is routed to ``write_apply`` instead and never
+#: reaches this path at all (see :func:`_eligible_for_auto_apply`).
 _QUEUEING_MODES: frozenset[str] = frozenset({"queue", "auto"})
 
 #: ``reason`` values on :class:`PageRecompileRunSummary`. Named constants
@@ -122,12 +164,14 @@ REASON_MAX_OPEN_ITEMS = "max-open-items"
 
 @dataclass
 class PageRecompileRunSummary:
-    """What one nightly page-recompile phase did (issue athenaeum#2547 AC9).
+    """What one nightly page-recompile phase did (issues athenaeum#2547 AC9,
+    athenaeum#2549 AC6).
 
     ``planned``/``queued``/``invalid``/``skipped_budget``/``backlog`` are the
-    five figures the AC requires the run summary to report; the remaining
-    counters name the OTHER reasons a candidate went untouched, so a
-    ``backlog`` that does not shrink is always attributable to something.
+    five figures athenaeum#2547 AC9 requires; ``applied``/``applied_plans``
+    are the ones athenaeum#2549 AC6 adds. The remaining counters name the
+    OTHER reasons a candidate went untouched, so a ``backlog`` that does not
+    shrink is always attributable to something.
     """
 
     reason: str
@@ -144,10 +188,19 @@ class PageRecompileRunSummary:
     opening_budget: bool = False
     #: Plans drafted that came back valid.
     planned: int = 0
-    #: Plans raised as ``page-recompile`` decision items (0 in ``shadow``).
+    #: Plans raised as ``page-recompile`` decision items (0 in ``shadow``,
+    #: and 0 for a plan that was auto-applied instead -- see ``applied``).
     queued: int = 0
     #: Plans the planner refused or validated as invalid.
     invalid: int = 0
+    #: Issue athenaeum#2549 AC2/AC6: structure-only plans applied unattended
+    #: this run, in mode ``auto`` with ``auto_apply_class: structure-only``.
+    applied: int = 0
+    #: Issue athenaeum#2549 AC6: one entry per :attr:`applied` plan -- its
+    #: plan id and the counts of sub-pages created and sections merged, so
+    #: an auto-applied plan is nameable from the run summary alone, the same
+    #: way a queued one is nameable from the decision item it raised.
+    applied_plans: list[dict[str, Any]] = field(default_factory=list)
     #: Candidates not planned because a per-run budget was spent.
     skipped_budget: int = 0
     #: Candidates not planned because the run deadline tripped mid-phase.
@@ -155,6 +208,12 @@ class PageRecompileRunSummary:
     #: Candidates skipped because a rejected plan still pins their current
     #: content hash (:func:`~athenaeum.page_recompile_queue.rejected_page_skip_reason`).
     skipped_suppressed: int = 0
+    #: Issue athenaeum#2549 AC4: candidates not planned because the LAST
+    #: plan drafted for their current content hash was invalid
+    #: (:func:`~athenaeum.page_recompile_plan.invalid_plan_skip_reason`) --
+    #: a page skipped this way is counted here, not in ``invalid`` again,
+    #: on a night it was not actually re-planned.
+    skipped_invalid: int = 0
     #: Candidates not planned because ``max_open_items`` was already reached.
     skipped_open_items: int = 0
     #: Candidates skipped because THIS page already has an unanswered plan
@@ -164,6 +223,11 @@ class PageRecompileRunSummary:
     #: the whole page budget every night and the rest of the backlog would
     #: never advance.
     skipped_already_queued: int = 0
+    #: Issue athenaeum#2549 AC5: a valid structure-only plan that would
+    #: otherwise auto-apply, but found ``max_auto_applies_per_run`` already
+    #: spent this run. Neither applied nor queued -- it waits for a later
+    #: run, when the bound resets.
+    skipped_auto_apply_budget: int = 0
     #: Model calls this phase made, measured off the run-level usage counter.
     api_calls: int = 0
     #: Page-body characters planned over.
@@ -183,18 +247,23 @@ class PageRecompileRunSummary:
             "planned": self.planned,
             "queued": self.queued,
             "invalid": self.invalid,
+            "applied": self.applied,
+            "applied_plans": list(self.applied_plans),
             "skipped_budget": self.skipped_budget,
             "skipped_deadline": self.skipped_deadline,
             "skipped_suppressed": self.skipped_suppressed,
+            "skipped_invalid": self.skipped_invalid,
             "skipped_open_items": self.skipped_open_items,
             "skipped_already_queued": self.skipped_already_queued,
+            "skipped_auto_apply_budget": self.skipped_auto_apply_budget,
             "api_calls": self.api_calls,
             "input_chars": self.input_chars,
         }
 
     def as_profile_fields(self) -> dict[str, Any]:
-        """The subset carried on the run-summary profile line (AC9's five
-        required figures plus the mode and the other skip reasons)."""
+        """The subset carried on the run-summary profile line (athenaeum#2547
+        AC9's five required figures, athenaeum#2549 AC6's ``applied``/
+        ``applied_plans``, plus the mode and the other skip reasons)."""
         fields = self.to_dict()
         fields.pop("auto_apply_class", None)
         return fields
@@ -230,12 +299,16 @@ def run_nightly_page_recompile(
     dry_run: bool = False,
     ledger_path: Path | None = None,
 ) -> PageRecompileRunSummary:
-    """Plan the top of the oversized-page backlog, bounded (issue athenaeum#2547).
+    """Plan the top of the oversized-page backlog, bounded (issue
+    athenaeum#2547), and -- in mode ``auto`` -- apply a valid structure-only
+    plan unattended (issue athenaeum#2549).
 
     *client* is the already-built per-knob client; *usage* is the run-level
     :class:`athenaeum.models.TokenUsage`, threaded into
-    :func:`~athenaeum.page_recompile_plan.plan_page` so every call this phase
-    makes is attributed to the ``page_recompile`` knob and counted against
+    :func:`~athenaeum.page_recompile_plan.plan_page` (and, for an
+    auto-applied plan's own merge-verify call, into
+    :func:`~athenaeum.page_recompile_apply.write_apply`) so every call this
+    phase makes is attributed to the knob that made it and counted against
     the run's own ``max_api_calls`` ceiling. *deadline_check* is the run's
     ``RunContext.deadline_exceeded`` and *heartbeat* its
     ``RunContext.tick_heartbeat`` -- both called BETWEEN pages (AC1, AC10).
@@ -245,7 +318,8 @@ def run_nightly_page_recompile(
     The phase's own caller wraps it as well, so a defect here can never
     change a run's exit code.
     """
-    from athenaeum.models import EntityIndex
+    from athenaeum.models import EntityIndex, resolve_page_type
+    from athenaeum.page_recompile_apply import write_apply
     from athenaeum.page_recompile_plan import plan_page
 
     mode = resolve_page_recompile_mode(config)
@@ -303,6 +377,11 @@ def run_nightly_page_recompile(
     max_api_calls = resolve_page_recompile_max_api_calls_per_run(config)
     threshold = resolve_page_size_threshold_chars(config)
     ceiling = resolve_oversize_hard_ceiling_chars(config)
+    # Issue athenaeum#2549 AC5/AC8: only consulted in mode `auto`, but
+    # resolved unconditionally -- both are cheap, and the alternative is a
+    # second `mode == "auto"` branch above this one for no real saving.
+    max_auto_applies = resolve_page_recompile_max_auto_applies_per_run(config)
+    never_auto_types = resolve_page_recompile_never_auto_types(config)
     index = EntityIndex(wiki_root)
     calls_at_start = _api_calls(usage)
 
@@ -333,7 +412,7 @@ def run_nightly_page_recompile(
             summary.skipped_budget += 1
             continue
 
-        body = _read_body(candidate.path)
+        page_meta, body = _read_meta_and_body(candidate.path)
         if body is None:
             summary.invalid += 1
             summary.errors.append(f"{candidate.uid}: page unreadable")
@@ -343,6 +422,18 @@ def run_nightly_page_recompile(
         )
         if suppressed:
             summary.skipped_suppressed += 1
+            continue
+        # Issue athenaeum#2549 AC4: the LAST plan drafted for this page's
+        # current content hash was invalid -- re-planning identical bytes
+        # would spend a full labelling-plus-plan(-plus-verify) call to
+        # arrive at the same invalid plan again. Checked for every planning
+        # mode, not only `auto`: the spend this avoids is the planner's,
+        # which every mode in `_PLANNING_MODES` pays.
+        invalid_reason = invalid_plan_skip_reason(
+            wiki_root, uid=candidate.uid, body=body, ledger_path=ledger_path
+        )
+        if invalid_reason:
+            summary.skipped_invalid += 1
             continue
         # This page already has an unanswered plan pinned to exactly these
         # bytes, so re-planning it would spend a plan and a verify call to
@@ -396,6 +487,72 @@ def run_nightly_page_recompile(
             continue
 
         summary.planned += 1
+
+        # Issue athenaeum#2549 AC2/AC3/AC5/AC8: decide whether THIS plan may
+        # be applied unattended, reading the plan's own scope rather than
+        # re-deriving it -- `plan.scope` is already
+        # `classify_plan_scope`'s answer, set by the planner. A plan that is
+        # NOT eligible here (wrong mode/class, cross-page, a never_auto_types
+        # page) falls straight through to the unchanged queue path below, so
+        # a cross-page plan is queued exactly as it always was.
+        eligible_for_auto = (
+            mode == "auto"
+            and auto_apply_class == "structure-only"
+            and plan.scope == SCOPE_STRUCTURE_ONLY
+            and resolve_page_type(page_meta) not in never_auto_types
+            and not dry_run
+        )
+        if eligible_for_auto:
+            if summary.applied >= max_auto_applies:
+                # Neither applied nor queued (AC5): a structure-only plan
+                # under `auto_apply_class: structure-only` is never a
+                # decision item, budget-exhausted or not -- it simply waits
+                # for a run where `max_auto_applies_per_run` has not yet
+                # been spent.
+                summary.skipped_auto_apply_budget += 1
+                continue
+            outcome = write_apply(
+                wiki_root,
+                plan_id=result.plan_id,
+                # The SAME client already built for the `page_recompile`
+                # knob, reused for the merge-verify call `write_apply` may
+                # make -- exactly how `plan_page` already reuses it for
+                # its OWN internal verify step (see this module's
+                # docstring). No *verdict* is ever passed: a structure-only
+                # plan does not need one (`write_apply` only consults
+                # *verdict* for a cross-page plan), so this call forges
+                # nothing and the athenaeum#2548 approval interlock is
+                # never touched.
+                client=client,
+                config=config,
+                ledger_path=ledger_path,
+                now=now,
+            )
+            if outcome.ok:
+                summary.applied += 1
+                summary.applied_plans.append(
+                    {
+                        "plan_id": outcome.plan_id,
+                        "uid": outcome.uid,
+                        "sub_pages_created": len(outcome.created_uids),
+                        "sections_merged": len(plan.merges),
+                    }
+                )
+            else:
+                # The plan is already recorded (as `planned`); a write-time
+                # refusal (a race on the content hash, a post-validation
+                # issue `compute_apply` catches that the planner's own
+                # checks did not) is reported and the run moves on, the
+                # same "already counted, do not also lose the run" rule the
+                # queueing failure just below follows.
+                log.warning(
+                    "page-recompile: auto-apply of plan %s failed: %s",
+                    result.plan_id,
+                    outcome.reason,
+                )
+                summary.errors.append(f"{candidate.uid}: auto-apply refused: {outcome.reason}")
+            continue
+
         if not queues_items or dry_run:
             continue
         try:
@@ -429,23 +586,28 @@ def run_nightly_page_recompile(
         summary.planned
         or summary.queued
         or summary.invalid
+        or summary.applied
         or summary.skipped_budget
         or summary.skipped_already_queued
     ):
         log.info(
             "page-recompile: mode=%s backlog=%d budget=%d%s planned=%d queued=%d "
-            "invalid=%d skipped_budget=%d skipped_suppressed=%d "
-            "skipped_already_queued=%d skipped_deadline=%d calls=%d",
+            "applied=%d invalid=%d skipped_budget=%d skipped_suppressed=%d "
+            "skipped_invalid=%d skipped_already_queued=%d "
+            "skipped_auto_apply_budget=%d skipped_deadline=%d calls=%d",
             mode,
             summary.backlog,
             budget,
             " (opening)" if opening else "",
             summary.planned,
             summary.queued,
+            summary.applied,
             summary.invalid,
             summary.skipped_budget,
             summary.skipped_suppressed,
+            summary.skipped_invalid,
             summary.skipped_already_queued,
+            summary.skipped_auto_apply_budget,
             summary.skipped_deadline,
             summary.api_calls,
         )
@@ -471,16 +633,24 @@ def _api_calls(usage: Any) -> int:
         return 0
 
 
-def _read_body(path: Path) -> str | None:
-    """The page's BODY (frontmatter stripped), or ``None`` if unreadable."""
+def _read_meta_and_body(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """*path*'s frontmatter mapping and BODY (frontmatter stripped), or
+    ``(None, None)`` if unreadable.
+
+    The meta half is issue athenaeum#2549 AC8's own read: the candidate's
+    ``type:`` (:func:`athenaeum.models.resolve_page_type`) is what
+    ``never_auto_types`` is checked against, and re-reading the file a
+    second time just for that would double the per-candidate I/O this
+    phase already does once here.
+    """
     from athenaeum.models import parse_frontmatter
 
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return None
-    _meta, body = parse_frontmatter(text)
-    return body
+        return None, None
+    meta, body = parse_frontmatter(text)
+    return (meta if isinstance(meta, dict) else {}), body
 
 
 def _units_for(body: str) -> tuple[Any, ...]:

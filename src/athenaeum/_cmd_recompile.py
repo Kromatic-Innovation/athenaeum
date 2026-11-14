@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum recompile {candidates,plan,show,apply,undo}`` -- the
+"""``athenaeum recompile {candidates,plan,show,apply,undo,list}`` -- the
 page-recompile operator surface (issues athenaeum#2534, athenaeum#2537,
-athenaeum#2540 and athenaeum#2541, slices S1, S3, S4 and S5 of
-athenaeum#2525).
+athenaeum#2540, athenaeum#2541 and athenaeum#2549, slices S1, S3, S4, S5 and
+S8 of athenaeum#2525).
 
 * ``candidates`` (athenaeum#2534) runs
   :func:`athenaeum.page_recompile.find_recompile_candidates` and prints
@@ -33,11 +33,16 @@ athenaeum#2525).
   lock (exits :data:`athenaeum._cli_shared.EXIT_LOCK_HELD`), and
   ``--dry-run`` reports which of the three it would be, and why, without
   writing anything at all.
+* ``list --applied`` (athenaeum#2549 AC6) lists every applied recompile --
+  manual (``recompile apply``) or unattended (the nightly phase's own
+  ``mode: auto``) alike, since both write the SAME ``apply`` ledger kind --
+  with its plan id, uid, timestamp, and the counts of sub-pages created and
+  sections merged. Read-only: no run lock, no writes, no LLM call.
 
 ``plan`` and ``apply`` (only when a plan carries a ``merge`` group) are the
-subcommands here that make an LLM call; ``undo`` makes none.
-``candidates``/``plan``/``show`` write no page; ``apply`` and ``undo`` are
-the two that do.
+subcommands here that make an LLM call; ``undo`` and ``list`` make none.
+``candidates``/``plan``/``show``/``list`` write no page; ``apply`` and
+``undo`` are the two that do.
 """
 
 from __future__ import annotations
@@ -55,9 +60,10 @@ def add_recompile_subparser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "recompile",
         help="Page-recompile maintenance pass (issues athenaeum#2534, "
-        "athenaeum#2537, athenaeum#2540, athenaeum#2541): a read-only "
-        "candidate scan, a shadow-only planner, a plan viewer, and the "
-        "applier and its undo, which DO write pages.",
+        "athenaeum#2537, athenaeum#2540, athenaeum#2541, athenaeum#2549): a "
+        "read-only candidate scan, a shadow-only planner, a plan viewer, an "
+        "applied-plan lister, and the applier and its undo, which DO write "
+        "pages.",
     )
     parser.set_defaults(func=_cmd_recompile_dispatch)
     sub = parser.add_subparsers(dest="recompile_target")
@@ -168,10 +174,31 @@ def add_recompile_subparser(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(undo_p)
     undo_p.set_defaults(func=_cmd_undo)
 
+    list_p = sub.add_parser(
+        "list",
+        help="List recompile plans (issue athenaeum#2549 AC6). --applied lists "
+        "every applied plan -- manual or unattended alike -- with its plan "
+        "id, uid, timestamp, and the counts of sub-pages created and "
+        "sections merged. Read-only: no run lock, no writes, no LLM call.",
+    )
+    list_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    list_p.add_argument(
+        "--applied",
+        action="store_true",
+        help="List applied plans (currently the only listing mode).",
+    )
+    list_p.add_argument("--json", action="store_true", help="Print the rows as a JSON array.")
+    list_p.set_defaults(func=_cmd_list)
+
 
 def _cmd_recompile_dispatch(args: argparse.Namespace) -> int:
     print(
-        "usage: athenaeum recompile {candidates,plan,show,apply,undo} [...]",
+        "usage: athenaeum recompile {candidates,plan,show,apply,undo,list} [...]",
         file=sys.stderr,
     )
     return 2
@@ -462,6 +489,64 @@ def _cmd_undo(args: argparse.Namespace) -> int:
         for link in outcome.inbound_links:
             print(f"    {link.kind} -> {link.uid} in {link.path}")
     return 0 if outcome.ok else 1
+
+
+def _cmd_list(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum recompile list --applied`` (issue athenaeum#2549
+    AC6).
+
+    Exit codes: 0 always for a named listing mode, including an empty
+    result (an empty list is not an error); 1 the wiki root is missing, or
+    no listing mode was named.
+    """
+    import json as _json
+
+    from athenaeum.page_recompile_apply import APPLY_KIND
+    from athenaeum.page_recompile_plan import read_page_recompile_ledger
+
+    wiki_root = _wiki_root_or_error(args)
+    if wiki_root is None:
+        return 1
+    if not args.applied:
+        print(
+            "error: name a listing mode, e.g. --applied",
+            file=sys.stderr,
+        )
+        return 1
+
+    rows: list[dict[str, object]] = []
+    for record in read_page_recompile_ledger(wiki_root):
+        if record.get("kind") != APPLY_KIND:
+            continue
+        rows.append(
+            {
+                "plan_id": str(record.get("id") or ""),
+                "uid": str(record.get("uid") or ""),
+                "ts": str(record.get("ts") or ""),
+                "sub_pages_created": len(record.get("created_uids") or []),
+                "sections_merged": len(record.get("merges") or []),
+            }
+        )
+    # Most recent first -- the operator question this answers ("what did
+    # the pass just do to my wiki?") is almost always about the latest
+    # apply, not the oldest.
+    rows.reverse()
+
+    if args.json:
+        sys.stdout.write(_json.dumps(rows, sort_keys=True) + "\n")
+        return 0
+
+    print("=== recompile list (applied) ===")
+    if not rows:
+        print("  (none)")
+        return 0
+    for row in rows:
+        print(
+            f"  {row['plan_id']}  uid={row['uid']}  ts={row['ts']}  "
+            f"sub-pages created={row['sub_pages_created']}  "
+            f"sections merged={row['sections_merged']}"
+        )
+    return 0
 
 
 def _print_plan(plan: dict[str, object], *, plan_id: str) -> None:

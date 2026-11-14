@@ -285,16 +285,15 @@ PAGE_RECOMPILE_NOT_AVAILABLE = "not available"
 #: say. Named here so the test that pins "never as zero" enumerates them
 #: from the source of truth rather than from a second hand-maintained list.
 #:
-#: Issue athenaeum#2547 gave two of the three a producer:
-#: ``plans_awaiting_approval`` and ``nights_since_progress`` are now filled
-#: from the page-recompile ledger whenever
-#: :func:`build_page_recompile_backlog` is given a *wiki_root* AND that
-#: ledger exists. They still report ``None`` when it does not -- "nothing
-#: has ever proposed a plan" and "the queue is empty" are different facts,
-#: and only the first is a starvation signal (see
+#: Issue athenaeum#2547 gave two of the three a producer, and athenaeum#2549
+#: the third: ``plans_awaiting_approval``, ``nights_since_progress`` and
+#: ``applied_last_7_days`` are all filled from the page-recompile ledger
+#: whenever :func:`build_page_recompile_backlog` is given a *wiki_root* AND
+#: that ledger exists. Every one of the three still reports ``None`` when it
+#: does not -- "nothing has ever proposed (or applied) a plan" and "the
+#: queue is empty (or nothing applied this week)" are different facts, and
+#: only the first is a starvation signal (see
 #: :func:`athenaeum.page_recompile_queue.plans_awaiting_approval`).
-#: ``applied_last_7_days`` is still unproduced: it was out of scope for
-#: athenaeum#2536 and athenaeum#2547 alike.
 PAGE_RECOMPILE_PENDING_FIELDS = (
     "plans_awaiting_approval",
     "applied_last_7_days",
@@ -436,12 +435,12 @@ def build_page_recompile_backlog(
     * ``blocked`` / ``blocked_by_reason`` -- pages the pass cannot act on,
       with a count per reason (AC1).
     * the :data:`PAGE_RECOMPILE_PENDING_FIELDS`, which the candidate scan
-      cannot produce. With *wiki_root* given (issue athenaeum#2547 AC9),
-      ``plans_awaiting_approval`` and ``nights_since_progress`` are read off
-      the page-recompile ledger; each stays ``None`` when that ledger has
-      nothing to say, and ``applied_last_7_days`` stays ``None``
-      unconditionally. Without *wiki_root* all three are ``None``, which is
-      what every pre-athenaeum#2547 caller gets.
+      cannot produce. With *wiki_root* given (issues athenaeum#2547 AC9,
+      athenaeum#2549 AC6), ``plans_awaiting_approval``, ``nights_since_progress``
+      and ``applied_last_7_days`` are all read off the page-recompile
+      ledger; each stays ``None`` when that ledger has nothing to say.
+      Without *wiki_root* all three are ``None``, which is what every
+      pre-athenaeum#2547 caller gets.
     * ``pages`` / ``blocked_pages`` -- the page NAMES behind the counts.
       :func:`format_status` prints them only under its ``verbose`` flag
       (AC7); they live in the dict because ``--json`` is a deliberate
@@ -480,12 +479,14 @@ def build_page_recompile_backlog(
         # available" rather than break `athenaeum status`.
         try:
             from athenaeum.page_recompile_queue import (
+                applied_last_7_days,
                 nights_since_progress,
                 plans_awaiting_approval,
             )
 
             block["plans_awaiting_approval"] = plans_awaiting_approval(wiki_root)
             block["nights_since_progress"] = nights_since_progress(wiki_root)
+            block["applied_last_7_days"] = applied_last_7_days(wiki_root)
         except Exception as exc:  # noqa: BLE001 - status must never raise
             log.debug("page-recompile queue counts unavailable: %s", exc)
     return block
