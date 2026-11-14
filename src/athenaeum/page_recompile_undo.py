@@ -90,11 +90,16 @@ all.** A created sub-page's uid did not exist before the apply, so any
 reference to it from a page OTHER than the recompiled parent (and other
 than the created sub-pages' own cross-links) was necessarily added after
 the apply. The scan is therefore "any inbound reference from a third
-page", with no timestamp heuristic anywhere: ``related`` rows naming a
-created uid, a ``parent:`` key naming one, and ``[[uid|...]]`` body
-wikilinks. Any hit refuses the undo and reports the COUNT -- deleting a
-page something else points at would leave a dangling link, which no diff
-a human adjudicates can repair.
+page", with no timestamp heuristic anywhere. FOUR shapes, two in the
+frontmatter (a ``related`` row naming a created uid, and a ``parent:``
+key naming one) and two in the body (``[[uid|Label]]`` wikilinks and
+``[Label](uid-slug.md)`` markdown inline links) -- see
+:func:`find_inbound_links` for why the markdown form is the one that
+matters most in practice, and what counting only the others cost. Any hit
+refuses the undo and reports the COUNT, de-duplicated per logical
+reference because AC4 asks for that count by name -- deleting a page
+something else points at would leave a dangling link, which no diff a
+human adjudicates can repair.
 
 **Order of writes on the direct path: parents FIRST, created pages
 deleted LAST** -- the mirror of the applier's "sub-pages first, parent
@@ -136,8 +141,9 @@ from __future__ import annotations
 import difflib
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
@@ -154,6 +160,7 @@ from athenaeum.page_recompile_plan import (
     read_page_recompile_ledger,
 )
 from athenaeum.page_relations import (
+    _LEGACY_ROLE_CHILD_NAMES_PARENT,
     _discover_wiki_pages,
     _index_pages_by_uid,
     _related_rows,
@@ -192,6 +199,15 @@ REASON_NO_APPLY_RECORD = "no_apply_record"
 #: including :mod:`athenaeum.unfold`): a two-line stable primitive is cheaper
 #: to state than a module-scope import of an unrelated L4 pipeline.
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|[^\[\]\n]*)?\]\]")
+
+#: A markdown INLINE link's target: ``[Label](34498e6a-learn-s-m-a-r-t.md)``.
+#: Scanned alongside the wikilink form because it is the form the real corpus
+#: overwhelmingly uses -- a census of all 26,649 live wiki pages found 167
+#: markdown links resolving to a real page file against 8 uid-form wikilinks.
+#: A scan of wikilinks alone would therefore cover ~5% of real inbound
+#: references and miss ~95% of them, which for AC4 means refusing almost
+#: nothing and deleting a page that other pages still point at.
+_MD_LINK_RE = re.compile(r"\]\(\s*<?([^)<>\s]+)>?\s*\)")
 
 
 # ---------------------------------------------------------------------------
@@ -301,21 +317,50 @@ class InboundLink:
 
 
 def find_inbound_links(
-    wiki_root: Path, created_uids: list[str], *, exclude: set[Path]
+    wiki_root: Path, created: Mapping[str, str], *, exclude: set[Path]
 ) -> tuple[InboundLink, ...]:
-    """Every reference to a uid in *created_uids* from a page not in
-    *exclude* (AC4).
+    """Every reference to a created sub-page from a page not in *exclude*
+    (AC4).
+
+    *created* maps each created sub-page's uid to its FILENAME
+    (``<uid>-<slug>.md``), because a reference can name either: the
+    frontmatter shapes name the uid, while both body link forms name the
+    file. An empty filename is tolerated (the record is all this module has
+    to go on) and simply narrows that page to its uid forms.
 
     *exclude* is the recompiled parent plus the created sub-pages
-    themselves -- the parent's rows are removed by the pre-image restore
-    and a created page's own rows go with its file, so neither is a reason
-    to refuse. Page discovery is
+    themselves -- the parent's rows are removed by the pre-image restore and
+    a created page's own rows go with its file, so neither is a reason to
+    refuse. Page discovery is
     :func:`athenaeum.page_relations._discover_wiki_pages`, the existing
     primitive, not a second corpus walk.
+
+    **Four reference shapes, not one.** Two in the frontmatter (a
+    ``related`` row naming the uid, and the ``parent:`` key) and two in the
+    body: ``[[uid|Label]]`` wikilinks and ``[Label](uid-slug.md)`` markdown
+    inline links. The markdown form is the one that matters most in
+    practice -- see :data:`_MD_LINK_RE` for the corpus census -- and it was
+    the one originally missing, which made this scan refuse almost nothing.
+
+    **One logical reference is counted once.** AC4 requires undo to name
+    the COUNT of inbound links, so an inflated count is a wrong answer, not
+    a cosmetic one. :func:`athenaeum.page_relations.read_relations`
+    normalises a page's new-shape ``parent:`` key and its legacy
+    ``split-from`` ``related`` row to ONE parent relation; counting both
+    rows would report two references where a reader of that frontmatter
+    sees one. The row that encodes the resolved parent is therefore skipped
+    in favour of the single ``parent-key`` entry. Distinct SHAPES of a
+    genuinely distinct reference (a ``see-also`` row AND a body link, say)
+    are separate references and are each counted.
     """
-    wanted = set(created_uids)
+    wanted = set(created)
     if not wanted:
         return ()
+    names_to_uid: dict[str, str] = {}
+    for uid, filename in created.items():
+        for key in (filename, Path(filename).stem if filename else ""):
+            if key:
+                names_to_uid[key] = uid
     excluded = {p.resolve() for p in exclude}
     found: list[InboundLink] = []
     for path in _discover_wiki_pages(Path(wiki_root)):
@@ -330,19 +375,60 @@ def find_inbound_links(
             continue
         meta, body = parse_frontmatter(text)
         meta_dict = meta if isinstance(meta, dict) else {}
+
+        relations = read_relations(meta_dict)
+        parent_uid = relations.parent.uid if relations.parent is not None else None
         for row in _related_rows(meta_dict):
-            if isinstance(row, dict):
-                uid = row.get("uid")
-                if isinstance(uid, str) and uid in wanted:
-                    found.append(InboundLink(path=str(path), uid=uid, kind="related-row"))
-        parent = read_relations(meta_dict).parent
-        if parent is not None and parent.uid in wanted:
-            found.append(InboundLink(path=str(path), uid=parent.uid, kind="parent-key"))
+            if not isinstance(row, dict):
+                continue
+            row_uid = row.get("uid")
+            if not isinstance(row_uid, str) or row_uid not in wanted:
+                continue
+            if row_uid == parent_uid and row.get("role") == _LEGACY_ROLE_CHILD_NAMES_PARENT:
+                # The legacy half of the SAME parent relation the
+                # `parent-key` entry below already counts.
+                continue
+            found.append(InboundLink(path=str(path), uid=row_uid, kind="related-row"))
+        if parent_uid is not None and parent_uid in wanted:
+            found.append(InboundLink(path=str(path), uid=parent_uid, kind="parent-key"))
+
         for match in _WIKILINK_RE.finditer(body):
             target = match.group(1).strip()
-            if target in wanted:
-                found.append(InboundLink(path=str(path), uid=target, kind="wikilink"))
+            uid = target if target in wanted else names_to_uid.get(target, "")
+            if uid:
+                found.append(InboundLink(path=str(path), uid=uid, kind="wikilink"))
+        for match in _MD_LINK_RE.finditer(body):
+            uid = _md_target_uid(match.group(1), wanted, names_to_uid)
+            if uid:
+                found.append(InboundLink(path=str(path), uid=uid, kind="markdown-link"))
     return tuple(found)
+
+
+def _md_target_uid(
+    raw_target: str, wanted: set[str], names_to_uid: Mapping[str, str]
+) -> str:
+    """The created-sub-page uid a markdown link target names, or ``""``.
+
+    Tolerates the shapes a hand-written or generated link actually uses: a
+    bare filename, a ``./``-prefixed one, a ``#anchor`` suffix, and a
+    percent-or-query tail. An absolute URL is never a wiki page reference
+    and is rejected before any of that.
+    """
+    target = raw_target.strip()
+    if not target or "://" in target or target.startswith("#"):
+        return ""
+    target = target.split("#", 1)[0].split("?", 1)[0]
+    if not target:
+        return ""
+    name = PurePosixPath(target).name
+    if name in names_to_uid:
+        return names_to_uid[name]
+    stem = PurePosixPath(name).stem
+    if stem in names_to_uid:
+        return names_to_uid[stem]
+    if stem in wanted:
+        return stem
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +442,8 @@ REASON_PAGE_CHANGED = "page_changed_since_apply"
 REASON_PAGE_MISSING = "page_missing"
 REASON_PAGE_UNREADABLE = "page_unreadable"
 REASON_PRE_IMAGE_UNREADABLE = "pre_image_blob_unreadable"
+REASON_POST_HASH_MISSING = "apply_record_missing_post_hash"
+REASON_PRE_HASH_MISSING = "apply_record_missing_pre_hash"
 
 _REASON_EXPLANATIONS: dict[str, str] = {
     REASON_PAGE_CHANGED: (
@@ -372,6 +460,23 @@ _REASON_EXPLANATIONS: dict[str, str] = {
         "The page the apply wrote exists but could not be read, so whether "
         "it still matches the apply cannot be established."
     ),
+    REASON_POST_HASH_MISSING: (
+        "The apply record does not say what this page's content hash was "
+        "immediately after the apply, so there is no way to establish that "
+        "the page has not been edited since -- and a direct restore would "
+        "silently discard any edit there has been. Today's applier always "
+        "records it, so this means the ledger record is truncated or was "
+        "hand-edited."
+    ),
+    REASON_PRE_HASH_MISSING: (
+        "The apply record does not say what this page's content hash was "
+        "BEFORE the apply. The restore itself would work, but the undo "
+        "record could not pin the hash the planner compares against to "
+        "avoid re-drafting the same plan -- so the page would be recompiled "
+        "again on the next pass, unattended, with nothing reporting why. "
+        "Today's applier always records it, so this means the ledger record "
+        "is truncated or was hand-edited."
+    ),
     REASON_PRE_IMAGE_UNREADABLE: (
         "The page itself is untouched, but its pre-image is not readable "
         "from the knowledge store's git objects -- the apply records the "
@@ -379,7 +484,9 @@ _REASON_EXPLANATIONS: dict[str, str] = {
         "was never committed before the apply, so its earlier bytes were "
         "never stored) or does not hash back to the recorded id. There is "
         "no pre-image to restore or to diff against: use `git revert` of "
-        "the apply's own snapshot commit instead."
+        "the apply's own snapshot commit instead. The same reason covers a "
+        "pre-image whose bytes are not valid UTF-8, which this module will "
+        "not write back to a page it cannot read."
     ),
 }
 
@@ -551,7 +658,17 @@ def compute_undo(
             continue
         _, current_body = parse_frontmatter(current_text)
 
-        if post_hash and page_content_hash(current_body) != post_hash:
+        if not post_hash:
+            # A3: fail CLOSED. Without the post hash there is no way to
+            # establish the page is still what the apply wrote, and a
+            # restore would silently discard any later edit. Same
+            # hand-edited-ledger threat model as the scope check above.
+            blocked.append(
+                BlockedPage(uid=page_uid, path=str(path), reason=REASON_POST_HASH_MISSING)
+            )
+            continue
+
+        if page_content_hash(current_body) != post_hash:
             # AC3: write nothing, carry a diff. A created sub-page's
             # pre-image is the empty string by construction, so only a
             # MODIFIED page needs its blob read -- and when that blob is
@@ -583,6 +700,17 @@ def compute_undo(
             deletions.append(PageDeletion(uid=page_uid, path=path))
             continue
 
+        if not pre_hash:
+            # A4's sibling of the check above, failing closed for the same
+            # reason: the restore would work, but the undo record could not
+            # pin the hash the planner's AC6 skip compares against, so the
+            # page would be re-planned and re-applied on the next pass with
+            # nothing reporting why.
+            blocked.append(
+                BlockedPage(uid=page_uid, path=str(path), reason=REASON_PRE_HASH_MISSING)
+            )
+            continue
+
         blob = read_git_blob(knowledge_root, pre_blob)
         if blob is None:
             blocked.append(
@@ -594,18 +722,49 @@ def compute_undo(
                 )
             )
             continue
+        try:
+            pre_image_text = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            # A pre-image this module cannot decode is a pre-image it must
+            # not write back -- a lossy `errors="replace"` restore would
+            # corrupt the page it is supposed to be repairing. Routed to the
+            # same queue as an absent blob, which is what the contract
+            # ("unreadable pre-image -> write nothing, queue") already says.
+            blocked.append(
+                BlockedPage(
+                    uid=page_uid,
+                    path=str(path),
+                    reason=REASON_PRE_IMAGE_UNREADABLE,
+                    diff=f"(pre-image blob {pre_blob} is not valid UTF-8; "
+                    "it cannot be restored without corrupting the page)\n",
+                )
+            )
+            continue
         restores.append(
             PageRestore(
                 uid=page_uid,
                 path=path,
-                text=blob.decode("utf-8"),
+                text=pre_image_text,
                 pre_content_hash=pre_hash,
             )
         )
 
+    # uid -> filename for every created sub-page, so the scan can recognise
+    # the body link forms (which name the FILE) as well as the frontmatter
+    # ones (which name the uid). Read off the apply record, so a created
+    # page already deleted from disk is still matchable.
+    # Built with a plain loop, NOT a comprehension with a walrus: a walrus
+    # inside a comprehension binds in the ENCLOSING scope, which silently
+    # rebound this function's own `uid` (the parent's) to the last created
+    # sub-page's -- caught by the snapshot-subject and ledger-record tests.
+    created_filenames: dict[str, str] = {uid: "" for uid in created}
+    for row in _record_pages(record):
+        row_uid = str(row.get("uid") or "")
+        if row_uid in created_set:
+            created_filenames[row_uid] = Path(str(row.get("path") or "")).name
     inbound = find_inbound_links(
         Path(wiki_root),
-        created,
+        created_filenames,
         exclude=touched_paths | {d.path for d in deletions},
     )
 
@@ -859,6 +1018,8 @@ def write_undo(
 
 __all__ = [
     "REASON_ALREADY_UNDONE",
+    "REASON_POST_HASH_MISSING",
+    "REASON_PRE_HASH_MISSING",
     "REASON_NO_APPLY_RECORD",
     "REASON_PAGE_CHANGED",
     "REASON_PAGE_MISSING",

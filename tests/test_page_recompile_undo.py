@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from athenaeum.answers import parse_pending_questions
 from athenaeum.cli import main as cli_main
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.page_recompile import segment_page
@@ -50,6 +51,9 @@ from athenaeum.page_recompile_undo import (
     REASON_NO_APPLY_RECORD,
     REASON_PAGE_CHANGED,
     REASON_PAGE_MISSING,
+    REASON_PAGE_UNREADABLE,
+    REASON_POST_HASH_MISSING,
+    REASON_PRE_HASH_MISSING,
     REASON_PRE_IMAGE_UNREADABLE,
     UNDO_DIRECT,
     UNDO_QUEUED,
@@ -481,6 +485,27 @@ class TestAC3ChangedPageQueuesADiff:
     and raises a decision item carrying a diff of current against pre-image
     for each changed page."""
 
+    @staticmethod
+    def _rewrite_apply_row(wiki: Path, uid: str, **fields: str) -> None:
+        """Overwrite one field of one page row in the recorded apply record.
+
+        The ledger is append-only but plain text and hand-editable, which is
+        the threat model the fail-closed checks below exist for -- the same
+        one the scope check already assumes.
+        """
+        ledger = wiki / "_page_recompiles.jsonl"
+        out = []
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("kind") == "apply":
+                for row in record["pages"]:
+                    if row["uid"] == uid:
+                        row.update(fields)
+            out.append(json.dumps(record, sort_keys=True))
+        ledger.write_text("\n".join(out) + "\n", encoding="utf-8")
+
     def test_the_pre_image_blob_is_readable_after_the_applys_own_snapshot(
         self, wiki: Path
     ) -> None:
@@ -575,6 +600,11 @@ class TestAC3ChangedPageQueuesADiff:
         assert [b.uid for b in outcome.blocked] == ["page0001"]
         # Nothing written: the wiki is exactly as the human left it.
         assert _page_bytes(wiki) == after_edit
+        # The reported id is the one a reader of the pending store resolves,
+        # asserted by equality rather than truthiness.
+        parsed = parse_pending_questions(pending)
+        assert len(parsed) == 1
+        assert outcome.queued_item_id == parsed[0].id
         # The decision item carries a REAL diff against the pre-image.
         assert pending.is_file()
         text = pending.read_text(encoding="utf-8")
@@ -642,6 +672,92 @@ class TestAC3ChangedPageQueuesADiff:
         assert blob_id in text
         assert "git revert" in text
 
+    def test_a_non_utf8_pre_image_queues_instead_of_raising(self, wiki: Path) -> None:
+        """A2: the restore path decoded the blob with a bare
+        ``decode("utf-8")``, so a pre-image that is not valid UTF-8 raised
+        an uncaught ``UnicodeDecodeError`` -- including under ``--dry-run``
+        -- instead of honouring the module's own stated contract
+        ("unreadable pre-image -> write nothing, queue"). A lossy
+        ``errors="replace"`` restore would be worse: it would corrupt the
+        page undo is supposed to be repairing.
+        """
+        plan_id, _before, _snapshot = _applied(wiki)
+        # Put a real but undecodable blob in the store and point the ledger
+        # row at it, so the lookup SUCCEEDS and only the decode fails.
+        blob_path = wiki.parent / "raw-bytes.bin"
+        blob_path.write_bytes(b"---\nuid: page0001\n---\n\n\xff\xfe not utf-8\n")
+        bad_blob_id = _git(wiki.parent, "hash-object", "-w", str(blob_path))
+        blob_path.unlink()
+        assert read_git_blob(wiki.parent, bad_blob_id) is not None
+        self._rewrite_apply_row(wiki, "page0001", pre_blob_id=bad_blob_id)
+        after_apply = _page_bytes(wiki)
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None, dry_run=True)
+
+        assert outcome.action == UNDO_QUEUED
+        assert outcome.reason == REASON_PRE_IMAGE_UNREADABLE
+        assert "not valid UTF-8" in outcome.blocked[0].diff
+        assert _page_bytes(wiki) == after_apply
+
+    def test_an_unreadable_page_blocks_the_undo_with_its_own_reason(self, wiki: Path) -> None:
+        """B2: `REASON_PAGE_UNREADABLE` is reachable in production (a page
+        whose bytes do not decode, a mode-bit change, a broken symlink) and
+        had no test. Reproduced the portable way, with undecodable bytes."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        (wiki / "page0001.md").write_bytes(b"---\nuid: page0001\n---\n\n\xff\xfe\n")
+        pending = wiki / "_pending_questions.md"
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None, pending_path=pending)
+
+        assert outcome.action == UNDO_QUEUED
+        assert outcome.reason == REASON_PAGE_UNREADABLE
+        assert [b.uid for b in outcome.blocked] == ["page0001"]
+        assert REASON_PAGE_UNREADABLE in pending.read_text(encoding="utf-8")
+
+    def test_an_apply_row_with_no_post_hash_blocks_rather_than_restoring(
+        self, wiki: Path
+    ) -> None:
+        """A3: the change-check used to be `if post_hash and ...`, so an apply
+        row with no post hash made every page look unchanged -- undo
+        reported DIRECT and a later human edit did not survive. Fail closed
+        instead: no post hash means the page cannot be shown to be
+        unchanged."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        self._rewrite_apply_row(wiki, "page0001", post_content_hash="")
+        parent = wiki / "page0001.md"
+        meta, body = parse_frontmatter(parent.read_text(encoding="utf-8"))
+        human_edit = render_frontmatter(meta) + "\n" + body + "\nA later human edit.\n"
+        parent.write_text(human_edit, encoding="utf-8")
+
+        outcome = write_undo(
+            wiki, plan_id=plan_id, config=None, pending_path=wiki / "_pending_questions.md"
+        )
+
+        assert outcome.action == UNDO_QUEUED
+        assert outcome.reason == REASON_POST_HASH_MISSING
+        # The edit survives, which is the whole point.
+        assert parent.read_text(encoding="utf-8") == human_edit
+
+    def test_an_apply_row_with_no_pre_hash_blocks_rather_than_restoring(
+        self, wiki: Path
+    ) -> None:
+        """A4: without the pre-image hash the undo record cannot pin the
+        value the planner's AC6 skip compares against, so the page would be
+        re-planned and re-applied on the next unattended pass with nothing
+        reporting why. Refuse to write an undo record that cannot be
+        honoured."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        self._rewrite_apply_row(wiki, "page0001", pre_content_hash="")
+        after_apply = _page_bytes(wiki)
+
+        outcome = write_undo(
+            wiki, plan_id=plan_id, config=None, pending_path=wiki / "_pending_questions.md"
+        )
+
+        assert outcome.action == UNDO_QUEUED
+        assert outcome.reason == REASON_PRE_HASH_MISSING
+        assert _page_bytes(wiki) == after_apply
+
     def test_no_apply_record_is_refused_not_queued(self, wiki: Path) -> None:
         wiki.mkdir(parents=True)
         outcome = write_undo(wiki, plan_id="nosuchplan", config=None)
@@ -693,6 +809,179 @@ class TestAC4RefusedWhenALaterPageLinksToACreatedSubPage:
         assert outcome.inbound_link_count == 3
         assert {link.kind for link in outcome.inbound_links} == {"wikilink", "related-row"}
 
+    def test_a_markdown_inline_link_from_a_later_page_refuses_with_a_count(
+        self, wiki: Path
+    ) -> None:
+        """The link form the real corpus overwhelmingly uses: a census of all
+        26,649 live wiki pages found 167 markdown links resolving to a real
+        page file against 8 uid-form wikilinks. A scan that saw only
+        wikilinks refused almost nothing and deleted pages other pages still
+        pointed at -- the exact harm AC4 exists to prevent."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        created_name = Path(
+            next(r["path"] for r in record["pages"] if r["uid"] == created_uid)
+        ).name
+        assert created_name.startswith(created_uid) and created_name.endswith(".md")
+        _write_page(
+            wiki,
+            uid="later001",
+            name="Later Page",
+            body=f"- [Acme Pricing]({created_name})\n",
+        )
+        after_link = _page_bytes(wiki)
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_REFUSED, (outcome.reason, outcome.action)
+        assert outcome.reason == "created_sub_page_has_inbound_links"
+        assert outcome.inbound_link_count == 1
+        assert outcome.inbound_links[0].kind == "markdown-link"
+        assert outcome.inbound_links[0].uid == created_uid
+        # Nothing was written, so the link does not dangle.
+        assert _page_bytes(wiki) == after_link
+        assert (wiki / created_name).is_file()
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "- [Label]({name})\n",
+            "- [Label](./{name})\n",
+            "- [Label]({name}#a-heading)\n",
+            "- [Label](<{name}>)\n",
+            "- **Name** ([{uid}]({name}))\n",
+        ],
+    )
+    def test_every_markdown_link_spelling_is_counted(self, wiki: Path, template: str) -> None:
+        """The shapes a hand-written or generated link actually uses. The last
+        one is a real corpus sample whose LABEL is a bare uid."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        created_name = Path(
+            next(r["path"] for r in record["pages"] if r["uid"] == created_uid)
+        ).name
+        _write_page(
+            wiki,
+            uid="later001",
+            name="Later",
+            body=template.format(name=created_name, uid=created_uid),
+        )
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_REFUSED, (outcome.reason, template)
+        assert outcome.inbound_link_count >= 1
+
+    def test_an_unrelated_markdown_link_is_not_counted(self, wiki: Path) -> None:
+        """The negative control: a markdown link to some OTHER page, and an
+        absolute URL, must not refuse the undo."""
+        plan_id, before, _snapshot = _applied(wiki)
+        _write_page(
+            wiki,
+            uid="later001",
+            name="Later",
+            body="See [something else](99999999-other-page.md) and "
+            "[the web](https://example.com/page.md).\n",
+        )
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
+        assert outcome.inbound_link_count == 0
+        assert _page_bytes(wiki)["page0001.md"] == before["page0001.md"]
+
+    def test_both_shapes_of_one_parent_relation_count_once(self, wiki: Path) -> None:
+        """AC4 asks undo to name the COUNT, so an inflated count is a wrong
+        answer. A page carrying the new-shape `parent:` key AND the legacy
+        `split-from` row for the SAME parent holds ONE relation --
+        `read_relations` normalises them to one -- so it is one reference,
+        not two."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        _write_page(
+            wiki,
+            uid="later001",
+            name="Later Page",
+            body="No body link at all.\n",
+            parent=created_uid,
+            related=[{"uid": created_uid, "role": "split-from"}],
+        )
+        # The control: both shapes really are present, and the ONE reader of
+        # this relation reports a single parent.
+        meta, _ = parse_frontmatter((wiki / "later001.md").read_text(encoding="utf-8"))
+        assert meta["parent"] == created_uid
+        assert meta["related"][0]["role"] == "split-from"
+        relations = read_relations(meta)
+        assert relations.parent is not None and relations.parent.uid == created_uid
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_REFUSED
+        assert outcome.inbound_link_count == 1
+        assert [link.kind for link in outcome.inbound_links] == ["parent-key"]
+
+    def test_a_genuinely_distinct_row_and_body_link_both_count(self, wiki: Path) -> None:
+        """The other side of the de-duplication: a `see-also` row and a body
+        link are two different references, not two spellings of one."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        created_name = Path(
+            next(r["path"] for r in record["pages"] if r["uid"] == created_uid)
+        ).name
+        _write_page(
+            wiki,
+            uid="later001",
+            name="Later",
+            body=f"- [Pricing]({created_name})\n",
+            related=[{"uid": created_uid, "role": "see-also"}],
+        )
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_REFUSED
+        assert outcome.inbound_link_count == 2
+        assert {link.kind for link in outcome.inbound_links} == {
+            "related-row",
+            "markdown-link",
+        }
+
+    def test_an_inbound_link_refuses_even_when_a_page_also_changed(
+        self, wiki: Path
+    ) -> None:
+        """Both blockers at once, which pins the ORDER the module documents.
+        A queued "undo anyway?" would ask a human a question whose
+        yes-answer cannot be carried out, because the link refusal stands
+        regardless of how they answer the diff."""
+        plan_id, _before, _snapshot = _applied(wiki)
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        created_uid = record["created_uids"][0]
+        created_name = Path(
+            next(r["path"] for r in record["pages"] if r["uid"] == created_uid)
+        ).name
+        _write_page(wiki, uid="later001", name="Later", body=f"[P]({created_name})\n")
+        parent = wiki / "page0001.md"
+        meta, body = parse_frontmatter(parent.read_text(encoding="utf-8"))
+        parent.write_text(render_frontmatter(meta) + "\n" + body + "\nEdited.\n", encoding="utf-8")
+        pending = wiki / "_pending_questions.md"
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None, pending_path=pending)
+
+        assert outcome.action == UNDO_REFUSED
+        assert outcome.reason == "created_sub_page_has_inbound_links"
+        assert outcome.inbound_link_count == 1
+        assert not pending.exists(), (
+            "a refusal that cannot be adjudicated must not be queued as a question"
+        )
+
     def test_a_parent_key_on_a_later_page_counts_too(self, wiki: Path) -> None:
         """Not only wikilinks: a later page that adopts a created sub-page as
         its own parent is just as broken by deleting it."""
@@ -714,11 +1003,25 @@ class TestAC4RefusedWhenALaterPageLinksToACreatedSubPage:
         assert outcome.inbound_link_count == 1
         assert outcome.inbound_links[0].kind == "parent-key"
 
-    def test_an_apply_that_created_nothing_has_no_links_to_scan(self, wiki: Path) -> None:
+    def test_an_apply_that_created_nothing_has_no_links_to_scan(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The scan short-circuits on an empty created set rather than
-        walking the corpus to find nothing."""
+        walking the corpus to find nothing.
+
+        Pinned by making the corpus walk itself fail: with the short-circuit
+        in place the walk is never reached, so removing it turns this test
+        red instead of leaving it passing for the wrong reason.
+        """
+        import athenaeum.page_recompile_undo as undo_mod
+
         _plan_id, _before, _snapshot = _applied(wiki)
-        assert find_inbound_links(wiki, [], exclude=set()) == ()
+
+        def _must_not_be_called(_root: Path) -> list[Path]:
+            raise AssertionError("the corpus walk ran for an empty created set")
+
+        monkeypatch.setattr(undo_mod, "_discover_wiki_pages", _must_not_be_called)
+        assert find_inbound_links(wiki, {}, exclude=set()) == ()
 
     def test_the_parents_own_links_to_its_children_are_not_counted(self, wiki: Path) -> None:
         """The control: the recompiled parent links to every sub-page it
@@ -1015,7 +1318,14 @@ class TestAC7DryRunReportsAndWritesNothing:
         assert payload["action"] == UNDO_QUEUED
         assert payload["blocked"][0]["uid"] == "page0001"
         assert "+Edited." in payload["blocked"][0]["diff"]
-        assert payload["queued_item_id"]
+        # EQUALITY against the id a reader of the pending store would use,
+        # not truthiness: a truthiness assert passes for any non-empty
+        # string, including a wrong one, and the whole point of reporting
+        # this field is that an operator can go find the item by it.
+        parsed = parse_pending_questions(wiki / "_pending_questions.md")
+        assert len(parsed) == 1
+        assert payload["queued_item_id"] == parsed[0].id
+        assert parsed[0].id
 
     def test_the_cli_reports_a_missing_wiki_root(self, tmp_path: Path) -> None:
         rc = cli_main(["recompile", "undo", "anything", "--path", str(tmp_path / "nope")])
