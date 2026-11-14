@@ -531,8 +531,9 @@ class TestIsHiddenSplitChild:
     and a page with no parent at all is never hidden."""
 
     def test_legacy_split_from_row_is_hidden(self) -> None:
-        # The REAL shape `tiers.py:_build_split_child_pages` writes: only
-        # the legacy `split-from` row, no top-level `parent:` key.
+        # The REAL shape the now-retired `tiers.py:_build_split_child_pages`
+        # used to write (deleted by issue athenaeum#2550): only the legacy
+        # `split-from` row, no top-level `parent:` key.
         meta, _body = parse_frontmatter(
             _page(
                 uid="child-split",

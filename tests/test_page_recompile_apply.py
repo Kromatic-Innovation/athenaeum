@@ -1262,3 +1262,112 @@ class TestAC11MergeNearDuplicatesKnob:
         units = {u.unit_id: u for u in segment_page(body).units}
         assert units[ids[1]].text in sub_body
         assert units[ids[2]].text in sub_body
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2550 AC6: applying a plan archives any open
+# oversize-family notice for that page -- unless the notice still carries
+# a parked observation, which must stay open.
+# ---------------------------------------------------------------------------
+
+
+def _write_pending_block(wiki: Path, block: str) -> Path:
+    pending = wiki / "_pending_questions.md"
+    pending.write_text("# Pending Questions\n\n" + block + "\n", encoding="utf-8")
+    return pending
+
+
+class TestOversizeNoticeArchivedOnApply:
+    def _oversize_block(self, entity: str, *, conflict_type: str = "oversize_page") -> str:
+        return (
+            f'## [2026-09-01] Entity: "{entity}" (from sessions/one.md)\n'
+            "- [ ] over threshold?\n\n"
+            f"**Conflict type**: {conflict_type}\n"
+            "**Description**: over threshold, ref=sessions/one.md\n"
+        )
+
+    def test_applying_a_plan_archives_the_open_notice_for_that_page(
+        self, wiki: Path
+    ) -> None:
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(wiki, self._oversize_block("Acme"))
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        after_pending = pending.read_text(encoding="utf-8")
+        assert "oversize_page" not in after_pending
+        archive = wiki / "_pending_questions_archive.md"
+        assert archive.exists()
+        archive_text = archive.read_text(encoding="utf-8")
+        assert "oversize_page" in archive_text
+        assert outcome.plan_id in archive_text  # reason names the plan id
+        assert "athenaeum#2550" in archive_text
+
+    @pytest.mark.parametrize("conflict_type", ["oversize_split", "oversize_log_demote"])
+    def test_archives_oversize_split_and_log_demote_too(
+        self, wiki: Path, conflict_type: str
+    ) -> None:
+        """The dedup FAMILY (:data:`athenaeum.tiers.OVERSIZE_ESCALATION_CONFLICT_TYPES`),
+        not just ``oversize_page`` -- an entity could carry any one of the
+        three depending on which disposition last fired for it (or, for
+        ``oversize_split``, a block left over from before that
+        disposition's own retirement)."""
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(
+            wiki, self._oversize_block("Acme", conflict_type=conflict_type)
+        )
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True, conflict_type
+        assert conflict_type not in pending.read_text(encoding="utf-8")
+
+    def test_notice_for_a_different_page_is_left_alone(self, wiki: Path) -> None:
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        pending = _write_pending_block(wiki, self._oversize_block("Some Other Page"))
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert "Some Other Page" in pending.read_text(encoding="utf-8")
+        assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def test_notice_with_a_parked_observation_stays_open(self, wiki: Path) -> None:
+        """AC6's negative case: a notice that still carries a parked
+        observation is left OPEN -- that text was never merged anywhere,
+        so archiving the notice would be the only place it was held."""
+        from athenaeum.answers import render_observation_field
+
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+        block = (
+            '## [2026-09-01] Entity: "Acme" (from sessions/one.md)\n'
+            "- [ ] over threshold?\n\n"
+            "**Conflict type**: oversize_page\n"
+            "**Description**: over threshold, ref=sessions/one.md\n"
+            f"{render_observation_field('A fact that was never merged anywhere.')}\n"
+        )
+        pending = _write_pending_block(wiki, block)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        after_pending = pending.read_text(encoding="utf-8")
+        assert "oversize_page" in after_pending  # still open
+        assert "A fact that was never merged anywhere." in after_pending
+        assert not (wiki / "_pending_questions_archive.md").exists()
+
+    def test_no_pending_file_is_a_silent_noop(self, wiki: Path) -> None:
+        """No ``_pending_questions.md`` at all must not block or alter the
+        apply -- the hook is additive, never a precondition."""
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY)
+        _simple_plan(wiki)
+
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+
+        assert outcome.ok is True
+        assert not (wiki / "_pending_questions_archive.md").exists()

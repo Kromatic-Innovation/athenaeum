@@ -307,8 +307,9 @@ class TestSplitChildrenExcludedFromCounts:
         (wiki / "_schema").mkdir()
         (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| company |\n")
         _write_page(wiki, "parent.md", uid="company-acme", page_type="company", name="Acme")
-        # Real shape `tiers.py:_build_split_child_pages` writes: only the
-        # legacy `split-from` row, no top-level `parent:` key.
+        # Real shape the now-retired `tiers.py:_build_split_child_pages`
+        # used to write (deleted by issue athenaeum#2550): only the legacy
+        # `split-from` row, no top-level `parent:` key.
         _write_page(
             wiki,
             "split.md",

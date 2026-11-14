@@ -331,6 +331,26 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
                 reason,
             )
 
+    # Issue athenaeum#2550: `librarian.oversize_page_action: split` is
+    # deprecated, not removed outright like `_REMOVED_CONFIG_KEYS` above --
+    # the KEY is still read (`resolve_oversize_page_action`), only this one
+    # VALUE is retired, mapped to "review" there. Warned exactly once per
+    # run, here, because `load_config` itself runs exactly once per run;
+    # `resolve_oversize_page_action` is called once per oversized page and
+    # would warn once per page if it warned at all.
+    librarian_cfg = result.get("librarian")
+    if (
+        isinstance(librarian_cfg, dict)
+        and librarian_cfg.get("oversize_page_action") == "split"
+    ):
+        logger.warning(
+            "librarian.oversize_page_action: split in %s is deprecated (issue "
+            "athenaeum#2550) and is read as 'review' -- the reactive split "
+            "disposition is retired in favour of the unattended "
+            "librarian.page_recompile pipeline; see librarian.page_recompile.mode.",
+            config_path,
+        )
+
     return result
 
 
@@ -4573,23 +4593,30 @@ def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> i
     return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 
 
-#: Issue athenaeum#2078 AC3: the body size above which ``athenaeum
-#: split-oversize --auto`` splits a page WITHOUT per-page operator approval.
-#: Four times :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`: a page this far past
-#: the 10,000-char invariant has outgrown any plausible atomic form, whereas
-#: one just over it is a judgement call the operator approves by uid.
+#: Issue athenaeum#2078 AC3: the body size above which a page-recompile
+#: candidate is treated as most urgent -- ordered first
+#: (:func:`athenaeum.page_recompile._candidate_sort_key`) and, while any
+#: candidate remains over this ceiling, given the larger
+#: ``opening_max_pages_per_run`` nightly budget instead of the steady-state
+#: ``max_pages_per_run`` one (:func:`athenaeum.page_recompile_nightly.page_budget`,
+#: issue athenaeum#2525's operator ruling). Originally the threshold
+#: ``athenaeum split-oversize --auto`` (retired by issue athenaeum#2550)
+#: split past WITHOUT per-page operator approval -- this knob outlived
+#: that command. Four times :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`: a
+#: page this far past the 10,000-char invariant has outgrown any plausible
+#: atomic form, whereas one just over it is a judgement call.
 DEFAULT_OVERSIZE_HARD_CEILING_CHARS = 40_000
 
 
 def resolve_oversize_hard_ceiling_chars(config: dict[str, Any] | None = None) -> int:
     """Resolve ``librarian.oversize_hard_ceiling_chars`` (issue athenaeum#2078).
 
-    The body size above which ``athenaeum split-oversize --auto`` splits a
-    page without per-page approval; pages between the page-size threshold and
-    this ceiling are split only when the operator names them with ``--uid``.
-    Same validation contract as :func:`resolve_page_size_threshold_chars`:
-    must be ``>= 1`` (bool rejected as an int subclass); anything else falls
-    back to :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+    The body size above which a page-recompile candidate is treated as
+    most urgent -- see :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`'s own
+    comment for the current consumers. Same validation contract as
+    :func:`resolve_page_size_threshold_chars`: must be ``>= 1`` (bool
+    rejected as an int subclass); anything else falls back to
+    :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")

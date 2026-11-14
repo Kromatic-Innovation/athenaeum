@@ -12,6 +12,7 @@ from pathlib import Path
 from athenaeum.models import render_frontmatter
 from athenaeum.page_recompile import (
     _pack_at_boundaries,
+    _split_into_atomic_sections,
     check_conservation,
     check_marker_resolution,
     find_recompile_candidates,
@@ -232,7 +233,8 @@ class TestSegmentPageAC4:
 
 
 # ---------------------------------------------------------------------------
-# AC5: title detection reuses tiers._split_into_atomic_sections.
+# AC5: title detection, via this module's own _split_into_atomic_sections
+# (relocated here from tiers.py by issue athenaeum#2550).
 # ---------------------------------------------------------------------------
 
 
@@ -256,6 +258,30 @@ class TestSegmentPageAC5TitleDetection:
         # sixth, same-named group of its own.
         assert not any(u.heading_path == ("Name",) for u in result.units)
         assert any(u.heading_path == () for u in result.units)
+
+    def test_trailing_lone_shallow_heading_stays_its_own_section(self) -> None:
+        """Review finding on athenaeum#2524's PR (test relocated from
+        ``tests/test_page_size_gate.py`` by issue athenaeum#2550, along
+        with the function it covers): a lone heading at the shallowest
+        depth that comes AFTER deeper headings (e.g. ``## Section A``,
+        ``## Section B``, then a trailing ``# Appendix``) does NOT span
+        the whole body, so it must NOT be treated as a title -- it stays
+        an ordinary section boundary, and its text must not be swallowed
+        into the preceding ``## Section B`` child."""
+        body = (
+            "## Section A\n\nDetail A.\n\n"
+            "## Section B\n\nDetail B.\n\n"
+            "# Appendix\n\nAppendix detail.\n"
+        )
+        sections = _split_into_atomic_sections(body)
+        headings = [heading for heading, _ in sections]
+        assert headings == ["Section A", "Section B", "Appendix"]
+
+        section_b_text = next(text for heading, text in sections if heading == "Section B")
+        appendix_text = next(text for heading, text in sections if heading == "Appendix")
+        assert "Appendix detail." not in section_b_text
+        assert "Appendix detail." in appendix_text
+        assert "Detail B." not in appendix_text
 
 
 # ---------------------------------------------------------------------------

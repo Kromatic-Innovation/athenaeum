@@ -13,7 +13,10 @@ units. Assignment and the move itself are later slices' jobs.
 **Why a new scan rather than `oversize_split.find_split_candidates`.**
 Verified by reading that function and one dry run of `athenaeum
 split-oversize` (which listed more candidates than outcomes) at deploy
-0.23.5. Two gaps, both fixed here:
+0.23.5, back when both still existed -- issue athenaeum#2550 later retired
+`oversize_split.py` and `athenaeum split-oversize` outright, once this
+module's own `athenaeum recompile` surface had superseded them. Two gaps
+this scan fixed relative to that retired one:
 
 1. No active-page filter -- a tombstoned/retired/superseded page could
    resurface as a phantom candidate. Fixed by excluding every page
@@ -21,37 +24,37 @@ split-oversize` (which listed more candidates than outcomes) at deploy
    inactive, the SAME composite predicate athenaeum#2535 already uses to
    refuse a parent attach onto exactly those three states -- not a fresh
    tombstone/retired/superseded check (see that function's own docstring).
-2. `split_pages` drops a candidate with no uid through its `if c.uid`
-   dict-build filter, so a blocked page disappears from the report
+2. `split_pages` dropped a candidate with no uid through its `if c.uid`
+   dict-build filter, so a blocked page disappeared from the report
    entirely. Fixed by routing every page the pass cannot act on (no uid,
    unreadable, or frontmatter that does not parse to a mapping) into a
    named `blocked` bucket instead of a silent `continue`.
 
-`oversize_split.py` itself is left untouched by this slice (its retirement
-is a later one); this module imports its `NEEDS_SPLIT_KEY` constant rather
-than redefining the same frontmatter key under a second name.
+`NEEDS_SPLIT_KEY` (the frontmatter flag :func:`athenaeum.tiers.
+check_page_size_gate` sets) was originally imported from
+`oversize_split.py`; it is defined locally in this module now that
+`oversize_split.py` is gone and this is the key's only reader.
 
-**Title detection (AC5) reuses, not duplicates.** The segmenter's heading
-grouping is :func:`athenaeum.tiers._split_into_atomic_sections` verbatim --
-including the athenaeum#2524 fix that treats a lone top-level heading
-spanning the whole body as a page TITLE (folded into the leading no-heading
-group) rather than a one-child split group. Imported function-local inside
-:func:`segment_page`, mirroring `oversize_split.py`'s own deferred import of
-the same `tiers.py` symbol, so merely importing this module never pays
-`tiers.py`'s own (unrelated, LLM-chain) import weight.
+**Title detection (AC5).** The segmenter's heading grouping is
+:func:`_split_into_atomic_sections` in this module -- including the
+athenaeum#2524 fix that treats a lone top-level heading spanning the whole
+body as a page TITLE (folded into the leading no-heading group) rather
+than a one-child split group. That function (and the
+`_SECTION_HEADING_RE` pattern it matches on) used to live in
+:mod:`athenaeum.tiers`, shared with the reactive split path
+`check_page_size_gate` drove; issue athenaeum#2550 retired that path and
+relocated the function here, to its only remaining caller.
 
-Layering: L4 domain/pipeline, same layer as :mod:`athenaeum.oversize_split`
-and :mod:`athenaeum.page_decompose` (its nearest sibling in shape: a
-read-mostly, dry-run-shaped maintenance pass over the wiki tree). Imports
-:mod:`athenaeum.config` (L2), :mod:`athenaeum.footnote_markers` and
-:mod:`athenaeum.models` (both L1), and :mod:`athenaeum.page_relations` (L3)
-at module scope -- all at or below this module's own L4, so none of these
-edges needs an :data:`tests.test_layer_boundary.ALLOWED_UPWARD_EDGES`
-entry. The one same-layer edge (:mod:`athenaeum.oversize_split`, also L4,
-for its `NEEDS_SPLIT_KEY` constant only) is permitted by that same guard
-(an importer's layer must be `>=`, not `>`, the imported module's layer).
-:mod:`athenaeum.tiers` (also L4) is imported function-local inside
-:func:`segment_page` only, for the reason stated above.
+Layering: L4 domain/pipeline, same layer as :mod:`athenaeum.page_decompose`
+(its nearest sibling in shape: a read-mostly, dry-run-shaped maintenance
+pass over the wiki tree). Imports :mod:`athenaeum.config` (L2),
+:mod:`athenaeum.footnote_markers` and :mod:`athenaeum.models` (both L1),
+and :mod:`athenaeum.page_relations` (L3) at module scope -- all at or below
+this module's own L4, so none of these edges needs an
+:data:`tests.test_layer_boundary.ALLOWED_UPWARD_EDGES` entry. Since issue
+athenaeum#2550 relocated `_split_into_atomic_sections` here (and inlined
+`NEEDS_SPLIT_KEY` locally, above), this module imports nothing at all from
+:mod:`athenaeum.tiers` -- not even function-local.
 """
 
 from __future__ import annotations
@@ -76,8 +79,15 @@ from athenaeum.footnote_markers import (
     parse_footnote_definitions,
 )
 from athenaeum.models import parse_frontmatter, validity_bound_str
-from athenaeum.oversize_split import NEEDS_SPLIT_KEY
 from athenaeum.page_relations import is_inactive_relation_target
+
+#: Frontmatter key :func:`athenaeum.tiers.check_page_size_gate` sets on a
+#: page it let a merge into while over the page-size threshold. Formerly
+#: imported from :mod:`athenaeum.oversize_split` (retired by issue
+#: athenaeum#2550, along with the CLI pass that read it); this module is
+#: now the key's only reader, so it is defined locally rather than kept
+#: alive in a deleted module just to be re-exported.
+NEEDS_SPLIT_KEY = "needs_split"
 
 # ---------------------------------------------------------------------------
 # AC1 / AC2 / AC3: candidate scan.
@@ -177,10 +187,11 @@ def _candidate_sort_key(candidate: RecompileCandidate) -> tuple[int, int, int]:
     travels with the code that enforces it (the AC requires this, not just a
     docstring elsewhere):
 
-    1. Over the hard ceiling first -- a ceiling page already breaches the
-       write-time merge gate (:mod:`athenaeum.oversize_split`'s own ``--auto``
-       threshold), so it is the most urgent regardless of how it compares in
-       size or recency to a merely-flagged candidate.
+    1. Over the hard ceiling first -- a ceiling page already breaches
+       ``librarian.oversize_hard_ceiling_chars`` (the same knob the now-
+       retired ``athenaeum split-oversize --auto`` used to read), so it is
+       the most urgent regardless of how it compares in size or recency to
+       a merely-flagged candidate.
     2. Then most recently ``updated`` -- a page someone is actively editing
        is both more likely to grow past the threshold again and more likely
        to still be in a human's or an agent's working set right now.
@@ -275,7 +286,7 @@ def find_recompile_candidates(
     """Active pages over ``librarian.page_size_threshold_chars`` or flagged
     ``needs_split: true`` (issue athenaeum#2534 AC1), ordered per
     :func:`_candidate_sort_key` (AC3). See the module docstring for the two
-    gaps this closes relative to :func:`athenaeum.oversize_split.find_split_candidates`.
+    gaps this closed relative to the retired ``oversize_split.find_split_candidates``.
 
     The walk itself lives here; the per-page predicates live in
     :func:`classify_page_text` above, so a caller already holding a page's
@@ -417,21 +428,94 @@ def _pack_at_boundaries(text: str, cap: int) -> list[str]:
     return chunks
 
 
+#: Same heading-match SHAPE :data:`athenaeum.tiers._SECTION_HEADING_RE`
+#: uses, duplicated here deliberately (issue athenaeum#2550): this module's
+#: own docstring documents importing nothing from :mod:`athenaeum.tiers`'s
+#: own (heavier, LLM-chain-adjacent) import graph as a load-bearing
+#: property, and after this retirement :func:`_split_into_atomic_sections`
+#: below is the symbol's only remaining caller anywhere -- there is no
+#: longer a "reuse, not a second copy" relationship to preserve by
+#: importing the regex across that edge too.
+_SECTION_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$", re.MULTILINE)
+
+
+def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
+    """Split *body* into ``(heading_text, section_text)`` pairs at its
+    TOP-LEVEL markdown heading depth (issue athenaeum#1248, relocated here
+    from :mod:`athenaeum.tiers` by issue athenaeum#2550 once
+    :func:`segment_page` below became its only caller) -- the shallowest
+    ``#``-count actually present in the body, e.g. every ``##`` if the page
+    has no ``#``. A deeper heading (a ``###`` under a ``##``) is a
+    SUBSECTION and stays folded into its enclosing top-level section's text
+    verbatim, so a page using nested heading structure splits into one
+    atomic group per top-level section, not one per subsection too.
+
+    A body with no heading at all returns ``[]`` -- :func:`segment_page`
+    treats this the same as any other heading-less body (one leaf group
+    covering the whole thing), not as an error.
+
+    The presumptive top level is the FIRST heading's own depth, not the
+    shallowest depth occurring anywhere in the body. A boundary match is
+    any heading AT OR SHALLOWER than that depth (``<=``, not ``==``) --
+    so a heading that is merely shallower than the first one but appears
+    LATER (e.g. a trailing ``# Appendix`` after ``## Section A`` / ``##
+    Section B``) is still an ordinary section boundary, not grounds to
+    re-derive the top level from it; it does not get swallowed into the
+    preceding section's text (issue athenaeum#2524's review finding on
+    this exact shape).
+
+    Issue athenaeum#2524: when there is exactly ONE such boundary match,
+    it can only be the first heading itself (every boundary match is, by
+    construction, at or shallower than the first heading's own depth, and
+    the first heading always qualifies) -- i.e. it genuinely spans the
+    whole body. That is a page TITLE (e.g. a lone ``# <Name>`` carrying
+    the whole body), not a section to split on -- it has nothing to be
+    split *from* at its own depth. In that case the split depth moves one
+    level down, to the shallowest depth actually present BENEATH that
+    lone heading, so a ``# Name`` page whose real structure lives under
+    ``##`` splits on the ``##`` headings instead of yielding one child
+    holding the entire body. The lone title heading and any text
+    before/after it at that depth folds into the leading ``("",
+    preamble_text)`` pair like any other pre-heading content, same as any
+    other pre-heading content. If nothing is nested beneath the lone
+    heading, the depth is left alone -- a single resulting group is not
+    this function's concern; it is purely a splitter, and leaves what to
+    do with a single group to its caller.
+    """
+    matches = list(_SECTION_HEADING_RE.finditer(body))
+    if not matches:
+        return []
+    top_level = len(matches[0].group(1))
+    top_matches = [m for m in matches if len(m.group(1)) <= top_level]
+    if len(top_matches) == 1:
+        deeper = [m for m in matches if len(m.group(1)) > top_level]
+        if deeper:
+            top_level = min(len(m.group(1)) for m in deeper)
+            top_matches = [m for m in deeper if len(m.group(1)) == top_level]
+    sections: list[tuple[str, str]] = []
+    if top_matches[0].start() > 0:
+        sections.append(("", body[: top_matches[0].start()]))
+    for i, m in enumerate(top_matches):
+        end = top_matches[i + 1].start() if i + 1 < len(top_matches) else len(body)
+        sections.append((m.group(2).strip(), body[m.start() : end]))
+    return sections
+
+
 def segment_page(body: str) -> SegmentResult:
     """Cut *body* into ordered, addressable :class:`Unit` objects plus the
     trailing footnote-definitions block (issue athenaeum#2534 AC4/AC5/AC6).
 
-    Heading grouping reuses :func:`athenaeum.tiers._split_into_atomic_sections`
-    verbatim (AC5) -- see the module docstring for why this is a reuse, not a
-    second copy. A leaf group over :data:`UNIT_CAP_CHARS` is cut into
+    Heading grouping is :func:`_split_into_atomic_sections` above (AC5) --
+    moved into this module by issue athenaeum#2550 once this function
+    became its only caller (the reactive split path in
+    :mod:`athenaeum.tiers` that used to share it was retired by that same
+    issue). A leaf group over :data:`UNIT_CAP_CHARS` is cut into
     multiple units at paragraph/list-item boundaries (AC6,
     :func:`_pack_at_boundaries`); every unit's ``footnote_labels`` is the
     inline ``[^label]`` markers its own text cites
     (:data:`athenaeum.footnote_markers.INLINE_MARKER_RE`), in order of first
     appearance.
     """
-    from athenaeum.tiers import _split_into_atomic_sections
-
     prose, footnote_block = _split_footnote_block(body)
     sections = _split_into_atomic_sections(prose) or [("", prose)]
 

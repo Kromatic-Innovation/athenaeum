@@ -58,8 +58,9 @@ Issue athenaeum#2536's page-recompile backlog reads
 layer as this one, which ``tests/test_layer_boundary.py`` permits (an
 importer's layer must be ``>=``, not ``>``, the imported module's), and it
 imports nothing that reaches back here -- its own closure is
-``config``/``models``/``footnote_markers``/``page_relations``/``oversize_split``,
-none of which import ``status``, ``librarian`` or ``drain`` -- so the
+``config``/``models``/``footnote_markers``/``page_relations`` (``oversize_split``
+was retired by issue athenaeum#2550; ``page_recompile`` no longer imports
+it), none of which import ``status``, ``librarian`` or ``drain`` -- so the
 dissolved ``{librarian, drain, status}`` cycle described above stays
 dissolved. Pinned by ``tests/test_import_graph_acyclic.py``'s ``[]``
 baseline.
