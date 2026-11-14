@@ -34,7 +34,7 @@ the README steps.
 ## Steps (repeatable)
 
 ```bash
-docker run -d --name clean --user node -e HOME=/home/node \
+docker run -d --name clean --user node \
   -e CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" node:22-bookworm sleep 3600
 # inside the container:
 npm config set prefix ~/.npm-global; export PATH=~/.npm-global/bin:~/.local/bin:$PATH
