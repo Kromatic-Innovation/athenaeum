@@ -5176,6 +5176,45 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
+### `resolve_serve_audit_log`
+
+- **YAML path:** `serve.audit_log`
+- **Environment variable:** `ATHENAEUM_SERVE_AUDIT_LOG`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve an explicit per-call remote-audit-log path override.
+
+Returns the operator's override, or ``None`` to take the default --
+``<cache_dir>/remote-audit.jsonl`` (see
+`athenaeum.audit_log.default_audit_log_path`). This resolver only
+ever returns an explicit override or ``None``; folding ``None`` with the
+resolved cache directory is `athenaeum.audit_log.resolve_audit_log_file`'s
+job, the same split `resolve_spend_ledger_path` /
+`athenaeum.spend.resolve_ledger_path` already use for the spend
+ledger, because the cache directory itself is not known inside this
+module's resolvers.
+
+One JSON line is appended per remote tool call -- a UTC timestamp, the
+verified caller's identity, the tool name, a digest of its arguments
+(never the argument text), the outcome, and which page uids came back
+(never page text). Only written under ``--transport http`` with
+``serve.auth.*`` configured; stdio and an unauthenticated HTTP server
+write nothing here, as there is no verified caller to attribute a line
+to. See ``docs/guides/remote.md``.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` -- the ``athenaeum serve --audit-log`` flag.
+- ``ATHENAEUM_SERVE_AUDIT_LOG`` -- env var.
+- ``serve.audit_log`` -- yaml string.
+- ``None`` -- the default location under the cache directory.
+
+An empty string at any tier means "use the default", matching
+`resolve_serve_profile`'s empty-means-unset convention, rather than
+resolving to a literal empty path.
+
 ### `resolve_serve_auth_allowed_identities`
 
 - **YAML path:** `serve.auth.allowed_identities`

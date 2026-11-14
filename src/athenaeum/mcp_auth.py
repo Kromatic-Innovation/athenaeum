@@ -51,6 +51,8 @@ dependency stays optional for every non-serve code path.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.auth import RemoteAuthProvider
@@ -73,11 +75,44 @@ class _IdentityAllowlistVerifier(JWTVerifier):
     it is handed, and FastMCP's JWKS cache, refresh lock and claim extraction
     are all behaviour worth inheriting rather than re-deriving. The override
     is three lines on top of the library's result.
+
+    *audit_log_path* (issue athenaeum#2603) is this process's resolved
+    ``serve.audit_log`` location, or ``None`` when no audit record should be
+    written (every caller outside ``create_server``'s HTTP+auth wiring).
+    When set, a refusal from EITHER branch below -- a token that fails
+    ``JWTVerifier``'s own signature/issuer/audience/expiry checks, or a
+    verified token whose identity is not on the allowlist -- appends one
+    ``outcome: "refused"`` line. This is the ONE place either refusal can be
+    attributed at all: both happen before any tool is named, strictly
+    upstream of ``mcp_server._guarded`` (the dispatch point
+    ``docs/guides/remote.md`` and this module's own audit-log wiring
+    otherwise rely on exclusively), so there is no tool-name field to
+    populate and none is written.
     """
 
-    def __init__(self, serve_auth: ServeAuth, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        serve_auth: ServeAuth,
+        *,
+        audit_log_path: Path | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self._serve_auth = serve_auth
+        self._audit_log_path = audit_log_path
+
+    def _record_refusal(self, *, reason: str, claims: Mapping[str, Any] | None) -> None:
+        if self._audit_log_path is None:
+            return
+        from athenaeum.audit_log import record_tool_call
+
+        record_tool_call(
+            self._audit_log_path,
+            tool_name=None,
+            outcome="refused",
+            claims=claims,
+            reason=reason,
+        )
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Verify *token*, then require that its identity is allowlisted.
@@ -90,9 +125,15 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         """
         access = await super().verify_token(token)
         if access is None:
+            # The token itself is unavailable here (JWTVerifier.load_access_token
+            # never returns it on a signature/issuer/audience/expiry failure),
+            # and so are its claims -- there is nothing to attribute this
+            # refusal to beyond the fact that it happened.
+            self._record_refusal(reason="invalid_token", claims=None)
             return None
         identity = self._serve_auth.identity_of(access.claims)
         if identity is None:
+            self._record_refusal(reason="identity_not_allowlisted", claims=access.claims)
             # `sub`, never the token. `%r` on a possibly-absent claim rather
             # than `%s` so a missing subject reads as `None` instead of an
             # empty gap in the line.
@@ -130,6 +171,7 @@ def build_auth_provider(
     serve_auth: ServeAuth,
     *,
     jwks_http_client: Any | None = None,
+    audit_log_path: Path | None = None,
 ) -> RemoteAuthProvider:
     """Build the resource-server auth provider for *serve_auth*.
 
@@ -166,9 +208,16 @@ def build_auth_provider(
             handed. It is an operator-side argument on an operator-side
             object, so — like every other serve-time pin — there is nothing a
             remote caller can pass here.
+        audit_log_path: issue athenaeum#2603 — this process's resolved
+            ``serve.audit_log`` location. ``None`` (default) means no record
+            is written for a refusal this verifier makes; ``create_server``
+            always passes its own resolved path when *serve_auth* is set, so
+            in production this is only ``None`` for a caller that builds a
+            provider directly, outside ``create_server``.
     """
     verifier = _IdentityAllowlistVerifier(
         serve_auth,
+        audit_log_path=audit_log_path,
         jwks_uri=serve_auth.jwks_uri,
         issuer=serve_auth.issuer,
         audience=serve_auth.resource,

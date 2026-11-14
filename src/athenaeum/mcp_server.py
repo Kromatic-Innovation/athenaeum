@@ -3538,6 +3538,7 @@ def create_server(
     jwks_http_client: Any | None = None,
     config: dict | None = None,
     transport: str | None = None,
+    audit_log_path: Path | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
 
@@ -3663,6 +3664,17 @@ def create_server(
             so every existing caller is byte-identical. It does NOT change
             which tools are registered or any tool's schema: ``tools/list``
             is identical on both transports, by construction and by test.
+        audit_log_path: Issue athenaeum#2603 — this process's resolved
+            ``serve.audit_log`` location (``athenaeum.config.resolve_serve_audit_log``
+            folded with ``athenaeum.audit_log.resolve_audit_log_file``), or
+            ``None``. Only consulted when *serve_auth* is set: every
+            scope-gated tool dispatch and every token/identity refusal then
+            appends one JSON line (never the token, never argument text,
+            never page bodies — see ``athenaeum.audit_log``'s module
+            docstring). With *serve_auth* ``None`` — every ``stdio`` server
+            and every unauthenticated HTTP one — this is inert even if set:
+            there is no scope guard to wrap and no verifier to attribute a
+            refusal to, so nothing is ever written.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -3745,7 +3757,9 @@ def create_server(
         from athenaeum.mcp_auth import build_auth_provider
 
         _auth_provider = build_auth_provider(
-            serve_auth, jwks_http_client=jwks_http_client
+            serve_auth,
+            jwks_http_client=jwks_http_client,
+            audit_log_path=audit_log_path,
         )
 
     # Issue athenaeum#2387: under ``serve.profile: remote`` the served
@@ -3826,6 +3840,19 @@ def create_server(
         all has already passed the transport's bearer-token enforcement, so
         the usual case here is a token that is valid but narrower than this
         tool needs; an absent token still fails closed.
+
+        Issue athenaeum#2603: this is also the ONE per-call audit-log write
+        point for every scope-gated dispatch — the "wrap the guarded
+        dispatch point once" the issue's plan names. Three outcomes, one
+        record each, through ``athenaeum.audit_log.record_tool_call``:
+        ``refused`` when *required_scope* is missing (covering both a
+        narrower-than-needed token and the degenerate absent-token case
+        above), ``error`` when *fn* raises (the exception's TYPE NAME is
+        recorded as ``reason`` — never ``str(exc)``, which could otherwise
+        echo back the very argument or page text this log must never hold),
+        and ``ok`` otherwise. Inert (writes nothing) when ``audit_log_path``
+        is ``None``, which it never is when ``serve_auth`` is set — see
+        ``create_server``'s own parameter docstring.
         """
 
         @functools.wraps(fn)
@@ -3833,14 +3860,49 @@ def create_server(
             from fastmcp.exceptions import InsufficientScopeError
             from fastmcp.server.dependencies import get_access_token
 
+            from athenaeum.audit_log import record_tool_call
+
             access = get_access_token()
             granted = set(access.scopes) if access is not None else set()
+            claims = access.claims if access is not None else None
             if required_scope not in granted:
+                if audit_log_path is not None:
+                    record_tool_call(
+                        audit_log_path,
+                        tool_name=fn.__name__,
+                        outcome="refused",
+                        claims=claims,
+                        reason="insufficient_scope",
+                    )
                 raise InsufficientScopeError(
                     [required_scope],
                     message=_insufficient_scope_message(fn.__name__, required_scope),
                 )
-            return fn(*args, **kwargs)
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                if audit_log_path is not None:
+                    record_tool_call(
+                        audit_log_path,
+                        tool_name=fn.__name__,
+                        outcome="error",
+                        claims=claims,
+                        args=args,
+                        kwargs=kwargs,
+                        reason=type(exc).__name__,
+                    )
+                raise
+            if audit_log_path is not None:
+                record_tool_call(
+                    audit_log_path,
+                    tool_name=fn.__name__,
+                    outcome="ok",
+                    claims=claims,
+                    args=args,
+                    kwargs=kwargs,
+                    result=result,
+                )
+            return result
 
         return _guarded
 

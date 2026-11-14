@@ -10196,3 +10196,69 @@ def resolve_page_type_field_groups(
         if type_groups:
             out[page_type.strip()] = type_groups
     return out
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2603 -- `serve.audit_log`. Appended here, at the end of the
+# file, per this module's own established convention (see the
+# `dedupe.strong_identifier_keys` block above) of giving a concurrently
+# landing lane's resolver its own append point so two lanes' diffs don't
+# collide on the same hunk.
+#
+# One segment deep (`serve.audit_log`), same shape as `resolve_serve_profile`
+# / `resolve_serve_tools` above -- `config.get("serve")` then `.get(...)` is
+# spelled out INLINE in this resolver's own body, not through a shared
+# "outer section" helper, for the same `test_yaml_key_is_actually_read`
+# reason those two document.
+# ---------------------------------------------------------------------------
+
+
+def resolve_serve_audit_log(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> Path | None:
+    """Resolve an explicit per-call remote-audit-log path override (issue athenaeum#2603).
+
+    Returns the operator's override, or ``None`` to take the default --
+    ``<cache_dir>/remote-audit.jsonl`` (see
+    :func:`athenaeum.audit_log.default_audit_log_path`). This resolver only
+    ever returns an explicit override or ``None``; folding ``None`` with the
+    resolved cache directory is :func:`athenaeum.audit_log.resolve_audit_log_file`'s
+    job, the same split :func:`resolve_spend_ledger_path` /
+    :func:`athenaeum.spend.resolve_ledger_path` already use for the spend
+    ledger, because the cache directory itself is not known inside this
+    module's resolvers.
+
+    One JSON line is appended per remote tool call -- a UTC timestamp, the
+    verified caller's identity, the tool name, a digest of its arguments
+    (never the argument text), the outcome, and which page uids came back
+    (never page text). Only written under ``--transport http`` with
+    ``serve.auth.*`` configured; stdio and an unauthenticated HTTP server
+    write nothing here, as there is no verified caller to attribute a line
+    to. See ``docs/guides/remote.md``.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` -- the ``athenaeum serve --audit-log`` flag.
+    - ``ATHENAEUM_SERVE_AUDIT_LOG`` -- env var.
+    - ``serve.audit_log`` -- yaml string.
+    - ``None`` -- the default location under the cache directory.
+
+    An empty string at any tier means "use the default", matching
+    :func:`resolve_serve_profile`'s empty-means-unset convention, rather than
+    resolving to a literal empty path.
+    """
+    if cli_value is not None:
+        return Path(cli_value).expanduser() if cli_value.strip() else None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUDIT_LOG")
+    if env is not None:
+        return Path(env).expanduser() if env.strip() else None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            candidate = serve_cfg.get("audit_log")
+            if isinstance(candidate, str) and candidate.strip():
+                return Path(candidate).expanduser()
+    return None
