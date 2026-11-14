@@ -55,6 +55,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size is above `librarian.page_recompile.rejoin_fraction` (default 0.5)
   of the page-size threshold (athenaeum#2540).
 
+- `athenaeum recompile undo <plan id>` is that applier's compensating
+  operation. When every page an apply touched still holds exactly what the
+  apply wrote, undo restores each one byte for byte from the pre-image git
+  blob the apply recorded, deletes the sub-pages it created, appends an
+  `undo` ledger record naming the plan id and makes exactly one snapshot
+  commit — a merged section's originals come back verbatim, and the
+  parent's relation rows and Sub-pages section come back with the
+  pre-image rather than being rebuilt. When a touched page has been edited
+  since the apply (or its pre-image was never committed, so no git object
+  holds it), nothing is written and one pending-decisions item is raised
+  carrying a unified diff of the pre-image against what is on disk now.
+  When any other page already links to a created sub-page, undo is refused
+  and reports how many such links there are, counting all four reference
+  shapes — a `related` row, a `parent:` key, a `[[uid]]` wikilink and an
+  ordinary markdown link to the sub-page's `uid-slug.md` file — de-duplicated so the two
+  spellings of one parent relation count once. An apply record missing
+  either content hash blocks the undo rather than restoring over an edit
+  or writing an undo record the re-apply guard could not honour. A page restored by an undo is
+  not re-planned while its content hash still matches the restored
+  pre-image, so an unattended pass cannot re-apply what was just undone —
+  a content comparison, not a timer, lifted by any later edit.
+  Re-running undo on a plan that was already undone is refused as such
+  rather than reported as "the page changed" — but a plan that was undone
+  and then re-applied can be undone again, because "already undone" is the
+  plan's most recent action, not merely the presence of an undo record.
+  `--dry-run` reports which of the three outcomes you would get and why,
+  writing nothing at all. Runs under the run lock in both modes (exit 75
+  on contention). `git revert` of the apply's own snapshot commit remains
+  the coarse fallback, now documented. The applier's recorded pre-image
+  blob id now names each page's raw on-disk bytes rather than a re-render
+  of its parsed frontmatter, so a page written without a blank line after
+  its frontmatter — 6% of a sampled real corpus — is undoable directly
+  instead of falling through to a decision item (athenaeum#2541).
+
 - `athenaeum entity rename --uid <uid> --name "..."` is the sanctioned page
   rename primitive: dry-run by default, `--apply` sets `name:`, appends the
   previous name to `aliases:` (deduplicated), rebuilds the recall index,

@@ -782,6 +782,11 @@ class TestAC7MergedSections:
             segment=segment,
             page_meta={"uid": "page0001", "name": "Acme", "type": "reference"},
             page_body=altered_page_body,
+            page_text=render_frontmatter(
+                {"uid": "page0001", "name": "Acme", "type": "reference"}
+            )
+            + "\n"
+            + altered_page_body,
             page_path=wiki / "page0001.md",
             wiki_root=wiki,
             today="2026-01-01",
@@ -975,6 +980,49 @@ class TestAC9LedgerAndSnapshot:
         assert pages["page0001"]["pre_content_hash"]
         assert pages["page0001"]["post_content_hash"]
         assert outcome.created_uids[0] in pages
+
+    def test_the_recorded_pre_blob_id_is_gits_own_hash_of_the_pre_apply_file(
+        self, wiki: Path
+    ) -> None:
+        """athenaeum#2541: ``pre_blob_id`` must name bytes git actually holds,
+        or the undo path's ``git cat-file blob`` lookup misses and a
+        reversible apply degrades to a queued decision item.
+
+        Asserted against ``git hash-object`` on the real pre-apply file, and
+        on a page written WITHOUT a blank line after its closing ``---`` --
+        the corpus's other shape, and the one a re-render of the parsed
+        frontmatter does not reproduce.
+        """
+        knowledge = wiki.parent
+        knowledge.mkdir(parents=True, exist_ok=True)
+        self._init_git_repo(knowledge)
+        meta = {"uid": "page0001", "type": "reference", "name": "Acme", "access": "internal"}
+        page = wiki / "page0001.md"
+        wiki.mkdir(parents=True, exist_ok=True)
+        # No blank line after the frontmatter: parses to the same body, but
+        # its bytes are NOT what render_frontmatter(meta) + "\n" + body gives.
+        page.write_text(render_frontmatter(meta) + _BODY, encoding="utf-8")
+        assert page.read_text(encoding="utf-8") != render_frontmatter(meta) + "\n" + _BODY
+        expected = subprocess.run(
+            ["git", "hash-object", str(page)],
+            cwd=knowledge,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        _simple_plan(wiki)
+        outcome = write_apply(wiki, uid="page0001", client=None, config=None)
+        assert outcome.ok, outcome.issues
+
+        records = [
+            json.loads(line)
+            for line in (wiki / "_page_recompiles.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        record = next(r for r in records if r.get("kind") == "apply")
+        row = next(r for r in record["pages"] if r["uid"] == "page0001")
+        assert row["pre_blob_id"] == expected
 
     def test_merge_group_originals_are_recorded_for_the_undo_snapshot(self, wiki: Path) -> None:
         body = (

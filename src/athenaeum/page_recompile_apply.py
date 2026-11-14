@@ -63,6 +63,17 @@ makes exactly ONE :meth:`athenaeum.store.FilesystemStore.snapshot` commit of
 its own, after the ledger append, so a merged section's originals (no
 longer live on any page) are reachable from that commit's parent.
 
+**The pre-image blob id names the page's RAW on-disk bytes** (issue
+athenaeum#2541), not a re-render of its parsed frontmatter -- see
+:attr:`ComputedApply.parent_pre_text` for what went wrong when it did.
+One residual limit remains and is deliberate: a blob id only RESOLVES if
+those bytes were ever committed, and this function snapshots AFTER its
+write, so a page that no earlier snapshot ever captured has its pre-image
+in no git object at all. :mod:`athenaeum.page_recompile_undo` treats that
+exactly like a page edited since the apply -- it writes nothing and queues
+a decision item -- which is correct conservative behaviour, not a gap to
+code around here.
+
 **Out of scope (per the issue).** ``move``/``attach``/``attach-self-under``
 (cross-page actions -- :func:`compute_apply` refuses any plan whose
 :attr:`~athenaeum.page_recompile_plan.RecompilePlan.scope` is not
@@ -427,6 +438,16 @@ class ComputedApply:
 
     issues: tuple[PlanIssue, ...] = ()
     parent_path: Path | None = None
+    #: The parent page's pre-image as its RAW on-disk bytes, never a
+    #: re-render of the parsed frontmatter (issue athenaeum#2541). The ONLY
+    #: consumer is the ``pre_blob_id`` field of the AC9 ledger record, and
+    #: that id is what an undo looks up with ``git cat-file blob`` -- so it
+    #: has to name bytes git actually holds. A re-render does not: it
+    #: normalises the page, and a page whose frontmatter is followed by no
+    #: blank line (6.0% of a seeded 600-page sample of a real 26,660-page
+    #: wiki) re-renders to bytes that were never written anywhere, naming a
+    #: blob that does not exist and degrading an undoable apply to a queued
+    #: decision item.
     parent_pre_text: str = ""
     parent_text: str = ""
     sub_pages: tuple[NewSubPage, ...] = ()
@@ -449,6 +470,7 @@ def compute_apply(
     segment: SegmentResult,
     page_meta: Mapping[str, Any],
     page_body: str,
+    page_text: str,
     page_path: Path,
     wiki_root: Path,
     today: str,
@@ -468,6 +490,11 @@ def compute_apply(
     itself (AC5/AC8) rather than reading :attr:`RecompilePlan.valid` and
     moving on -- the SAME "the model's say-so is not evidence" posture
     :mod:`athenaeum.page_recompile_plan` already applies to ``duplicate``.
+
+    *page_text* is the page's RAW bytes as read from disk, passed in rather
+    than reconstructed from *page_meta* + *page_body*, and carried straight
+    through to :attr:`ComputedApply.parent_pre_text` -- see that field for
+    why the difference is load-bearing (issue athenaeum#2541).
 
     Returns a :class:`ComputedApply` with ``issues`` populated and nothing
     else meaningful when any check fails -- the caller never writes in that
@@ -811,7 +838,9 @@ def compute_apply(
     return ComputedApply(
         issues=(),
         parent_path=page_path,
-        parent_pre_text=render_frontmatter(dict(page_meta)) + "\n" + page_body,
+        # RAW bytes, not `render_frontmatter(page_meta) + "\n" + page_body`
+        # (issue athenaeum#2541) -- see ComputedApply.parent_pre_text.
+        parent_pre_text=page_text,
         parent_text=new_parent_text,
         sub_pages=tuple(sub_pages),
         merges=tuple(merge_accounting),
@@ -1056,6 +1085,7 @@ def write_apply(
         segment=segment,
         page_meta=page_meta,
         page_body=page_body,
+        page_text=text,
         page_path=page_path,
         wiki_root=wiki_root,
         today=today,
