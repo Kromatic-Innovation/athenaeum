@@ -1784,6 +1784,7 @@ def _build_ledger_record(
     post_parent_hash: str,
     target_post_hashes: "Mapping[str, str] | None" = None,
     attach_pages: "Sequence[Mapping[str, Any]]" = (),
+    attachments: "Sequence[Attachment] | None" = None,
 ) -> dict[str, Any]:
     """The AC9 record: pre/post content hash and the pre-image git blob id
     for every touched page, the created uids, which units landed where, and
@@ -1876,7 +1877,7 @@ def _build_ledger_record(
         ],
         "attachments": [
             {"child": a.child_uid, "parent": a.parent_uid, "via": a.via, "action": a.action}
-            for a in computed.attachments
+            for a in (computed.attachments if attachments is None else attachments)
         ],
         "alias_moves": [
             {"alias": a.alias, "target": a.target_uid} for a in computed.alias_moves
@@ -2112,8 +2113,23 @@ def write_apply(
     # keeps the attach from changing any other body text. Every refusal it
     # can make was already pre-checked by `_attachment_issues`; a residual
     # one is reported as a post-write issue rather than silently dropped.
+    #
+    # **A refused attach still leaves `ok=True`, deliberately** (Seer
+    # finding on PR athenaeum#2579, considered and kept). By the time this
+    # loop runs every page has been written and the writes are correct;
+    # `post_write_issues` is this module's established channel for "the
+    # write happened, and here is what is off about it" -- the equally
+    # serious `post-write-byte-mismatch` and `post-write-dangling-marker`
+    # cases already report that way. Flipping `ok` to False here would be
+    # actively worse: `decision_answers` closes the queue item only on
+    # success, so the item would stay open over a page that HAS been
+    # rewritten, and the next answer would be refused by the content-hash
+    # pin -- an item nobody can ever discharge. The honest reporting fix is
+    # the ledger one below (only landed attachments are recorded), so an
+    # undo never chases a relation that was never set.
     attach_issues: list[PlanIssue] = []
     attach_pages: list[dict[str, Any]] = []
+    attached: list[Attachment] = []
     for attachment in computed.attachments:
         pair_pre: dict[str, tuple[Path, str]] = {}
         for pair_uid in (attachment.child_uid, attachment.parent_uid):
@@ -2135,6 +2151,7 @@ def write_apply(
                 )
             )
             continue
+        attached.append(attachment)
         for pair_uid, (pair_path, pre_text) in pair_pre.items():
             _, post_body = parse_frontmatter(pair_path.read_text(encoding="utf-8"))
             attach_pages.append(
@@ -2223,6 +2240,13 @@ def write_apply(
         post_parent_hash=post_parent_hash,
         target_post_hashes=target_post_hashes,
         attach_pages=attach_pages,
+        # Only the attachments that actually LANDED (Seer finding on PR
+        # athenaeum#2579). The ledger is what `page_recompile_undo` detaches
+        # from, so recording a refused attach would send an undo chasing a
+        # relation that was never set -- harmless today (the detach tolerates
+        # it) but a false audit record either way, and the ledger's whole job
+        # is to say what happened.
+        attachments=tuple(attached),
     )
     target_ledger = (
         ledger_path if ledger_path is not None else default_page_recompile_ledger_path(wiki_root)

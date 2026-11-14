@@ -613,6 +613,7 @@ def parse_alias_move(action: str) -> tuple[str, str] | None:
 #: :class:`PlanIssue` codes :func:`resolve_standalone_groups` can add.
 STANDALONE_NAME_IS_SOURCE_CODE = "standalone-name-is-the-source-page"
 STANDALONE_NAME_INACTIVE_CODE = "standalone-name-resolves-to-inactive-page"
+STANDALONE_NAME_NO_UID_CODE = "standalone-name-resolves-to-a-page-with-no-uid"
 
 
 def resolve_standalone_groups(plan: RecompilePlan, index: EntityIndex) -> RecompilePlan:
@@ -642,6 +643,12 @@ def resolve_standalone_groups(plan: RecompilePlan, index: EntityIndex) -> Recomp
       (:data:`STANDALONE_NAME_IS_SOURCE_CODE`) -- a page cannot be the
       target of its own move, and minting a second page under the parent's
       own name would make the index ambiguous;
+    * the name resolves to a page carrying no ``uid:``
+      (:data:`STANDALONE_NAME_NO_UID_CODE`) -- such a page cannot be a move
+      target, and a second live page under a name the index already
+      resolves would make its name lookup ambiguous. See the call site for
+      why :meth:`athenaeum.models.EntityIndex.get_by_uid`, not
+      ``entry.uid``'s truthiness, is the discriminator;
     * the name resolves to an INACTIVE page
       (:data:`STANDALONE_NAME_INACTIVE_CODE`, tombstoned / retired /
       superseded per :func:`athenaeum.page_relations.is_inactive_relation_target`,
@@ -671,20 +678,40 @@ def resolve_standalone_groups(plan: RecompilePlan, index: EntityIndex) -> Recomp
         if not name:
             continue
         entry = index.lookup(name)
-        if entry is None or not entry.uid:
+        if entry is None:
             continue
         if entry.uid == plan.uid:
             issues.append(PlanIssue(STANDALONE_NAME_IS_SOURCE_CODE, group_key))
             continue
+        # :attr:`athenaeum.models.IndexEntry.uid` is ``uid or name`` (see
+        # ``EntityIndex._apply_record``), so for a page that carries a
+        # ``name:`` but NO ``uid:`` it holds the page's NAME. Such an entry
+        # is therefore not a usable move target: `get_by_uid` indexes only
+        # pages that really have a uid, so converting here would mint
+        # ``move:<name>``, pass validation (which already ran, and whose
+        # `known_uids` this conversion is not re-checked against), be
+        # queued as a valid plan -- and then be refused at apply time with
+        # `move-target-missing`.
+        #
+        # `get_by_uid` is the discriminator, and it is the SAME lookup the
+        # applier resolves a move target with, so plan time and apply time
+        # cannot disagree. A uid-less hit is REFUSED rather than left
+        # standalone: minting a second live page under a name the index
+        # already resolves would make `_by_name` ambiguous (it is
+        # last-write-wins), which is a worse outcome than declining and
+        # saying why. Giving the corpus page a uid makes the name a real
+        # move target on the next pass.
         path = index.get_by_uid(entry.uid)
+        if path is None:
+            issues.append(PlanIssue(STANDALONE_NAME_NO_UID_CODE, group_key))
+            continue
         meta: dict[str, Any] = {}
-        if path is not None:
-            try:
-                parsed, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                parsed = {}
-            if isinstance(parsed, dict):
-                meta = parsed
+        try:
+            parsed, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            meta = parsed
         if is_inactive_relation_target(meta):
             issues.append(PlanIssue(STANDALONE_NAME_INACTIVE_CODE, group_key))
             continue
@@ -1846,6 +1873,7 @@ __all__ = [
     "SCOPE_STRUCTURE_ONLY",
     "STANDALONE_NAME_INACTIVE_CODE",
     "STANDALONE_NAME_IS_SOURCE_CODE",
+    "STANDALONE_NAME_NO_UID_CODE",
     "STRUCTURE_ONLY_VERBS",
     "UNDO_KIND",
     "VERIFY_KNOB",

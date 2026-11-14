@@ -1046,7 +1046,19 @@ def write_undo(
     for attachment in computed.attachments:
         try:
             remove_relation(wiki_root, child_uid=attachment.child_uid)
-        except RelationError as exc:
+        except (RelationError, OSError) as exc:
+            # OSError as well as RelationError (Seer finding on PR athenaeum#2579,
+            # and it is a real one): `remove_relation` WRITES both pages
+            # through `atomic_write_text`, so a filesystem error is
+            # reachable here -- and letting it propagate would abort the
+            # undo between the detach and the restores, leaving the wiki in
+            # a state that is neither the pre-image nor the post-apply one.
+            # Swallowing it is strictly safer because the detach is
+            # belt-and-braces and the RESTORE below is authoritative: it
+            # writes the pre-image bytes, which already encode "no
+            # relation". If the filesystem is genuinely failing, the restore
+            # raises instead, before any ledger record or snapshot claims
+            # the undo happened.
             log.debug(
                 "page-recompile undo: detach of %s from %s skipped: %s",
                 attachment.child_uid,

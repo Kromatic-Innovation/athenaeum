@@ -49,6 +49,7 @@ from athenaeum.page_recompile_plan import (
     SCOPE_STRUCTURE_ONLY,
     STANDALONE_NAME_INACTIVE_CODE,
     STANDALONE_NAME_IS_SOURCE_CODE,
+    STANDALONE_NAME_NO_UID_CODE,
     RecompilePlan,
     append_plan_record,
     classify_plan_scope,
@@ -795,6 +796,54 @@ class TestAC5NameResolutionConvertsToAMove:
         resolved = self._resolved(wiki, "Retired Topic")
         assert [i.code for i in resolved.issues] == [STANDALONE_NAME_INACTIVE_CODE]
         assert resolved.valid is False
+
+    def test_a_name_that_resolves_to_a_page_with_no_uid_is_refused(
+        self, wiki: Path
+    ) -> None:
+        """Seer finding on PR athenaeum#2579, and a real one.
+        ``IndexEntry.uid`` is ``uid or name``, so a page carrying a `name:`
+        but no `uid:` resolves to an entry whose `uid` is its NAME. Without
+        this refusal the group converted to `move:<name>`, the plan stayed
+        `valid` (``validate_plan`` had already run and is not re-checked
+        against the rewrite), it was queued -- and the apply then refused it
+        with `move-target-missing`. Uid-less pages are real: they are exactly
+        what the candidate scan buckets as `no_uid`.
+        """
+        _seed(wiki)
+        # A page with a name and NO uid -- what `classify_page_text` reports
+        # as `no_uid`, and what `EntityIndex` still indexes by name.
+        (wiki / "nouid.md").write_text(
+            render_frontmatter({"type": "reference", "name": "Orphan Topic"})
+            + "\nNo uid here.\n",
+            encoding="utf-8",
+        )
+        index = EntityIndex(wiki)
+        entry = index.lookup("Orphan Topic")
+        assert entry is not None
+        # The exact trap: truthy, but not a uid.
+        assert entry.uid == "Orphan Topic"
+        assert index.get_by_uid(entry.uid) is None
+
+        resolved = self._resolved(wiki, "Orphan Topic")
+
+        assert [d for _u, d in resolved.dispositions][1] == "standalone:g1"
+        assert [i.code for i in resolved.issues] == [STANDALONE_NAME_NO_UID_CODE]
+        assert resolved.valid is False
+
+    def test_a_uid_less_hit_never_produces_a_plan_that_fails_at_apply(
+        self, wiki: Path
+    ) -> None:
+        """The same finding stated as the outcome that mattered: no plan
+        reaches the queue claiming to be valid and then dies on
+        `move-target-missing`."""
+        _seed(wiki)
+        (wiki / "nouid.md").write_text(
+            render_frontmatter({"type": "reference", "name": "Orphan Topic"})
+            + "\nNo uid here.\n",
+            encoding="utf-8",
+        )
+        resolved = self._resolved(wiki, "Orphan Topic")
+        assert not any(d.startswith("move:") for _u, d in resolved.dispositions)
 
     def test_the_applier_refuses_rather_than_converting_a_second_time(
         self, wiki: Path
@@ -1685,6 +1734,59 @@ class TestAC11UndoCoversTheseActions:
 
         assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
         assert _page_bytes(wiki) == before
+
+    def test_a_detach_that_raises_an_oserror_does_not_abort_the_undo(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2579, and a real one.
+        `remove_relation` WRITES both pages, so an `OSError` is reachable
+        there -- and letting it propagate would abort the undo between the
+        detach and the restores, leaving the wiki neither pre nor post. The
+        restore is authoritative, so the round trip must still complete."""
+        plan_id, before = self._applied(wiki, page_actions=["attach:other001"])
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("disk went away")
+
+        monkeypatch.setattr(
+            "athenaeum.page_recompile_undo.remove_relation", _boom
+        )
+
+        outcome = write_undo(wiki, plan_id=plan_id, config=None)
+
+        assert outcome.action == UNDO_DIRECT, (outcome.reason, outcome.blocked)
+        assert _page_bytes(wiki) == before
+
+    def test_only_attachments_that_landed_are_recorded_in_the_ledger(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer finding on PR athenaeum#2579, part (a), as a reporting
+        claim: a refused attach is reported on `post_write_issues` and is
+        NOT written to the ledger, so an undo never chases a relation that
+        was never set. `ok` stays True because the pages really were
+        written -- see the call site for why flipping it would be worse."""
+        _init_git_repo(wiki.parent)
+        _seed(wiki)
+        _git(wiki.parent, "add", "-A")
+        _git(wiki.parent, "commit", "-m", "seed")
+        _plan, plan_id = _all_parent_plan(wiki, page_actions=["attach:other001"])
+
+        from athenaeum.page_relations import RelationError
+
+        def _refuse(*_args: Any, **_kwargs: Any) -> None:
+            raise RelationError("refused under a race")
+
+        monkeypatch.setattr("athenaeum.page_recompile_apply.set_relation", _refuse)
+
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=_CONFIG, verdict=VERDICT_APPROVE
+        )
+
+        assert outcome.ok is True
+        assert [i.code for i in outcome.post_write_issues] == ["attach-refused"]
+        record = find_apply_record(plan_id, wiki)
+        assert record is not None
+        assert record["attachments"] == []
 
     def test_a_target_edited_since_the_apply_goes_to_the_queued_path(
         self, wiki: Path
