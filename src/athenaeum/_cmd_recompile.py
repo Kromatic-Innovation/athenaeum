@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum recompile {candidates,plan,show}`` -- the page-recompile
-operator surface (issues athenaeum#2534 and athenaeum#2537, slices S1 and
-S3 of athenaeum#2525).
+"""``athenaeum recompile {candidates,plan,show,apply}`` -- the page-recompile
+operator surface (issues athenaeum#2534, athenaeum#2537 and athenaeum#2540,
+slices S1, S3 and S4 of athenaeum#2525).
 
 * ``candidates`` (athenaeum#2534) runs
   :func:`athenaeum.page_recompile.find_recompile_candidates` and prints
@@ -15,10 +15,16 @@ S3 of athenaeum#2525).
   page: the ledger is the only file it can write. ``--dry-run`` suppresses
   even that.
 * ``show <plan id>`` (athenaeum#2537 AC11) prints a recorded plan.
+* ``apply (--uid U | --plan ID)`` (athenaeum#2540 AC1) runs
+  :func:`athenaeum.page_recompile_apply.write_apply`, which WRITES the
+  parent and its new sub-pages for a ``structure-only`` plan, under the run
+  lock (exits :data:`athenaeum._cli_shared.EXIT_LOCK_HELD` while another
+  process holds it) and refuses a plan whose pinned content hash no longer
+  matches the live page.
 
-``plan`` is the only subcommand here that makes an LLM call. Neither ``plan``
-nor ``show`` writes a page, raises a decision item, or has an undo --
-applying a plan is a later slice's job.
+``plan`` and ``apply`` (only when a plan carries a ``merge`` group) are the
+subcommands here that make an LLM call. ``candidates``/``plan``/``show``
+write no page; ``apply`` is the only one that does.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
@@ -95,9 +102,32 @@ def add_recompile_subparser(subparsers: argparse._SubParsersAction) -> None:
     show_p.add_argument("--json", action="store_true", help="Print the record as JSON.")
     show_p.set_defaults(func=_cmd_show)
 
+    apply_p = sub.add_parser(
+        "apply",
+        help="Apply ONE structure-only recompile plan (issue athenaeum#2540): "
+        "writes the recompiled parent and its new sub-pages atomically, "
+        "checks that no content or citation was lost, and records the "
+        "undo-relevant ledger fields. Refuses a stale plan (the page "
+        "changed since it was made) and any plan that is not "
+        "structure-only. Runs under the run lock; exits 75 while another "
+        "process holds it.",
+    )
+    apply_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    apply_target = apply_p.add_mutually_exclusive_group(required=True)
+    apply_target.add_argument("--uid", help="uid of the page to apply the latest valid plan for")
+    apply_target.add_argument("--plan", dest="plan_id", help="an exact plan id to apply")
+    apply_p.add_argument("--json", action="store_true", help="Print the outcome as JSON.")
+    _add_lock_args(apply_p)
+    apply_p.set_defaults(func=_cmd_apply)
+
 
 def _cmd_recompile_dispatch(args: argparse.Namespace) -> int:
-    print("usage: athenaeum recompile {candidates,plan,show} [...]", file=sys.stderr)
+    print("usage: athenaeum recompile {candidates,plan,show,apply} [...]", file=sys.stderr)
     return 2
 
 
@@ -219,6 +249,79 @@ def _cmd_show(args: argparse.Namespace) -> int:
     plan = record.get("plan")
     _print_plan(plan if isinstance(plan, dict) else {}, plan_id=str(record.get("id") or ""))
     print(f"  recorded:  {record.get('ts', '')}")
+    return 0
+
+
+def _cmd_apply(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum recompile apply (--uid U | --plan ID)`` (issue
+    athenaeum#2540 AC1).
+
+    Exit codes: 0 applied; 1 the plan was refused (stale, not
+    structure-only, rejected at apply time, or no such plan/page) or the
+    wiki root is missing; 75 (``EXIT_LOCK_HELD``) another process holds the
+    run lock.
+    """
+    import json as _json
+
+    from athenaeum.config import load_config
+    from athenaeum.page_recompile_apply import write_apply
+    from athenaeum.provider import build_llm_client
+
+    wiki_root = _wiki_root_or_error(args)
+    if wiki_root is None:
+        return 1
+    knowledge_root = args.path.expanduser().resolve()
+    config = load_config(knowledge_root)
+
+    # A client is only ever USED when the plan carries a `merge` group
+    # (AC7(d)'s verify call); a structure-only plan with no merge applies
+    # fine with none configured.
+    client = build_llm_client(config, knob="verify")
+
+    acquired = _acquire_or_exit(knowledge_root, args, config)
+    if isinstance(acquired, int):
+        return acquired
+    lock = acquired
+    try:
+        outcome = write_apply(
+            wiki_root,
+            uid=args.uid or "",
+            plan_id=args.plan_id or "",
+            client=client,
+            config=config,
+        )
+    finally:
+        lock.release()
+
+    if args.json:
+        payload = {
+            "ok": outcome.ok,
+            "reason": outcome.reason,
+            "plan_id": outcome.plan_id,
+            "uid": outcome.uid,
+            "created_uids": list(outcome.created_uids),
+            "snapshot_sha": outcome.snapshot_sha,
+            "issues": [i.to_dict() for i in outcome.issues],
+            "post_write_issues": [i.to_dict() for i in outcome.post_write_issues],
+        }
+        sys.stdout.write(_json.dumps(payload, sort_keys=True) + "\n")
+        return 0 if outcome.ok else 1
+
+    if not outcome.ok:
+        print(f"error: {outcome.reason}", file=sys.stderr)
+        for issue in outcome.issues:
+            print(f"  {issue.code}: {issue.detail}", file=sys.stderr)
+        return 1
+
+    print("=== recompile apply ===")
+    print(f"  plan id:     {outcome.plan_id}")
+    print(f"  uid:         {outcome.uid}")
+    print(f"  created:     {', '.join(outcome.created_uids) or '(none)'}")
+    print(f"  snapshot:    {outcome.snapshot_sha or '(nothing to commit)'}")
+    if outcome.post_write_issues:
+        print("  post-write issues:")
+        for issue in outcome.post_write_issues:
+            print(f"    {issue.code}: {issue.detail}")
     return 0
 
 

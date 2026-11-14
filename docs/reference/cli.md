@@ -107,6 +107,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
 - [`athenaeum recompile`](#athenaeum-recompile) (group) — Page-recompile maintenance pass: a read-only candidate scan, a shadow-only planner, and a plan viewer. Writes no page.
+- [`athenaeum recompile apply`](#athenaeum-recompile-apply) (command) — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
 - [`athenaeum recompile candidates`](#athenaeum-recompile-candidates) (command) — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
 - [`athenaeum recompile plan`](#athenaeum-recompile-plan) (command) — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - [`athenaeum recompile show`](#athenaeum-recompile-show) (command) — Print a recorded plan by its plan id.
@@ -1382,9 +1383,23 @@ Page-recompile maintenance pass: a read-only candidate scan, a shadow-only plann
 
 Subcommands:
 
+- `athenaeum recompile apply` — Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
 - `athenaeum recompile candidates` — Scan for active pages over librarian.page_size_threshold_chars or flagged needs_split: true, and report counts only -- no page name, uid, or filename is ever printed. Read-only: no run lock, no writes, no LLM call.
 - `athenaeum recompile plan` — Plan the recompilation of ONE page (--uid) and append the plan to wiki/_page_recompiles.jsonl as a shadow record. Writes no page.
 - `athenaeum recompile show` — Print a recorded plan by its plan id.
+
+## `athenaeum recompile apply`
+
+Apply ONE structure-only recompile plan: writes the recompiled parent and its new sub-pages atomically, checks that no content or citation was lost, and records the undo-relevant ledger fields. Refuses a stale plan (the page changed since it was made) and any plan that is not structure-only. Runs under the run lock; exits 75 while another process holds it.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | off (flag absent) | — | Print the outcome as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--plan` | — | — | an exact plan id to apply |
+| `--uid` | — | — | uid of the page to apply the latest valid plan for |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum recompile candidates`
 

@@ -2112,6 +2112,59 @@ Read ``athenaeum status``'s chars-based page-recompile backlog block
 (``page_recompile`` in ``--json``) instead; this knob and its
 ``Oversized pages (warn/flag)`` status line go away in that release.
 
+### `resolve_page_recompile_merge_near_duplicates`
+
+- **YAML path:** `librarian.page_recompile.merge_near_duplicates`
+- **Environment variable:** `ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.merge_near_duplicates`` (AC11).
+
+Default ``True``. With this ``False``, the applier re-plans away any
+``merge`` group a plan carries (each merge group's units fall back to
+separate ``child`` placement) rather than writing the merged text — a
+kill switch for the merge guarantee, mirroring
+`resolve_section_scoped_merge_enabled`'s own "behavioral change
+needs an off switch" shape.
+
+Env ``ATHENAEUM_PAGE_RECOMPILE_MERGE_NEAR_DUPLICATES`` (``1``/``true``/
+``yes``/``on``, case-insensitive) > yaml
+``librarian.page_recompile.merge_near_duplicates`` > default ``True``.
+Non-bool yaml values and unrecognized env strings fall through to on.
+
+### `resolve_page_recompile_min_parent_chars`
+
+- **YAML path:** `librarian.page_recompile.min_parent_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `200`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.min_parent_chars`` (AC3).
+
+Only a yaml layer (no ``ATHENAEUM_*`` env override) — this is a per-corpus
+editorial judgement call, not a cost/behavior toggle an operator needs to
+flip from a shell one-off. Must be a non-negative, non-bool int; anything
+else (missing key/section, wrong type, negative) falls back to
+`DEFAULT_PAGE_RECOMPILE_MIN_PARENT_CHARS`.
+
+### `resolve_page_recompile_rejoin_fraction`
+
+- **YAML path:** `librarian.page_recompile.rejoin_fraction`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `0.5`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_recompile.rejoin_fraction`` (AC12).
+
+Only a yaml layer, same rationale as
+`resolve_page_recompile_min_parent_chars`. Must be a positive,
+non-bool number ``<= 1.0``; anything else falls back to
+`DEFAULT_PAGE_RECOMPILE_REJOIN_FRACTION`.
+
 ### `resolve_page_size_threshold_chars`
 
 - **YAML path:** `librarian.page_size_threshold_chars`
