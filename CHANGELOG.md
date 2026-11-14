@@ -265,6 +265,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `athenaeum doctor`'s `mcp` check now also looks for the user-scope MCP
+  registration at the home-level `.claude.json` (a sibling of `.claude/`,
+  not a child of it), which is where current Claude Code writes it after
+  `claude mcp add --scope user`. Previously the check looked only inside
+  the `.claude` config directory, so a correct install reported `FAIL`
+  with a fix that was the command the user had just run; a genuinely
+  unregistered install still reports `FAIL` (athenaeum#2594).
+
 - Merge proposals a human rejected, and proposals `athenaeum decisions
   revalidate --apply` archived as stale, are no longer re-proposed the next
   night. The nightly name-collision scan was the one proposer of three that
