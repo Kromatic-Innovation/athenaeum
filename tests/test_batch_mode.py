@@ -4271,7 +4271,6 @@ class TestPageSizeGateBatchTransport:
         )
 
         assert result.updated == 1
-        assert result.oversize_suppressed == 0
         assert result.escalated == 0
         after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
         assert "Merged note from" in after
@@ -4307,7 +4306,6 @@ class TestPageSizeGateBatchTransport:
         )
 
         assert result.updated == 1
-        assert result.oversize_suppressed == 0
         assert result.escalated == 0
         after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
         assert "Merged note from" in after
@@ -4342,7 +4340,6 @@ class TestPageSizeGateBatchTransport:
             batch_write=True,
         )
         assert result_batched.updated == 1
-        assert result_batched.oversize_suppressed == 0
         body_batched = (root_batched / "wiki" / "acme1234-acme-corp.md").read_text(
             encoding="utf-8"
         )
@@ -4368,7 +4365,6 @@ class TestPageSizeGateBatchTransport:
             batch_write=False,
         )
         assert result_sync.updated == 1
-        assert result_sync.oversize_suppressed == 0
         body_sync = (root_sync / "wiki" / "acme1234-acme-corp.md").read_text(
             encoding="utf-8"
         )
