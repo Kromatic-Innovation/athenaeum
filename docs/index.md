@@ -226,6 +226,7 @@ Evidence, kept out of the reading path.
 - [Claude Code witness hook latency — 2026-10-28](measurements/claude-code-witness-hook-latency-2026-10-28.md) — the witness path's own added p95 latency against the pre-existing fork/exec baseline, for `key_provider: none` and for a local Ed25519 stand-in standing in for the `software-file` adapter.
 - [Claude Code periodic anchor spawn latency — 2026-10-28](measurements/claude-code-witness-anchor-spawn-latency-2026-10-28.md) — the due-vs-not-due subprocess delta for the periodic in-session anchor spawn, with a bare-`Popen` control isolating this container's own fork/exec cost from anything the design itself adds.
 - [Contact-attribution calibration — 2026-11-11](measurements/attribution-calibration-2026-11-11.md) — the first live calibration of the contact-value attribution judge (run 42959041029): per-class pass table, token spend, and the names-other failure pattern.
+- [Claude Code entry-path live run — 2026-11-14](measurements/claude-entry-paths-live-run-2026-11-14.md) — the first real-binary pass of the entry-path harness: the headless row passes, the interactive rows were not exercised (harness driver defects), and the ledger was not enabled.
 - [Witness-attestation readout — template](measurements/witness-attestation-readout.md) — the fill-in shape for a witnessed-hits / per-miss-incident reading from `athenaeum receipts attest-readout`; a template, not a reading.
 
 ---
