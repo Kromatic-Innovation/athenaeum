@@ -921,6 +921,18 @@ PAGE_RECOMPILE_LEDGER_FILENAME = "_page_recompiles.jsonl"
 LABEL_KIND = "label"
 PLAN_KIND = "plan"
 
+#: Record kind for an undone apply, WRITTEN by
+#: :mod:`athenaeum.page_recompile_undo` (issue athenaeum#2541) and READ here
+#: by :func:`undone_page_skip_reason`. It lives in this module, not in the
+#: writer, precisely because of that read: this module owns the ledger, and
+#: the planner has to recognise an ``undo`` record to honour it -- importing
+#: the writer to learn the string would make the planner and the undo module
+#: an import cycle (``tests/test_import_graph_acyclic.py`` allows none). That
+#: is also why it is not a sibling of
+#: :data:`athenaeum.page_recompile_apply.APPLY_KIND`, which no reader in this
+#: module needs.
+UNDO_KIND = "undo"
+
 
 def default_page_recompile_ledger_path(wiki_root: Path) -> Path:
     """Default ledger path: ``<wiki_root>/_page_recompiles.jsonl``."""
@@ -1002,6 +1014,63 @@ def find_plan_record(
         if record.get("kind") == PLAN_KIND and str(record.get("id")) == plan_id:
             match = record
     return match
+
+
+def undone_page_skip_reason(
+    wiki_root: Path,
+    *,
+    uid: str,
+    body: str,
+    ledger_path: Path | None = None,
+) -> str:
+    """Why *uid* must NOT be planned again yet, or ``""`` (issue
+    athenaeum#2541 AC6).
+
+    An operator who undoes an applied recompile has made a judgement about
+    that page. Without this check the very next planning pass would read the
+    restored page -- oversized again, exactly as it was before the apply --
+    and draft the same plan, so an unattended pass would re-apply what was
+    just undone. :mod:`athenaeum.page_recompile_undo` appends an
+    :data:`UNDO_KIND` record naming each restored page and the pre-image
+    content hash it restored; this function skips the page while its live
+    body still hashes to that value.
+
+    **A hash comparison, never a timestamp or a permanent block.** The
+    moment the page's content differs from the restored pre-image -- someone
+    edited it, or a later apply changed it again -- the hash stops matching
+    and planning resumes on its own. "Not re-applied automatically" is
+    exactly that: the undo is respected until the page genuinely moves, not
+    forever, and the issue explicitly puts time-based expiry of undo out of
+    scope, so nothing here expires.
+
+    The LAST matching record wins, the same append-only rule
+    :func:`find_plan_record` applies: a page that was undone, re-planned,
+    re-applied and undone again is governed by its most recent undo.
+    """
+    current = page_content_hash(body)
+    reason = ""
+    for record in read_page_recompile_ledger(wiki_root, ledger_path=ledger_path):
+        if record.get("kind") != UNDO_KIND:
+            continue
+        restored = record.get("restored")
+        if not isinstance(restored, list):
+            continue
+        for row in restored:
+            if not isinstance(row, dict) or row.get("uid") != uid:
+                continue
+            pre_hash = row.get("pre_content_hash")
+            if isinstance(pre_hash, str) and pre_hash and pre_hash == current:
+                reason = (
+                    f"page was restored by an undo of recompile plan "
+                    f"{record.get('plan_id') or record.get('id') or '(unknown)'} and has "
+                    "not changed since; it is skipped until its content hash "
+                    "differs from the restored pre-image"
+                )
+            else:
+                # A later undo whose pre-image is NOT what the page holds now
+                # clears an earlier skip rather than leaving it latched.
+                reason = ""
+    return reason
 
 
 def read_label_cache(
@@ -1532,6 +1601,13 @@ def plan_page(
             error="page is inactive (tombstoned, retired or superseded)",
         )
 
+    # AC6 of issue athenaeum#2541: an undone apply is not re-drafted while
+    # the page still holds the restored pre-image. Checked BEFORE the
+    # labelling pass, so an undone page costs no model call at all.
+    undone = undone_page_skip_reason(wiki_root, uid=uid, body=body, ledger_path=ledger_path)
+    if undone:
+        return PlanRunResult(plan=None, usage=usage, error=undone)
+
     segment = segment_page(body)
     if not segment.units:
         return PlanRunResult(plan=None, usage=usage, error="page has no units to plan")
@@ -1600,6 +1676,7 @@ __all__ = [
     "SCOPE_CROSS_PAGE",
     "SCOPE_STRUCTURE_ONLY",
     "STRUCTURE_ONLY_VERBS",
+    "UNDO_KIND",
     "VERIFY_KNOB",
     "VERIFY_UNUSABLE_CODE",
     "MergedSection",
@@ -1628,6 +1705,7 @@ __all__ = [
     "split_disposition",
     "split_summary_sentences",
     "summary_definition_labels",
+    "undone_page_skip_reason",
     "unit_hash",
     "validate_plan",
     "verify_summary",

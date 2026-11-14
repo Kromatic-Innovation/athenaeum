@@ -280,6 +280,12 @@ MODULE_LAYER: dict[str, int] = {
     # domain/pipeline, the same layer as its siblings athenaeum.page_recompile
     # and athenaeum.page_recompile_plan").
     "page_recompile_apply": 4,
+    # Issue athenaeum#2541 (page-recompile slice S5): the compensating undo
+    # for an applied plan (own docstring states "Layering: L4
+    # domain/pipeline, the same layer as its siblings
+    # athenaeum.page_recompile, athenaeum.page_recompile_plan and
+    # athenaeum.page_recompile_apply").
+    "page_recompile_undo": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,

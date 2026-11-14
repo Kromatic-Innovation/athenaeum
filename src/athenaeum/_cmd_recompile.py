@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum recompile {candidates,plan,show,apply}`` -- the page-recompile
-operator surface (issues athenaeum#2534, athenaeum#2537 and athenaeum#2540,
-slices S1, S3 and S4 of athenaeum#2525).
+"""``athenaeum recompile {candidates,plan,show,apply,undo}`` -- the
+page-recompile operator surface (issues athenaeum#2534, athenaeum#2537,
+athenaeum#2540 and athenaeum#2541, slices S1, S3, S4 and S5 of
+athenaeum#2525).
 
 * ``candidates`` (athenaeum#2534) runs
   :func:`athenaeum.page_recompile.find_recompile_candidates` and prints
@@ -22,9 +23,21 @@ slices S1, S3 and S4 of athenaeum#2525).
   process holds it) and refuses a plan whose pinned content hash no longer
   matches the live page.
 
+* ``undo <plan id>`` (athenaeum#2541) runs
+  :func:`athenaeum.page_recompile_undo.write_undo`, the applier's
+  compensating operation: it restores every page the apply touched from the
+  pre-image blob the apply recorded and deletes the sub-pages it created,
+  or -- when a touched page has changed since -- writes nothing and raises
+  one decision item carrying a diff per changed page. It refuses outright
+  when another page already links to a created sub-page. Runs under the run
+  lock (exits :data:`athenaeum._cli_shared.EXIT_LOCK_HELD`), and
+  ``--dry-run`` reports which of the three it would be, and why, without
+  writing anything at all.
+
 ``plan`` and ``apply`` (only when a plan carries a ``merge`` group) are the
-subcommands here that make an LLM call. ``candidates``/``plan``/``show``
-write no page; ``apply`` is the only one that does.
+subcommands here that make an LLM call; ``undo`` makes none.
+``candidates``/``plan``/``show`` write no page; ``apply`` and ``undo`` are
+the two that do.
 """
 
 from __future__ import annotations
@@ -125,9 +138,41 @@ def add_recompile_subparser(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(apply_p)
     apply_p.set_defaults(func=_cmd_apply)
 
+    undo_p = sub.add_parser(
+        "undo",
+        help="Undo an applied recompile plan (issue athenaeum#2541): "
+        "restores every page the apply touched from its recorded pre-image "
+        "and deletes the sub-pages it created. If any touched page changed "
+        "since the apply, it writes nothing and raises a decision item "
+        "carrying a diff per changed page; if another page already links to "
+        "a created sub-page, it refuses and reports how many such links "
+        "there are. Runs under the run lock; exits 75 while another process "
+        "holds it.",
+    )
+    undo_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    undo_p.add_argument("plan_id", help="plan id of the apply to undo")
+    undo_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report whether the undo would be direct, queued or refused, "
+        "and why. Writes nothing -- no page, no ledger record, no decision "
+        "item, no snapshot commit.",
+    )
+    undo_p.add_argument("--json", action="store_true", help="Print the outcome as JSON.")
+    _add_lock_args(undo_p)
+    undo_p.set_defaults(func=_cmd_undo)
+
 
 def _cmd_recompile_dispatch(args: argparse.Namespace) -> int:
-    print("usage: athenaeum recompile {candidates,plan,show,apply} [...]", file=sys.stderr)
+    print(
+        "usage: athenaeum recompile {candidates,plan,show,apply,undo} [...]",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -323,6 +368,99 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         for issue in outcome.post_write_issues:
             print(f"    {issue.code}: {issue.detail}")
     return 0
+
+
+def _cmd_undo(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum recompile undo <plan id>`` (issue athenaeum#2541).
+
+    Exit codes: 0 the undo was carried out directly, or ``--dry-run``
+    produced its report; 1 the wiki root is missing, no apply record carries
+    that plan id, or the undo was queued or refused (the operator asked for
+    an undo and did not get one -- the reason is printed either way); 75
+    (``EXIT_LOCK_HELD``) another process holds the run lock.
+
+    The lock is taken for ``--dry-run`` too, unlike ``plan --dry-run``: a
+    dry run reads page hashes and git pre-images to decide direct-vs-queued,
+    and reading those mid-apply would report an answer that was never true.
+    """
+    import json as _json
+
+    from athenaeum.config import load_config
+    from athenaeum.page_recompile_undo import (
+        REASON_NO_APPLY_RECORD,
+        UNDO_DIRECT,
+        UNDO_QUEUED,
+        write_undo,
+    )
+
+    wiki_root = _wiki_root_or_error(args)
+    if wiki_root is None:
+        return 1
+    knowledge_root = args.path.expanduser().resolve()
+    config = load_config(knowledge_root)
+
+    acquired = _acquire_or_exit(knowledge_root, args, config)
+    if isinstance(acquired, int):
+        return acquired
+    lock = acquired
+    try:
+        outcome = write_undo(
+            wiki_root,
+            plan_id=args.plan_id,
+            config=config,
+            dry_run=args.dry_run,
+        )
+    finally:
+        lock.release()
+
+    if args.json:
+        payload = {
+            "action": outcome.action,
+            "reason": outcome.reason,
+            "ok": outcome.ok,
+            "dry_run": outcome.dry_run,
+            "plan_id": outcome.plan_id,
+            "uid": outcome.uid,
+            "restored_uids": list(outcome.restored_uids),
+            "deleted_uids": list(outcome.deleted_uids),
+            "inbound_link_count": outcome.inbound_link_count,
+            "blocked": [
+                {"uid": b.uid, "path": b.path, "reason": b.reason, "diff": b.diff}
+                for b in outcome.blocked
+            ],
+            "snapshot_sha": outcome.snapshot_sha,
+            "queued_item_id": outcome.queued_item_id,
+        }
+        sys.stdout.write(_json.dumps(payload, sort_keys=True) + "\n")
+        return 0 if outcome.ok else 1
+
+    if outcome.reason == REASON_NO_APPLY_RECORD:
+        print(f"error: no applied recompile plan with id {args.plan_id}", file=sys.stderr)
+        return 1
+
+    print("=== recompile undo ===")
+    print(f"  plan id:     {outcome.plan_id}")
+    print(f"  uid:         {outcome.uid}")
+    print(f"  dry run:     {'yes (nothing written)' if outcome.dry_run else 'no'}")
+    print(f"  outcome:     {outcome.action} ({outcome.reason})")
+    if outcome.action == UNDO_DIRECT:
+        print(f"  restored:    {', '.join(outcome.restored_uids) or '(none)'}")
+        print(f"  deleted:     {', '.join(outcome.deleted_uids) or '(none)'}")
+        if not outcome.dry_run:
+            print(f"  snapshot:    {outcome.snapshot_sha or '(nothing to commit)'}")
+    if outcome.action == UNDO_QUEUED:
+        print("  blocked by:")
+        for blocked in outcome.blocked:
+            print(f"    {blocked.uid}: {blocked.reason}")
+        if outcome.dry_run:
+            print("  would raise one decision item carrying a diff per page above.")
+        else:
+            print(f"  decision item raised: {outcome.queued_item_id or '(see queue)'}")
+    if outcome.inbound_link_count:
+        print(f"  inbound links to created sub-pages: {outcome.inbound_link_count}")
+        for link in outcome.inbound_links:
+            print(f"    {link.kind} -> {link.uid} in {link.path}")
+    return 0 if outcome.ok else 1
 
 
 def _print_plan(plan: dict[str, object], *, plan_id: str) -> None:
