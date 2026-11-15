@@ -87,7 +87,6 @@ from athenaeum.models import (
 from athenaeum.pii import is_pii_flagged
 from athenaeum.storage import (
     IndexedRoot,
-    IndexedSurface,
     as_indexed_surface,
     open_store,
     page_embedding_disabled,
@@ -3496,7 +3495,7 @@ def build_fts5_index(
     backstop for the stat pre-filter.
     """
     roots: list[IndexedRoot] | None = (
-        [r if isinstance(r, IndexedSurface) else Path(r) for r in extra_roots]
+        [Path(r) if isinstance(r, (str, os.PathLike)) else r for r in extra_roots]
         if extra_roots
         else None
     )
@@ -3549,7 +3548,7 @@ def build_vector_index(
     backstop for the stat pre-filter.
     """
     roots: list[IndexedRoot] | None = (
-        [r if isinstance(r, IndexedSurface) else Path(r) for r in extra_roots]
+        [Path(r) if isinstance(r, (str, os.PathLike)) else r for r in extra_roots]
         if extra_roots
         else None
     )
