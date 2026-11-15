@@ -252,6 +252,32 @@ class TestSurfaceSync:
         assert outcomes == {("recipes", "pull"): "ok", ("recipes", "push"): "ok"}
         assert state.as_profile_fields()["reason"] == "completed"
 
+    def test_knowledge_repo_push_branch_is_not_forced_onto_a_surface_repo(
+        self, tmp_path: Path
+    ) -> None:
+        # librarian.push_branch names the KNOWLEDGE repo's branch; a surface
+        # repo with its own branch layout syncs its own current branch.
+        kr, repo, bare, cfg = self._setup(tmp_path)
+        cfg["librarian"] = {"push_branch": "kb-only-branch"}
+        state = librarian.SurfaceSyncState()
+        librarian._maybe_pull_before_run(
+            kr, config=cfg, pull_before_run=True, dry_run=False, surface_sync=state
+        )
+        librarian._capture_surface_heads(kr, config=cfg, surface_sync=state)
+        (repo / "mine.md").write_text("m")
+        open_store(cfg, kr).snapshot("run")
+        librarian._maybe_push_after_run(
+            kr,
+            config=cfg,
+            push_after_run=True,
+            dry_run=False,
+            head_at_start=None,
+            surface_sync=state,
+        )
+        assert _git(bare, "log", "-1", "--format=%s", "main") == "run"
+        outcomes = {(r["surface"], r["op"]): r["outcome"] for r in state.results}
+        assert outcomes == {("recipes", "pull"): "ok", ("recipes", "push"): "ok"}
+
     def test_unchanged_head_is_reported_skipped_not_silent(self, tmp_path: Path) -> None:
         kr, repo, _bare, cfg = self._setup(tmp_path)
         state = librarian.SurfaceSyncState()

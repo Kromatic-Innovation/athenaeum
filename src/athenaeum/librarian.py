@@ -790,11 +790,10 @@ def _maybe_pull_before_run(
     if surface_sync is None:
         return
     for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
-        ok = git_pull(
-            repo,
-            remote=resolve_push_remote(config),
-            branch=resolve_push_branch(config),
-        )
+        # branch=None: a surface repo syncs its OWN current branch/upstream.
+        # ``librarian.push_branch`` names the knowledge repo's branch and must
+        # not be forced onto a separate repository (PR athenaeum#2672 review).
+        ok = git_pull(repo, remote=resolve_push_remote(config), branch=None)
         surface_sync.record(surfaces, "pull", "ok" if ok else "failed")
 
 
@@ -873,7 +872,7 @@ def _push_surface_repos(
         ok = git_push(
             repo,
             remote=resolve_push_remote(config),
-            branch=resolve_push_branch(config),
+            branch=None,  # the surface repo's own current branch (see pull above)
             track_failure_streak=False,
         )
         surface_sync.record(surfaces, "push", "ok" if ok else "failed")
