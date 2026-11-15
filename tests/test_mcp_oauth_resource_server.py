@@ -766,6 +766,95 @@ class TestProtectedResourceMetadata:
         # the operator knows which form their authorization server mints.
         assert [s.rstrip("/") for s in document["authorization_servers"]] == [ISSUER]
 
+    @pytest.mark.parametrize("configured", [ISSUER, ISSUER + "/"])
+    def test_the_issuer_is_advertised_byte_for_byte(
+        self, corpus: Path, issuer: _FakeIssuer, configured: str
+    ) -> None:
+        """athenaeum#2600: no trailing slash is added to, or taken from, the
+        configured issuer. Compared on the raw response bytes, not URL objects,
+        because RFC 8414 / RFC 9207 match the issuer as an exact string."""
+
+        async def _body(app: Any) -> tuple[int, bytes, dict[str, str]]:
+            async with _raw_client(app) as client:
+                response = await client.get("/.well-known/oauth-protected-resource")
+                return response.status_code, response.content, dict(response.headers)
+
+        status, raw, headers = _drive(
+            corpus, issuer, _serve_auth(issuer=configured), _body
+        )
+        assert status == 200
+        assert f'"authorization_servers":["{configured}"]'.encode() in raw
+        assert json.loads(raw)["authorization_servers"][0].encode() == configured.encode()
+        assert headers["content-length"] == str(len(raw))
+        assert headers["cache-control"] == "public, max-age=3600"
+
+    def test_a_cors_preflight_is_not_rewritten(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The OPTIONS answer is not JSON and must reach the client intact."""
+
+        async def _body(app: Any) -> tuple[int, bytes]:
+            async with _raw_client(app) as client:
+                response = await client.options(
+                    "/.well-known/oauth-protected-resource",
+                    headers={
+                        "Origin": "https://client.example.invalid",
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+                return response.status_code, response.content
+
+        status, raw = _drive(corpus, issuer, _serve_auth(), _body)
+        assert status == 200
+        assert b"authorization_servers" not in raw
+
+    def test_a_multi_chunk_body_is_rewritten_with_one_start_message(self) -> None:
+        """A body streamed in several chunks is buffered, rewritten once, and
+        sent behind exactly one ``http.response.start`` whose Content-Length
+        matches the bytes actually sent."""
+        from athenaeum.mcp_auth import build_auth_provider
+
+        provider = build_auth_provider(_serve_auth())
+        document = b'{"resource":"x","authorization_servers":["https://normalized.invalid/"]}'
+
+        async def inner(scope: Any, receive: Any, send: Any) -> None:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-length", str(len(document)).encode())],
+                }
+            )
+            await send({"type": "http.response.body", "body": document[:10], "more_body": True})
+            await send({"type": "http.response.body", "body": document[10:], "more_body": False})
+
+        sent: list[dict[str, Any]] = []
+
+        async def collect(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        wrapped = provider._with_raw_issuer(inner)  # type: ignore[attr-defined]
+        asyncio.run(wrapped({"type": "http", "method": "GET"}, None, collect))
+
+        starts = [m for m in sent if m["type"] == "http.response.start"]
+        bodies = [m for m in sent if m["type"] == "http.response.body"]
+        assert len(starts) == 1
+        body = b"".join(m["body"] for m in bodies)
+        assert json.loads(body)["authorization_servers"] == [ISSUER]
+        assert dict(starts[0]["headers"])[b"content-length"] == str(len(body)).encode()
+
+    @pytest.mark.parametrize("resource", [RESOURCE, RESOURCE + "/mcp"])
+    def test_the_resource_field_is_unchanged_by_the_issuer_fix(
+        self, corpus: Path, issuer: _FakeIssuer, resource: str
+    ) -> None:
+        """The pinned resource is still served as FastMCP rendered it: the
+        canonical form of the configured pin, which for a path-less origin
+        carries the slash a pydantic URL renders."""
+        status, document = self._metadata(corpus, issuer, resource)
+        assert status == 200
+        assert document["resource"] == _serve_auth(resource=resource).resource
+        assert document["resource"] == (resource + "/" if resource == RESOURCE else resource)
+
     def test_a_path_scoped_resource_answers_at_its_rfc_9728_path(
         self, corpus: Path, issuer: _FakeIssuer
     ) -> None:

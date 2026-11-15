@@ -179,7 +179,7 @@ deploy, because the symptom is every token being rejected.
 
 `GET /.well-known/oauth-protected-resource` serves RFC 9728 protected resource metadata:
 the `resource` (your `serve.auth.resource`), `authorization_servers` (a one-element list
-naming your issuer) and `scopes_supported` (both scope names). A resource URL that carries
+naming your issuer exactly as you configured it, with or without a trailing slash) and `scopes_supported` (both scope names). A resource URL that carries
 a path is served at the path-scoped variant RFC 9728 §3.1 defines — `.../mcp` is published
 at `/.well-known/oauth-protected-resource/mcp`.
 
