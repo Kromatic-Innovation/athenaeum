@@ -284,7 +284,7 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.storage import open_store, resolve_indexed_surfaces
+from athenaeum.storage import open_store, resolve_indexed_surfaces, resolve_locator_surfaces
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -8945,7 +8945,7 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     from athenaeum.batch import collect_pending_batches
 
     valid_types, valid_tags, valid_access = _resolve_schema_lists(ctx.wiki_root)
-    index = EntityIndex(ctx.wiki_root)
+    index = EntityIndex(ctx.wiki_root, resolve_locator_surfaces(ctx.knowledge_root, ctx.config))
     assert ctx.max_api_calls is not None
     outcome = collect_pending_batches(
         index,
@@ -9211,7 +9211,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
 
             valid_types, valid_tags, valid_access = _resolve_schema_lists(ctx.wiki_root)
 
-            index = EntityIndex(ctx.wiki_root)
+            # athenaeum#2617: the index also covers the indexed surfaces outside
+            # wiki/, so a uid/name that lives there resolves (and a structured
+            # upsert finds its target page there). No extra surface: wiki only.
+            index = EntityIndex(
+                ctx.wiki_root, resolve_locator_surfaces(ctx.knowledge_root, ctx.config)
+            )
             log.info("Loaded %d wiki entries into index", len(index))
 
             # Issue athenaeum#1183: built once per run, mirroring `index` above —

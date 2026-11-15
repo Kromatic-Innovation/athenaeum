@@ -457,6 +457,11 @@ def gate_raw_content(
     if policy is None or not policy.rules:
         return RelevanceGateResult(kept_content=content)
     items = _split_jsonl(content) if jsonl else _split_markdown(content)
+    # The explicit-remember marker on the raw note's own (top) frontmatter
+    # covers every item in it: ``remember(explicit_request=True)`` stamps only
+    # that block, and the human asked for the whole note (Seer review on PR
+    # athenaeum#2680). An item may also carry the marker itself.
+    note_explicit = not jsonl and bool(items) and _is_explicit_remember(items[0].meta)
     drops: list[RelevanceDrop] = []
     overrides: list[RelevanceDrop] = []
     kept: list[str] = []
@@ -464,7 +469,7 @@ def gate_raw_content(
         rule = policy.match(*_declared(item.meta))
         if rule is not None and rule.verdict == "never":
             hit = RelevanceDrop(rule, index, item.text.strip()[:_EXCERPT_CHARS])
-            if _is_explicit_remember(item.meta):
+            if note_explicit or _is_explicit_remember(item.meta):
                 overrides.append(hit)  # explicit human request beats ``never``
                 kept.append(item.text)
             else:

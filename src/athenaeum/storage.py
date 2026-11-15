@@ -678,6 +678,20 @@ def resolve_indexed_surfaces(
     return indexed
 
 
+def resolve_locator_surfaces(
+    knowledge_root: Path, config: dict[str, Any] | None = None
+) -> list[IndexedSurface]:
+    """The extra surfaces :class:`~athenaeum.models.PageLocator` reads pages from (athenaeum#2617).
+
+    The configured storage surfaces :func:`resolve_indexed_surfaces` includes
+    (``embedded: true``, outside ``wiki/``), with its exclusion guards. Bare
+    ``recall.extra_intake_roots`` entries are raw-intake folders, not page
+    stores, so they are left out: a deployment with no extra storage surface
+    gets ``[]`` and the historical wiki-only lookup.
+    """
+    return resolve_indexed_surfaces(knowledge_root, config, extra_roots=[])
+
+
 _RAW_INTAKE_FILENAME_RETRIES = 5
 
 
