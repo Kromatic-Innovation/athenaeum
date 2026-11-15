@@ -338,10 +338,23 @@ def _state_log_path(home: Path) -> Path:
     reference it -- neither systemd's ``StandardOutput=append:`` nor cron's
     shell ``>>`` redirect creates a missing directory, so without that
     ``mkdir`` the schedule fails every run on a fresh host. ``remove``
-    deliberately leaves this directory (and any log file in it) in place --
-    see the comment at its two call sites below.
+    deletes this log and, if empty, the directory (athenaeum#2596) unless
+    ``--keep-logs``.
     """
     return home / ".local" / "state" / "athenaeum" / "schedule-run.log"
+
+
+#: Marker ``install`` writes beside the Linux run log when the cron backend
+#: found NO crontab for the user (athenaeum#2596). ``remove`` consults it to
+#: decide whether an emptied crontab was created by athenaeum (delete it) or
+#: pre-existed (leave it). An install made before this marker existed has none,
+#: and ``remove`` then leaves an empty crontab rather than delete one the user
+#: might own.
+_NO_PRIOR_CRONTAB_MARKER = "schedule-no-prior-crontab"
+
+
+def _no_prior_crontab_marker_path(home: Path) -> Path:
+    return _state_log_path(home).parent / _NO_PRIOR_CRONTAB_MARKER
 
 
 #: Characters that render unquoted in a systemd unit's word-split settings
@@ -540,6 +553,10 @@ class RemoveResult:
     loader_returncode: int
     loader_output: str
     had_schedule: bool
+    #: Run logs / log directory deleted by ``remove`` (athenaeum#2596).
+    removed_logs: tuple[Path, ...] = ()
+    #: True when the cron backend deleted the (otherwise empty) crontab.
+    crontab_deleted: bool = False
 
 
 def install(
@@ -628,7 +645,21 @@ def install(
     # redirect fails if the directory is missing, same reasoning as the
     # systemd branch above.
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = [line for line in _crontab_lines(loader_fn) if CRON_TAG not in line]
+    listing = loader_fn(["crontab", "-l"], None)
+    marker = _no_prior_crontab_marker_path(resolved_home)
+    if (
+        listing.returncode != 0
+        and "no crontab" in listing.output.lower()
+        and not marker.exists()
+    ):
+        # athenaeum#2596: the user had no crontab before this install --
+        # remember it so `remove` can delete the crontab it would leave empty.
+        _write(marker, "athenaeum created this user's crontab\n")
+    existing = [
+        line
+        for line in (listing.stdout.splitlines() if listing.returncode == 0 else [])
+        if CRON_TAG not in line
+    ]
     new_line = generate_cron_line(
         bin_path, resolved_knowledge_root, key_source, hour=hour, minute=minute, log_path=log_path
     )
@@ -637,26 +668,51 @@ def install(
     return InstallResult(plat, (), result.returncode, result.output, bin_path)
 
 
+def _remove_logs(home: Path, plat: Platform) -> tuple[Path, ...]:
+    """Delete the run log(s) ``install`` / the scheduled run created
+    (athenaeum#2596). Only athenaeum's own files are touched: the specific log
+    path (and the no-prior-crontab marker), then the Linux log directory only
+    if that leaves it empty. ``~/Library/Logs`` and ``~/.local/state`` are
+    shared directories and are never removed."""
+    removed: list[Path] = []
+    if plat == "launchd":
+        candidates = [_launchd_log_path(home)]
+        log_dir = None
+    else:
+        candidates = [_state_log_path(home), _no_prior_crontab_marker_path(home)]
+        log_dir = _state_log_path(home).parent
+    for path in candidates:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            removed.append(path)
+    if log_dir is not None and log_dir.is_dir() and not any(log_dir.iterdir()):
+        log_dir.rmdir()
+        removed.append(log_dir)
+    return tuple(removed)
+
+
 def remove(
     *,
     home: Path | None = None,
     loader: LoaderFn | None = None,
     platform_override: Platform | None = None,
+    keep_logs: bool = False,
 ) -> RemoveResult:
-    """Unload and delete everything ``install`` wrote (issue athenaeum#2304
-    AC1). Idempotent: removing an already-absent schedule is a successful
-    no-op (``had_schedule=False``), not an error.
+    """Unload and delete everything ``install`` wrote, plus what the schedule
+    left behind (issue athenaeum#2304 AC1, athenaeum#2596). Idempotent:
+    removing an already-absent schedule is a successful no-op
+    (``had_schedule=False``), not an error.
 
-    **Deliberate exception (Finding athenaeum#2408 review, HIGH):**
-    ``install`` now also creates ``_state_log_path(home).parent`` (the
-    systemd/cron log directory) so the unit's own log redirect has
-    somewhere to write. ``remove`` does NOT delete that directory or any
-    log file inside it -- an operator may still want to read a schedule's
-    run history after unloading it, and the directory is inert, harmless
-    residue if left (it doesn't recreate itself and doesn't collide with a
-    future ``install``). ``remove`` only undoes what ``install`` did to
-    the scheduling unit itself (plist / service+timer / crontab line), not
-    every directory that unit's execution populates.
+    **Logs (athenaeum#2596):** unless *keep_logs*, ``remove`` also deletes the
+    run log (macOS ``~/Library/Logs/athenaeum-run.log``; Linux
+    ``<state>/athenaeum/schedule-run.log``) and the Linux log directory when
+    it is left empty. Other files in that directory are never touched.
+
+    **Cron (athenaeum#2596):** only the tagged line is removed. If that leaves
+    the crontab empty AND ``install`` recorded that the user had no crontab
+    before, the crontab is deleted (``crontab -r``); otherwise it is left with
+    exactly the remaining entries (an empty one when the install predates the
+    marker).
     """
     loader_fn = loader or _default_loader
     resolved_home = (home or Path.home()).expanduser().resolve()
@@ -669,7 +725,10 @@ def remove(
             return RemoveResult(plat, (), 0, "", False)
         result = loader_fn(["launchctl", "unload", str(plist_path)], None)
         plist_path.unlink()
-        return RemoveResult(plat, (plist_path,), result.returncode, result.output, True)
+        logs: tuple[Path, ...] = () if keep_logs else _remove_logs(resolved_home, plat)
+        return RemoveResult(
+            plat, (plist_path,), result.returncode, result.output, True, logs
+        )
 
     if plat == "systemd":
         service_path = _systemd_service_path(resolved_home)
@@ -687,8 +746,14 @@ def remove(
                 removed.append(path)
         reload_result = loader_fn(["systemctl", "--user", "daemon-reload"], None)
         rc = disable_result.returncode or reload_result.returncode
+        logs = () if keep_logs else _remove_logs(resolved_home, plat)
         return RemoveResult(
-            plat, tuple(removed), rc, disable_result.output + reload_result.output, True
+            plat,
+            tuple(removed),
+            rc,
+            disable_result.output + reload_result.output,
+            True,
+            logs,
         )
 
     # cron
@@ -697,9 +762,24 @@ def remove(
     if not had:
         return RemoveResult(plat, (), 0, "", False)
     filtered = [line for line in existing if CRON_TAG not in line]
-    new_text = "\n".join(filtered) + ("\n" if filtered else "")
-    result = loader_fn(["crontab", "-"], new_text)
-    return RemoveResult(plat, (), result.returncode, result.output, True)
+    marker = _no_prior_crontab_marker_path(resolved_home)
+    delete_crontab = marker.is_file() and not any(line.strip() for line in filtered)
+    if delete_crontab:
+        result = loader_fn(["crontab", "-r"], None)
+    else:
+        new_text = "\n".join(filtered) + ("\n" if filtered else "")
+        result = loader_fn(["crontab", "-"], new_text)
+    if keep_logs:
+        # The marker is athenaeum's own bookkeeping, not a log: once the
+        # schedule is gone it is stale either way.
+        if marker.is_file():
+            marker.unlink()
+        logs = ()
+    else:
+        logs = _remove_logs(resolved_home, plat)
+    return RemoveResult(
+        plat, (), result.returncode, result.output, True, logs, delete_crontab
+    )
 
 
 def _write(path: Path, content: str) -> None:

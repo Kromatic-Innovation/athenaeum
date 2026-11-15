@@ -71,14 +71,18 @@ class FakeLoader:
     returncode: int = 0
     stdout: str = ""
     stderr: str = ""
-    crontab_body: str = ""
+    #: ``None`` models "the user has no crontab" (``crontab -l`` exits 1).
+    crontab_body: str | None = ""
 
     def __call__(self, argv: list[str], input_text: str | None = None) -> schedule.LoaderResult:
         self.calls.append((argv, input_text))
         if argv[:2] == ["crontab", "-l"]:
-            return schedule.LoaderResult(
-                0 if self.crontab_body is not None else 1, self.crontab_body or "", ""
-            )
+            if self.crontab_body is None:
+                return schedule.LoaderResult(1, "", "no crontab for user\n")
+            return schedule.LoaderResult(0, self.crontab_body, "")
+        if argv[:2] == ["crontab", "-r"]:
+            self.crontab_body = None
+            return schedule.LoaderResult(0, "", "")
         if argv[:1] == ["crontab"]:
             # `crontab -` -- record the new body as the current one.
             self.crontab_body = input_text or ""
@@ -481,7 +485,7 @@ class TestInstallCron:
         assert "/some/other/job" in loader.crontab_body
 
     def test_remove_with_no_crontab_at_all_is_a_noop(self, home: Path) -> None:
-        loader = FakeLoader(crontab_body=None)  # type: ignore[arg-type]
+        loader = FakeLoader(crontab_body=None)
         result = schedule.remove(home=home, loader=loader, platform_override="cron")
         assert result.had_schedule is False
 
@@ -523,10 +527,10 @@ class TestLogDirectoryLifecycle:
         schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
         assert (home / ".local" / "state" / "athenaeum").is_dir()
 
-    def test_remove_leaves_an_existing_log_file_and_its_directory_in_place(
+    def test_remove_deletes_the_cron_log_and_its_empty_directory(
         self, home: Path, knowledge_root: Path, api_key_env: None
     ) -> None:
-        loader = FakeLoader(crontab_body="")
+        loader = FakeLoader(crontab_body="0 1 * * * /some/other/job\n")
         schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
         log_dir = home / ".local" / "state" / "athenaeum"
         log_file = log_dir / "schedule-run.log"
@@ -535,13 +539,128 @@ class TestLogDirectoryLifecycle:
         result = schedule.remove(home=home, loader=loader, platform_override="cron")
 
         assert result.had_schedule is True
-        # Everything `remove` is documented to delete (the tagged crontab
-        # line) is gone -- but the log an operator may still want to read
-        # survives, and so does the directory holding it.
         assert schedule.CRON_TAG not in loader.crontab_body
-        assert log_file.is_file()
-        assert log_file.read_text(encoding="utf-8") == "a previous run's output\n"
+        assert not log_file.exists()
+        assert not log_dir.exists()
+        assert (home / ".local" / "state").is_dir()
+        assert log_file in result.removed_logs
+
+    def test_remove_keeps_files_it_did_not_create(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body="")
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        log_dir = home / ".local" / "state" / "athenaeum"
+        (log_dir / "schedule-run.log").write_text("x\n", encoding="utf-8")
+        other = log_dir / "notes.txt"
+        other.write_text("mine\n", encoding="utf-8")
+
+        schedule.remove(home=home, loader=loader, platform_override="systemd")
+
+        assert not (log_dir / "schedule-run.log").exists()
+        assert other.read_text(encoding="utf-8") == "mine\n"
         assert log_dir.is_dir()
+
+    def test_remove_keep_logs_leaves_log_and_directory(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body=None)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        log_dir = home / ".local" / "state" / "athenaeum"
+        log_file = log_dir / "schedule-run.log"
+        log_file.write_text("keep me\n", encoding="utf-8")
+
+        result = schedule.remove(
+            home=home, loader=loader, platform_override="cron", keep_logs=True
+        )
+
+        assert log_file.read_text(encoding="utf-8") == "keep me\n"
+        assert result.removed_logs == ()
+        assert not (log_dir / "schedule-no-prior-crontab").exists()
+
+    def test_launchd_remove_deletes_the_run_log_only(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader()
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="launchd")
+        logs_dir = home / "Library" / "Logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file = logs_dir / "athenaeum-run.log"
+        log_file.write_text("out\n", encoding="utf-8")
+        sibling = logs_dir / "other-app.log"
+        sibling.write_text("not ours\n", encoding="utf-8")
+
+        schedule.remove(home=home, loader=loader, platform_override="launchd")
+
+        assert not log_file.exists()
+        assert sibling.is_file()
+
+    def test_launchd_remove_keep_logs(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader()
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="launchd")
+        log_file = home / "Library" / "Logs" / "athenaeum-run.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text("out\n", encoding="utf-8")
+        schedule.remove(
+            home=home, loader=loader, platform_override="launchd", keep_logs=True
+        )
+        assert log_file.is_file()
+
+
+class TestCrontabDeletion:
+    def test_empty_crontab_athenaeum_created_is_deleted(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body=None)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        assert loader.crontab_body is not None
+
+        result = schedule.remove(home=home, loader=loader, platform_override="cron")
+
+        assert loader.crontab_body is None
+        assert result.crontab_deleted is True
+        assert ["crontab", "-r"] in [c[0] for c in loader.calls]
+
+    def test_reinstall_keeps_the_no_prior_crontab_record(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body=None)
+        for _ in range(2):
+            schedule.install(
+                knowledge_root, home=home, loader=loader, platform_override="cron"
+            )
+        schedule.remove(home=home, loader=loader, platform_override="cron")
+        assert loader.crontab_body is None
+
+    def test_preexisting_empty_crontab_is_left_empty(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body="")
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        result = schedule.remove(home=home, loader=loader, platform_override="cron")
+        assert loader.crontab_body == ""
+        assert result.crontab_deleted is False
+
+    def test_install_without_record_leaves_empty_crontab(
+        self, home: Path, api_key_env: None
+    ) -> None:
+        # An install made before the record existed: only the tagged line.
+        loader = FakeLoader(crontab_body=f"0 3 * * * /x # {schedule.CRON_TAG}\n")
+        result = schedule.remove(home=home, loader=loader, platform_override="cron")
+        assert loader.crontab_body == ""
+        assert result.crontab_deleted is False
+
+    def test_other_entries_are_preserved_exactly(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader(crontab_body=None)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="cron")
+        # The user adds entries after install.
+        loader.crontab_body = "0 1 * * * /a\n" + loader.crontab_body + "5 2 * * * /b\n"
+        schedule.remove(home=home, loader=loader, platform_override="cron")
+        assert loader.crontab_body == "0 1 * * * /a\n5 2 * * * /b\n"
 
 
 class TestInstallRefusesWithoutKeySource:
@@ -595,6 +714,27 @@ class TestCLI:
         assert rc == 0, out
         assert "schedule removed" in out
         assert not schedule.status(home=home, loader=loader, platform_override="cron").scheduled
+
+    def test_cli_remove_keep_logs(
+        self, home: Path, knowledge_root: Path, api_key_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loader = FakeLoader(crontab_body=None)
+        monkeypatch.setattr(schedule, "_default_loader", loader)
+        common = ["--home", str(home), "--backend", "cron"]
+        rc, _out, _err = _run_cli(["schedule", "install", "--path", str(knowledge_root), *common])
+        assert rc == 0
+        log_file = home / ".local" / "state" / "athenaeum" / "schedule-run.log"
+        log_file.write_text("keep\n", encoding="utf-8")
+
+        rc, _out, _err = _run_cli(["schedule", "remove", "--keep-logs", *common])
+        assert rc == 0
+        assert log_file.is_file()
+
+        rc, _out, _err = _run_cli(["schedule", "install", "--path", str(knowledge_root), *common])
+        rc, out, _err = _run_cli(["schedule", "remove", *common])
+        assert rc == 0
+        assert not log_file.exists()
+        assert "deleted" in out
 
     def test_cli_install_refuses_without_key_source(
         self, home: Path, knowledge_root: Path, monkeypatch: pytest.MonkeyPatch
