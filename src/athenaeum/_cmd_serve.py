@@ -217,6 +217,19 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "ATHENAEUM_SERVE_AUTH_SCOPES and serve.auth.scopes in "
         "athenaeum.yaml. Unset = athenaeum:read / athenaeum:write.",
     )
+    serve_parser.add_argument(
+        "--audit-log",
+        type=str,
+        default=None,
+        help="Path to the per-call remote audit log. "
+        "Only written under --transport http with auth configured: one JSON "
+        "line per tool call naming the verified caller, the tool, a digest "
+        "of its arguments (never the argument text) and which page uids "
+        "came back (never page text). Refused calls (bad token, scope, "
+        "non-allowlisted identity) are recorded too. Overrides "
+        "ATHENAEUM_SERVE_AUDIT_LOG and serve.audit_log in athenaeum.yaml. "
+        "Unset = <cache-dir>/remote-audit.jsonl.",
+    )
     serve_parser.set_defaults(func=cmd_serve)
 
 
@@ -348,6 +361,7 @@ def _non_loopback_bind_refusal(host: str, *, authenticated: bool = False) -> str
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    from athenaeum.audit_log import resolve_audit_log_file
     from athenaeum.config import (
         load_config,
         resolve_audience,
@@ -355,6 +369,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_extra_intake_roots,
         resolve_screening,
         resolve_search_backend,
+        resolve_serve_audit_log,
         resolve_serve_auth_allowed_identities,
         resolve_serve_auth_issuer,
         resolve_serve_auth_resource,
@@ -458,6 +473,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None))
     extra_roots = resolve_extra_intake_roots(target, cfg)
 
+    # Issue athenaeum#2603: the per-call remote audit log. Resolved whenever
+    # *serve_auth* is set (the stdio branch above has already nulled it out
+    # for that transport) -- the location is folded against *cache_dir* here
+    # because `resolve_serve_audit_log` only ever returns an explicit
+    # override or `None`, and the cache directory it defaults against is not
+    # known inside `config.py`'s own resolvers.
+    audit_log_path = None
+    if serve_auth is not None:
+        audit_log_path = resolve_audit_log_file(
+            resolve_serve_audit_log(cfg, getattr(args, "audit_log", None)),
+            cache_dir,
+        )
+        print(f"[audit] per-call remote audit log: {audit_log_path}", file=sys.stderr)
+
     # Issue athenaeum#312: resolve the serve-time read-scope pin (CLI > env > yaml).
     # None = owner = full access (existing single-user behavior).
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
@@ -549,6 +578,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             # the registered tool set and every tool's schema are identical
             # on both transports.
             transport=transport,
+            audit_log_path=audit_log_path,
         )
     except RemotePolicyError as exc:
         print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)

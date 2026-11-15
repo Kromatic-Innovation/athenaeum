@@ -79,6 +79,11 @@ MODULE_LAYER: dict[str, int] = {
     "t1_census": 0,
     "vecmath": 0,
     # L1 -- data model.
+    # Issue athenaeum#2603: the per-call remote audit log -- own docstring
+    # states "Layering: L1 -- stdlib-only ... plus one L1 import
+    # (athenaeum.store.now_iso)", so both mcp_server.py and mcp_auth.py (L5)
+    # can depend on it without reaching through each other.
+    "audit_log": 1,
     "authority": 1,
     "init": 1,
     "merge_type_gate": 1,  # "L0/L1-boundary primitive" -> upper bound

@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit way to reverse a rejection. `athenaeum doctor` reports a
   `merge_rejected_with:` entry that resolves to no existing page.
 
+- **Remote mode now writes a per-call audit log of remote tool calls**
+  (athenaeum#2603): one append-only JSON line per scope-gated tool
+  dispatch under `--transport http` with `serve.auth.*` configured —
+  UTC timestamp, the verified caller's `sub` / client id (`azp` or
+  `client_id`) / `jti` (when present), the tool name, a SHA-256 digest
+  of the canonicalised arguments, the outcome (`ok` / `refused` /
+  `error`), the result count and the returned page uids. No token,
+  no argument text and no page body is ever written — only the
+  digest and the uids. A refused call (insufficient scope, an invalid
+  bearer token, or a verified-but-non-allowlisted identity) is
+  recorded too; stdio and an unauthenticated HTTP server write
+  nothing. Location is configurable as `serve.audit_log`
+  (`ATHENAEUM_SERVE_AUDIT_LOG` / `athenaeum serve --audit-log`),
+  defaulting to `<cache_dir>/remote-audit.jsonl`, created at file mode
+  `0600`; writes are line-atomic under concurrent callers. See
+  `docs/guides/remote.md`.
 - **Page recompile now runs in the nightly librarian run and is ON by
   default: it makes model calls every night (up to 3 pages a run, 10 while
   any page is still over the hard ceiling) and you turn it off with

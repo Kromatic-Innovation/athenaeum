@@ -181,6 +181,7 @@ serve:
     scopes:
       read: athenaeum:read
       write: athenaeum:write
+  audit_log: /var/lib/athenaeum/remote-audit.jsonl  # optional; default <cache_dir>/remote-audit.jsonl
 ```
 
 The equivalent as flags, which is what a service unit carries:
@@ -192,7 +193,8 @@ athenaeum serve --path ~/knowledge \
   --auth-issuer https://id.example.net \
   --auth-resource https://memory.example.net/mcp \
   --auth-allowed-identities ops@example.net \
-  --auth-scopes read=athenaeum:read,write=athenaeum:write
+  --auth-scopes read=athenaeum:read,write=athenaeum:write \
+  --audit-log /var/lib/athenaeum/remote-audit.jsonl
 ```
 
 What each block buys you:
@@ -209,6 +211,7 @@ What each block buys you:
 | `serve.auth.resource` | The one audience this process serves, and the `resource` value the host must request. |
 | `serve.auth.allowed_identities` | `sub` values, or issuer-verified emails. Never empty. |
 | `serve.auth.scopes` | Rename the read/write pair to scopes your provider actually issues. |
+| `serve.audit_log` | Where the per-call audit log lands (see [The per-call audit log](#the-per-call-audit-log)). Optional; defaults under the cache directory. Only written with `serve.auth.*` configured. |
 
 `serve.auth.issuer`, `serve.auth.resource` and `serve.auth.allowed_identities` are a
 set: configure all three or none. A half-configured block exits non-zero before
@@ -220,6 +223,7 @@ Confirm the server came up the way you meant by reading its own startup lines
 
 ```
 [auth] OAuth 2.1 resource server: issuer https://id.example.net, audience https://memory.example.net/mcp, 1 allowed identity, scopes athenaeum:read athenaeum:write
+[audit] per-call remote audit log: /var/lib/athenaeum/remote-audit.jsonl
 [remote-policy] excluded fields: off (withheld); tools not served: resolve_merge, resolve_question, review_audit_item
 [transport] streamable HTTP on http://127.0.0.1:8000/mcp
 ```
@@ -408,10 +412,12 @@ exit non-zero on failure, which is what makes them worth alerting on.
 
 ## Logs
 
-There is no athenaeum log file. Every line goes to stdout/stderr, so your service
-manager owns the log — `journalctl -u athenaeum-serve` under the units above.
+There is no athenaeum STARTUP log file. Every startup line goes to
+stdout/stderr, so your service manager owns those — `journalctl -u
+athenaeum-serve` under the units above. Per-call forensics are different: see
+[The per-call audit log](#the-per-call-audit-log) below.
 
-What you get, and what you do not:
+What you get from startup lines, and what you do not:
 
 - **A `[warn] search_backend=... but no index at <path>` line at startup means
   `recall` will return nothing.** It is the single most common silent remote-mode
@@ -421,30 +427,100 @@ What you get, and what you do not:
 - **Startup lines name the whole resolved configuration**: the `[auth]` line carries
   the issuer, the audience and the allowed-identity count; `[remote-policy]` carries
   the profile and the excluded-fields pin; `[transport]` carries the bind and the
-  path prefix. These are the lines to diff against your intent after a config change,
-  and they are the only place the resolved values appear.
-- **No token is ever logged**, in whole or in part, by athenaeum or by the verifier
-  underneath it. An allowlist refusal names the `sub` it refused — a value from your
-  own configuration — and nothing else.
+  path prefix; `[audit]` carries the resolved audit-log path. These are the lines to
+  diff against your intent after a config change, and they are the only place the
+  resolved values appear.
+- **No token is ever logged**, in whole or in part, by athenaeum, by the verifier
+  underneath it, or by the audit log below. An allowlist refusal names the `sub` it
+  refused — a value from your own configuration — and nothing else.
 - **A rejected request is a 401 with a `WWW-Authenticate` challenge** naming the
   metadata URL and the required scopes. An identity that is not on the allowlist gets
   the same 401 an invalid signature gets, deliberately: a distinguishable 403 would
   let a caller enumerate which subjects you trust. So "401" alone does not tell you
-  which of the two happened — read the refusal line in the log.
+  which of the two happened from the HTTP response alone — the audit log's `reason`
+  field does distinguish them, for the operator only; it is never echoed to the caller.
 - **`raw/remote-session/` is the durable record of what a remote agent wrote.** Every
   `remember` is one append-only file there, with its own provenance. It is more
   useful than any log line for answering "what did that host put in my store".
 - **The local push-metrics ledger records that a `recall` happened**, as a
   best-effort telemetry append — counts and hashes, on your own disk. Useful for
-  "is this endpoint being used"; not an access log, and not a record of what was
-  returned.
-- **What was returned is not recoverable from your side.** The page text went to the
-  host provider. Their retention is the only place it is logged. This is the same
-  point as [Every recall result is egress](#every-recall-result-is-egress), stated
-  where you would go looking for an audit trail.
+  "is this endpoint being used"; not a substitute for the audit log below.
 
-Keep the proxy's access log too. It is the only place a request that never reached
-athenaeum — a TLS failure, a path typo, a scanner — appears at all.
+### The per-call audit log
+
+Every scope-gated tool call — and every refusal, including one that never reaches a
+tool (a bad bearer token, or a verified identity not on the allowlist) — appends one
+JSON line to a local file. This is the record this project controls, as opposed to
+the authorization server's own logs (which you do not control the retention of) or a
+tunnel provider's edge (which may keep none at all): after a suspected token leak or
+a prompt-injection exfiltration attempt, this file is where you answer "what did a
+remote caller actually do".
+
+Each line carries: a UTC timestamp; the caller's `sub`, client id (`azp` or
+`client_id`) and `jti` when the token carries one; the tool name (`null` for a
+refusal that never reached a tool); a SHA-256 digest of the call's canonicalised
+arguments; the outcome (`ok`, `refused` or `error`); the result count; and the page
+uids that came back. **No token, no argument text and no page body is ever written —
+only the digest and the uids.** What this buys you and what it does not:
+
+- **You can tell WHICH pages a caller read, never WHAT was in them.** A `recall` hit
+  shows up as a `uid` in `page_uids`; the page's title, tags and body stay off this
+  file entirely, the same way they stay off every other log in this project. Cross-
+  reference a `uid` against your own wiki to see the content.
+- **An `error` outcome never echoes the exception message** — only the exception's
+  type name. A tool that happened to raise with caller-controlled text in its message
+  cannot use that path to get the text into this file.
+- **It is only written under `--transport http` with `serve.auth.*` configured.**
+  stdio and an unauthenticated HTTP server write nothing — there is no verified
+  caller to attribute a line to, and nothing here changes that default.
+- **The file is created at mode `0600`** and appends are line-atomic under concurrent
+  callers (one `write(2)` per line, never interleaved mid-line).
+- **It still cannot replace the proxy's access log.** A request that never reached
+  athenaeum at all — a TLS failure, a path typo, a scanner probing the bare URL with
+  no `Authorization` header — is refused by the transport before any athenaeum code
+  runs, so there is nothing here to attribute it to either. Keep the proxy's access
+  log for that class; this file picks up everything that reached athenaeum's own
+  bearer-token check, which the proxy's log cannot distinguish a valid call from.
+
+Configure the location with `serve.audit_log` (`ATHENAEUM_SERVE_AUDIT_LOG` /
+`athenaeum serve --audit-log`); the default is `<cache_dir>/remote-audit.jsonl`. Set
+it to a path your log rotation tooling already watches, or point your own `logrotate`
+(or equivalent) at it directly — it is a plain append-only JSONL file, so a `copytruncate`
+rotation strategy is safe as long as it does not truncate mid-append (which a default
+`logrotate` run, between requests, will not). athenaeum itself holds the file open only
+for the duration of each append and never for the life of the process, so a rename-based
+rotation (the non-`copytruncate` default) is equally safe: the next append reopens
+whatever path `serve.audit_log` still names.
+
+**If the audit log cannot be written — a full disk, a permissions change, the cache
+directory remounted read-only — remote mode fails CLOSED, deliberately.** A tool
+call that could not be audited is reported to the caller as a FAILED call, not a
+successful one with a gap in the log. The reasoning: this is a security control
+whose whole premise is being able to answer "what did a remote caller read" after
+the fact, so an audit log that can be silently turned off by exhausting disk space
+is worse than no audit log at all — it is a trail you keep trusting after it has
+already gone blind. Concretely:
+
+- **Every call fails until the audit path is writable again.** This is a real
+  availability cost: a full disk takes remote mode down, not just the write. Watch
+  disk space on whatever volume `serve.audit_log` resolves to the same way you would
+  watch it for any other append-only store.
+- **A write failure is also logged, loudly, to stderr** (`error` level, naming the
+  path and the underlying OS error) — independent of whatever the MCP client does
+  with its own failed call, so the cause is visible in `journalctl -u athenaeum-serve`
+  even before you go looking at a client-side error.
+- **For a tool that WRITES (`remember`, a decision-queue resolution), the write may
+  already be durable by the time the failure is reported.** The audit record for a
+  successful call is appended AFTER the tool's own work completes, so a disk that
+  fills at exactly that moment can make the caller see "failed" for work the server
+  already did. Treat that the same way you would already have to treat a response
+  lost to a dropped connection — no MCP transport here promises exactly-once
+  delivery — and check whether the write actually landed before retrying it, rather
+  than assuming it did not.
+- **A REFUSED call (bad token, insufficient scope, a non-allowlisted identity) never
+  has this ambiguity.** Its audit line is written BEFORE anything is read or
+  written, so a write failure there still blocks the call with nothing to double-
+  check — it was already being refused.
 
 ## Rotation and revocation
 
