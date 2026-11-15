@@ -108,9 +108,9 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -239,6 +239,18 @@ class LeaseHeldError(RuntimeError):
             f"lease {name!r} is held"
             + (f" by {self.holder}" if self.holder else " (no holder metadata)")
         )
+
+
+class StoreCapabilityError(RuntimeError):
+    """Raised when an operation needs a capability the target surface does not
+    declare (design note §4.4 R1 / §4.5 R2, issue athenaeum#2615).
+
+    The case it exists for: a destructive operation (``delete``, or the source
+    side of a ``move``) on a surface that is neither ``versioned`` (so the
+    change is recoverable from git) nor ``purgeable`` (so erasure is the
+    point). Doing it anyway would be the silent, unrecoverable delete R1
+    forbids, so the store refuses, loudly (D6).
+    """
 
 
 class UnknownSurfaceError(KeyError):
@@ -1231,6 +1243,41 @@ class Store(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def _repo_has_remote(repo: Path) -> bool:
+    """True when the git repository at *repo* has at least one remote."""
+    result = subprocess.run(
+        ["git", "remote"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _commit_all(repo: Path, label: str) -> str | None:
+    """``git add -A`` + ``git commit`` in *repo* iff it has changes; return the
+    new HEAD SHA, or ``None`` when there was nothing to commit (or no ``.git``)."""
+    if not (repo / ".git").exists():
+        return None
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    if not status.stdout.strip():
+        return None
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-m", label], cwd=str(repo), check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 class FilesystemStore:
     """``Store`` over :mod:`athenaeum.atomic_io` + :mod:`pathlib` (issue athenaeum#976).
 
@@ -1275,9 +1322,19 @@ class FilesystemStore:
     ``UnicodeDecodeError`` rather than a silently truncated write.
     """
 
-    def __init__(self, knowledge_root: Path, roots: Mapping[str, Path]) -> None:
+    def __init__(
+        self,
+        knowledge_root: Path,
+        roots: Mapping[str, Path],
+        *,
+        non_purgeable_surfaces: Collection[str] = (),
+    ) -> None:
         self._knowledge_root = Path(knowledge_root)
         self._roots = dict(roots)
+        # Surfaces whose adapter declares ``purgeable: false`` (R2, athenaeum#2615).
+        # Empty by default, so every surface keeps the store-level
+        # ``purgeable=True`` it always had.
+        self._non_purgeable = frozenset(non_purgeable_surfaces)
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
@@ -1297,6 +1354,89 @@ class FilesystemStore:
             cheap_local_scan=True,
             local_path_for=self._local_path_for,
         )
+
+    # -- per-surface capabilities (design note §4.5 R2, athenaeum#2615) ----
+
+    def _surface_repo(self, surface: str) -> Path | None:
+        """The git working-tree root that holds *surface*'s own root, or ``None``.
+
+        Found by walking up from the surface root (or its nearest existing
+        ancestor) to the first directory containing ``.git``. Two guards keep
+        this from ever picking a repository the deployment did not mean:
+        the knowledge root's own repo is returned as-is, and a repo that is a
+        STRICT ANCESTOR of the knowledge root while the knowledge root is not
+        itself a repo is ignored (an unrelated repo higher up the tree must
+        never be treated as this store's, or ``snapshot`` would ``git add -A``
+        it). Raises :class:`UnknownSurfaceError` for an unknown *surface*.
+        """
+        root = self._root_for_surface(surface)
+        probe = root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        found: Path | None = None
+        for candidate in (probe, *probe.parents):
+            if (candidate / ".git").exists():
+                found = candidate
+                break
+        if found is None:
+            return None
+        knowledge = self._knowledge_root
+        if found == knowledge:
+            return found
+        if found in knowledge.parents:
+            return None
+        return found
+
+    def capabilities_for(self, surface: str) -> StoreCapabilities:
+        """The capability profile of *surface* (design note §4.5 R2).
+
+        ``versioned`` is true only when the surface's OWN root sits inside a
+        git working tree; ``purgeable`` is true unless the surface's adapter
+        declared otherwise. Every other flag is the store-level value. The
+        store-level :attr:`capabilities` stays the default-surface (knowledge
+        root) profile, unchanged, so existing callers keep working.
+        """
+        return replace(
+            self.capabilities,
+            versioned=self._surface_repo(surface) is not None,
+            purgeable=surface not in self._non_purgeable,
+        )
+
+    def versioned_surface_repos(self) -> dict[Path, tuple[str, ...]]:
+        """``{git working-tree root: surfaces held in it}`` for every versioned
+        surface, in stable (sorted) order."""
+        grouped: dict[Path, list[str]] = {}
+        for surface in sorted(self._roots):
+            repo = self._surface_repo(surface)
+            if repo is not None:
+                grouped.setdefault(repo, []).append(surface)
+        return {repo: tuple(names) for repo, names in grouped.items()}
+
+    def own_repo_surfaces(self) -> dict[Path, tuple[str, ...]]:
+        """The versioned surfaces that live in a git repository OTHER than the
+        knowledge root's — the ones the run must pull and push on their own."""
+        return {
+            repo: names
+            for repo, names in self.versioned_surface_repos().items()
+            if repo != self._knowledge_root
+        }
+
+    def sync_repos(self) -> dict[Path, tuple[str, ...]]:
+        """:meth:`own_repo_surfaces` narrowed to repos that have a remote."""
+        return {
+            repo: names
+            for repo, names in self.own_repo_surfaces().items()
+            if _repo_has_remote(repo)
+        }
+
+    def _require_destructive_ok(self, surface: str, op: str) -> None:
+        caps = self.capabilities_for(surface)
+        if not caps.versioned and not caps.purgeable:
+            raise StoreCapabilityError(
+                f"{op} refused on surface {surface!r}: it is neither versioned "
+                "(recoverable from git) nor purgeable (erasure is its point), so "
+                "the change would be unrecoverable (design note §4.4 R1)"
+            )
 
     # -- path / version resolution --------------------------------------
 
@@ -1348,6 +1488,10 @@ class FilesystemStore:
             if not path.is_file():
                 continue
             rel = path.relative_to(root).as_posix()
+            # A surface rooted at a git repository's top level (athenaeum#2615)
+            # must not list git's own metadata as stored objects.
+            if ".git" in path.relative_to(root).parts:
+                continue
             if not rel.startswith(prefix):
                 continue
             info = path.stat()
@@ -1400,6 +1544,7 @@ class FilesystemStore:
     def delete(self, key: StoreKey, *, expect: str | None = None) -> bool:
         """``expect=None`` deletes unconditionally (``False`` if already absent,
         matching "no ``exists()``", §6.3); ``expect=<token>`` is a CAS delete."""
+        self._require_destructive_ok(key.surface, "delete")
         path = self._path_for(key)
         current = self._version_for(path)
         if current is None:
@@ -1426,6 +1571,7 @@ class FilesystemStore:
         closed, loudly") is the conservative default absent an explicit
         ``expect=`` parameter on this method.
         """
+        self._require_destructive_ok(src.surface, "move")
         src_path = self._path_for(src)
         dst_path = self._path_for(dst)
         if not src_path.exists():
@@ -1460,37 +1606,29 @@ class FilesystemStore:
         posture ``git_snapshot`` always had, in case ``.git`` is removed
         out-of-band between construction and this call.
         """
-        knowledge_root = self._knowledge_root
-        if not (knowledge_root / ".git").exists():
-            return None
-
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(knowledge_root),
-            capture_output=True,
-            text=True,
-        )
-        if not status.stdout.strip():
-            return None
-
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=str(knowledge_root),
-            check=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", label],
-            cwd=str(knowledge_root),
-            check=True,
-        )
-        sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(knowledge_root),
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+        sha = _commit_all(self._knowledge_root, label)
+        # R2 (athenaeum#2615): a surface that is its own git repository is a
+        # restore point of its own. Committed here so every existing caller
+        # gets it for free; the return value stays the knowledge root's SHA.
+        for repo in self.own_repo_surfaces():
+            _commit_all(repo, label)
         return sha
+
+    def snapshot_surfaces(self, label: str) -> dict[str, str]:
+        """Commit every versioned surface that has changes; return one restore
+        point (commit SHA) per such surface (athenaeum#2615).
+
+        Surfaces that share a repository share a commit and so a SHA. A
+        versioned surface with nothing to commit is absent from the result.
+        A failing ``git commit`` raises (never silently skipped).
+        """
+        points: dict[str, str] = {}
+        for repo, surfaces in self.versioned_surface_repos().items():
+            sha = _commit_all(repo, label)
+            if sha is not None:
+                for surface in surfaces:
+                    points[surface] = sha
+        return points
 
     def uncommitted_paths(self, paths: Sequence[Path]) -> list[Path]:
         """Return the subset of *paths* ``git status --porcelain`` reports as

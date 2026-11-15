@@ -132,7 +132,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum run`](#athenaeum-run) (command) — Run the librarian pipeline
 - [`athenaeum schedule`](#athenaeum-schedule) (group) — Install or remove a recurring `athenaeum run` schedule: a launchd plist on macOS, or a systemd user timer or crontab entry on Linux, with absolute paths and the key source resolved without a login shell.
 - [`athenaeum schedule install`](#athenaeum-schedule-install) (command) — Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM key source is available, rather than installing a schedule that would fail every night.
-- [`athenaeum schedule remove`](#athenaeum-schedule-remove) (command) — Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
+- [`athenaeum schedule remove`](#athenaeum-schedule-remove) (command) — Unload and delete everything `install` wrote, plus the run log(s) the schedule created (and, on Linux, the log directory when empty and a crontab athenaeum itself created). A no-op (exit 0) when nothing is installed.
 - [`athenaeum schema`](#athenaeum-schema) (group) — Page schema-version maintenance: apply pending EAGER rule-based kernel migrations corpus-wide.
 - [`athenaeum schema migrate`](#athenaeum-schema-migrate) (command) — Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MIGRATIONS) — dry-run unless --apply. Never touches a model-derivation migration (those advance only via 'athenaeum audit') and never overwrites an already-populated field.
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
@@ -1711,7 +1711,7 @@ Install or remove a recurring `athenaeum run` schedule: a launchd plist on macOS
 Subcommands:
 
 - `athenaeum schedule install` — Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM key source is available, rather than installing a schedule that would fail every night.
-- `athenaeum schedule remove` — Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
+- `athenaeum schedule remove` — Unload and delete everything `install` wrote, plus the run log(s) the schedule created (and, on Linux, the log directory when empty and a crontab athenaeum itself created). A no-op (exit 0) when nothing is installed.
 
 ## `athenaeum schedule install`
 
@@ -1728,13 +1728,14 @@ Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM 
 
 ## `athenaeum schedule remove`
 
-Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is installed.
+Unload and delete everything `install` wrote, plus the run log(s) the schedule created (and, on Linux, the log directory when empty and a crontab athenaeum itself created). A no-op (exit 0) when nothing is installed.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--backend` | — | launchd, systemd, cron | Force a backend instead of auto-detecting from the platform (macOS is always launchd; Linux auto-detects systemd when `systemctl` is on PATH, else cron). |
 | `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). When it is not the default, `install` also sets ATHENAEUM_CACHE_DIR in the generated unit, so the scheduled run uses this same cache directory. |
 | `--home` | — | — | Home directory the unit is written under / read from (default: the real home directory). Mainly for testing an unusual HOME layout. |
+| `--keep-logs` | off (flag absent) | — | Keep the scheduled run's log file(s) instead of deleting them. |
 | `--path` | `~/knowledge` | — | Knowledge directory the generated unit runs `athenaeum run` against (default: ~/knowledge) |
 
 ## `athenaeum schema`

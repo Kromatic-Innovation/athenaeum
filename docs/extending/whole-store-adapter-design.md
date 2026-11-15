@@ -2,14 +2,38 @@
 
 # Generalising the storage-adapter seam to the whole store
 
-**Status:** DESIGN LOCK. Issue athenaeum#911. Not yet implemented — the
-implementation slices this design locks are specified in §9.2 and were filed by
-athenaeum#945, the operator follow-up that also performed the athenaeum#718
-re-scope in §8. The slices are **S1 athenaeum#976**, **S2 athenaeum#977**,
-**S3 athenaeum#978**, **S4 athenaeum#979**, **S5 athenaeum#980**,
-**S6 athenaeum#981**, **S7 athenaeum#982** and **S8 athenaeum#983**; the §8
-re-scope left tiering and push budget on athenaeum#718 (split (a)) and split
-off athenaeum#984 (off-corpus storage) and athenaeum#985 (erasure
+**Status:** PARTLY IMPLEMENTED. Issue athenaeum#911 (closed). The implementation
+slices this design locks are specified in §9.2 and were filed by athenaeum#945,
+the operator follow-up that also performed the athenaeum#718 re-scope in §8.
+All eight slices have shipped:
+
+| Slice | Issue | PR | What shipped |
+|---|---|---|---|
+| S1 | athenaeum#976 | athenaeum#1041 | store protocol + filesystem adapter (no callers migrated) |
+| S2 | athenaeum#977 | athenaeum#1071 | index build on the bulk primitives |
+| S3 | athenaeum#978 | athenaeum#1046 | recoverability capability replaces the `.git` gate |
+| S4 | athenaeum#979 | athenaeum#1073 | lease primitive |
+| S5 | athenaeum#980 | athenaeum#1080 | artifact classification (the four R3 classes) |
+| S6 | athenaeum#981 | athenaeum#1076 | keyword backend declares its `cheap_local_scan` requirement |
+| S7 | athenaeum#982 | athenaeum#1069 | one write-path caller (`quarantine.py`) end to end |
+| S8 | athenaeum#983 | athenaeum#1083 | publish the store contract |
+
+**Not built.** The design sections below still describe these as designed, not
+as running code:
+
+- **R2, capabilities declared per surface (§4.5).** Capabilities are still
+  declared per store, not per surface.
+- **The W3 to W8 caller migration (§9.2).** Only the S7 caller
+  (`quarantine.py`) was migrated; the remaining direct-filesystem callers still
+  touch the filesystem themselves.
+- **Type routing for indexed types to a store outside `wiki/`.** An indexed
+  type cannot yet be placed in a store of its own.
+
+The per-type stores epic (athenaeum#2630) and the federation design epic
+(athenaeum#2631) carry this work forward.
+
+The §8 re-scope left tiering and push budget on athenaeum#718 (split (a)) and
+split off athenaeum#984 (off-corpus storage) and athenaeum#985 (erasure
 classification and taint).
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify), which
