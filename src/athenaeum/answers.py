@@ -1098,6 +1098,48 @@ _NO_SOURCE_WRITEBACK_CONFLICT_TYPES: frozenset[str] = frozenset(
 # `tests/test_import_graph_acyclic.py`, `ALLOWED_SCCS = []`).
 _FOLD_CONFLICT_TYPE = "duplicate"
 
+# Issue athenaeum#2705: a `classification_failed` notice (raised by the
+# athenaeum#1126 address gate in `librarian.process_one` /
+# `batch.process_batch_run`) is raised AGAINST a raw note the librarian goes
+# on to consume and remove on its normal schedule -- usually long before a
+# human answers. Its answer is a ruling about WHICH entity the parked
+# statement belongs to (or that it belongs to none), so annotating the raw
+# note -- the "source" class's `_writeback_source` -- was never the right
+# apply: it held every answer `no source ref resolved` forever once the note
+# was gone. The block already carries a durable copy of the statement (the
+# fenced `**Observation**:` field, athenaeum#2078 AC4); the apply re-submits
+# that copy, plus the human's answer, as fresh raw intake under
+# `_REINGEST_DIR`, so the librarian's next compile creates or updates the
+# page the answer directs. See `_apply_reingest_answer`.
+_REINGEST_CONFLICT_TYPES: frozenset[str] = frozenset(("classification_failed",))
+
+#: Raw-intake source directory the athenaeum#2705 re-ingest notes land in.
+#: Deliberately NOT ``raw/answers/`` -- that directory is skipped by intake
+#: discovery (issue athenaeum#414), and the whole point of this note is that
+#: the librarian compiles it.
+_REINGEST_DIR = "question-answers"
+
+# Issue athenaeum#2705: a leading answer token that directs NO page write --
+# the statement is archived with the block and nothing is re-ingested.
+# `not_a_conflict` is included because it is the existing source-class
+# "no change" verdict (`_VERDICT_TOKENS`) and operators already answer notice
+# blocks with it; treating it as "write nothing" is the conservative reading
+# (the archive keeps the statement, so it can still be re-submitted by hand).
+_REINGEST_DISMISS_TOKENS: frozenset[str] = frozenset(
+    (
+        "dismiss",
+        "dismissed",
+        "discard",
+        "drop",
+        "skip",
+        "ignore",
+        "reject",
+        "rejected",
+        "not_a_conflict",
+        "not_a_person",
+    )
+)
+
 
 def _parse_verdict(answer_body: str) -> tuple[str | None, str]:
     """Split a leading verdict token off an answer body.
@@ -1255,7 +1297,10 @@ def _writeback_class(pq: PendingQuestion) -> str:
     / ``"short_name_escalated"`` (issue athenaeum#2526 — already applied
     directly by :func:`athenaeum.decision_answers._apply_short_name_escalated_answer`)
     for a block whose source ref is unresolvable by design, or already
-    handled elsewhere (see :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or
+    handled elsewhere (see :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`),
+    ``"reingest"`` for a ``classification_failed`` notice (issue
+    athenaeum#2705 -- applied by re-submitting its retained statement plus
+    the answer as fresh intake, see :func:`_apply_reingest_answer`), or
     ``"source"`` for every ordinary detector-raised block, where a
     write-back IS expected.
     """
@@ -1263,9 +1308,30 @@ def _writeback_class(pq: PendingQuestion) -> str:
         return "agent"
     if pq.conflict_type == _FOLD_CONFLICT_TYPE:
         return "fold"
+    if pq.conflict_type in _REINGEST_CONFLICT_TYPES:
+        return "reingest"
     if pq.conflict_type in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
         return pq.conflict_type
     return "source"
+
+
+def _first_answer_token(answer_body: str) -> str | None:
+    """The lowercased leading token of *answer_body*'s first non-blank line.
+
+    Split at the first ``:`` then at whitespace, one trailing ``.``/``!``
+    stripped. ``None`` for an empty body, and for a first line with no token
+    before its first ``:`` (e.g. an answer starting ``:thumbsup:``) -- which
+    used to raise ``IndexError`` and abort the whole ``ingest_answers`` run.
+    """
+    for line in answer_body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        words = stripped.split(":", 1)[0].split()
+        if not words:
+            return None
+        return words[0].strip().lower().rstrip(".!")
+    return None
 
 
 def _parse_correction_answer(pq: PendingQuestion) -> str | None:
@@ -1281,18 +1347,145 @@ def _parse_correction_answer(pq: PendingQuestion) -> str | None:
     (:func:`_apply_field_correction`) never falls back to treating an
     unrecognized token as either verdict.
     """
-    body = _answer_body(pq)
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        token = stripped.split(":", 1)[0].split()[0].strip().lower().rstrip(".!")
-        if token in _RATIFY_TOKENS:
-            return "ratify"
-        if token in _REJECT_TOKENS:
-            return "reject"
-        return None
+    token = _first_answer_token(_answer_body(pq))
+    if token in _RATIFY_TOKENS:
+        return "ratify"
+    if token in _REJECT_TOKENS:
+        return "reject"
     return None
+
+
+def _parse_reingest_dismissal(answer_body: str) -> str | None:
+    """Return the dismissal token leading *answer_body*, or ``None`` (athenaeum#2705).
+
+    Same first-token rule as :func:`_parse_correction_answer`
+    (:func:`_first_answer_token`). Only a token in
+    :data:`_REINGEST_DISMISS_TOKENS` counts -- any other answer is a ruling
+    to apply, never guessed to be a dismissal.
+    """
+    token = _first_answer_token(answer_body)
+    return token if token in _REINGEST_DISMISS_TOKENS else None
+
+
+def _retained_reingest_statement(
+    pq: PendingQuestion, roots: list[Path]
+) -> tuple[str, str]:
+    """Return ``(statement, origin)`` -- the text an athenaeum#2705 apply re-submits.
+
+    The block's own fenced ``**Observation**:`` copy (athenaeum#2078 AC4) is
+    preferred: it is written at raise time and survives the raw note being
+    consumed, which is the whole point. When a block carries no such copy
+    (it predates that field) the source raw note itself is used if it still
+    resolves. ``("", "")`` means neither exists -- the answer is
+    unrecoverable, and the caller reports it as such rather than holding it.
+    """
+    if pq.observation.strip():
+        return pq.observation.strip(), "retained copy"
+    for path in _resolve_source_files([pq.source], roots):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            log.warning("answers: source missing/unreadable: %s", path)
+            continue
+        from athenaeum.models import parse_frontmatter
+
+        _meta, body = parse_frontmatter(text)
+        if body.strip():
+            return body.strip(), f"source raw/{pq.source}"
+    return "", ""
+
+
+def _render_reingest_note(
+    pq: PendingQuestion, statement: str, answer_body: str, resolved_at: str
+) -> str:
+    """Render the raw-intake note an athenaeum#2705 apply writes.
+
+    The statement comes first, exactly as the librarian originally saw it;
+    the human's ruling follows under its own heading so the classifier reads
+    it as authoritative context for which entity the statement belongs to.
+    Frontmatter carries a typed ``<type>:<ref>`` ``source`` (issue
+    athenaeum#97) plus the original raw ref, so the compiled facts stay
+    traceable to the question that released them.
+    """
+    return (
+        "---\n"
+        f"source: pending-question:{pq.id}\n"
+        f"original_source: raw/{pq.source}\n"
+        f"pending_question_id: {pq.id}\n"
+        f"resolved_at: {resolved_at}\n"
+        "---\n\n"
+        f"{statement}\n\n"
+        "## Operator ruling\n\n"
+        "This statement was held back from compilation by a pending question "
+        f"({pq.question}). A human answered it as follows; treat the answer "
+        "as authoritative about which entity the statement above belongs to "
+        "and whether a page should be created or updated for it:\n\n"
+        f"{answer_body}\n"
+    )
+
+
+def _apply_reingest_answer(
+    pq: PendingQuestion,
+    raw_root: Path,
+    roots: list[Path],
+    *,
+    resolved_at: str,
+    filename_ts: str,
+) -> tuple[str, str]:
+    """Apply an answered ``classification_failed`` notice (issue athenaeum#2705).
+
+    Returns ``(outcome, detail)``; never raises past the caller's archive
+    path. ``outcome`` is one of:
+
+    - ``"reingested"`` -- the retained statement plus the answer were written
+      as a fresh raw-intake note under ``raw/question-answers/``; the
+      librarian's next compile creates or updates the page the answer
+      directs. Idempotent: a note already written for this block id (a run
+      that crashed before rewriting the pending file) is reused, not
+      duplicated.
+    - ``"dismissed"`` -- the answer leads with a
+      :data:`_REINGEST_DISMISS_TOKENS` token, or is empty: nothing is
+      written, the block (with its statement) is archived.
+    - ``"unrecoverable"`` -- the block has no retained copy and its source
+      raw note no longer resolves, so there is nothing to apply the answer
+      to. Reported, never held: holding it would wait forever on a file
+      that was consumed by design.
+    """
+    answer_body = _answer_body(pq)
+    if not answer_body:
+        return "dismissed", "empty answer — nothing re-submitted"
+    token = _parse_reingest_dismissal(answer_body)
+    if token is not None:
+        return "dismissed", f"answer {token!r} directs no page write — nothing re-submitted"
+
+    statement, origin = _retained_reingest_statement(pq, roots)
+    if not statement:
+        return (
+            "unrecoverable",
+            f"no retained copy of the statement and source ref raw/{pq.source} "
+            "no longer resolves, so the answer cannot be applied — re-submit "
+            "the fact by hand if it still matters",
+        )
+
+    reingest_dir = raw_root / _REINGEST_DIR
+    # `pq.id` is 12 hex chars; its first 8 make the name match intake's
+    # canonical `<ts>-<8hex>.md` shape (`intake.RAW_FILE_RE`), and are what
+    # makes a re-run after a crash find the note it already wrote.
+    id8 = pq.id[:8]
+    existing = sorted(reingest_dir.glob(f"*-{id8}.md")) if reingest_dir.is_dir() else []
+    if existing:
+        target = existing[0]
+    else:
+        reingest_dir.mkdir(parents=True, exist_ok=True)
+        target = reingest_dir / f"{filename_ts}-{id8}.md"
+        atomic_write_text(
+            target, _render_reingest_note(pq, statement, answer_body, resolved_at)
+        )
+    rel = target.relative_to(raw_root).as_posix()
+    return (
+        "reingested",
+        f"{origin} + answer re-submitted as raw/{rel} for the next librarian run",
+    )
 
 
 def _writeback_source(
@@ -1715,6 +1908,15 @@ class IngestAnswersReport:
         folds_refused: Issue athenaeum#2518 — fold-question blocks archived
             this run whose "approve" was refused by one of the normal merge
             path's safety checks (``fold_applier`` returned ``"refused"``).
+        reingested: Issue athenaeum#2705 — ``classification_failed`` blocks
+            archived this run whose answer was applied by re-submitting the
+            retained statement plus the answer as fresh raw intake.
+        reingest_dismissed: Issue athenaeum#2705 — ``classification_failed``
+            blocks archived this run whose answer directed no page write.
+        unrecoverable: Issue athenaeum#2705 — ``classification_failed``
+            blocks archived this run whose answer could not be applied
+            because neither a retained copy nor the source raw note exists.
+            Reported here (and logged as a warning) instead of held.
     """
 
     files_written: int = 0
@@ -1726,6 +1928,9 @@ class IngestAnswersReport:
     folds_applied: int = 0
     folds_rejected: int = 0
     folds_refused: int = 0
+    reingested: int = 0
+    reingest_dismissed: int = 0
+    unrecoverable: int = 0
 
 
 def ingest_answers(
@@ -1928,6 +2133,27 @@ def ingest_answers(
         # whether this run needs to write anything) so a fold's
         # folded/refused/rejected/held status is known up front.
         fold_outcome: tuple[str, str] | None = None
+        # Issue athenaeum#2705: the classification_failed twin -- never
+        # held. A block an earlier run stamped `held — no source ref
+        # resolved` (before this class existed) has existing_state "held"
+        # and is re-applied here on its next run.
+        reingest_outcome: tuple[str, str] | None = None
+        if writeback_class == "reingest" and existing_state != "waived":
+            reingest_outcome = _apply_reingest_answer(
+                pq,
+                raw_root,
+                source_roots,
+                resolved_at=iso_ts,
+                filename_ts=filename_ts,
+            )
+            if reingest_outcome[0] == "unrecoverable":
+                log.warning(
+                    "answers: answer for entity=%s (id=%s) is unrecoverable "
+                    "(athenaeum#2705): %s",
+                    pq.entity,
+                    pq.id,
+                    reingest_outcome[1],
+                )
         if writeback_class == "source" and existing_state != "waived":
             hold_body = _answer_body(pq)
             hold_refs = _block_source_refs(pq)
@@ -2095,6 +2321,25 @@ def ingest_answers(
                         report.folds_rejected += 1
                     else:
                         report.folds_refused += 1
+        elif writeback_class == "reingest":
+            # Issue athenaeum#2705: applied above by `_apply_reingest_answer`
+            # (never via _writeback_source -- the raw note it would annotate
+            # is consumed by design). Never "held".
+            skip_writeback = True
+            if existing_state == "waived":
+                if report is not None:
+                    report.waived += 1
+            else:
+                assert reingest_outcome is not None
+                outcome, detail = reingest_outcome
+                archive_status_line = f"**Write-back**: {outcome} — {detail}"
+                if report is not None:
+                    if outcome == "reingested":
+                        report.reingested += 1
+                    elif outcome == "dismissed":
+                        report.reingest_dismissed += 1
+                    else:
+                        report.unrecoverable += 1
         elif writeback_class == "schema-amendment":
             skip_writeback = True
             archive_status_line = (
