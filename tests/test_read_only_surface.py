@@ -89,6 +89,13 @@ def _config(read_only: Any = True, root: str = "recipes") -> dict[str, Any]:
     }
 
 
+def _fillers(root: Path, n: int = 5) -> None:
+    """Pages that never contain a query term: a corpus of one or two pages scores ~0 on
+    bm25 and the hit is dropped, which would make recall assertions flaky."""
+    for i in range(n):
+        _page(root / f"filler-{i}.md", f"recipe-filler{i}", f"Filler {i}", f"plain text {i}")
+
+
 def _page(path: Path, uid: str, name: str, body: str = "body", typ: str = "recipe") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -450,6 +457,7 @@ class TestPullAndPush:
         (kr / "wiki").mkdir(parents=True)
         repo = _init_repo(tmp_path / "shared")
         _page(repo / "loaf.md", "recipe-loaf", "Pistachio Loaf", "zephyrloaf")
+        _fillers(repo)
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "recipes")
         bare = _with_remote(repo, tmp_path, "shared")
@@ -472,7 +480,7 @@ class TestPullAndPush:
         cache = tmp_path / "cache"
         backend, pages = librarian.reindex(kr, config=cfg, cache_dir=cache, backend="fts5")
         assert (repo / "quokka.md").exists()  # pulled first
-        assert pages == 2
+        assert pages == 7  # loaf + quokka + 5 fillers
 
     def test_cli_reindex_pulls_and_reports_failure(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -504,7 +512,7 @@ class TestPullAndPush:
         assert outcome == {"recipes": False}
         cache = tmp_path / "cache"
         _, pages = librarian.reindex(kr, config=cfg, cache_dir=cache, backend="fts5")
-        assert pages == 1
+        assert pages == 6  # loaf + 5 fillers
 
     def test_no_read_only_surface_pulls_nothing(self, tmp_path: Path) -> None:
         kr, repo, bare, cfg = self._mount(tmp_path)
@@ -554,6 +562,7 @@ class TestReadOnlyMountIsServed:
         self, kb: Path, ro_page: Path
     ) -> None:
         cfg = _config()
+        _fillers(kb / "recipes")  # inside the mount: it is still the only content
         surfaces = resolve_locator_surfaces(kb, cfg)
         assert [s.prefix for s in surfaces] == ["recipes"]
         cache = kb / "cache"
