@@ -382,6 +382,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.claude` config directory, so a correct install reported `FAIL`
   with a fix that was the command the user had just run; a genuinely
   unregistered install still reports `FAIL` (athenaeum#2594).
+- The `two_surnames_former_name` attribution eval cases no longer use the target's own surname as the "former name" in 22 of 44 cases (athenaeum#2542). The generator now draws a distinct former surname; no gold label changed, and the audit under `docs/measurements/` records the written alias / same-entity / own rule used. The shipped calibration record still pins the previous dataset sha.
 - `athenaeum reindex` and `athenaeum session-end` no longer error with
   "Vector backend requires chromadb" under the shipped default
   (`search_backend: vector`) when the `[vector]` extra is not installed —

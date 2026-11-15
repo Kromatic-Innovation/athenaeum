@@ -417,6 +417,12 @@ def _pattern_role_inbox_unrelated_domain(i: int) -> dict[str, Any]:
 def _pattern_two_surnames_former_name(i: int) -> dict[str, Any]:
     tf, tl = _name(i)
     _, former_last = _name(i + 19)
+    if former_last == tl:
+        # athenaeum#2542: ``_name(i + 19)`` lands on the target's own surname
+        # for i in 0-10 and 30-40, which made "former name" identical to the
+        # current name and the local part a plain own-name address. A
+        # two-surnames case needs two surnames, so step to the next pool entry.
+        former_last = LAST_NAMES[(LAST_NAMES.index(tl) + 1) % len(LAST_NAMES)]
     domain = _domain(i)
     target_uid = _next_uid()
     other_uid = _next_uid()
