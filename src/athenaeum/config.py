@@ -6380,6 +6380,13 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     adapters are always available regardless. Non-string keys and non-mapping
     values are dropped defensively (a malformed entry is surfaced loudly later,
     at build time, with the adapter name in the message).
+
+    An entry may carry an integer ``visibility`` (athenaeum#2619): how widely
+    the surface is shared, higher = more widely shared, default 0 (the most
+    private, same as the built-in wiki surface). A page may not link to a page
+    on a lower-ranked surface, and pages on different surfaces are never merged.
+    A negative or non-integer value is a ``StorageConfigError``. With no
+    ``visibility`` declared anywhere nothing is refused.
     """
     if not isinstance(config, dict):
         return {}

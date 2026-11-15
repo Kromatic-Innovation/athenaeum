@@ -46,6 +46,7 @@ import yaml
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.store_boundary import assert_same_surface, locator_for, same_surface
 
 # Honorifics + suffixes to drop before name matching.
 _HONORIFICS = {
@@ -432,6 +433,7 @@ def find_duplicate_persons(
     keys = tuple(strong_identifier_keys)
     identifier_key = keys[0] if keys else None
     persons = _load_persons(wiki_root, identifier_key)
+    locator = locator_for(wiki_root)
     seen: dict[tuple[str, str], DuplicatePair] = {}
 
     def record(
@@ -441,6 +443,9 @@ def find_duplicate_persons(
         forced_canonical: dict[str, Any] | None = None,
     ) -> None:
         if a["uid"] == b["uid"]:
+            return
+        # athenaeum#2619: a merge never crosses a surface.
+        if locator.surfaces and not same_surface(locator, a["path"], b["path"]):
             return
         key = _pair_key(a["uid"], b["uid"])
         if key in seen:
@@ -983,7 +988,21 @@ def merge_duplicate_persons(
             owner=owner,
         )
 
-    for pair in pairs:
+    pair_list = list(pairs)
+    if wiki_root is not None:
+        # athenaeum#2619: refuse BEFORE any write if any pair spans two surfaces.
+        guard_locator = locator_for(wiki_root)
+        if guard_locator.surfaces:
+            for pair in pair_list:
+                assert_same_surface(
+                    guard_locator,
+                    [
+                        p if p.is_absolute() else wiki_root / p
+                        for p in (Path(pair.canonical_path), Path(pair.absorbed_path))
+                    ],
+                )
+
+    for pair in pair_list:
         cpath = Path(pair.canonical_path)
         apath = Path(pair.absorbed_path)
         if not cpath.is_absolute() and wiki_root is not None:

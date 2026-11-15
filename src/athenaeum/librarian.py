@@ -288,6 +288,7 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.storage import open_store, resolve_indexed_surfaces, resolve_locator_surfaces
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store_links import guard_entity_store_links
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
 )
@@ -2334,6 +2335,21 @@ def _apply_tier3_results(
             if _update_idx < len(updated_uids):
                 _prevented_uids.append(str(updated_uids[_update_idx]).strip())
             continue
+        _update_prev = _update_path.read_text(encoding="utf-8") if _update_path.is_file() else None
+        _update_meta, _ = parse_frontmatter(_update_content)
+        if not guard_entity_store_links(
+            wiki_root,
+            _update_path.name,
+            _update_content,
+            _update_meta or {},
+            page_path=_update_path,
+            index=index,
+            config=config,
+            previous_text=_update_prev,
+            source="tier3-merge",
+        ):
+            result.store_link_rejected += 1
+            continue
         atomic_write_text(_update_path, _update_content)
         if _update_idx < len(updated_uids):
             _admitted_updated_uids.append(updated_uids[_update_idx])
@@ -2417,6 +2433,20 @@ def _apply_tier3_results(
                 entity.name,
                 len(_create_violations),
             )
+            continue
+        # Store-boundary link guard (athenaeum#2619): refuse a page that links
+        # to a page on a more private surface than the one it lands on.
+        if not guard_entity_store_links(
+            wiki_root,
+            entity.filename,
+            rendered,
+            rendered_meta,
+            page_path=page_path,
+            index=index,
+            config=config,
+            source="tier3-create",
+        ):
+            result.store_link_rejected += 1
             continue
         atomic_write_text(page_path, rendered)
         index.register(entity)

@@ -129,6 +129,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "schedule": ("athenaeum._cmd_schedule", "add_schedule_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
+    "store-link-lint": (
+        "athenaeum._cmd_store_link_lint",
+        "add_store_link_lint_subparser",
+    ),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
         "add_recovery_yield_subparser",
@@ -255,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
+    from athenaeum._cmd_store_link_lint import add_store_link_lint_subparser
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_triage import add_triage_subparser
@@ -294,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
+    add_store_link_lint_subparser(subparsers)  # store-link-lint (athenaeum#2619)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     # questions / merges removed in 0.24.0 (issue athenaeum#2457), as the
     # athenaeum#1992 deprecation announced: `decisions` carries every mode

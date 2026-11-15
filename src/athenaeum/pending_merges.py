@@ -145,6 +145,7 @@ from athenaeum.sidecar_blocks import (
     split_blocks,
 )
 from athenaeum.store import now_iso
+from athenaeum.store_boundary import CrossStoreMergeError, assert_same_surface, locator_for
 from athenaeum.verdicts import content_hash
 
 log = logging.getLogger(__name__)
@@ -3005,6 +3006,10 @@ def _archive_stale_merge_block(
     atomic_write_text(archive_path, combined)
 
 
+#: ``resolve_merge`` error code for a merge across two surfaces (athenaeum#2619).
+CROSS_STORE_MERGE_ERROR_CODE = "cross_store_merge"
+
+
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
@@ -3229,6 +3234,33 @@ def resolve_merge(
             "message": f"merge id not found: {merge_id}",
             "resolved_block": None,
         }
+
+    # athenaeum#2619: a merge (or attach) never crosses a surface. Refused before
+    # any write, checkbox unflipped, as a named error code.
+    if decision in ("approve", "attach-as-subpage"):
+        _guard_root = wiki_root or merges_path.parent
+        _guard_locator = locator_for(_guard_root)
+        if _guard_locator.surfaces:
+            _guard_pages = [
+                p
+                for p in (
+                    resolve_source_path(src, wiki_root=_guard_root)
+                    for src in target_pm.sources
+                )
+                if p is not None
+            ]
+            _guard_target = resolve_target_page(target_pm.merge_target_name, _guard_root)
+            if _guard_target is not None:
+                _guard_pages.append(_guard_target)
+            try:
+                assert_same_surface(_guard_locator, _guard_pages)
+            except CrossStoreMergeError as exc:
+                return {
+                    "ok": False,
+                    "error_code": CROSS_STORE_MERGE_ERROR_CODE,
+                    "message": str(exc),
+                    "resolved_block": None,
+                }
 
     warning: str | None = None
     extra_response: dict = {}

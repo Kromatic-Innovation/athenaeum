@@ -101,6 +101,8 @@ MODULE_LAYER: dict[str, int] = {
     "schemas": 1,
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,
+    "store_boundary": 3,  # issue athenaeum#2619: surface/rank predicates
+    "store_links": 4,  # issue athenaeum#2619: link guard + lint
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
     # athenaeum#2159: pure single-key frontmatter-line surgery plus the one
@@ -414,6 +416,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_enumerate": 5,
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,
+    "_cmd_store_link_lint": 5,  # issue athenaeum#2619
     "_cmd_import_memory": 5,  # issue athenaeum#2316
     "_cmd_index": 5,
     "_cmd_lifecycle": 5,
