@@ -111,10 +111,17 @@ def add_schedule_subparser(subparsers: argparse._SubParsersAction) -> None:
 
     remove_p = sub.add_parser(
         "remove",
-        help="Unload and delete everything `install` wrote. A no-op "
+        help="Unload and delete everything `install` wrote, plus the run "
+        "log(s) the schedule created (and, on Linux, the log directory when "
+        "empty and a crontab athenaeum itself created). A no-op "
         "(exit 0) when nothing is installed.",
     )
     _add_common(remove_p)
+    remove_p.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Keep the scheduled run's log file(s) instead of deleting them.",
+    )
     remove_p.set_defaults(func=_cmd_remove)
 
 
@@ -165,6 +172,7 @@ def _cmd_remove(args: argparse.Namespace) -> int:
         result = schedule.remove(
             home=args.home,
             platform_override=args.backend,
+            keep_logs=args.keep_logs,
         )
     except schedule.UnsupportedPlatformError as exc:
         print(f"athenaeum schedule remove: error: {exc}", file=sys.stderr)
@@ -176,6 +184,10 @@ def _cmd_remove(args: argparse.Namespace) -> int:
 
     where = ", ".join(str(p) for p in result.removed_paths) or "crontab entry"
     print(f"athenaeum schedule remove: {result.platform} schedule removed ({where})")
+    if result.crontab_deleted:
+        print("  deleted the now-empty crontab (athenaeum created it)")
+    for log in result.removed_logs:
+        print(f"  deleted {log}")
     if result.loader_returncode != 0:
         print(
             f"  WARN loader exited {result.loader_returncode}: {result.loader_output}",
