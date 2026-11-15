@@ -626,3 +626,82 @@ class TestCLI:
         rc, out, _err = _run_cli(["schedule", "remove", "--home", str(home), "--backend", "cron"])
         assert rc == 0
         assert "no cron schedule was installed" in out
+
+
+# ---------------------------------------------------------------------------
+# resolve_athenaeum_binary: running environment beats PATH (athenaeum#2583).
+# ---------------------------------------------------------------------------
+
+
+def _fake_exe(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+class TestResolveAthenaeumBinary:
+    def test_console_script_beside_interpreter_beats_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        venv_bin = tmp_path / "venv" / "bin"
+        mine = _fake_exe(venv_bin / "athenaeum")
+        (venv_bin / "python").write_text("", encoding="utf-8")
+        other = _fake_exe(tmp_path / "other" / "athenaeum")
+        monkeypatch.setenv("PATH", str(other.parent))
+        monkeypatch.setattr(schedule.sys, "executable", str(venv_bin / "python"))
+        monkeypatch.setattr(schedule.sys, "argv", ["python"])
+        assert schedule.resolve_athenaeum_binary() == mine.resolve()
+
+    def test_argv0_entry_point_beats_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mine = _fake_exe(tmp_path / "pinned" / "athenaeum")
+        other = _fake_exe(tmp_path / "other" / "athenaeum")
+        monkeypatch.setenv("PATH", str(other.parent))
+        monkeypatch.setattr(schedule.sys, "executable", str(tmp_path / "nowhere" / "python"))
+        monkeypatch.setattr(schedule.sys, "argv", [str(mine), "schedule", "install"])
+        assert schedule.resolve_athenaeum_binary() == mine.resolve()
+
+    def test_falls_back_to_path_when_environment_has_no_script(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        other = _fake_exe(tmp_path / "other" / "athenaeum")
+        monkeypatch.setenv("PATH", str(other.parent))
+        monkeypatch.setattr(schedule.sys, "executable", str(tmp_path / "empty" / "python"))
+        monkeypatch.setattr(schedule.sys, "argv", ["-m"])
+        assert schedule.resolve_athenaeum_binary() == other.resolve()
+
+    def test_install_reports_and_embeds_the_running_environments_binary(
+        self,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        venv_bin = tmp_path / "venv" / "bin"
+        mine = _fake_exe(venv_bin / "athenaeum")
+        other = _fake_exe(tmp_path / "other" / "athenaeum")
+        monkeypatch.setenv("PATH", str(other.parent))
+        monkeypatch.setattr(schedule.sys, "executable", str(venv_bin / "python"))
+        monkeypatch.setattr(schedule.sys, "argv", ["python"])
+        monkeypatch.setattr(schedule, "_default_loader", FakeLoader())
+
+        rc, out, _err = _run_cli(
+            [
+                "schedule",
+                "install",
+                "--path",
+                str(knowledge_root),
+                "--home",
+                str(home),
+                "--backend",
+                "launchd",
+            ]
+        )
+        assert rc == 0, out
+        assert f"athenaeum binary: {mine.resolve()}" in out
+        plist = home / "Library" / "LaunchAgents" / f"{schedule.LAUNCHD_LABEL}.plist"
+        assert f"<string>{mine.resolve()}</string>" in plist.read_text(encoding="utf-8")
+        assert str(other.resolve()) not in plist.read_text(encoding="utf-8")

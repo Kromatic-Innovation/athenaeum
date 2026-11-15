@@ -145,6 +145,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     where = ", ".join(str(p) for p in result.paths) or "crontab"
     print(f"athenaeum schedule install: {result.platform} schedule installed ({where})")
+    print(f"  athenaeum binary: {result.athenaeum_bin}")
     if result.loader_returncode != 0:
         print(
             f"  WARN loader exited {result.loader_returncode}: {result.loader_output}",

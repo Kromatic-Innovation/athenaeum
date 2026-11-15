@@ -266,17 +266,39 @@ def detect_platform(
     )
 
 
+def _is_runnable_file(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
 def resolve_athenaeum_binary() -> Path:
     """Absolute path to the ``athenaeum`` console script (AC2's "absolute
     paths"), matching the hand-written example plist's own
     ``/REPLACE_ME/path/to/venv/bin/athenaeum`` -- resolved for real instead
     of left as a placeholder.
+
+    The running environment wins over ``PATH`` (athenaeum#2583): an operator
+    who runs ``install`` from a pinned venv expects that venv's engine to run
+    at 03:00, even when a different ``athenaeum`` sits earlier on ``PATH``.
+    Order: ``sys.argv[0]`` when it is an ``athenaeum`` entry point with an
+    explicit directory, the console script beside ``sys.executable``, then
+    ``shutil.which`` as the last resort (and, failing that, the sibling path
+    of the interpreter so the unit at least names the expected location).
     """
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if (
+        argv0 is not None
+        and argv0.name == "athenaeum"
+        and argv0.parent != Path(".")
+        and _is_runnable_file(argv0)
+    ):
+        return argv0.resolve()
+    beside = Path(sys.executable).parent / "athenaeum"
+    if _is_runnable_file(beside):
+        return beside.resolve()
     found = shutil.which("athenaeum")
     if found:
         return Path(found).resolve()
-    # Fallback: the console script sits next to the interpreter in a venv.
-    return (Path(sys.executable).parent / "athenaeum").resolve()
+    return beside.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +523,10 @@ class InstallResult:
     paths: tuple[Path, ...]
     loader_returncode: int
     loader_output: str
+    #: The ``athenaeum`` binary the generated unit runs (athenaeum#2583) --
+    #: ``install`` surfaces it so a mismatch with the operator's expectation
+    #: is visible.
+    athenaeum_bin: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -550,7 +576,9 @@ def install(
         )
         _write(plist_path, content)
         result = loader_fn(["launchctl", "load", "-w", str(plist_path)], None)
-        return InstallResult(plat, (plist_path,), result.returncode, result.output)
+        return InstallResult(
+            plat, (plist_path,), result.returncode, result.output, bin_path
+        )
 
     if plat == "systemd":
         service_path = _systemd_service_path(resolved_home)
@@ -576,7 +604,11 @@ def install(
         )
         rc = enable_result.returncode or reload_result.returncode
         return InstallResult(
-            plat, (service_path, timer_path), rc, reload_result.output + enable_result.output
+            plat,
+            (service_path, timer_path),
+            rc,
+            reload_result.output + enable_result.output,
+            bin_path,
         )
 
     # cron
@@ -591,7 +623,7 @@ def install(
     )
     new_text = "\n".join([*existing, new_line]) + "\n"
     result = loader_fn(["crontab", "-"], new_text)
-    return InstallResult(plat, (), result.returncode, result.output)
+    return InstallResult(plat, (), result.returncode, result.output, bin_path)
 
 
 def remove(
