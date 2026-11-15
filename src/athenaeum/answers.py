@@ -1315,6 +1315,25 @@ def _writeback_class(pq: PendingQuestion) -> str:
     return "source"
 
 
+def _first_answer_token(answer_body: str) -> str | None:
+    """The lowercased leading token of *answer_body*'s first non-blank line.
+
+    Split at the first ``:`` then at whitespace, one trailing ``.``/``!``
+    stripped. ``None`` for an empty body, and for a first line with no token
+    before its first ``:`` (e.g. an answer starting ``:thumbsup:``) -- which
+    used to raise ``IndexError`` and abort the whole ``ingest_answers`` run.
+    """
+    for line in answer_body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        words = stripped.split(":", 1)[0].split()
+        if not words:
+            return None
+        return words[0].strip().lower().rstrip(".!")
+    return None
+
+
 def _parse_correction_answer(pq: PendingQuestion) -> str | None:
     """Classify ``pq``'s answer as the closed ratify/reject token (issue
     athenaeum#1850), or ``None`` when it is neither.
@@ -1328,36 +1347,24 @@ def _parse_correction_answer(pq: PendingQuestion) -> str | None:
     (:func:`_apply_field_correction`) never falls back to treating an
     unrecognized token as either verdict.
     """
-    body = _answer_body(pq)
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        token = stripped.split(":", 1)[0].split()[0].strip().lower().rstrip(".!")
-        if token in _RATIFY_TOKENS:
-            return "ratify"
-        if token in _REJECT_TOKENS:
-            return "reject"
-        return None
+    token = _first_answer_token(_answer_body(pq))
+    if token in _RATIFY_TOKENS:
+        return "ratify"
+    if token in _REJECT_TOKENS:
+        return "reject"
     return None
 
 
 def _parse_reingest_dismissal(answer_body: str) -> str | None:
     """Return the dismissal token leading *answer_body*, or ``None`` (athenaeum#2705).
 
-    Same first-token rule as :func:`_parse_correction_answer`: the first
-    non-blank line, split at the first ``:``/whitespace, lowercased, one
-    trailing ``.``/``!`` stripped. Only a token in
+    Same first-token rule as :func:`_parse_correction_answer`
+    (:func:`_first_answer_token`). Only a token in
     :data:`_REINGEST_DISMISS_TOKENS` counts -- any other answer is a ruling
     to apply, never guessed to be a dismissal.
     """
-    for line in answer_body.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        token = stripped.split(":", 1)[0].split()[0].strip().lower().rstrip(".!")
-        return token if token in _REINGEST_DISMISS_TOKENS else None
-    return None
+    token = _first_answer_token(answer_body)
+    return token if token in _REINGEST_DISMISS_TOKENS else None
 
 
 def _retained_reingest_statement(

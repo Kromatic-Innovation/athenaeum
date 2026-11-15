@@ -154,6 +154,18 @@ class TestAnswerAppliesAfterRawConsumed:
         # The statement is kept in the archive, so it can still be re-submitted.
         assert "program lead at Example Labs" in archive
 
+    def test_answer_starting_with_colon_does_not_abort_run(
+        self, roots: tuple[Path, Path]
+    ) -> None:
+        # Review finding on the PR: `":thumbsup: ..."` has no token before
+        # its first colon, which used to raise IndexError mid-run.
+        pending, raw = roots
+        qid = _raise_question(pending, raw)
+        resolve_by_id(pending, qid, ":thumbsup: belongs to Dana Example")
+        report = IngestAnswersReport()
+        assert ingest_answers(pending, raw, report=report) == 1
+        assert report.reingested == 1
+
     def test_raw_note_still_present_also_reingests(
         self, roots: tuple[Path, Path]
     ) -> None:
@@ -270,3 +282,12 @@ def test_cli_summary_names_reingest_counts(
     out = capsys.readouterr().out
     assert "0 held" in out
     assert "1 re-ingested, 0 dismissed, 1 unrecoverable." in out
+
+
+def test_first_answer_token_handles_leading_colon() -> None:
+    from athenaeum.answers import _first_answer_token
+
+    assert _first_answer_token(":thumbsup: yes") is None
+    assert _first_answer_token("\n  Dismiss: spam") == "dismiss"
+    assert _first_answer_token("Ratify.") == "ratify"
+    assert _first_answer_token("") is None
