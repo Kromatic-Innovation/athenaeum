@@ -15,6 +15,7 @@ already uses for its own hand-built plans, rather than through
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from athenaeum.page_recompile_plan import (
     page_content_hash,
 )
 from athenaeum.page_recompile_queue import VERDICT_APPROVE, queue_plan_for_approval
+from athenaeum.page_recompile_undo import UNDO_DIRECT, compute_undo, write_undo
 from athenaeum.page_relations import read_relations
 
 _LEAD = "Acme builds widgets and has operated for over a decade.[^src-1]"
@@ -125,6 +127,26 @@ def _read_meta(path: Path) -> dict[str, Any]:
     meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
     assert isinstance(meta, dict)
     return meta
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _init_git_repo(root: Path) -> None:
+    """A REAL git repository with a pre-apply commit -- the same shape
+    `tests/test_page_recompile_cross_page.py`/`test_page_recompile_undo.py`
+    use, and for the same reason: a direct undo reads the PRE-image out of
+    a real git blob, so only a real commit before the apply makes one
+    readable at all."""
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "seed")
 
 
 # ---------------------------------------------------------------------------
@@ -366,3 +388,184 @@ class TestAC4SingleSubjectCounterExample:
         _meta_a, body_a = parse_frontmatter(subject_a.read_text(encoding="utf-8"))
         assert "sequential, not competing" in body_a
         assert read_relations(_read_meta(subject_a)).parent is None
+
+
+# ---------------------------------------------------------------------------
+# Regression (Seer finding, HIGH, on PR athenaeum#2640, reviewing issue
+# athenaeum#2589): the shared page's LEDGER record must store its
+# POST-attach content hash, not the pre-attach one `standalone.text`
+# carries in memory -- otherwise `page_recompile_undo` compares the
+# shared page's real (post-attach) on-disk hash against a hash that was
+# always going to differ, and a direct undo queues itself as
+# "page_changed_since_apply" on a page nothing external ever touched.
+# ---------------------------------------------------------------------------
+
+
+class TestSharedPageUndoRecordsThePostAttachHash:
+    def test_a_minted_shared_page_undoes_directly(self, wiki: Path) -> None:
+        knowledge = wiki.parent
+        _source, _subject_a, _subject_b = _seed(wiki)
+        _init_git_repo(knowledge)
+
+        _plan, plan_id = _shared_plan(wiki, subject_uids=["subjecta1", "subjectb1"])
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=_config(shared_type="reference"), verdict=VERDICT_APPROVE
+        )
+        assert outcome.ok, (outcome.reason, outcome.issues)
+        assert not outcome.post_write_issues, outcome.post_write_issues
+        shared_uid = outcome.created_uids[0]
+
+        # The failure mode BEFORE the fix, made explicit: the shared
+        # page's own CURRENT on-disk hash differs from the recorded
+        # pre-attach render, because `set_relation` appended its Sub-pages
+        # block afterward.
+        shared_path = next(p for p in wiki.glob("*.md") if _read_meta(p).get("uid") == shared_uid)
+        _shared_meta, shared_body = parse_frontmatter(shared_path.read_text(encoding="utf-8"))
+
+        # The real undo path -- this is what settles it, not a hash
+        # comparison in isolation.
+        computed = compute_undo(wiki, plan_id=plan_id)
+        assert computed.action == UNDO_DIRECT, (computed.action, computed.reason, computed.blocked)
+        assert computed.blocked == ()
+
+        result = write_undo(wiki, plan_id=plan_id)
+        assert result.action == UNDO_DIRECT, (result.action, result.reason, result.blocked)
+        assert shared_uid in result.deleted_uids
+        assert set(result.restored_uids) == {"page0001", "subjecta1", "subjectb1"}
+        assert not shared_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Regression (Seer finding, LOW, on PR athenaeum#2640): `shared_order` must
+# count as content that left the parent, the same as `standalone_order`,
+# so a plan whose only cross-page action is `shared:<group>` can still
+# clear a stale `needs_split` flag once the parent shrinks under
+# threshold.
+# ---------------------------------------------------------------------------
+
+
+class TestSharedGroupClearsStaleNeedsSplitFlag:
+    def test_a_shared_only_plan_clears_needs_split(self, wiki: Path) -> None:
+        source = _write_page(wiki, uid="page0001", name="Acme", body=_BODY, needs_split=True)
+        _write_page(wiki, uid="subjecta1", name="Rule A", body="Rule A is a pricing rule.\n")
+        _write_page(wiki, uid="subjectb1", name="Rule B", body="Rule B is a discount rule.\n")
+        assert _read_meta(source).get("needs_split") is True
+
+        _plan, plan_id = _shared_plan(wiki, subject_uids=["subjecta1", "subjectb1"])
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=_config(shared_type="reference"), verdict=VERDICT_APPROVE
+        )
+        assert outcome.ok, (outcome.reason, outcome.issues)
+
+        assert "needs_split" not in _read_meta(source)
+
+
+# ---------------------------------------------------------------------------
+# Regression (Seer finding, MEDIUM, on PR athenaeum#2640): the per-subject
+# pre-check must account for a subject a DIFFERENT shared group in the
+# SAME plan already claimed, not only the on-disk snapshot taken before
+# this apply's first write.
+# ---------------------------------------------------------------------------
+
+_LEAD2 = "Acme builds widgets.[^src-1]"
+_SHARED_AB = "Rule A and Rule B are sequential, not competing.[^src-2]"
+_SHARED_AC = "Rule A and Rule C overlap in scope but never conflict.[^src-3]"
+_BODY2 = (
+    _LEAD2
+    + "\n\n## Relationship AB\n\n"
+    + _SHARED_AB
+    + "\n\n## Relationship AC\n\n"
+    + _SHARED_AC
+    + "\n\n[^src-1]: **Source:** doc-a\n[^src-2]: **Source:** doc-b\n[^src-3]: **Source:** doc-c\n"
+)
+_SUMMARY2 = "Acme is a widget maker.[^src-1]"
+
+
+def _two_group_plan(
+    wiki: Path, *, second_group_subjects: list[str]
+) -> tuple[RecompilePlan, str]:
+    """Two `shared:<group>` dispositions in ONE plan: `g1` always claims
+    subject A and B; `g2` claims whichever subjects the caller names (so a
+    test can make the SAME uid appear in both groups, or keep them
+    disjoint)."""
+    ids = [u.unit_id for u in segment_page(_BODY2).units]
+    page_actions = ["shared-subject:g1:subjecta1", "shared-subject:g1:subjectb1"]
+    page_actions += [f"shared-subject:g2:{uid}" for uid in second_group_subjects]
+    plan = RecompilePlan(
+        uid="page0001",
+        content_hash=page_content_hash(_BODY2),
+        dispositions=((ids[0], "parent"), (ids[1], "shared:g1"), (ids[2], "shared:g2")),
+        groups=(
+            PlanGroup(
+                key="g1", name="Rule A / Rule B Relationship", description="", confidence=0.9
+            ),
+            PlanGroup(
+                key="g2", name="Rule A / Rule C Relationship", description="", confidence=0.9
+            ),
+        ),
+        merges=(),
+        page_actions=tuple(page_actions),
+        summary=_SUMMARY2,
+        scope=SCOPE_CROSS_PAGE,
+        issues=(),
+        verified=None,
+    )
+    plan_id = append_plan_record(plan, wiki)
+    queue_plan_for_approval(wiki, plan_id=plan_id, plan=plan, outline={})
+    return plan, plan_id
+
+
+def _seed_three_subjects(wiki: Path) -> tuple[Path, Path, Path, Path]:
+    source = _write_page(wiki, uid="page0001", name="Acme", body=_BODY2)
+    subject_a = _write_page(wiki, uid="subjecta1", name="Rule A", body="Rule A text.\n")
+    subject_b = _write_page(wiki, uid="subjectb1", name="Rule B", body="Rule B text.\n")
+    subject_c = _write_page(wiki, uid="subjectc1", name="Rule C", body="Rule C text.\n")
+    return source, subject_a, subject_b, subject_c
+
+
+class TestTwoSharedGroupsClaimingTheSameSubject:
+    def test_an_overlapping_subject_refuses_the_whole_plan(self, wiki: Path) -> None:
+        """subjecta1 is named by BOTH g1 and g2 -- refused up front, and
+        NOTHING is written (not even the first group's shared page)."""
+        _seed_three_subjects(wiki)
+        _plan, plan_id = _two_group_plan(wiki, second_group_subjects=["subjecta1", "subjectc1"])
+
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=_config(shared_type="reference"), verdict=VERDICT_APPROVE
+        )
+        assert outcome.ok is False
+        assert [i.code for i in outcome.issues] == ["shared-subject-claimed-by-another-group"]
+        assert outcome.created_uids == ()
+        # Confirms "nothing written": the wiki carries only the four seed
+        # pages, no shared page for EITHER group landed on disk.
+        assert sorted(p.stem for p in wiki.glob("*.md")) == [
+            "page0001",
+            "subjecta1",
+            "subjectb1",
+            "subjectc1",
+        ]
+
+    def test_two_disjoint_shared_groups_in_one_plan_both_succeed(self, wiki: Path) -> None:
+        """The negative control: g1 claims A/B, g2 claims A's sibling C
+        plus a FOURTH, disjoint subject -- no uid is named by both groups,
+        so this is the ordinary, unaffected case and both pages land."""
+        source, _subject_a, _subject_b, subject_c = _seed_three_subjects(wiki)
+        subject_d = _write_page(wiki, uid="subjectd1", name="Rule D", body="Rule D text.\n")
+        _plan, plan_id = _two_group_plan(
+            wiki, second_group_subjects=["subjectc1", "subjectd1"]
+        )
+
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=_config(shared_type="reference"), verdict=VERDICT_APPROVE
+        )
+        assert outcome.ok, (outcome.reason, outcome.issues)
+        assert len(outcome.created_uids) == 2
+
+        from athenaeum.page_relations import read_relations as _read_relations
+
+        assert _read_relations(_read_meta(subject_c)).parent is not None
+        assert _read_relations(_read_meta(subject_d)).parent is not None
+        assert (
+            _read_relations(_read_meta(subject_c)).parent.uid
+            == _read_relations(_read_meta(subject_d)).parent.uid
+        )

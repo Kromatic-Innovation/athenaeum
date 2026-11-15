@@ -1578,6 +1578,27 @@ def compute_apply(
     # -----------------------------------------------------------------
     if shared_order:
         shared_declared_types = _declared_types(wiki_root)
+        # Issue athenaeum#2589 (Seer finding on PR athenaeum#2640): the
+        # per-subject pre-check below reads each subject's relation off
+        # `index_map` -- the on-disk snapshot taken before ANY write in
+        # this apply -- which is exactly right for a subject's EXISTING
+        # parent/children, but blind to a PROSPECTIVE one a group earlier
+        # in this SAME loop just decided to give it. Without this map, two
+        # shared groups in one plan naming the same subject uid both pass
+        # this pre-check (disk still shows the subject parentless for
+        # both), so a second `set_relation` call for it is only caught
+        # later, in `write_apply`'s attach loop, as a soft `attach-refused`
+        # post-write issue with `ok` left `True` -- a shared page minted
+        # on disk with no link to the subject it claimed to be about, and
+        # nothing in the top-level outcome saying so. Tracked and checked
+        # here instead, mirroring `_attachment_issues`'s own
+        # `prospective_children` parameter (which does the identical job
+        # for the recompiled parent's own new sub-pages): a subject a
+        # LATER group tries to claim, after an EARLIER group in this same
+        # loop already claimed it, is refused up front -- the whole plan
+        # is rejected before anything is written, not silently
+        # part-applied.
+        claimed_by_shared_group: dict[str, str] = {}
         for group_key in shared_order:
             group = groups_by_key.get(group_key)
             name = (group.name if group is not None else "").strip()
@@ -1618,6 +1639,13 @@ def compute_apply(
             # disk yet, so it has no parent of its own and forms no cycle.
             subject_issue: PlanIssue | None = None
             for subject_uid in subject_uids:
+                claimed_by = claimed_by_shared_group.get(subject_uid)
+                if claimed_by is not None and claimed_by != group_key:
+                    subject_issue = PlanIssue(
+                        "shared-subject-claimed-by-another-group",
+                        f"{subject_uid} (already claimed by {claimed_by})",
+                    )
+                    break
                 subject_path = index_map.get(subject_uid)
                 if subject_path is None:
                     subject_issue = PlanIssue("shared-subject-missing", subject_uid)
@@ -1640,6 +1668,8 @@ def compute_apply(
             if subject_issue is not None:
                 issues.append(subject_issue)
                 continue
+            for subject_uid in subject_uids:
+                claimed_by_shared_group[subject_uid] = group_key
 
             built = _build_relocated_body(
                 unit_ids=shared_items[group_key],
@@ -1820,7 +1850,12 @@ def compute_apply(
     # standalone) routes nothing away, so the flag is left exactly as it
     # was -- clearing it would assert a page had been split when it had
     # not, and that flag is what puts the page back on the candidate scan.
-    units_left_the_parent = bool(group_order or move_order or standalone_order)
+    # Issue athenaeum#2589 (Seer finding on PR athenaeum#2640): `shared_order`
+    # is content that left the parent too -- it routes to a newly-minted
+    # shared page exactly as `standalone_order` does -- so its omission here
+    # left a plan whose ONLY cross-page action was `shared:<group>` unable
+    # to ever clear a stale `needs_split` flag.
+    units_left_the_parent = bool(group_order or move_order or standalone_order or shared_order)
     if units_left_the_parent and len(new_parent_body) <= threshold_chars:
         new_meta.pop("needs_split", None)
     if moved_aliases:
@@ -1969,6 +2004,7 @@ def _build_ledger_record(
     pre_parent_hash: str,
     post_parent_hash: str,
     target_post_hashes: "Mapping[str, str] | None" = None,
+    standalone_post_hashes: "Mapping[str, str] | None" = None,
     attach_pages: "Sequence[Mapping[str, Any]]" = (),
     attachments: "Sequence[Attachment] | None" = None,
 ) -> dict[str, Any]:
@@ -1984,6 +2020,15 @@ def _build_ledger_record(
     write (and, for the attach pair, after
     :func:`athenaeum.page_relations.set_relation`), because that is the only
     moment they are true.
+
+    *standalone_post_hashes* (issue athenaeum#2589, Seer finding on PR
+    athenaeum#2640) is the same idea applied to a standalone page: falling
+    back to ``standalone.text`` (the in-memory, PRE-attach render) when a
+    uid is absent from the map keeps every caller that does not pass one
+    working exactly as before this fix, but every standalone page a shared
+    group mints IS attach-touched (it is the parent side of a
+    ``via="fold"`` relation), and ``write_apply`` always supplies the
+    measured-after-the-fact value for it.
     """
     pages: list[dict[str, Any]] = [
         {
@@ -2007,13 +2052,16 @@ def _build_ledger_record(
             }
         )
     for standalone in computed.standalone_pages:
+        measured_post_hash = (standalone_post_hashes or {}).get(standalone.uid)
         pages.append(
             {
                 "uid": standalone.uid,
                 "path": str(standalone.path),
                 "pre_content_hash": "",
-                "post_content_hash": page_content_hash(
-                    parse_frontmatter(standalone.text)[1]
+                "post_content_hash": (
+                    measured_post_hash
+                    if measured_post_hash is not None
+                    else page_content_hash(parse_frontmatter(standalone.text)[1])
                 ),
                 "pre_blob_id": "",
                 "units": list(standalone.unit_ids),
@@ -2492,9 +2540,24 @@ def write_apply(
     # unit-presence and marker-resolution checks below still run
     # unconditionally -- they are the ones that would catch content loss.
     shared_page_uids = {a.parent_uid for a in computed.attachments if a.via == "fold"}
+    # Issue athenaeum#2589 (Seer finding on PR athenaeum#2640): a shared
+    # page's RE-READ bytes, after `set_relation` below has had its chance
+    # to append the Sub-pages block, are what the ledger must record as
+    # `post_content_hash` too -- not `standalone.text`, the in-memory,
+    # pre-attach render. Recording the latter made `page_recompile_undo`
+    # compare a shared page's CURRENT (post-attach) hash against a hash
+    # that was always going to differ, so a direct undo queued itself as
+    # "changed since apply" on a page nothing external ever touched. Built
+    # here, uniformly, for every standalone page (not only shared ones):
+    # for one that was never attach-touched this is simply the same value
+    # `standalone.text` already carries, so there is nothing to choose
+    # between -- the SAME "measure after set_relation, not before" rule
+    # `target_post_hashes` below already applies to move targets.
+    standalone_post_hashes: dict[str, str] = {}
     for standalone in computed.standalone_pages:
         reread_text = standalone.path.read_text(encoding="utf-8")
         _, reread_body = parse_frontmatter(reread_text)
+        standalone_post_hashes[standalone.uid] = page_content_hash(reread_body)
         if reread_text != standalone.text and standalone.uid not in shared_page_uids:
             post_issues.append(PlanIssue("post-write-byte-mismatch", standalone.uid))
         for section in standalone.inserted_texts:
@@ -2528,6 +2591,7 @@ def write_apply(
         pre_parent_hash=pre_parent_hash,
         post_parent_hash=post_parent_hash,
         target_post_hashes=target_post_hashes,
+        standalone_post_hashes=standalone_post_hashes,
         attach_pages=attach_pages,
         # Only the attachments that actually LANDED (Seer finding on PR
         # athenaeum#2579). The ledger is what `page_recompile_undo` detaches
