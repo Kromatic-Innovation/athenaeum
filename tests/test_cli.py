@@ -2228,7 +2228,11 @@ class TestRemovedCommandsPointToReplacements:
         ["storage", "audit-h1-redaction"],
     ]
 
-    @pytest.mark.parametrize("argv,hint", WITH_REPLACEMENT, ids=lambda v: v if isinstance(v, str) else " ".join(v))
+    @pytest.mark.parametrize(
+        "argv,hint",
+        WITH_REPLACEMENT,
+        ids=lambda v: v if isinstance(v, str) else " ".join(v),
+    )
     def test_replacement_is_named_on_stderr(
         self, argv: list[str], hint: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
