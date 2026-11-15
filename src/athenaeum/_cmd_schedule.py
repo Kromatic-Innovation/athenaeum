@@ -52,7 +52,10 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="Cache directory to read a cached ANTHROPIC_API_KEY from "
-        "(default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum)",
+        "(default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). "
+        "When it is not the default, `install` also sets ATHENAEUM_CACHE_DIR "
+        "in the generated unit, so the scheduled run uses this same cache "
+        "directory.",
     )
     parser.add_argument(
         "--home",

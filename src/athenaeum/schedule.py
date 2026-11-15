@@ -55,6 +55,10 @@ login shell to resolve it:
   ``ATHENAEUM_CLAUDE_CLI_BIN`` (a knob :mod:`athenaeum.provider` already
   reads) rather than relying on the scheduled job's restricted ``PATH`` to
   find a bare ``claude`` the way an interactive shell would.
+- **Cache directory (athenaeum#2584):** when ``install``'s resolved cache
+  directory (``--cache-dir`` > ``ATHENAEUM_CACHE_DIR`` > default) is not the
+  default, the unit also embeds ``ATHENAEUM_CACHE_DIR`` so the scheduled
+  ``athenaeum run`` reads and writes the same cache the key was read from.
 - **Neither resolves (AC3 counter-example):** :func:`resolve_key_source`
   raises :class:`NoKeySourceError` and ``install`` refuses outright, naming
   the exact fix, instead of installing a schedule that fails every night.
@@ -93,7 +97,7 @@ import string
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -553,12 +557,19 @@ def install(
     """Generate the platform's unit, write it, and invoke the loader (issue
     athenaeum#2304 AC1). Raises :class:`NoKeySourceError` (AC3) before
     writing anything when no key source resolves."""
-    from athenaeum.config import resolve_cache_dir
+    from athenaeum.config import DEFAULT_CACHE_DIR, resolve_cache_dir
 
     loader_fn = loader or _default_loader
     resolved_home = (home or Path.home()).expanduser().resolve()
     resolved_cache_dir = resolve_cache_dir(cache_dir).resolve()
     key_source = resolve_key_source(config, resolved_cache_dir)  # may raise NoKeySourceError
+    # athenaeum#2584: the unit must run against the same cache directory the
+    # key was read from. Embedded only when it is not the default, so a
+    # default install's unit is unchanged.
+    if resolved_cache_dir != DEFAULT_CACHE_DIR.expanduser().resolve():
+        key_source = replace(
+            key_source, env={**key_source.env, "ATHENAEUM_CACHE_DIR": str(resolved_cache_dir)}
+        )
     plat = platform_override or detect_platform()
     bin_path = athenaeum_bin or resolve_athenaeum_binary()
     resolved_knowledge_root = Path(knowledge_root).expanduser().resolve()
