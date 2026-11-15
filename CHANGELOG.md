@@ -265,6 +265,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same counts under a `page_recompile` key (schema v4), and the new
   `athenaeum status --json` emits the whole snapshot, backlog block
   included, as JSON (athenaeum#2536).
+- `librarian.structured_upsert.<type>` gained `drop_sections`: a list of
+  `{when_any: [...], drop: [...]}` rules so a type-config change can express
+  "these new sections replace those old ones" — when a raw fills in any
+  `when_any` section, every `drop` section (which need not even be listed
+  in the type's current `sections`) is removed from the page outright
+  instead of being left stale next to the new ones. The structured-upsert
+  engine also now accepts the provenance keys the `remember` MCP tool
+  itself stamps when a caller omits `sources` (`model`, `originSessionId`,
+  `source`) on every configured type unconditionally, rather than refusing
+  a write because `remember`'s own default stamped it; they are never
+  merged onto the page. Both are general engine capabilities, not anything
+  recipe-specific (athenaeum#2587).
 
 ### Deprecated
 
