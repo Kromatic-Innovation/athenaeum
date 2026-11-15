@@ -1488,6 +1488,88 @@ class TestApplyShortNameEscalated:
         assert "- [ ]" in pending_text
         assert "- [x]" not in pending_text
 
+    def test_refused_answer_is_never_archived_by_the_same_ingest_tick(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Seer review finding (PR athenaeum#2632): does ``ingest_answers``
+        archive a ``short_name_escalated`` block regardless of whether the
+        applier actually ran? No — archival in
+        :func:`athenaeum.answers.ingest_answers` is gated on
+        ``pq.answered`` (checked BEFORE ``writeback_class`` is even
+        consulted), and the checkbox is flipped ONLY by
+        :func:`athenaeum.decision_answers._apply_short_name_escalated_answer`
+        calling ``resolve_by_id`` — which a refusal (unknown uid here)
+        returns before ever reaching. Drives the FULL tick (decision-answer
+        apply, then ``ingest_answers``, exactly like
+        ``_cmd_pending.cmd_ingest_answers`` wires them) to prove the block
+        is neither archived nor silently dropped, and the parked
+        observation is still sitting in the (unanswered, still-open)
+        primary file afterward."""
+        from athenaeum.answers import ingest_answers
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(
+            pending_path, observation="an observation that must not be lost."
+        )
+        # No page written at all — "nope" resolves to nothing.
+
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="nope"
+        )
+        decision_report = apply_decision_answers(wiki_root, raw_root)
+        assert decision_report.applied == 0
+
+        count = ingest_answers(pending_path, raw_root, client=None, config=None)
+
+        assert count == 0
+        assert not (wiki_root / "_pending_questions_archive.md").exists()
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "short_name_escalated" in pending_text
+        assert "- [ ]" in pending_text
+        assert "- [x]" not in pending_text
+        assert "an observation that must not be lost." in pending_text
+
+    def test_a_raise_mid_apply_propagates_and_leaves_the_checkbox_unflipped(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer review finding (PR athenaeum#2632): this applier has no
+        try/except around ``apply_rename``/``_attach_short_name_observation``
+        -- but neither does any peer applier that performs a real write
+        (``_apply_merge_answer`` -> ``resolve_merge``;
+        ``_apply_page_recompile_answer`` -> ``write_apply``;
+        ``_apply_coordinate_answer`` -> ``atomic_write_text``, all called
+        with no surrounding try/except). The ONLY try/except blocks in
+        ``apply_decision_answers`` guard POST-apply, best-effort
+        instrumentation (the decision-budget ledger, the calibration
+        sampler) explicitly commented "must never break apply" -- never the
+        dispatch call itself. This pins the SAME fail-loud behaviour for
+        the new applier: an exception propagates out of
+        ``apply_decision_answers`` rather than being silently swallowed,
+        and -- because it happens before ``resolve_by_id`` is ever reached
+        -- the checkbox is left unflipped, not half-applied."""
+        import athenaeum.decision_answers as decision_answers_mod
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(pending_path)
+        _write_entity_page(wiki_root, uid="page0005", name="Acme")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("disk full (simulated)")
+
+        monkeypatch.setattr(
+            decision_answers_mod, "_attach_short_name_observation", _boom
+        )
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="page0005"
+        )
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            apply_decision_answers(wiki_root, raw_root)
+
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "- [ ]" in pending_text
+        assert "- [x]" not in pending_text
+
     def test_name_matching_the_current_name_is_a_clean_noop_rename(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
