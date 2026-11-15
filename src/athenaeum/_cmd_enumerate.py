@@ -168,7 +168,6 @@ def cmd_enumerate(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
         resolve_audience,
-        resolve_extra_intake_roots,
     )
     from athenaeum.enumeration import enumerate_entities
 
@@ -180,7 +179,9 @@ def cmd_enumerate(args: argparse.Namespace) -> int:
 
     cfg = load_config(knowledge_root)
     cache_dir = resolve_cache_dir(args.cache_dir).resolve()
-    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+    from athenaeum.storage import resolve_indexed_surfaces
+
+    extra_roots = resolve_indexed_surfaces(knowledge_root, cfg)
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
 
     try:

@@ -366,7 +366,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         load_config,
         resolve_audience,
         resolve_cache_dir,
-        resolve_extra_intake_roots,
         resolve_screening,
         resolve_search_backend,
         resolve_serve_audit_log,
@@ -471,7 +470,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # ATHENAEUM_CACHE_DIR (and --cache-dir) are honoured — previously hardcoded,
     # so recall served a stale/empty index when the compiler wrote elsewhere.
     cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None))
-    extra_roots = resolve_extra_intake_roots(target, cfg)
+    from athenaeum.storage import resolve_indexed_surfaces
+
+    extra_roots = resolve_indexed_surfaces(target, cfg)
 
     # Issue athenaeum#2603: the per-call remote audit log. Resolved whenever
     # *serve_auth* is set (the stdio branch above has already nulled it out
