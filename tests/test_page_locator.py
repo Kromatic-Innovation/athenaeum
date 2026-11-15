@@ -110,6 +110,20 @@ class TestLocator:
         with pytest.raises(AmbiguousPageUidError):
             locate_entity_page(kb / "wiki", "recipe-dup", cache_dir=kb / "cache", surfaces=surfaces)
 
+    def test_surface_page_never_displaces_a_wiki_name(self, kb: Path) -> None:
+        # Seer review on PR athenaeum#2678: a surface page that shares a name or
+        # alias with an existing wiki page must not re-route that lookup.
+        wiki = _write(kb / "wiki" / "w.md", "concept-w", "Shared Name", typ="concept")
+        _write(kb / "recipes" / "r.md", "recipe-r", "Shared Name")
+        surfaces = resolve_locator_surfaces(kb, CONFIG)
+        idx = EntityIndex(kb / "wiki", surfaces)
+        hit = idx.lookup("shared name")
+        assert hit is not None and hit.path == wiki
+        assert idx.get_by_uid("recipe-r") is not None  # still reachable by uid
+        cached = load_entity_index(kb / "wiki", cache_dir=kb / "cache", surfaces=surfaces)
+        hit = cached.lookup("shared name")
+        assert hit is not None and hit.path == wiki
+
     def test_no_extra_surfaces_behaves_as_before(self, kb: Path) -> None:
         _write(kb / "wiki" / "a.md", "recipe-a", "A")
         _write(kb / "recipes" / "b.md", "recipe-b", "B")  # not configured

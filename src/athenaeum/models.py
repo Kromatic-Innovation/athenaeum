@@ -3803,7 +3803,8 @@ class EntityIndex:
         name = record.name
         entry_type = record.type if record.type else None
 
-        self._by_name[name.lower()] = IndexEntry(uid or name, fpath, entry_type)
+        entry = IndexEntry(uid or name, fpath, entry_type)
+        self._set_name_key(name.lower(), entry)
         if uid:
             self.locator.check_uid_unique(uid, self._by_uid.get(uid), fpath)
             self._entities[uid] = meta
@@ -3811,7 +3812,26 @@ class EntityIndex:
             self._entity_format_paths.add(fpath)
 
         for alias in record.aliases:
-            self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
+            self._set_name_key(alias.lower(), entry)
+
+    def _set_name_key(self, key: str, entry: "IndexEntry") -> None:
+        """Register a name/alias key, last write wins -- except across surfaces.
+
+        athenaeum#2617: a page on an extra indexed surface never displaces a
+        ``wiki/`` page that already holds the same name or alias, so adding a
+        surface cannot silently re-route an existing name lookup (or a
+        structured upsert's target) away from the wiki. With no surfaces this
+        is exactly the historical last-write-wins assignment.
+        """
+        if self.locator.surfaces:
+            existing = self._by_name.get(key)
+            if (
+                existing is not None
+                and self.locator.surface_of(existing.path) == PageLocator.WIKI_SURFACE
+                and self.locator.surface_of(entry.path) != PageLocator.WIKI_SURFACE
+            ):
+                return
+        self._by_name[key] = entry
 
     @classmethod
     def from_page_records(
