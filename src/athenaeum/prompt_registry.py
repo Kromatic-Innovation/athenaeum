@@ -101,6 +101,15 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
         4096,
         False,
     ),
+    # Issue athenaeum#2653: owner-candidate classify block, rendered ahead of
+    # the base block when the candidate list carries the owner.
+    (
+        "tiers.person_hint_owner_classify_prompt",
+        "PERSON_HINT_OWNER_CLASSIFY_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
     # write-knob budgets re-baselined by issue athenaeum#578 (Sonnet-5-bound + adaptive
     # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
     ("tiers.create_system", "CREATE_SYSTEM", "write", 6144, False),
@@ -115,6 +124,15 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     (
         "tiers.person_hint_verify_note",
         "PERSON_HINT_VERIFY_NOTE",
+        "write",
+        6144,
+        False,
+    ),
+    # Issue athenaeum#2653: verify note for a hint-derived merge into the
+    # owner's page (same `write`/merge_patch knob/budget as the base note).
+    (
+        "tiers.person_hint_owner_verify_note",
+        "PERSON_HINT_OWNER_VERIFY_NOTE",
         "write",
         6144,
         False,

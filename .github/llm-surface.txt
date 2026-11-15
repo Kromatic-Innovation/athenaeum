@@ -109,6 +109,8 @@ src/athenaeum/tiers.py::MERGE_SYSTEM_FULL
 src/athenaeum/tiers.py::MERGE_TEMPLATE
 src/athenaeum/tiers.py::MERGE_TEMPLATE_FULL
 src/athenaeum/tiers.py::PERSON_HINT_CLASSIFY_PROMPT
+src/athenaeum/tiers.py::PERSON_HINT_OWNER_CLASSIFY_PROMPT
+src/athenaeum/tiers.py::PERSON_HINT_OWNER_VERIFY_NOTE
 src/athenaeum/tiers.py::PERSON_HINT_VERIFY_NOTE
 
 # --- machine-derived D3: the model-routing seam — `resolve_model`, every

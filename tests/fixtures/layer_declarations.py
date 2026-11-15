@@ -126,6 +126,7 @@ MODULE_LAYER: dict[str, int] = {
     "never_ingest": 2,
     "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
+    "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)
     "quiesce": 2,

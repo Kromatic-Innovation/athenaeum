@@ -783,7 +783,20 @@ class TestBatchSyncEquivalence:
         _freeze_recorded_at(monkeypatch)
         before = (wiki / "uid-robin.md").read_text(encoding="utf-8")
 
-        batch_client = _FakeClient(_scripted_responder, allow_sync=False)
+        # Issue athenaeum#2653: the batch transport now offers a literal person
+        # match to the classifier as a hint (as the synchronous transport
+        # always has) instead of proposing an unconditional tier-1 merge. The
+        # classifier here affirms a claim for Robin, so a merge into Robin's
+        # page is still proposed and the routing guard is still what refuses it.
+        def _hinting_responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if params["model"] == DEFAULT_CLASSIFY_MODEL and "uid-robin" in user_msg:
+                return json.dumps(
+                    [{"candidate_uid": "uid-robin", "observations": "Replied about pricing."}]
+                )
+            return _scripted_responder(params)
+
+        batch_client = _FakeClient(_hinting_responder, allow_sync=False)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
         _patch_uids(monkeypatch)
         assert (
@@ -2640,6 +2653,69 @@ class TestCollectPendingBatches:
         # AC3: the handle is retired and its lease with it, in one store write.
         assert batch_state.load(cache_dir) == {}
         assert out.retired_handles and out.kept_handles == []
+
+    def test_collect_forwards_the_person_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2653: a collected batch parses with the same person hints.
+
+        Seer review on PR athenaeum#2682: without the registry a resumed batch
+        rebuilds its hint set with no literal person candidates, so a valid
+        hint claim from the submitting run would be refused at parse time.
+        """
+        from athenaeum.person_registry import PersonRegistry
+
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "c-reg", ["Standalone fact about WidgetRegistry gadget.\n"]
+        )
+        registry = PersonRegistry(root / "wiki")
+        seen: dict[str, Any] = {}
+        real = process_batch_run
+
+        def _spy(*args: Any, **kwargs: Any) -> BatchRunResult:
+            seen["person_registry"] = kwargs.get("person_registry")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("athenaeum.batch.process_batch_run", _spy)
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+            person_registry=registry,
+        )
+        assert seen["person_registry"] is registry
+
+    def test_hint_flag_survives_a_spilled_work_document(self) -> None:
+        """athenaeum#2653 (Seer review on PR athenaeum#2682): ``from_person_hint``
+        round-trips, so tier-3 verify guards still apply after a spill."""
+        from athenaeum.batch import _action_from_json, _action_to_json
+        from athenaeum.models import EntityAction
+
+        action = EntityAction(
+            kind="update",
+            name="Robin Example",
+            entity_type="",
+            tags=[],
+            access="",
+            existing_uid="u1",
+            observations="Robin prefers tea.",
+            from_person_hint=True,
+        )
+        back = _action_from_json(_action_to_json(action))
+        assert back is not None and back.from_person_hint is True
+        legacy = _action_to_json(action)
+        del legacy["from_person_hint"]  # a work document written before the fix
+        old = _action_from_json(legacy)
+        assert old is not None and old.from_person_hint is False
 
     def test_collect_books_usage_with_the_handles_knob_and_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

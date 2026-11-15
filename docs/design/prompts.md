@@ -6,7 +6,7 @@
 
 # LLM prompt inventory
 
-Athenaeum sends 28 distinct prompt constants to the model. Each stays an inline
+Athenaeum sends 30 distinct prompt constants to the model. Each stays an inline
 constant in its home module (next to the parser it feeds); `athenaeum.prompt_registry`
 indexes them and this file is generated from that index.
 
@@ -131,6 +131,55 @@ Rules:
   `candidate_uid` shape above instead.
 - A candidate this file does not mention at all, or mentions only in
   passing, is simply omitted — do not emit a placeholder for it.
+````
+
+## `tiers.person_hint_owner_classify_prompt`
+
+- **Constant:** `athenaeum.tiers.PERSON_HINT_OWNER_CLASSIFY_PROMPT`
+- **Source:** `src/athenaeum/tiers.py`
+- **Model knob:** `classify` &middot; **max_tokens:** `4096`
+- **sha256:** `031330bf4e0f6bd0f7282f421127f9b946fa611791f940dd8859d7687dc95b9b`
+
+````text
+One entry in the candidate list below is marked `(owner)`. It is the person
+this knowledge base belongs to — the one who runs this install. It is offered
+on EVERY file, whether or not the owner is named in the text, because notes
+about the owner are very often written in the first person ("I", "my", "me")
+or about "the user", with no name at all.
+
+Treat a statement as being about the owner when the text says it of:
+- the writer in the first person ("I prefer…", "my team…", "I decided…");
+- "the user" or "the owner" when the note records a person's own statements
+  or choices (an assistant memory note, a journal entry, a chat log);
+- the owner by name or by one of their aliases.
+
+Statements about OTHER people, about the world, or about a tool or project
+that merely appear in a note the owner wrote are NOT about the owner — emit
+nothing for the owner on their account. A generic first person inside a
+quotation, an email from someone else, or pasted third-party text is not the
+owner speaking.
+
+For each such claim, emit ONE object in the SAME JSON array as any other
+entity, using the `candidate_uid` shape:
+
+```json
+{"candidate_uid": "<the owner's uid from the list below>", "observations": "<the claim, stated as a fact about the owner in the third person>"}
+```
+
+Rules:
+- Restate the claim in the third person and as a fact about the owner ("Prefers
+  concise status updates."), not as "I …". Keep one object per file for the
+  owner; put several claims in the one `observations` string.
+- A preference, habit, taste, or standing instruction ("I prefer", "I always",
+  "I never", "don't ever", "please always") is a PREFERENCE. Begin that claim
+  with the word `Preference:` so the writer files it under the owner page's
+  Preferences section.
+- A passing mention or a first-person sentence that asserts nothing durable
+  ("I'm back", "thanks") is NOT a claim — emit nothing for the owner.
+- Never invent a `candidate_uid` that is not in the list below.
+- Never re-extract the owner as a NEW entity (a `name`/`entity_type` object).
+- When the file says nothing about the owner, omit the owner; do not emit a
+  placeholder.
 ````
 
 ## `tiers.create_system`
@@ -425,6 +474,46 @@ that is not a claim worth a page edit. Do not edit the page. Return exactly:
 ```json
 {"ops": [], "adds_new_claim": false, "presence_only": true}
 ```
+
+Otherwise, proceed with the ordinary merge instructions below.
+````
+
+## `tiers.person_hint_owner_verify_note`
+
+- **Constant:** `athenaeum.tiers.PERSON_HINT_OWNER_VERIFY_NOTE`
+- **Source:** `src/athenaeum/tiers.py`
+- **Model knob:** `write` &middot; **max_tokens:** `6144`
+- **sha256:** `b3ead24b4bddb752670e6098fe178dae03ee69523cedd71f6d53139bcaf3a034`
+
+````text
+This observation is about the OWNER of this knowledge base — the person this
+page describes — and was proposed because a note was written in the first
+person or about "the user", not because a name matched. Before merging, check:
+is the claim actually a durable fact, preference, or decision of THIS person,
+or is it about someone else (a quoted third party, a pasted message, a
+different person in the note)?
+
+If it is NOT about this page's person, do not edit the page. Return exactly:
+
+```json
+{"ops": [], "adds_new_claim": false, "subject_mismatch": true}
+```
+
+If it records only that the owner was present or said something with no
+durable content (a greeting, an acknowledgement, "I'm back"), do not edit the
+page. Return exactly:
+
+```json
+{"ops": [], "adds_new_claim": false, "presence_only": true}
+```
+
+If the observation begins with `Preference:`, it is a PREFERENCE. File it under
+a `## Preferences` section of this page as a bullet, without the `Preference:`
+prefix: when the page already has a `## Preferences` heading, add the bullet
+after that section's last bullet (an `insert_after` op anchored on that
+bullet); otherwise use an `append_section` op whose text is the heading
+`## Preferences` followed by the bullet. Never fold a preference into another
+section, and never duplicate a preference the section already states.
 
 Otherwise, proceed with the ordinary merge instructions below.
 ````

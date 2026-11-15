@@ -2678,6 +2678,26 @@ def _load_person_hint_classify_prompt() -> str:
 PERSON_HINT_CLASSIFY_PROMPT = _load_person_hint_classify_prompt()
 
 
+def _load_person_hint_owner_classify_prompt() -> str:
+    """Read the owner-candidate classify instruction block (athenaeum#2653).
+
+    Same module-import-time load as :func:`_load_person_hint_classify_prompt`;
+    the text lives in ``src/athenaeum/prompts/person_hint_owner_classify.md``
+    because the base block says every candidate came from a literal name
+    match, which is not true of the owner.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "person_hint_owner_classify.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: The owner-candidate instruction block, rendered ahead of the base block when
+#: the candidate list carries an owner. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.person_hint_owner_classify_prompt``.
+PERSON_HINT_OWNER_CLASSIFY_PROMPT = _load_person_hint_owner_classify_prompt()
+
+
 def _render_person_candidates_section(
     person_candidates: "list[dict[str, str]] | None",
 ) -> str:
@@ -2693,12 +2713,24 @@ def _render_person_candidates_section(
         return ""
     lines = "\n".join(
         f"- {c['uid']}: {c['name']}"
+        + (" (owner)" if c.get("role") == "owner" else "")
         + (f" — {c['description']}" if c.get("description") else "")
         for c in person_candidates
     )
+    # Issue athenaeum#2653: an owner candidate is offered without a literal
+    # match, so the base block's "each was matched by a literal name/alias
+    # search" framing is only rendered when a non-owner candidate is present;
+    # the owner block carries its own self-contained rules.
+    has_owner = any(c.get("role") == "owner" for c in person_candidates)
+    has_literal = any(c.get("role") != "owner" for c in person_candidates)
+    blocks = ""
+    if has_owner:
+        blocks += f"{PERSON_HINT_OWNER_CLASSIFY_PROMPT}\n"
+    if has_literal or not has_owner:
+        blocks += f"{PERSON_HINT_CLASSIFY_PROMPT}\n"
     return (
         "\n## Person hints (existing people this file may be about)\n"
-        f"{PERSON_HINT_CLASSIFY_PROMPT}\n"
+        f"{blocks}"
         f"Candidates:\n{lines}\n"
     )
 
@@ -4517,6 +4549,19 @@ _MERGE_HEADINGLESS_SCOPING_NOTE = (
 )
 
 
+def _load_person_hint_owner_verify_prompt() -> str:
+    """Read the owner-claim verify note (athenaeum#2653).
+
+    Same import-time load as :func:`_load_person_hint_verify_prompt`; the base
+    note frames the claim as a possible name collision, which is the wrong
+    question for an owner claim proposed from a first-person note.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "person_hint_owner_verify.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
 def _load_person_hint_verify_prompt() -> str:
     """Read the hint-derived-merge subject-mismatch verify note (issue athenaeum#1866).
 
@@ -4539,6 +4584,11 @@ def _load_person_hint_verify_prompt() -> str:
 #: athenaeum#1866) -- see :func:`tier3_merge_params`. Registered in
 #: ``athenaeum.prompt_registry`` as ``tiers.person_hint_verify_note``.
 PERSON_HINT_VERIFY_NOTE = _load_person_hint_verify_prompt()
+
+#: Verify note for a hint-derived merge into the OWNER's page (athenaeum#2653),
+#: including its Preferences-section filing rule. Registered as
+#: ``tiers.person_hint_owner_verify_note``.
+PERSON_HINT_OWNER_VERIFY_NOTE = _load_person_hint_owner_verify_prompt()
 
 
 # The heading OUTLINE needs its own budget. On the real corpus it is not
@@ -4855,6 +4905,22 @@ def _select_merge_section(
     return candidate, True
 
 
+def _person_hint_verify_note(
+    action: EntityAction, config: dict[str, Any] | None
+) -> str:
+    """The verify note for a hint-derived merge: owner text for the owner's page.
+
+    The owner is resolved from *config* (athenaeum#2653), so a literal-name hit
+    on the owner's page gets the owner text too.
+    """
+    from athenaeum.person_hints import owner_uid_from_config
+
+    owner_uid = owner_uid_from_config(config)
+    if owner_uid and action.existing_uid == owner_uid:
+        return PERSON_HINT_OWNER_VERIFY_NOTE
+    return PERSON_HINT_VERIFY_NOTE
+
+
 def tier3_merge_params(
     action: EntityAction,
     existing_body: str,
@@ -4943,7 +5009,11 @@ def tier3_merge_params(
             # Issue athenaeum#1866: prepended, independent of section
             # scoping — this note is about VERIFYING the observation's
             # subject, not about what portion of the page is visible.
-            (PERSON_HINT_VERIFY_NOTE if action.from_person_hint else "")
+            (
+                _person_hint_verify_note(action, config)
+                if action.from_person_hint
+                else ""
+            )
             + (
                 (
                     _MERGE_SCOPING_NOTE

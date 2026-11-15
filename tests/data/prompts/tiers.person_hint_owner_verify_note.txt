@@ -1,0 +1,34 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.tiers.PERSON_HINT_OWNER_VERIFY_NOTE`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+This observation is about the OWNER of this knowledge base — the person this
+page describes — and was proposed because a note was written in the first
+person or about "the user", not because a name matched. Before merging, check:
+is the claim actually a durable fact, preference, or decision of THIS person,
+or is it about someone else (a quoted third party, a pasted message, a
+different person in the note)?
+
+If it is NOT about this page's person, do not edit the page. Return exactly:
+
+```json
+{"ops": [], "adds_new_claim": false, "subject_mismatch": true}
+```
+
+If it records only that the owner was present or said something with no
+durable content (a greeting, an acknowledgement, "I'm back"), do not edit the
+page. Return exactly:
+
+```json
+{"ops": [], "adds_new_claim": false, "presence_only": true}
+```
+
+If the observation begins with `Preference:`, it is a PREFERENCE. File it under
+a `## Preferences` section of this page as a bullet, without the `Preference:`
+prefix: when the page already has a `## Preferences` heading, add the bullet
+after that section's last bullet (an `insert_after` op anchored on that
+bullet); otherwise use an `append_section` op whose text is the heading
+`## Preferences` followed by the bullet. Never fold a preference into another
+section, and never duplicate a preference the section already states.
+
+Otherwise, proceed with the ordinary merge instructions below.
