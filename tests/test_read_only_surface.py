@@ -758,3 +758,35 @@ class TestCrossSurfaceWritePathsRespectReadOnly:
         assert not outcome.ok
         assert "ReadOnlySurfaceError" in (outcome.reason or "")
         assert {p.name: p.read_bytes() for p in wiki.iterdir() if p.is_file()} == before
+
+
+class TestRunEndSnapshotNeverCommitsInAMount:
+    def test_librarian_run_leaves_a_dirty_read_only_repo_uncommitted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        kr = tmp_path / "kr"
+        (kr / "wiki").mkdir(parents=True)
+        (kr / "raw" / "sessions").mkdir(parents=True)
+        repo = _init_repo(tmp_path / "shared")
+        _page(repo / "loaf.md", "recipe-loaf", "Pistachio Loaf")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "recipes")
+        (kr / "athenaeum.yaml").write_text(json.dumps(_config(root=str(repo))), encoding="utf-8")
+        (kr / "raw" / "sessions" / "20260410T120000Z-aabbccdd.md").write_text(
+            "Some fact worth compiling.\n", encoding="utf-8"
+        )
+        _init_repo(kr)
+        _git(kr, "add", "-A")
+        _git(kr, "commit", "-q", "-m", "seed")
+        head = _git(repo, "rev-parse", "HEAD")
+        (repo / "dirty.md").write_text("dirty")
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[MagicMock(text="[]")])
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        librarian.run(raw_root=kr / "raw", wiki_root=kr / "wiki", knowledge_root=kr)
+        assert _git(repo, "rev-parse", "HEAD") == head
+        assert _git(repo, "status", "--porcelain") == "?? dirty.md"

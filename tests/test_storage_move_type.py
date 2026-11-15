@@ -423,3 +423,56 @@ class TestTargetRefusals:
     ) -> None:
         assert _run(kb) == 2
         assert "required" in capsys.readouterr().err
+
+
+class TestReadOnlyTarget:
+    """move-type never writes, commits or resets a repository held by a read-only
+    surface (athenaeum#2621)."""
+
+    @staticmethod
+    def _make_read_only(kb: Path) -> None:
+        cfg = yaml.safe_load((kb / "athenaeum.yaml").read_text(encoding="utf-8"))
+        cfg["storage"]["adapters"]["recipes"]["read_only"] = True
+        (kb / "athenaeum.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    def test_plan_and_apply_are_refused_and_nothing_is_touched(
+        self, kb: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._make_read_only(kb)
+        (_recipes(kb) / "wip.txt").write_text("uncommitted\n")  # must stay uncommitted
+        heads = (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD"))
+        digest = _tree_digest(kb / "wiki")
+        for extra in ((), ("--apply",)):
+            assert _run(kb, "recipe", "--to", "recipes", *extra) == 1
+            assert "read_only" in capsys.readouterr().err
+        assert (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD")) == heads
+        assert _git(_recipes(kb), "status", "--porcelain") == "?? wip.txt"
+        assert _tree_digest(kb / "wiki") == digest
+
+    def test_apply_move_rechecks_the_current_config(self, kb: Path) -> None:
+        from athenaeum import storage_move
+        from athenaeum.storage import ReadOnlySurfaceError
+
+        plan = storage_move.plan_move(_cfg(kb), kb, "recipe", "recipes")  # writable then
+        self._make_read_only(kb)
+        (_recipes(kb) / "wip.txt").write_text("uncommitted\n")
+        heads = (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD"))
+        with pytest.raises(ReadOnlySurfaceError):
+            storage_move.apply_move(plan, _cfg(kb), kb)
+        assert (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD")) == heads
+        assert (kb / "wiki" / "loaf.md").exists()  # no commit_repo, no page moved
+
+    def test_undo_into_a_since_read_only_surface_is_refused(
+        self, kb: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert _run(kb, "recipe", "--to", "recipes", "--apply") == 0
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "--undo" in ln)
+        record_id = line.split("--undo ")[1].split()[0]
+        self._make_read_only(kb)
+        heads = (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD"))
+        for extra in ((), ("--force",)):
+            assert _run(kb, "--undo", record_id, *extra) == 1
+            assert "read_only" in capsys.readouterr().err
+        assert (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD")) == heads
+        assert (_recipes(kb) / "loaf.md").is_file()

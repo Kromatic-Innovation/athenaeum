@@ -470,7 +470,7 @@ def _cmd_storage_move_type(args: argparse.Namespace) -> int:
                 print("error: --undo takes only a record (and --force).", file=sys.stderr)
                 return 2
             record = storage_move.load_record(args.undo, cache_dir)
-            storage_move.undo_move(record, force=args.force)
+            storage_move.undo_move(record, force=args.force, config=config)
             for role, info in record.repos.items():
                 print(f"undone: {role} repo {info['repo']} restored to {info['before']}")
             _reindex_after_move(knowledge_root, config)
