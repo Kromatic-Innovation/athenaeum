@@ -5,7 +5,7 @@
 ## I want to know why `serve --profile remote` now refuses to start
 
 `athenaeum serve --transport http --profile remote` now exits non-zero when no
-audience is configured (athenaeum#2604). An unset audience has always meant
+audience is configured. An unset audience has always meant
 owner, the whole corpus, and a remote server should not serve that by omission.
 An existing remote deployment that never set `serve.audience` must choose one
 before it will start again:
