@@ -1998,6 +1998,14 @@ class ClassifiedEntity:
     # ``raw.content[:2000]`` fallback: a hint-derived item's ``observations``
     # is always the classifier's stated claim, never a whole-file paste.
     from_person_hint: bool = False
+    #: Relevance category the Tier-2 classifier assigned (athenaeum#2647): a tag
+    #: from the ``tags.md`` vocabulary, possibly hierarchical
+    #: (``personal/travel``), or ``None``. Only requested when a relevance
+    #: policy names a tag; read by :mod:`athenaeum.relevance_classify`.
+    category: str | None = None
+    #: The classifier's confidence in :attr:`category`: ``"high"``, ``"low"``
+    #: or ``None`` (not emitted). Anything but ``"high"`` is *unsure*.
+    category_confidence: str | None = None
 
 
 @dataclass

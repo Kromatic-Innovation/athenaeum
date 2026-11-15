@@ -31,11 +31,13 @@ dependencies = [
     # wheel — bumps are explicit PRs.
     # Floor 0.39.0: first stable release shipping client.messages.batches
     # (the Batch API surface batch-mode depends on, athenaeum#236).
-    # Last tested against anthropic 0.120.2 (requirements-ci.lock). The pin
-    # allows any 0.x or 1.x/2.x release below 3.0 (the SDK is still 0.x, so
-    # `<3.0` is a wide ceiling, not a 1.0 gate); record the tested minor here
-    # so a CI run that resolves a newer-than-tested release is visible at a
-    # glance against this baseline.
+    # requirements-ci.lock pins anthropic 0.120.2, but the SDK has since
+    # shipped 1.x and 2.x, and the unlocked `clean-venv` CI job installs
+    # whatever resolves under this bound. The ceiling therefore stays at the
+    # next major boundary (`<3.0`): a tighter `<1` would exclude releases
+    # that job already exercises and break callers on a current SDK
+    # (athenaeum#2686). Record the lock's tested version here so a run that
+    # resolves a newer release is visible against this baseline.
     "anthropic>=0.39.0,<3.0",
     "pydantic>=2.0,<3.0",
 ]

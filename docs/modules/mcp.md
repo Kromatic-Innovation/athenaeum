@@ -148,6 +148,7 @@ athenaeum serve --path ~/knowledge --transport http --host 0.0.0.0 \
 | — | `serve.auth.jwks_uri` | `ATHENAEUM_SERVE_AUTH_JWKS_URI` | Explicit key set URL, used verbatim. Unset: discovered, then derived. |
 | — | `serve.auth.jwks_refetch_interval` | `ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL` | Minimum seconds between unknown-`kid` key-set fetches. Defaults to `60`. |
 | — | `serve.auth.clock_leeway` | `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY` | Seconds of clock skew tolerated on `nbf` / `iat`. Defaults to `60`. |
+| — | `serve.auth.allowed_clients` | — | Optional client allowlist, matched against a token's `azp` or `client_id`. An entry may set `read_only: true`. Unset by default. yaml only. |
 
 Each resolves **CLI flag > environment variable > `athenaeum.yaml`**, the same order every
 other knob uses (the time-claim and key-set settings have no flag: environment variable or yaml). The
@@ -168,6 +169,10 @@ serve:
     scopes:
       read: athenaeum:read
       write: athenaeum:write
+    allowed_clients:                       # optional
+      - https://desktop-app.example.com/client.json
+      - id: https://browser-app.example.com/client.json
+        read_only: true
 ```
 
 **Where the key set comes from.** Resolved once at startup, in this order, and `RS256` is the
@@ -247,6 +252,22 @@ logged.
   tools, the write scope for the six that mutate. A token carrying neither can call
   nothing. The served `tools/list` is the same either way — authentication narrows who may
   call, never what is published.
+- **A client allowlist, when you set one, fails closed.** With `serve.auth.allowed_clients`
+  unset, the client is not checked and any client your identity signs in with is
+  accepted. Set it when your authorization server lets clients register on their own:
+  then a token must name a listed client in `azp` or `client_id`. A token that names an
+  unlisted client, names no client at all, or carries both claims with different values
+  gets the same 401 as an invalid token. Client ids match exactly (no case folding), which
+  suits the URL ids of Client ID Metadata Documents. The refusal is logged with the client
+  id the token named, never the token. An empty list is a startup error, because it would
+  refuse everyone.
+- **A `read_only: true` client cannot write, whatever its token says.** The write scope is
+  removed from that client's token when the token is verified, so `remember` and the other
+  write tools refuse it (with a message saying the client is read-only) while the read tools
+  work. Its `tools/list` leaves the write tools out. This is the one case where `tools/list`
+  depends on the caller: servers without a read-only entry list the same tools for every
+  token. The cap only removes the write scope. It cannot give a client a scope its token
+  lacks, so a read-only client whose token has no read scope can call nothing.
 - **A half-configured block refuses to start.** An issuer with no resource, or a resource
   with no issuer, exits non-zero before anything binds. Falling back to "no auth" is the
   one direction this must never fail in: it would publish an unauthenticated store on the

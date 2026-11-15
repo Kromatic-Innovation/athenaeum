@@ -2,7 +2,12 @@
 
 ## Supported versions
 
-Athenaeum is pre-1.0. Only the latest release on `main` is supported with security patches. Fixes land on `develop` first and are promoted to `main` via the `Promote Main` workflow.
+Athenaeum is pre-1.0 and has no long-term-support branches. Security fixes are made for the **latest minor release line** only (for example, once 0.25.0 is out, 0.24.x no longer receives fixes). Within that line, a fix ships as a new patch release of the latest version; older minor lines are not patched or backported, so upgrade to receive a fix. Fixes land on `develop` first and are promoted to `main` via the `Promote Main` workflow, and the fixed release is published to PyPI from `main`.
+
+| Version | Security fixes |
+| --- | --- |
+| Latest minor release line (the newest `0.x` on PyPI) | Yes |
+| Any older release | No |
 
 ## Reporting a vulnerability
 

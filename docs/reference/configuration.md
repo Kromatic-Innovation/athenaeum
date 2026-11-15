@@ -5300,6 +5300,27 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
+### `resolve_audience_choice`
+
+- **YAML path:** `serve.audience`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'unset'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Classify the configured audience as ``unset``, ``owner`` or ``roles``.
+
+Same tiers as `resolve_audience` (CLI > env > ``serve.audience``):
+
+- ``"unset"`` -- nothing configured, or only blank values.
+- ``"owner"`` -- the value is exactly ``owner`` (case-folded, the SOLE
+ role): a deliberate choice to serve every page.
+- ``"roles"`` -- one or more role ids.
+
+``resolve_audience`` keeps its contract for its other callers; only
+``serve --transport http --profile remote`` reads the distinction, to
+refuse "unset" and to treat ``owner`` as full access.
+
 ### `resolve_serve_audit_log`
 
 - **YAML path:** `serve.audit_log`
@@ -5338,6 +5359,39 @@ Precedence follows the repo convention CLI > env > yaml > default:
 An empty string at any tier means "use the default", matching
 `resolve_serve_profile`'s empty-means-unset convention, rather than
 resolving to a literal empty path.
+
+### `resolve_serve_auth_allowed_clients`
+
+- **YAML path:** `serve.auth.allowed_clients`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the optional client allowlist.
+
+Returns the raw ``serve.auth.allowed_clients`` entries, or ``None`` when
+the key is absent. ``None`` means the client is not consulted at all --
+the behaviour before this setting existed. When it is set, a verified
+token must name a listed client in its ``azp`` or ``client_id`` claim or
+it is refused with the same 401 an invalid token gets; a token naming
+neither (or two different ones) is refused too, so the allowlist fails
+closed. Client ids are matched exactly, without case folding.
+
+Each entry is a client id string, or a mapping
+``{id: <client id>, read_only: true}``. A ``read_only`` client has the
+write scope withheld even when its token carries it, so it can call read
+tools only, and the write tools are left out of its ``tools/list``. The
+cap only narrows: it never grants a scope the token lacks.
+
+yaml only: a list of entries, or a comma-separated string of ids (all
+with full access). There is no environment variable and no flag, because
+neither has a shape for the per-client ``read_only`` cap.
+
+Entries are validated, and an empty list refused, by
+`athenaeum.serve_auth.build_serve_auth`. Raises
+`athenaeum.serve_auth.ServeAuthError` here on a value that is
+neither a list nor a string. No seed in ``_DEFAULTS``.
 
 ### `resolve_serve_auth_allowed_identities`
 
@@ -6278,9 +6332,9 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_REASONING_T1_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_MODEL` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_THINKING` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py` |
+| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_KEYWORD` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |

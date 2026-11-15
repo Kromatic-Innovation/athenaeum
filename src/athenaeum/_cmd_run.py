@@ -215,6 +215,18 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
     run_parser.set_defaults(func=cmd_run)
 
 
+def _warn_removed_config_keys(knowledge_root: Path) -> None:
+    """Print one stderr line per removed config key still set (athenaeum#2686).
+
+    ``load_config`` logs the same keys, but a log line is easy to miss in a
+    cron run; this notice is printed regardless of log configuration.
+    """
+    from athenaeum.config import format_removed_key_notice, removed_config_keys_in_file
+
+    for key, reason in removed_config_keys_in_file(knowledge_root):
+        print(f"WARNING: {format_removed_key_notice(key, reason)}", file=sys.stderr)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, run
 
@@ -262,6 +274,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     knowledge_root = args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT
+    _warn_removed_config_keys(knowledge_root)
     raw_root = args.raw_root or (knowledge_root / "raw")
     wiki_root = args.wiki_root or (knowledge_root / "wiki")
 

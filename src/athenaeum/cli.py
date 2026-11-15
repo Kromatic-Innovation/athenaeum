@@ -197,6 +197,115 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     ),
 }
 
+#: Top-level ``athenaeum --help`` groups: (heading, subcommand names). Every
+#: key of ``_SUBCOMMAND_LOADERS`` belongs to exactly one group; a test fails
+#: for a subcommand that is ungrouped or listed twice. Grouping changes only
+#: how ``--help`` lists commands -- every command stays registered and every
+#: invocation parses exactly as before.
+_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Setup and health",
+        ("init", "owner", "doctor", "test-mcp", "serve", "schedule",
+         "import-memory", "enable", "disable"),
+    ),
+    (
+        "Everyday",
+        ("run", "status", "recall", "entity", "enumerate", "session-end",
+         "reindex", "compile", "ingest", "spend", "usage-report", "drops"),
+    ),
+    (
+        "Decisions (items the pipeline left for you)",
+        ("decisions", "ingest-answers", "ingest-merges",
+         "reresolve-questions", "triage", "relevance-policy"),
+    ),
+    (
+        "Maintenance and repair",
+        ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
+         "quarantine", "repair", "reconcile", "decompose-page", "recompile",
+         "relate", "correct-notes", "fold-lint", "store-link-lint",
+         "pii-restore", "quiesce", "drain", "storage", "schema", "registry",
+         "memory-class", "description", "subject-population"),
+    ),
+    (
+        "Audit and verification",
+        ("audit", "attribution", "provenance", "receipts", "contact-surface-lint",
+         "outbound-lint", "surface-divergence", "bounce-contract"),
+    ),
+    (
+        "Hook and integration helpers",
+        ("query-topics", "stopwords", "context", "codex-context",
+         "push-metrics", "viewer", "demo"),
+    ),
+    (
+        "Experimental and measurement (flags and formats may change)",
+        ("measure", "calibration", "verdicts", "dimensions", "convergence",
+         "corrections-trust-dryrun", "recovery-yield", "axiom", "authority",
+         "explain-routing"),
+    ),
+)
+
+_TOP_DESCRIPTION = "Knowledge management pipeline — append-only intake, tiered compilation"
+
+
+class _GroupedHelpParser(argparse.ArgumentParser):
+    """Top-level parser whose ``--help`` lists subcommands by group.
+
+    Only :meth:`format_help` differs from argparse: the flat
+    ``{a,b,c,...}`` list becomes the groups in ``_COMMAND_GROUPS``, one
+    ``name  summary`` line per command. Parsing, ``choices`` and error
+    messages are untouched.
+    """
+
+    def format_help(self) -> str:
+        sub_action = next(
+            (a for a in self._actions if isinstance(a, argparse._SubParsersAction)),
+            None,
+        )
+        helps: dict[str, str] = {}
+        if sub_action is not None:
+            for choice in sub_action._choices_actions:
+                text = " ".join((choice.help or "").split())
+                if text.startswith("Issue athenaeum#") and ": " in text:
+                    text = text.split(": ", 1)[1]
+                # First sentence or clause only: this is an index, not the manual.
+                for sep in (". ", " — ", "; ", " (issue "):
+                    text = text.split(sep)[0]
+                if len(text) > 62:
+                    text = text[:59].rstrip() + "..."
+                helps[choice.dest] = text
+        registered = set(helps)
+        lines = [
+            "usage: athenaeum [-h] [--version] <command> [<args>]",
+            "",
+            self.description or "",
+            "",
+            "options:",
+            "  -h, --help  show this help message and exit",
+            "  --version   show program's version number and exit",
+        ]
+        width = max((len(n) for n in registered), default=0) + 2
+        listed: set[str] = set()
+        for heading, names in _COMMAND_GROUPS:
+            present = [n for n in names if n in registered]
+            if not present:
+                continue
+            lines += ["", f"{heading}:"]
+            for name in present:
+                listed.add(name)
+                lines.append(f"  {name.ljust(width)}{helps[name]}".rstrip())
+        leftovers = sorted(registered - listed)
+        if leftovers:  # defensive: a test keeps this empty
+            lines += ["", "Other:"]
+            lines += [f"  {n.ljust(width)}{helps[n]}".rstrip() for n in leftovers]
+        lines += ["", "Run `athenaeum <command> --help` for a command's options.", ""]
+        return "\n".join(lines)
+
+
+def _new_top_parser() -> argparse.ArgumentParser:
+    parser = _GroupedHelpParser(prog="athenaeum", description=_TOP_DESCRIPTION)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+    return parser
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level ``athenaeum`` parser with every subcommand wired.
@@ -267,12 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_verdicts import add_verdicts_subparser
     from athenaeum._cmd_viewer import add_viewer_subparser
 
-    parser = argparse.ArgumentParser(
-        prog="athenaeum",
-        description="Knowledge management pipeline — append-only intake, tiered compilation",
+    parser = _new_top_parser()
+    subparsers = parser.add_subparsers(
+        dest="command", metavar="<command>", parser_class=argparse.ArgumentParser
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
-    subparsers = parser.add_subparsers(dest="command")
 
     # Issue athenaeum#553: each add_*_subparser both builds its subparser(s) AND calls
     # set_defaults(func=<handler>) on them, so dispatch below is uniform.
@@ -416,12 +523,10 @@ def _build_lazy_parser(command: str) -> argparse.ArgumentParser:
     module = importlib.import_module(module_path)
     loader = getattr(module, loader_name)
 
-    parser = argparse.ArgumentParser(
-        prog="athenaeum",
-        description="Knowledge management pipeline — append-only intake, tiered compilation",
+    parser = _new_top_parser()
+    subparsers = parser.add_subparsers(
+        dest="command", metavar="<command>", parser_class=argparse.ArgumentParser
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
-    subparsers = parser.add_subparsers(dest="command")
     loader(subparsers)
     return parser
 
