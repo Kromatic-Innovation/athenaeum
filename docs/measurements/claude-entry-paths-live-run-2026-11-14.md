@@ -124,3 +124,15 @@ ledger exists to count. No host config was changed: no editable re-install, no
 - Teardown error on the `launch-argument` case.
 - Bridge case needs a driver or a documented manual procedure.
 - Re-run once the above lands, then record the table and decide on enabling.
+
+## Harness changes since this run
+
+The driver defects above were addressed in athenaeum#2588, verified offline only
+(no `claude` binary was available): an isolated config dir with a documented
+credential hand-off and no host hooks, Enter delivered as its own pty write on a
+sized pty with every submission confirmed in the session transcript, parent-turn
+proof for the "no line" rows, a scrub of inherited `CLAUDE_CODE_*` variables, a
+hardened teardown, and the bridge row skipped with a recorded reason. Whether
+Enter now submits on a live host is still unobserved and is the first thing the
+athenaeum#2161 re-run settles. Credential routes and the submit rationale are in
+the harness module docstring.
