@@ -123,6 +123,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.storage import page_write_root_for_class
 from athenaeum.structured_upsert import (
     STATUS_APPLIED,
     STATUS_REFUSED,
@@ -2526,7 +2527,13 @@ def process_batch_run(
                 new_entities, relatedness_run_index(wiki_root)
             )
             written_entities: list[WikiEntity] = []
-            for entity in new_entities:
+            # Per-type target surface (athenaeum#2618), resolved up front so a
+            # class mapped to a non-indexed surface raises before any write.
+            _create_roots = [
+                page_write_root_for_class(e.type, resolved_config, wiki_root.parent)
+                for e in new_entities
+            ]
+            for entity, _create_root in zip(new_entities, _create_roots):
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
@@ -2545,8 +2552,8 @@ def process_batch_run(
                 ):
                     result.type_rejected += 1
                     continue
-                atomic_write_text(wiki_root / entity.filename, rendered)
-                index.register(entity)
+                atomic_write_text(_create_root / entity.filename, rendered)
+                index.register(entity, root=_create_root)
                 written_entities.append(entity)
                 log.info("  Created: %s → %s", entity.name, entity.filename)
 
