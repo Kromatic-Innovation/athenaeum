@@ -284,8 +284,9 @@ def gate_classified_entities(
     categories = policy_categories(policy)
     out = CategoryGateOutcome()
     for c in classified:
-        # A person-hint item is an assertion about an existing page; it carries
-        # no category, so it can match deterministically but is never "unsure".
+        # A person-hint item (athenaeum#2654) carries category + confidence like
+        # any other, so it can be unsure and escalate; its subject is the
+        # hinted page's uid (the owner's uid for an owner fact).
         verdict, rule = _decide(
             policy,
             c.entity_type or None,
@@ -293,7 +294,7 @@ def gate_classified_entities(
             c.existing_uid,
             c.category,
             c.category_confidence,
-            can_be_unsure=not c.from_person_hint,
+            can_be_unsure=True,
         )
         if verdict == "keep" or rule is None:
             out.kept.append(c)

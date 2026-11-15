@@ -6,7 +6,7 @@
 
 # LLM prompt inventory
 
-Athenaeum sends 33 distinct prompt constants to the model. Each stays an inline
+Athenaeum sends 34 distinct prompt constants to the model. Each stays an inline
 constant in its home module (next to the parser it feeds); `athenaeum.prompt_registry`
 indexes them and this file is generated from that index.
 
@@ -207,6 +207,28 @@ For EVERY entity you return, also add two fields:
 Judge the category from what the observations say, not from how sensitive
 they sound. Do not leave either field out.
 ```
+
+## `tiers.relevance_category_hint_prompt`
+
+- **Constant:** `athenaeum.tiers.RELEVANCE_CATEGORY_HINT_PROMPT`
+- **Source:** `src/athenaeum/tiers.py`
+- **Model knob:** `classify` &middot; **max_tokens:** `4096`
+- **sha256:** `a5805b1a59b7b5f4588c9afe90bce5080f1f555ebdad8854783302ad3139b06a`
+
+````text
+The `candidate_uid` objects above carry the same two relevance fields as every
+other entity (see "Relevance categories" in this message). Add `"category"` and
+`"confidence"` to each `candidate_uid` object, judged from its `observations`
+alone and exactly as described there:
+
+```json
+{"candidate_uid": "<uid>", "observations": "<the claim>", "category": "<category or null>", "confidence": "high"}
+```
+
+Being about a known person, including the owner, does not exempt a claim from
+the categories: the claim's own subject matter decides. Do not leave either
+field out.
+````
 
 ## `tiers.relevance_always_prompt`
 
