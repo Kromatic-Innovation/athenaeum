@@ -194,7 +194,8 @@ transports, identical prompts either way. → [modules/provider](docs/modules/pr
 such as ChatGPT or the Grok apps, can't reach a stdio memory server at all.
 `athenaeum serve --transport http` serves the store over HTTPS behind your reverse proxy,
 with OIDC bearer-token auth (`serve.auth.*`) and a `remote` serve profile that narrows
-what leaves your machine. Experimental, and not covered by the `athenaeum.__all__`
+what leaves your machine, and each remote tool call is written to an audit log
+(digests and page ids only, never page text). Experimental, and not covered by the `athenaeum.__all__`
 compatibility promise: flags and keys may change in a minor release.
 → [guides/remote](docs/guides/remote.md)
 
@@ -217,9 +218,13 @@ minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
   serving with OIDC auth, `promptwitness`, and the source trust graph). They sit
   outside `athenaeum.__all__` and may change in any minor release without a
   deprecation cycle.
-- **Removed surfaces.** `athenaeum merges` and `athenaeum questions` were removed
-  in 0.24.0, as announced. Use `athenaeum decisions` — see
-  [Upgrading](docs/guides/upgrading.md) for the command-by-command mapping.
+- **Removed surfaces.** 0.24.0 removed `athenaeum merges` and `athenaeum questions`
+  (use `athenaeum decisions`), `athenaeum rebuild-index` (use `athenaeum reindex`),
+  `athenaeum split-oversize` (use `athenaeum recompile`), seven one-shot repair
+  commands, the legacy `block` / `error` / `resolved_block` keys in MCP responses,
+  and a set of config keys and switches that had no effect or only turned
+  always-on behaviour off. See [Upgrading](docs/guides/upgrading.md) for the
+  command-by-command mapping and the [CHANGELOG](CHANGELOG.md) for the full list.
 - **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
   for supported versions and how to report a vulnerability.
 
