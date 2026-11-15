@@ -1171,10 +1171,381 @@ def _pointer_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in bundle.items() if k in _POINTER_KEYS}
 
 
+# ---------------------------------------------------------------------------
+# Item contract v1 (athenaeum#2528): presentation, fingerprint, priority
+# ---------------------------------------------------------------------------
+
+#: ``contract_version`` every item carries (design athenaeum#2489 section 2).
+CONTRACT_VERSION = 1
+
+STATE_PENDING = "pending"
+STATE_HELD = "held"
+STATE_STALE = "stale"
+
+#: ``presentation.framed_by.method`` for deterministic template framing, the
+#: only method this slice produces (design ruling D3: no LLM framing).
+FRAMED_BY_TEMPLATE = "template"
+
+#: Upper bound on ``presentation.context`` in characters. The design counts
+#: presentation toward the per-item context cap; rather than shrink the
+#: bundle against it (which would turn every small-cap item into a scheduled
+#: review), the presentation is bounded by construction.
+_PRESENTATION_CONTEXT_CHARS = 800
+
+#: Per-type ``job``: what answering the item is FOR, in plain English.
+_JOB: dict[str, str] = {
+    "question": (
+        "Settle claims the system could not rank, so recall returns one "
+        "answer instead of either."
+    ),
+    "confirmation": (
+        "Decide whether the narrower scope an agent built is acceptable or "
+        "the original alternative is still required."
+    ),
+    "coordinate": (
+        "Supply the missing separator value(s) so the system can finish "
+        "comparing the page pair(s)."
+    ),
+    "merge": "Decide whether these pages describe the same thing and should become one.",
+    "audit": (
+        "Check one sampled automated verdict, so the system's error rate can "
+        "be measured."
+    ),
+    "retraction": (
+        "Decide whether content already derived from a retracted observation "
+        "may stand."
+    ),
+    "quarantine": "Decide whether a quarantined raw file may enter the corpus.",
+    "proposed-rule": "Decide whether to adopt a rule the librarian drafted for future intake.",
+    "dimension-proposal": (
+        "Decide whether to add a drafted comparison axis (dimension) to the registry."
+    ),
+    "auto-apply-threshold": (
+        "Decide whether the resolver may auto-apply this action at a lower "
+        "confidence floor, backed by audit data."
+    ),
+    "tier-movement-proposal": (
+        "Acknowledge or dismiss a low-usage pattern flagged on one claim."
+    ),
+    "policy-pack-edit": (
+        "Decide whether to edit a retention-policy pack's rules, which "
+        "changes how future content is classified."
+    ),
+    "schema-amendment-proposal": (
+        "Decide whether to widen a page type's schema so a repeatedly "
+        "refused second value can be kept."
+    ),
+    "page-recompile": (
+        "Decide whether an oversized page is cut into a parent page plus sub-pages."
+    ),
+}
+_JOB_UNKNOWN = "Decide this item; its type carries no more specific guidance."
+
+_Opt = tuple[str, list[str], list[str]]
+
+#: Generic ``(label, pros, cons)`` per verdict token, used when a type has no
+#: more specific copy in :data:`_OPTION_COPY`.
+_GENERIC_OPTION: dict[str, _Opt] = {
+    "approve": ("Approve", ["Carries out what the item proposes."], ["Applies the change."]),
+    "reject": ("Reject", ["Changes nothing."], ["The underlying issue stays open."]),
+    "rename": (
+        "Approve under a different name",
+        ["Adopts the proposal with a better name."],
+        ["Needs a replacement name from you."],
+    ),
+    "attach-as-subpage": (
+        "Attach as a sub-page",
+        ["Keeps both pages and records that one belongs under the other."],
+        ["Leaves two pages in the corpus."],
+    ),
+    "approve-structure-only": (
+        "Approve the in-page restructure only",
+        ["Applies the part that stays inside this page."],
+        ["Leaves the cross-page part undone."],
+    ),
+}
+
+#: Per-``(type, verdict)`` option copy. Keys are the exact verdict tokens the
+#: type's response schema accepts.
+_OPTION_COPY: dict[tuple[str, str], _Opt] = {
+    ("merge", "approve"): (
+        "Merge the pages",
+        ["One whole page for recall to return."],
+        ["Reversible only by unfolding; the sources become tombstones."],
+    ),
+    ("merge", "attach-as-subpage"): (
+        "Attach as a sub-page",
+        ["Nothing is folded or tombstoned; the relation is recorded."],
+        ["Two pages remain."],
+    ),
+    ("merge", "reject"): (
+        "Keep separate",
+        ["Nothing is changed or destroyed."],
+        ["Recall may return either of two partial answers."],
+    ),
+    ("confirmation", "approve"): (
+        "Accept the narrower scope",
+        ["No further work is needed."],
+        ["The alternative is not built and no record says it was declined."],
+    ),
+    ("confirmation", "reject"): (
+        "Require the alternative",
+        ["The originally intended behaviour is built."],
+        ["More work for the raiser."],
+    ),
+    ("quarantine", "approve"): (
+        "Release for ingestion",
+        ["The file's content can enter the corpus."],
+        ["Whatever tripped the gate is now ingested."],
+    ),
+    ("quarantine", "reject"): (
+        "Leave quarantined",
+        ["Nothing unvetted enters the corpus."],
+        ["The file's content stays outside the corpus."],
+    ),
+    ("proposed-rule", "approve"): (
+        "Adopt the rule",
+        ["Stops the recurring pattern from producing items."],
+        ["Changes how future intake is handled."],
+    ),
+    ("proposed-rule", "reject"): (
+        "Discard the rule",
+        ["Intake handling is unchanged."],
+        ["The pattern keeps recurring."],
+    ),
+    ("dimension-proposal", "approve"): (
+        "Register the dimension as drafted",
+        ["Resolves the recurring missing-dimension shape."],
+        ["Adds an axis to the registry under the drafter's name."],
+    ),
+    ("dimension-proposal", "rename"): (
+        "Register it under a different name",
+        ["Adopts the axis with a name you choose."],
+        ["Needs a replacement name from you."],
+    ),
+    ("dimension-proposal", "reject"): (
+        "Discard the proposal",
+        ["The registry is unchanged."],
+        ["The shape keeps recurring."],
+    ),
+    ("auto-apply-threshold", "approve"): (
+        "Lower the auto-apply floor",
+        ["Fewer verdicts for this action reach a human."],
+        ["More verdicts are applied without review."],
+    ),
+    ("auto-apply-threshold", "reject"): (
+        "Keep the current floor",
+        ["Review coverage is unchanged."],
+        ["The same share keeps escalating."],
+    ),
+    ("tier-movement-proposal", "approve"): (
+        "Acknowledge the flag",
+        ["Records that the usage pattern was reviewed."],
+        ["Nothing is moved; there is no automatic executor."],
+    ),
+    ("tier-movement-proposal", "reject"): (
+        "Dismiss the finding",
+        ["Clears the item."],
+        ["The pattern may be proposed again."],
+    ),
+    ("policy-pack-edit", "approve"): (
+        "Apply the edit",
+        ["Closes the classification gap that motivated it."],
+        ["Changes retention/erasure classification across the whole pack."],
+    ),
+    ("policy-pack-edit", "reject"): (
+        "Discard the proposal",
+        ["The pack's rules are unchanged."],
+        ["The motivating gap persists."],
+    ),
+    ("schema-amendment-proposal", "approve"): (
+        "Adopt the amendment",
+        ["Records the decision to widen the schema (applied by hand)."],
+        ["No applier exists yet, so it is not applied automatically."],
+    ),
+    ("schema-amendment-proposal", "reject"): (
+        "Dismiss the proposal",
+        ["The schema is unchanged."],
+        ["The second value keeps being refused."],
+    ),
+    ("page-recompile", "approve"): (
+        "Carry out the whole plan",
+        ["The page is cut down to size."],
+        ["Rewrites real pages."],
+    ),
+    ("page-recompile", "approve-structure-only"): (
+        "Approve the in-page restructure only",
+        ["Restructures this page without touching any other."],
+        ["Cross-page moves in the plan are not applied."],
+    ),
+    ("page-recompile", "reject"): (
+        "Leave the page as it is",
+        ["Nothing is rewritten or lost."],
+        ["The page stays oversized and keeps reappearing in the backlog."],
+    ),
+}
+
+
+def _sha256_json(value: Any) -> str:
+    import hashlib
+
+    rendered = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=repr
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def state_digest_for(item: dict[str, Any]) -> str:
+    """Hash of ``item``'s decision-relevant fields (excluding presentation).
+
+    Design athenaeum#2489 section 2.1: ``type``, ``id``, ``summary``,
+    ``confidence`` and the whole ``payload`` (which carries the resolved
+    subject names). ``created_at`` is excluded -- it says when, not what. Any
+    change to one of these invalidates a stored presentation.
+    """
+    return "sha256:" + _sha256_json(
+        {
+            "type": item.get("type"),
+            "id": item.get("id"),
+            "summary": item.get("summary"),
+            "confidence": item.get("confidence"),
+            "payload": item.get("payload"),
+        }
+    )
+
+
+def _option_values(schema: dict[str, Any]) -> list[str]:
+    verdict = (schema.get("properties") or {}).get("verdict")
+    enum = verdict.get("enum") if isinstance(verdict, dict) else None
+    return [v for v in enum if isinstance(v, str)] if isinstance(enum, list) else []
+
+
+def _presentation_context(item: dict[str, Any], rationale: str) -> str:
+    parts = [str(item.get("summary") or "").strip()]
+    subjects = subjects_for(item)
+    if subjects:
+        named = "; ".join(
+            f"{s['title']} ({s['path']})" if s.get("path") else str(s["title"]) for s in subjects
+        )
+        parts.append(f"Pages involved: {named}.")
+    parts.append(f"Why this needs you: {rationale}")
+    text = " ".join(p for p in parts if p)
+    if len(text) > _PRESENTATION_CONTEXT_CHARS:
+        text = text[: _PRESENTATION_CONTEXT_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def template_presentation(
+    item: dict[str, Any], *, framed_at: str | None = None
+) -> dict[str, Any]:
+    """Deterministic, offline presentation for ``item`` (no model call).
+
+    ``context`` renders the summary, the named subjects and the escalation
+    rationale as prose; ``job`` and the options' copy come from per-type
+    templates; ``options`` are derived from the item's response schema enum
+    (free-text items get none). ``recommendation`` is set only from a signal
+    the item already carries -- ``payload["recommended_verdict"]`` naming one
+    of the options -- and is otherwise ``None``. It is deliberately NOT
+    ``proposed_default``.
+    """
+    from datetime import datetime, timezone
+
+    decision_type = str(item.get("type") or "")
+    values = _option_values(response_schema_for_item(item))
+    options = []
+    for value in values:
+        label, pros, cons = _OPTION_COPY.get(
+            (decision_type, value), _GENERIC_OPTION.get(value, (value, [], []))
+        )
+        options.append({"value": value, "label": label, "pros": list(pros), "cons": list(cons)})
+    payload = item.get("payload")
+    signal = payload.get("recommended_verdict") if isinstance(payload, dict) else None
+    recommendation = None
+    if isinstance(signal, str) and signal in values:
+        recommendation = {
+            "value": signal,
+            "rationale": "The step that raised this item named this as its recommended answer.",
+        }
+    return {
+        "context": _presentation_context(item, escalation_rationale_for(item)),
+        "job": _JOB.get(decision_type, _JOB_UNKNOWN),
+        "options": options,
+        "recommendation": recommendation,
+        "framed_by": {
+            "method": FRAMED_BY_TEMPLATE,
+            "model": None,
+            "framed_at": framed_at
+            or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    }
+
+
+def fingerprint_for(item: dict[str, Any], presentation: dict[str, Any], state_digest: str) -> str:
+    """The ``what was shown`` anchor (design athenaeum#2489 section 2.2).
+
+    ``sha256`` over canonical JSON of ``{contract_version, id, type,
+    state_digest, summary, presentation}``. ``presentation.framed_by.
+    framed_at`` is left out of the hash: it is bookkeeping, not something a
+    reader was shown, and including it would change the fingerprint whenever
+    a presentation is re-stored.
+    """
+    shown = copy.deepcopy(presentation)
+    framed_by = shown.get("framed_by")
+    if isinstance(framed_by, dict):
+        framed_by.pop("framed_at", None)
+    return "sha256:" + _sha256_json(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "id": item.get("id"),
+            "type": item.get("type"),
+            "state_digest": state_digest,
+            "summary": item.get("summary"),
+            "presentation": shown,
+        }
+    )
+
+
+def priority_for(item: dict[str, Any], *, routing: str, today: Any = None) -> dict[str, Any]:
+    """``{score, reasons}`` -- an input to digest ordering, in ``[0, 1]``.
+
+    Deterministic arithmetic over signals the item already carries: routing
+    (authority outranks competence), reversibility, and age.
+    """
+    from athenaeum.metrics import days_since
+
+    decision_type = str(item.get("type") or "")
+    score = 0.0
+    reasons: list[str] = []
+    if routing == ROUTING_AUTHORITY:
+        score += 0.3
+        reasons.append("only the owner can decide this")
+    elif routing == ROUTING_COMPETENCE:
+        score += 0.1
+        reasons.append("the system could not resolve this itself")
+    else:
+        reasons.append("too large for one sitting; scheduled review")
+    reversibility = reversibility_for(decision_type)
+    if reversibility == REVERSIBILITY_IRREVERSIBLE:
+        score += 0.3
+        reasons.append("cannot be undone once applied")
+    elif reversibility == REVERSIBILITY_REVERSIBLE_WITH_WORK:
+        score += 0.1
+        reasons.append("undoing it takes real work")
+    age = days_since(str(item.get("created_at") or ""), today=today)
+    if age is not None and age > 0:
+        score += min(age, 30) / 30 * 0.3
+        reasons.append(f"waiting {age} day(s)")
+    if answerable_as(decision_type) is None:
+        reasons.append("no applier yet; cannot be answered through the seam")
+    return {"score": round(min(score, 1.0), 3), "reasons": reasons}
+
+
 def frame_decision(
     item: dict[str, Any],
     *,
     max_context_tokens: int,
+    stored_presentation: dict[str, Any] | None = None,
+    today: Any = None,
 ) -> dict[str, Any]:
     """Return ``item`` with framing fields added and the context cap applied.
 
@@ -1188,6 +1559,15 @@ def frame_decision(
     batching rather than before: a batched item is one item and passes
     through here exactly once, so no amount of member-sizing can smuggle
     oversized context past the cap.
+
+    Issue athenaeum#2528 (item contract v1): also stamps ``contract_version``,
+    ``state``/``hold_reason``, ``answerable``, ``presentation``,
+    ``fingerprint`` and ``priority``. ``stored_presentation`` is a
+    presentation already persisted for THIS item's current
+    :func:`state_digest_for` (the caller owns the store and the digest
+    match); it is used verbatim, otherwise the deterministic
+    :func:`template_presentation` is built. No model is ever called, and
+    the function stays pure.
     """
     decision_type = str(item.get("type") or "")
     framed = dict(item)
@@ -1226,6 +1606,19 @@ def frame_decision(
     subjects = subjects_for(item)
     if subjects:
         framed["subjects"] = subjects
+    digest = state_digest_for(item)
+    presentation = (
+        copy.deepcopy(stored_presentation)
+        if stored_presentation is not None
+        else template_presentation(item)
+    )
+    framed["contract_version"] = CONTRACT_VERSION
+    framed["state"] = STATE_PENDING
+    framed["hold_reason"] = None
+    framed["answerable"] = answerable_as(decision_type) is not None
+    framed["presentation"] = presentation
+    framed["fingerprint"] = fingerprint_for(item, presentation, digest)
+    framed["priority"] = priority_for(item, routing=routing, today=today)
     return framed
 
 
