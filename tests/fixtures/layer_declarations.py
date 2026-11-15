@@ -124,6 +124,7 @@ MODULE_LAYER: dict[str, int] = {
     "measurement_docs": 2,
     "memory_class_backfill": 2,
     "never_ingest": 2,
+    "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)
@@ -417,6 +418,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_measure": 5,
     "_cmd_description": 5,
     "_cmd_memory_class": 5,
+    "_cmd_owner": 5,  # issue athenaeum#2652
     "_cmd_merges": 5,
     "_cmd_outbound": 5,
     "_cmd_pending": 5,

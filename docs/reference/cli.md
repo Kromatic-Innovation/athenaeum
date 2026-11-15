@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `drops`, `entity`, `measure`, `memory-class`, `provenance`, `push-metrics`, `receipts`, `recompile`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `drops`, `entity`, `measure`, `memory-class`, `owner`, `provenance`, `push-metrics`, `receipts`, `recompile`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -89,6 +89,8 @@ python scripts/gen_cli_reference.py
 - [`athenaeum memory-class`](#athenaeum-memory-class) (group) — Memory-taxonomy class maintenance: backfill the memory_class: frontmatter axis across the wiki.
 - [`athenaeum memory-class backfill`](#athenaeum-memory-class-backfill) (command) — Assign memory_class: to pages that lack it — deterministic type-rule map, plus an optional classifier pass over the residual. Dry-run unless --apply. Never overwrites an existing value and never mints 'axiom'.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
+- [`athenaeum owner`](#athenaeum-owner) (group) — Manage the knowledge-base owner identity. 'set' creates the owner's person page and records owner.uid.
+- [`athenaeum owner set`](#athenaeum-owner-set) (command) — Create the owner's person page and record owner.uid and aliases in athenaeum.yaml. Idempotent; never asks for or writes an email or phone.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum provenance`](#athenaeum-provenance) (group) — Read-only provenance-ledger lookups. `adapter --uid <uid>` prints which adapter/source produced a compiled page, from the adapter-provenance ledger.
 - [`athenaeum provenance adapter`](#athenaeum-provenance-adapter) (command) — Print the adapter-provenance ledger row(s) recorded for one compiled page uid -- source, source_object_id, raw_ref, and the captured adapter fields -- or say none were recorded.
@@ -1027,6 +1029,7 @@ Initialize a new knowledge directory
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--force` | off (flag absent) | — | Overwrite existing template files at the destination; no backup is created (only applies with --with-templates and/or --with-rules). |
+| `--owner-name` | — | — | Also record the owner: create the owner's person page and write owner.uid into athenaeum.yaml -- the same code path as 'athenaeum owner set --name'. Omit to configure no owner. |
 | `--path` | `~/knowledge` | — | Target directory (default: ~/knowledge) |
 | `--rules-dest` | — | — | Override the shape-rules destination directory (default: <path>/rules). |
 | `--templates-dest` | — | — | Override the templates destination directory (default: <path>/templates). |
@@ -1163,6 +1166,26 @@ Scan outbound-destined text for PII (emails/phones) before it ships; flag findin
 | `--json` | off (flag absent) | — | Emit machine-readable JSON findings instead of plain text (ignored in --redact mode). |
 | `--redact` | off (flag absent) | — | Strip mode: print the text with each finding replaced by a redaction placeholder (to stdout) instead of reporting findings. |
 | `--text` | — | — | Text to scan, given inline. Mutually exclusive with --file; if neither is given, text is read from stdin. |
+
+## `athenaeum owner`
+
+Manage the knowledge-base owner identity. 'set' creates the owner's person page and records owner.uid.
+
+Subcommands:
+
+- `athenaeum owner set` — Create the owner's person page and record owner.uid and aliases in athenaeum.yaml. Idempotent; never asks for or writes an email or phone.
+
+## `athenaeum owner set`
+
+Create the owner's person page and record owner.uid and aliases in athenaeum.yaml. Idempotent; never asks for or writes an email or phone.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--alias` | `[]` | — | Additional alias for name matching (repeatable). Use full names; a single-word alias is ignored by the name matcher. |
+| `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--name` | — | — | The owner's full name, e.g. 'Ada Example'. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum pii-restore`
 

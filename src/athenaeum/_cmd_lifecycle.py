@@ -74,6 +74,13 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Override the shape-rules destination directory "
         "(default: <path>/rules).",
     )
+    init_parser.add_argument(
+        "--owner-name",
+        default=None,
+        help="Also record the owner (issue athenaeum#2652): create the owner's "
+        "person page and write owner.uid into athenaeum.yaml -- the same code "
+        "path as 'athenaeum owner set --name'. Omit to configure no owner.",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     # status command
@@ -272,6 +279,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
+
+    if getattr(args, "owner_name", None):
+        from athenaeum._cmd_owner import apply_owner_set
+
+        rc = apply_owner_set(target, args.owner_name, None)
+        if rc:
+            return rc
 
     # Issue athenaeum#2367: disclose which LLM provider backs compiles, and
     # (the missing-credential counter-example) name exactly what is absent
