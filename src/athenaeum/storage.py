@@ -469,6 +469,40 @@ def surface_root_for_class(
     return resolve_adapter_for_class(entity_class, config).resolve_root(knowledge_root)
 
 
+class SurfaceNotIndexedError(StorageConfigError):
+    """A compile write was routed to a surface that is not indexed (athenaeum#2618).
+
+    ``storage.mapping`` sends the class to a surface whose corpus policy has
+    ``embedded: false`` (e.g. the built-in ``excluded`` surface). The compile
+    paths write pages that join the corpus, so they refuse rather than park
+    them where recall can never see them; only the excluded-surface writers
+    (PII, corrections, storage migration) may write there.
+    """
+
+
+def page_write_root_for_class(
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """Directory a NEW page of *entity_class* is written to (athenaeum#2618).
+
+    The compile write paths (entity creation, batch apply, page recompile)
+    call this once per entity instead of assuming ``wiki/``. With no
+    ``storage.mapping`` for the class it is the default wiki surface, so an
+    unconfigured deployment writes to the same paths as before. Raises
+    :class:`SurfaceNotIndexedError` when the class maps to a surface that is
+    not indexed, and :class:`StorageConfigError` for an unknown adapter.
+    """
+    adapter = resolve_adapter_for_class(entity_class, config)
+    if not adapter.corpus_policy.embedded:
+        raise SurfaceNotIndexedError(
+            f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
+            "not indexed (embedded: false); compile cannot write pages there"
+        )
+    return adapter.resolve_root(knowledge_root)
+
+
 def resolve_store_for_class(
     entity_class: str | None,
     config: dict[str, Any] | None,

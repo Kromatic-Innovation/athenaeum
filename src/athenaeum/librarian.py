@@ -286,7 +286,12 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.storage import open_store, resolve_indexed_surfaces, resolve_locator_surfaces
+from athenaeum.storage import (
+    open_store,
+    page_write_root_for_class,
+    resolve_indexed_surfaces,
+    resolve_locator_surfaces,
+)
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
@@ -2377,8 +2382,15 @@ def _apply_tier3_results(
     # ``split-from``/``split-into`` pairs) are preserved, never replaced.
     stamp_related_edges(new_entities, relatedness_run_index(wiki_root))
 
-    for entity in new_entities:
-        page_path = wiki_root / entity.filename
+    # Resolve each entity's target surface up front (athenaeum#2618): a class
+    # mapped to a non-indexed surface raises BEFORE any create is written.
+    _page_config = config if config is not None else load_config(wiki_root.parent)
+    _create_roots = [
+        page_write_root_for_class(e.type, _page_config, wiki_root.parent) for e in new_entities
+    ]
+
+    for entity, _create_root in zip(new_entities, _create_roots):
+        page_path = _create_root / entity.filename
         rendered = entity.render()
         # Schema-gate the LLM-produced entity before write. Re-parse the
         # rendered frontmatter so the validator sees exactly the bytes
@@ -2435,7 +2447,7 @@ def _apply_tier3_results(
             result.retain_raw = True  # a refused page must not consume its raw
             continue
         atomic_write_text(page_path, rendered)
-        index.register(entity)
+        index.register(entity, root=_create_root)
         result.created.append(entity)
         _written_uids.append(entity.uid)
         if str(entity.type).strip().casefold() == PERSON_ENTITY_TYPE:

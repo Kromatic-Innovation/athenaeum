@@ -64,8 +64,9 @@ counter ``athenaeum doctor`` (:mod:`athenaeum.doctor`) reports.
 verdict, recompile planning, and any bulk migration of existing rows — none
 of those are touched here.
 
-Layering: L3 service. Imports only :mod:`athenaeum.atomic_io` (L0) and
-:mod:`athenaeum.models` (L1) — both well below every NAMED caller this
+Layering: L3 service. Imports only :mod:`athenaeum.atomic_io` (L0),
+:mod:`athenaeum.models` (L1) and :mod:`athenaeum.storage` (L1, the locator
+surfaces a per-type page can live on) — all well below every NAMED caller this
 relation is meant to serve: ``tiers.py``'s recompile pass, the merge
 resolver (``merge.py``/``wiki_dedupe.py``), and ``cli.py``'s ``_cmd_*``
 layer (L5). Placing this module below all three means none of them has to
@@ -80,6 +81,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import (
@@ -88,6 +90,7 @@ from athenaeum.models import (
     parse_superseded_by,
     render_frontmatter,
 )
+from athenaeum.storage import resolve_locator_surfaces
 
 #: The four origins a relation can be set from (issue athenaeum#2535 AC1).
 VALID_VIA: frozenset[str] = frozenset({"split", "attach", "fold", "manual"})
@@ -215,12 +218,29 @@ def _discover_wiki_pages(wiki_root: Path) -> list[Path]:
     return sorted(p for p in wiki_root.glob("*.md") if p.is_file() and not p.name.startswith("_"))
 
 
-def _index_pages_by_uid(wiki_root: Path) -> dict[str, Path]:
-    """uid -> path for every page with a string uid. The first page found
-    (sorted-path order) wins a duplicate uid -- an ambiguous uid is an
-    existing-corpus problem outside this module's job to adjudicate."""
+def _surface_pages(wiki_root: Path, config: dict[str, Any] | None) -> list[Path]:
+    """Pages on the indexed storage surfaces outside ``wiki/`` (athenaeum#2618).
+
+    A page routed to a per-type surface is found by the same locator surfaces
+    the read path uses; empty for a deployment with no extra surface.
+    """
+    pages: list[Path] = []
+    for surface in resolve_locator_surfaces(wiki_root.parent, config):
+        if surface.root.is_dir():
+            pages.extend(
+                p for p in sorted(surface.root.rglob("*.md")) if not p.name.startswith("_")
+            )
+    return pages
+
+
+def _index_pages_by_uid(wiki_root: Path, config: dict[str, Any] | None = None) -> dict[str, Path]:
+    """uid -> path for every page with a string uid, across ``wiki/`` and the
+    indexed storage surfaces (athenaeum#2618). Wiki pages are listed first, so
+    one wins a uid tie, then the first page found (sorted-path order) wins a
+    duplicate uid -- an ambiguous uid is an existing-corpus problem outside
+    this module's job to adjudicate."""
     index: dict[str, Path] = {}
-    for path in _discover_wiki_pages(wiki_root):
+    for path in [*_discover_wiki_pages(wiki_root), *_surface_pages(wiki_root, config)]:
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -428,7 +448,14 @@ def _write_both_or_rollback(path_a: Path, text_a: str, path_b: Path, text_b: str
         raise
 
 
-def set_relation(wiki_root: Path, *, child_uid: str, parent_uid: str, via: str) -> None:
+def set_relation(
+    wiki_root: Path,
+    *,
+    child_uid: str,
+    parent_uid: str,
+    via: str,
+    config: dict[str, Any] | None = None,
+) -> None:
     """Set the parent/child relation between *child_uid* and *parent_uid*
     (issue athenaeum#2535 AC1-AC3/AC5), writing both pages in one
     all-or-nothing operation.
@@ -451,7 +478,7 @@ def set_relation(wiki_root: Path, *, child_uid: str, parent_uid: str, via: str) 
     if via not in VALID_VIA:
         raise ValueError(f"via must be one of {sorted(VALID_VIA)}, got {via!r}")
 
-    index = _index_pages_by_uid(wiki_root)
+    index = _index_pages_by_uid(wiki_root, config)
     child_path = index.get(child_uid)
     parent_path = index.get(parent_uid)
     if child_path is None:
@@ -527,7 +554,9 @@ def set_relation(wiki_root: Path, *, child_uid: str, parent_uid: str, via: str) 
     _write_both_or_rollback(child_path, new_child_text, parent_path, new_parent_text)
 
 
-def remove_relation(wiki_root: Path, *, child_uid: str) -> None:
+def remove_relation(
+    wiki_root: Path, *, child_uid: str, config: dict[str, Any] | None = None
+) -> None:
     """Remove the parent/child relation naming *child_uid* as the child
     (issue athenaeum#2535 AC2), writing both pages in one all-or-nothing
     operation. Raises :class:`RelationError` -- no write -- when
@@ -537,7 +566,7 @@ def remove_relation(wiki_root: Path, *, child_uid: str) -> None:
     longer exists on disk, only the child's dangling pointer is cleared --
     there is no second page left to keep in sync.
     """
-    index = _index_pages_by_uid(wiki_root)
+    index = _index_pages_by_uid(wiki_root, config)
     child_path = index.get(child_uid)
     if child_path is None:
         raise RelationError(f"unknown child uid: {child_uid!r}")
@@ -630,7 +659,9 @@ def count_one_sided_relations(wiki_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def resolve_page_meta_by_uid(wiki_root: Path, uid: str) -> dict[str, object] | None:
+def resolve_page_meta_by_uid(
+    wiki_root: Path, uid: str, config: dict[str, Any] | None = None
+) -> dict[str, object] | None:
     """Best-effort lookup of one page's frontmatter by its ``uid:`` field.
 
     A single targeted glob (``<uid>*.md``), never a corpus-wide index build
@@ -655,6 +686,12 @@ def resolve_page_meta_by_uid(wiki_root: Path, uid: str) -> dict[str, object] | N
         candidates = sorted(wiki_root.glob(f"{uid}*.md"))
     except OSError:
         return None
+    # Only on a wiki miss, so the hot recall path pays nothing for a page that
+    # lives in ``wiki/`` (athenaeum#2618: a page may live on a mapped surface).
+    if not any(_is_uid_candidate(p, uid) for p in candidates):
+        for surface in resolve_locator_surfaces(wiki_root.parent, config):
+            if surface.root.is_dir():
+                candidates.extend(sorted(surface.root.rglob(f"{uid}*.md")))
     for path in candidates:
         if path.stem != uid and not path.stem.startswith(f"{uid}-"):
             continue
@@ -662,6 +699,10 @@ def resolve_page_meta_by_uid(wiki_root: Path, uid: str) -> dict[str, object] | N
         if path.stem == uid or str(meta.get("uid") or "") == uid:
             return meta
     return None
+
+
+def _is_uid_candidate(path: Path, uid: str) -> bool:
+    return path.stem == uid or path.stem.startswith(f"{uid}-")
 
 
 def is_hidden_split_child(meta: Mapping[str, object]) -> bool:

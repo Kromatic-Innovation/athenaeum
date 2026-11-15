@@ -183,6 +183,7 @@ from athenaeum.page_relations import (
     _discover_wiki_pages,
     _index_pages_by_uid,
     _related_rows,
+    _surface_pages,
     read_relations,
     remove_relation,
 )
@@ -340,7 +341,11 @@ class InboundLink:
 
 
 def find_inbound_links(
-    wiki_root: Path, created: Mapping[str, str], *, exclude: set[Path]
+    wiki_root: Path,
+    created: Mapping[str, str],
+    *,
+    exclude: set[Path],
+    config: dict[str, Any] | None = None,
 ) -> tuple[InboundLink, ...]:
     """Every reference to a created sub-page from a page not in *exclude*
     (AC4).
@@ -386,7 +391,7 @@ def find_inbound_links(
                 names_to_uid[key] = uid
     excluded = {p.resolve() for p in exclude}
     found: list[InboundLink] = []
-    for path in _discover_wiki_pages(Path(wiki_root)):
+    for path in [*_discover_wiki_pages(Path(wiki_root)), *_surface_pages(Path(wiki_root), config)]:
         try:
             if path.resolve() in excluded:
                 continue
@@ -604,6 +609,7 @@ def compute_undo(
     *,
     plan_id: str,
     ledger_path: Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> ComputedUndo:
     """Decide direct / queued / refused for *plan_id*, and read every
     pre-image needed -- writing nothing.
@@ -649,7 +655,7 @@ def compute_undo(
     uid = str(record.get("uid") or "")
     created = _created_uids(record)
     created_set = set(created)
-    index = _index_pages_by_uid(Path(wiki_root))
+    index = _index_pages_by_uid(Path(wiki_root), config)
     knowledge_root = Path(wiki_root).parent
 
     restores: list[PageRestore] = []
@@ -800,6 +806,7 @@ def compute_undo(
         Path(wiki_root),
         created_filenames,
         exclude=touched_paths | {d.path for d in deletions},
+        config=config,
     )
 
     # AC4 before AC3, deliberately: an inbound link is not adjudicable by a
@@ -1000,7 +1007,7 @@ def write_undo(
     its count (REFUSED). *dry_run* stops after the decision: nothing is
     written, not even the queue item (AC7).
     """
-    computed = compute_undo(wiki_root, plan_id=plan_id, ledger_path=ledger_path)
+    computed = compute_undo(wiki_root, plan_id=plan_id, ledger_path=ledger_path, config=config)
 
     if dry_run:
         return UndoOutcome(
@@ -1046,7 +1053,7 @@ def write_undo(
     # `remove_relation` refuses is that the relation is already gone.
     for attachment in computed.attachments:
         try:
-            remove_relation(wiki_root, child_uid=attachment.child_uid)
+            remove_relation(wiki_root, child_uid=attachment.child_uid, config=config)
         except (RelationError, OSError) as exc:
             # OSError as well as RelationError (Seer finding on PR athenaeum#2579,
             # and it is a real one): `remove_relation` WRITES both pages

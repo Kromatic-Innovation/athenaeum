@@ -380,3 +380,51 @@ class TestPendingMergesAcrossSurfaces:
         res = resolve_merge(merges, parse_pending_merges(merges)[0].id, "approve", wiki_root=kroot / "wiki")
         assert res["error_code"] == CROSS_STORE_MERGE_ERROR_CODE
         assert not (kroot / "wiki" / "brand-new-dish.md").exists()
+
+
+class TestRoutedCreate:
+    def test_type_mapped_to_shared_surface_cannot_link_wiki_page(self, kroot) -> None:
+        from athenaeum.models import WikiEntity
+
+        cfg = _config(1)
+        cfg["storage"]["mapping"] = {"recipe": "recipes"}
+        (kroot / "wiki" / "_schema").mkdir()
+        (kroot / "wiki" / "_schema" / "types.md").write_text(
+            "# Types\n\n| Type |\n|------|\n| recipe |\n| reference |\n", encoding="utf-8"
+        )
+        entity = WikiEntity(
+            uid="dddd4444", type="recipe", name="Stew", created="2026-11-15", updated="2026-11-15",
+            body=f"# Stew\n\nCooked for [[{PRIVATE_UID}]].\n",
+        )
+        raw = RawFile(path=kroot / "r.md", source="claude-session", timestamp="20260807T090000Z", uuid8="aabb0011", _content="c")
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result, new_entities=[entity], pending_updates=[], updated_uids=[], escalations=[],
+            wiki_root=kroot / "wiki", index=_index(kroot, cfg), config=cfg,
+        )
+        assert result.created == [] and result.store_link_rejected == 1
+        assert result.retain_raw is True
+        assert not (kroot / "recipes" / entity.filename).exists()
+        assert not (kroot / "wiki" / entity.filename).exists()
+
+    def test_same_type_without_the_link_is_written_to_the_surface(self, kroot) -> None:
+        from athenaeum.models import WikiEntity
+
+        cfg = _config(1)
+        cfg["storage"]["mapping"] = {"recipe": "recipes"}
+        (kroot / "wiki" / "_schema").mkdir()
+        (kroot / "wiki" / "_schema" / "types.md").write_text(
+            "# Types\n\n| Type |\n|------|\n| recipe |\n| reference |\n", encoding="utf-8"
+        )
+        entity = WikiEntity(
+            uid="dddd4444", type="recipe", name="Stew", created="2026-11-15", updated="2026-11-15",
+            body=f"# Stew\n\nWith [[{SHARED2_UID}]].\n",
+        )
+        raw = RawFile(path=kroot / "r.md", source="claude-session", timestamp="20260807T090000Z", uuid8="aabb0011", _content="c")
+        result = ProcessingResult(raw_file=raw)
+        _apply_tier3_results(
+            result, new_entities=[entity], pending_updates=[], updated_uids=[], escalations=[],
+            wiki_root=kroot / "wiki", index=_index(kroot, cfg), config=cfg,
+        )
+        assert [e.uid for e in result.created] == ["dddd4444"]
+        assert (kroot / "recipes" / entity.filename).is_file()
