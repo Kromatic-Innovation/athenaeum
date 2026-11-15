@@ -392,13 +392,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
         resolve_audience,
+        resolve_audience_choice,
         resolve_cache_dir,
         resolve_screening,
         resolve_search_backend,
         resolve_serve_audit_log,
+        resolve_serve_auth_allowed_clients,
         resolve_serve_auth_allowed_identities,
         resolve_serve_auth_clock_leeway,
         resolve_serve_auth_issuer,
+        resolve_serve_auth_jwks_refetch_interval,
+        resolve_serve_auth_jwks_uri,
         resolve_serve_auth_max_token_lifetime,
         resolve_serve_auth_resource,
         resolve_serve_auth_scopes,
@@ -411,7 +415,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     from athenaeum.mcp_server import create_server
     from athenaeum.remote_policy import RemotePolicyError, build_remote_policy
-    from athenaeum.serve_auth import ServeAuthError, build_serve_auth
+    from athenaeum.serve_auth import (
+        ServeAuthError,
+        build_serve_auth,
+        fetch_discovery_document,
+    )
 
     # Issue athenaeum#540 (M25): the MCP server process previously configured NO logging
     # at all — every mcp_server log line was dropped. Configure the shared
@@ -457,6 +465,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
             scopes=resolve_serve_auth_scopes(cfg, getattr(args, "auth_scopes", None)),
             clock_leeway=resolve_serve_auth_clock_leeway(cfg),
             max_token_lifetime=resolve_serve_auth_max_token_lifetime(cfg),
+            jwks_uri=resolve_serve_auth_jwks_uri(cfg),
+            jwks_refetch_interval=resolve_serve_auth_jwks_refetch_interval(cfg),
+            discovery_fetcher=fetch_discovery_document,
+            allowed_clients=resolve_serve_auth_allowed_clients(cfg),
         )
     except ServeAuthError as exc:
         print(f"[auth] invalid configuration: {exc}", file=sys.stderr)
@@ -477,9 +489,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 f"audience {serve_auth.resource}, "
                 f"{len(serve_auth.allowed_identities)} allowed identit"
                 f"{'y' if len(serve_auth.allowed_identities) == 1 else 'ies'}, "
-                f"scopes {' '.join(serve_auth.scopes_supported)}",
+                f"scopes {' '.join(serve_auth.scopes_supported)}, "
+                f"JWKS {serve_auth.jwks_uri} ({serve_auth.jwks_source})",
                 file=sys.stderr,
             )
+            if serve_auth.allowed_clients is not None:
+                # Issue athenaeum#2602. Counts only: client ids are the
+                # operator's own configuration, but the line stays the same
+                # shape as the one above it.
+                print(
+                    f"[auth] client allowlist: {len(serve_auth.allowed_clients)} "
+                    f"client{'' if len(serve_auth.allowed_clients) == 1 else 's'}, "
+                    f"{len(serve_auth.read_only_clients)} read-only",
+                    file=sys.stderr,
+                )
     elif serve_auth is not None:
         # An auth block under stdio is inert and must SAY so rather than look
         # applied: stdio binds no socket and carries no bearer token, so there
@@ -521,14 +544,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     # Issue athenaeum#312: resolve the serve-time read-scope pin (CLI > env > yaml).
     # None = owner = full access (existing single-user behavior).
+    # The unset/owner distinction (athenaeum#2604) is only acted on below, once
+    # the profile is known.
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
-    if caller_audience is not None:
-        print(
-            "[audience] recall restricted to roles: "
-            f"{', '.join(sorted(caller_audience))} "
-            "(untagged/confidential/personal pages withheld)",
-            file=sys.stderr,
-        )
+    audience_kind = resolve_audience_choice(cfg, getattr(args, "audience", None))
 
     # Issue athenaeum#320: resolve intake screening (env > yaml > off). Fails fast with
     # a clear message on a mis-set screening block rather than serving with a
@@ -563,6 +582,34 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except RemotePolicyError as exc:
         print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)
         return 1
+    # Issue athenaeum#2604: an unset audience means the whole corpus, so a
+    # remote HTTP server must be told which one -- refuse before binding.
+    # Everywhere else `owner` stays an ordinary role id, as before.
+    if transport == "http" and remote_policy is not None and remote_policy.profile == "remote":
+        if audience_kind == "unset":
+            print(
+                "[audience] refusing to serve --profile remote with no audience: an "
+                "unset audience means the whole corpus. Set a role "
+                "(--audience <role>, serve.audience, or ATHENAEUM_AUDIENCE) to restrict "
+                "what remote callers can read, or set owner explicitly "
+                "(--audience owner) to serve every page.",
+                file=sys.stderr,
+            )
+            return 1
+        if audience_kind == "owner":
+            caller_audience = None
+            print(
+                "[audience] owner — every page is readable by authenticated remote callers",
+                file=sys.stderr,
+            )
+    if caller_audience is not None:
+        print(
+            f"[audience] {', '.join(sorted(caller_audience))} "
+            "(recall restricted to these roles; "
+            "untagged/confidential/personal pages withheld)",
+            file=sys.stderr,
+        )
+
     if remote_policy is not None:
         print(
             "[remote-policy] excluded fields: "

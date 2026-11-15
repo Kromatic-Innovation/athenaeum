@@ -145,10 +145,13 @@ athenaeum serve --path ~/knowledge --transport http --host 0.0.0.0 \
 | `--auth-allowed-identities` | `serve.auth.allowed_identities` | `ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES` | Comma-separated `sub` values, or emails the issuer marked verified. |
 | `--auth-scopes` | `serve.auth.scopes` | `ATHENAEUM_SERVE_AUTH_SCOPES` | `read=<name>,write=<name>`. Defaults to `athenaeum:read` / `athenaeum:write`. |
 | — | `serve.auth.max_token_lifetime` | `ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME` | Optional ceiling, in seconds, on a token's validity window. Unset by default. |
+| — | `serve.auth.jwks_uri` | `ATHENAEUM_SERVE_AUTH_JWKS_URI` | Explicit key set URL, used verbatim. Unset: discovered, then derived. |
+| — | `serve.auth.jwks_refetch_interval` | `ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL` | Minimum seconds between unknown-`kid` key-set fetches. Defaults to `60`. |
 | — | `serve.auth.clock_leeway` | `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY` | Seconds of clock skew tolerated on `nbf` / `iat`. Defaults to `60`. |
+| — | `serve.auth.allowed_clients` | — | Optional client allowlist, matched against a token's `azp` or `client_id`. An entry may set `read_only: true`. Unset by default. yaml only. |
 
 Each resolves **CLI flag > environment variable > `athenaeum.yaml`**, the same order every
-other knob uses (the two time-claim settings have no flag: environment variable or yaml). The
+other knob uses (the time-claim and key-set settings have no flag: environment variable or yaml). The
 first three are a set: configure all of them or none of them. Under
 `stdio` the block is inert and says so on startup — stdio binds no socket and carries no
 bearer token, so there is nothing to verify.
@@ -166,14 +169,35 @@ serve:
     scopes:
       read: athenaeum:read
       write: athenaeum:write
+    allowed_clients:                       # optional
+      - https://desktop-app.example.com/client.json
+      - id: https://browser-app.example.com/client.json
+        read_only: true
 ```
 
-**The key set location is a convention, not a setting.** athenaeum reads the issuer's JSON
-Web Key Set from `/.well-known/jwks.json` under the configured issuer, and accepts `RS256`
-signatures only. That is the plain OIDC default, and it is what the hosted authorization
-servers publish. An issuer that serves its key set from a tenant-scoped path instead is not
-supported by this setting set — check your issuer's own discovery document before you
-deploy, because the symptom is every token being rejected.
+**Where the key set comes from.** Resolved once at startup, in this order, and `RS256` is the
+only accepted signature algorithm:
+
+1. `serve.auth.jwks_uri` (or `ATHENAEUM_SERVE_AUTH_JWKS_URI`), used verbatim; an absolute
+   http(s) URL.
+2. The `jwks_uri` in the issuer's discovery metadata, fetched with a 5 second timeout: RFC 8414
+   `/.well-known/oauth-authorization-server` first, then OpenID Connect
+   `/.well-known/openid-configuration`. For an issuer with a path (`https://h/tenant`) the RFC 8414
+   document is looked up with the well-known segment inserted after the host
+   (`https://h/.well-known/oauth-authorization-server/tenant`), and the OpenID document is
+   appended to the issuer (`https://h/tenant/.well-known/openid-configuration`). If a served
+   document's `issuer` is not exactly the configured issuer, **startup is refused** (non-zero
+   exit, nothing bound).
+3. `/.well-known/jwks.json` under the issuer, when discovery is unreachable, not JSON, or carries
+   no `jwks_uri`.
+
+The `[auth]` startup line ends with the chosen URL and `(configured)`, `(discovered)` or
+`(derived)`.
+
+**Key-set refetches are throttled.** A token whose `kid` is not cached triggers a fetch of the key
+set, at most one per `serve.auth.jwks_refetch_interval` seconds (default 60; `0` disables the
+limit). Other unknown-`kid` tokens inside the interval are refused without a fetch. Tokens signed
+by a cached key never fetch, and the normal cache expiry and rotation to a new `kid` work as before.
 
 ### What a client discovers
 
@@ -228,6 +252,22 @@ logged.
   tools, the write scope for the six that mutate. A token carrying neither can call
   nothing. The served `tools/list` is the same either way — authentication narrows who may
   call, never what is published.
+- **A client allowlist, when you set one, fails closed.** With `serve.auth.allowed_clients`
+  unset, the client is not checked and any client your identity signs in with is
+  accepted. Set it when your authorization server lets clients register on their own:
+  then a token must name a listed client in `azp` or `client_id`. A token that names an
+  unlisted client, names no client at all, or carries both claims with different values
+  gets the same 401 as an invalid token. Client ids match exactly (no case folding), which
+  suits the URL ids of Client ID Metadata Documents. The refusal is logged with the client
+  id the token named, never the token. An empty list is a startup error, because it would
+  refuse everyone.
+- **A `read_only: true` client cannot write, whatever its token says.** The write scope is
+  removed from that client's token when the token is verified, so `remember` and the other
+  write tools refuse it (with a message saying the client is read-only) while the read tools
+  work. Its `tools/list` leaves the write tools out. This is the one case where `tools/list`
+  depends on the caller: servers without a read-only entry list the same tools for every
+  token. The cap only removes the write scope. It cannot give a client a scope its token
+  lacks, so a read-only client whose token has no read scope can call nothing.
 - **A half-configured block refuses to start.** An issuer with no resource, or a resource
   with no issuer, exits non-zero before anything binds. Falling back to "no auth" is the
   one direction this must never fail in: it would publish an unauthenticated store on the

@@ -110,6 +110,43 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
         4096,
         False,
     ),
+    # Issue athenaeum#2647: relevance-category block, rendered into the classify
+    # user message only when a relevance policy has a tag-keyed `never` rule.
+    (
+        "tiers.relevance_category_prompt",
+        "RELEVANCE_CATEGORY_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
+    # Issue athenaeum#2654: the same category pair on the `candidate_uid`
+    # person-hint answer shape; rendered with the person-hints section only
+    # when the category block above is rendered.
+    (
+        "tiers.relevance_category_hint_prompt",
+        "RELEVANCE_CATEGORY_HINT_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
+    # Issue athenaeum#2650: `always`-rule hint block, rendered into the classify
+    # user message beside the observation filter when the policy has one.
+    (
+        "tiers.relevance_always_prompt",
+        "RELEVANCE_ALWAYS_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
+    # Issue athenaeum#2647: the reasoning-tier call that settles an unsure
+    # category (resolves through the existing `reasoning_t2` knob).
+    (
+        "relevance_classify.relevance_escalate_system",
+        "RELEVANCE_ESCALATE_SYSTEM",
+        "reasoning_t2",
+        4096,
+        False,
+    ),
     # write-knob budgets re-baselined by issue athenaeum#578 (Sonnet-5-bound + adaptive
     # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
     ("tiers.create_system", "CREATE_SYSTEM", "write", 6144, False),

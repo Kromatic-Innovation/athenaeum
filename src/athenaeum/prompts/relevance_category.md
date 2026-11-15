@@ -1,0 +1,16 @@
+## Relevance categories (what this deployment declines to keep)
+This deployment has capture rules keyed on these categories:
+<<categories>>
+
+For EVERY entity you return, also add two fields:
+
+- `"category"`: the ONE category from the list above that the entity's
+  observations belong to. Choose the most specific category that applies (a
+  `/`-separated child is more specific than its parent). Use `null` when none
+  of the listed categories applies.
+- `"confidence"`: `"high"` when you are sure of that choice, otherwise `"low"`.
+  A `null` category that you are sure about is `"high"`; if you cannot tell
+  whether a listed category applies, say `"low"` rather than guessing.
+
+Judge the category from what the observations say, not from how sensitive
+they sound. Do not leave either field out.

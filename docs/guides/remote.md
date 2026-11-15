@@ -138,25 +138,34 @@ first call, not at athenaeum startup.
 - **The two athenaeum scopes issuable.** Register `athenaeum:read` and
   `athenaeum:write` (or whatever you rename them to with `serve.auth.scopes`) as
   scopes the provider will grant. A token carrying neither can call nothing.
-- **A JSON Web Key Set at the plain OIDC default path, signed `RS256`.** athenaeum
-  reads the key set from `/.well-known/jwks.json` under the configured issuer, and
-  accepts `RS256` only. Neither is configurable: there is no JWKS-URI setting and no
-  algorithm knob.
+- **A JSON Web Key Set, signed `RS256`.** athenaeum finds the key set in this order,
+  once, at startup: `serve.auth.jwks_uri` if you set it (used verbatim); otherwise the
+  `jwks_uri` published by the issuer's discovery metadata
+  (`/.well-known/oauth-authorization-server`, then `/.well-known/openid-configuration`);
+  otherwise `<issuer>/.well-known/jwks.json`. `RS256` is the only accepted algorithm and
+  is not configurable.
 
-That last point is the one that most often surprises an operator, so read it twice.
-The derivation is right for the hosted providers that publish at the OIDC default —
-Auth0, Clerk, WorkOS, Descope and Supabase among them. It is **wrong** for an issuer
-that serves its key set from a tenant-scoped path, which includes a typical Okta or
-Microsoft Entra issuer. Fetch `<your issuer>/.well-known/jwks.json` yourself and
-confirm you get a key set back:
+Where an issuer publishes its keys varies by provider and by tenant, so do not assume the
+default. If the issuer serves discovery metadata, athenaeum uses it, and **refuses to
+start** if that metadata names an issuer other than the one you configured. If discovery
+is unreachable or carries no `jwks_uri`, athenaeum falls back to the derived path, so an
+issuer without discovery metadata that keeps its keys elsewhere needs `serve.auth.jwks_uri`
+set explicitly. The `[auth]` startup line says which URL was chosen and how (`configured`,
+`discovered` or `derived`). To check it yourself:
 
 ```bash
-curl -fsS https://id.example.net/.well-known/jwks.json | head -c 200
+curl -fsS https://id.example.net/.well-known/openid-configuration | head -c 400
 ```
 
-A 404 there means this setting set cannot serve your provider, and the symptom in
-production is every token being rejected with nothing in the logs pointing at the
-key set.
+A 404 there is not fatal: set `serve.auth.jwks_uri` to the key set URL your provider
+documents. A wrong location shows up as every token being rejected.
+
+A token signed with a `kid` athenaeum has not cached triggers a key-set refetch, but at
+most one per `serve.auth.jwks_refetch_interval` seconds (default 60; `0` disables the
+limit). Further unknown-`kid` tokens inside the interval are refused without a fetch, so
+an unauthenticated caller cannot make the server hammer your provider's key endpoint. A
+newly rotated key is picked up on the first token that carries it once the interval has
+passed.
 
 ## athenaeum's settings
 
@@ -171,7 +180,7 @@ serve:
   port: 8000
   profile: remote
   excluded_fields: off
-  audience: ops            # optional read scope; see below
+  audience: ops            # required under profile remote: a role, or `owner` on purpose
   auth:
     issuer: https://id.example.net
     resource: https://memory.example.net/mcp
@@ -181,6 +190,8 @@ serve:
     scopes:
       read: athenaeum:read
       write: athenaeum:write
+    # jwks_uri: https://id.example.net/oauth2/jwks  # optional; skips discovery
+    # jwks_refetch_interval: 60                     # seconds; see below
   audit_log: /var/lib/athenaeum/remote-audit.jsonl  # optional; default <cache_dir>/remote-audit.jsonl
 ```
 
@@ -206,10 +217,11 @@ What each block buys you:
 | `--path-prefix` | The URL path the endpoint is mounted at, default `/mcp`. CLI-only: unlike the three above it has no environment variable and no yaml key. |
 | `serve.profile: remote` | Does not serve `resolve_question`, `resolve_merge` or `review_audit_item` — adjudicating your own decision queue is an owner action. `remember` and `raise_decision` stay on, because a remote agent contributing memories is the point. |
 | `serve.excluded_fields: off` | Withholds every off-corpus excluded value. The `remote` profile already pins this; setting it explicitly documents the intent. |
-| `serve.audience` | A read filter pinned for the life of the process. Untagged, `confidential` and `personal` pages become invisible. The caller cannot widen it. |
+| `serve.audience` | Required under `--transport http --profile remote` (an unset audience is refused). A read filter pinned for the life of the process. Untagged, `confidential` and `personal` pages become invisible. The caller cannot widen it. The value `owner` serves every page. |
 | `serve.auth.issuer` | Whose signatures this server trusts. Setting it is also what lifts the non-loopback bind refusal — the same act that makes every request carry a verified token. |
 | `serve.auth.resource` | The one audience this process serves, and the `resource` value the host must request. |
 | `serve.auth.allowed_identities` | `sub` values, or issuer-verified emails. Never empty. |
+| `serve.auth.allowed_clients` | Optional. The apps allowed to connect, by the `azp` / `client_id` their tokens carry; `read_only: true` on an entry keeps that app from writing. Worth setting when your provider allows dynamic client registration. yaml only. |
 | `serve.auth.scopes` | Rename the read/write pair to scopes your provider actually issues. |
 | `serve.audit_log` | Where the per-call audit log lands (see [The per-call audit log](#the-per-call-audit-log)). Optional; defaults under the cache directory. Only written with `serve.auth.*` configured. |
 
@@ -745,11 +757,17 @@ yours to rotate. What there is:
   log says `[transport] Host/Origin guard: on` or `off`. With an issuer configured
   the guard is off, because the proxy or tunnel forwards the public hostname and
   every request already needs a verified token.
-- **Do not serve the owner audience by default.** Leaving `serve.audience` unset means
-  owner, which means every page in the store — untagged, `confidential` and
-  `personal` included — is in scope for a remote host. Pin the narrowest audience
-  that makes the deployment useful, and widen it deliberately, later, with a reason.
-  Owner-by-default is the single costliest misconfiguration available here.
+- **Do not serve the owner audience by accident.** An unset audience means owner,
+  which means every page in the store — untagged, `confidential` and `personal`
+  included — is in scope for a remote host. `serve --transport http --profile remote`
+  therefore refuses to start with no audience configured, and the message names both
+  ways out: pin the narrowest audience that makes the deployment useful
+  (`--audience <role>`), or choose owner on purpose (`--audience owner`,
+  `serve.audience: owner` or `ATHENAEUM_AUDIENCE=owner`), which prints
+  `[audience] owner — every page is readable by authenticated remote callers` at
+  startup. Serving the whole corpus remotely is legitimate for a single-operator
+  deployment; owner as an unexamined default is the costliest misconfiguration
+  available here, and widening a pinned role later, with a reason, is the safer path.
 - **Do not set `excluded_fields: on` without understanding where the values go.**
   `on` lets a remote caller resolve excluded, off-corpus fields — the contact data
   deliberately kept off entity pages. Every value it returns goes to the host

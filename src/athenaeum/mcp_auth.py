@@ -50,6 +50,7 @@ dependency stays optional for every non-serve code path.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -59,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.middleware import Middleware
 from pydantic import AnyHttpUrl
 
 from athenaeum.serve_auth import SIGNING_ALGORITHM, ServeAuth
@@ -99,9 +101,50 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         audit_log_path: Path | None = None,
         **kwargs: Any,
     ) -> None:
+        # fastmcp >= 4.2 ships its own refresh throttle (constructor keyword
+        # ``jwks_refresh_interval``, default 30 s) layered above
+        # ``_fetch_jwks``. Hand it the configured interval when the installed
+        # release accepts it, so the two throttles agree instead of the
+        # library's default silently overriding ``serve.auth.
+        # jwks_refetch_interval``; older releases (the 4.0.x lock) have no
+        # such keyword and rely on the override below alone.
+        if "jwks_refresh_interval" in inspect.signature(JWTVerifier.__init__).parameters:
+            kwargs.setdefault("jwks_refresh_interval", float(serve_auth.jwks_refetch_interval))
         super().__init__(**kwargs)
         self._serve_auth = serve_auth
         self._audit_log_path = audit_log_path
+        # Monotonic time of the last key-set fetch this process allowed.
+        self._last_jwks_fetch: float | None = None
+
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        """FastMCP's key-set fetch, but at most one fetch per interval.
+
+        FastMCP 4.0.x refetches the key set for EVERY token whose ``kid`` is
+        not in the cache, so an unauthenticated caller can make this server
+        hammer the issuer's key endpoint (athenaeum#2601). The throttle sits on
+        the FETCH, not on the key lookup: ``_get_jwks_key`` only reaches here
+        on a cache miss (empty cache, TTL expiry, unknown ``kid``), so a cache
+        hit is never throttled and this override needs no knowledge of how the
+        library timestamps its cache (fastmcp 4.2 moved that clock from
+        ``time.time`` to ``time.monotonic``). A fetch inside
+        ``serve.auth.jwks_refetch_interval`` seconds of the last allowed one is
+        refused with ``ValueError`` -- which FastMCP turns into a rejected
+        token -- and no request is made. The interval counts from the last
+        ATTEMPT, so a failing key endpoint is also hit at most once per
+        interval; ``0`` disables the throttle.
+        """
+        now = time.monotonic()
+        interval = self._serve_auth.jwks_refetch_interval
+        if self._last_jwks_fetch is not None and now - self._last_jwks_fetch < interval:
+            logger.warning(
+                "Bearer token rejected: signing key not in the cached key set and "
+                "the key set was already fetched within the last %d s "
+                "(serve.auth.jwks_refetch_interval)",
+                interval,
+            )
+            raise ValueError("Signing key not in the cached key set; refetch throttled")
+        self._last_jwks_fetch = now
+        return await super()._fetch_jwks()
 
     def _record_refusal(self, *, reason: str, claims: Mapping[str, Any] | None) -> None:
         """Append one ``refused`` audit record, swallowing an OSError.
@@ -199,6 +242,29 @@ class _IdentityAllowlistVerifier(JWTVerifier):
                 access.claims.get("sub"),
             )
             return None
+        # Issue athenaeum#2602: the client allowlist. Checked AFTER the
+        # identity so a stranger's token is still refused as an identity
+        # first, and answered with the same bare 401 for the same oracle
+        # reason. The log line names the client id the token presented
+        # (both claims, since a disagreement between them is itself the
+        # refusal), never the token.
+        client_refusal = self._serve_auth.client_refusal(access.claims)
+        if client_refusal is not None:
+            self._record_refusal(reason=client_refusal, claims=access.claims)
+            logger.warning(
+                "Bearer token rejected: client azp=%r client_id=%r is not in "
+                "serve.auth.allowed_clients (%s)",
+                access.claims.get("azp"),
+                access.claims.get("client_id"),
+                client_refusal,
+            )
+            return None
+        # The per-client read-only cap narrows the token's scopes here, at
+        # the one place every request passes, so no downstream check can see
+        # the write scope for a capped client. `capped_scopes` only removes.
+        capped = self._serve_auth.capped_scopes(access.claims, access.scopes)
+        if capped != list(access.scopes):
+            access = access.model_copy(update={"scopes": capped})
         return access
 
 
@@ -291,6 +357,36 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
             await app(scope, receive, intercept if scope.get("method") == "GET" else send)
 
         return wrapped
+
+
+class ReadOnlyClientToolFilter(Middleware):
+    """Hide write tools from ``tools/list`` for a read-only-capped client.
+
+    Issue athenaeum#2602. Installed by ``create_server`` only when some
+    ``serve.auth.allowed_clients`` entry sets ``read_only: true``, so every
+    other server's ``tools/list`` stays identical for every token. For a
+    capped client, a tool whose ``readOnlyHint`` is not literally ``True``
+    is dropped from the listing -- the same fail-closed reading
+    :meth:`ServeAuth.required_scope` uses. Listing is a convenience only:
+    the call itself is still refused by the scope check whether or not the
+    tool was listed.
+    """
+
+    def __init__(self, serve_auth: ServeAuth) -> None:
+        self._serve_auth = serve_auth
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+        from fastmcp.server.dependencies import get_access_token
+
+        tools = await call_next(context)
+        access = get_access_token()
+        if access is None or not self._serve_auth.client_is_read_only(access.claims):
+            return tools
+        return [
+            tool
+            for tool in tools
+            if tool.annotations is not None and tool.annotations.read_only_hint is True
+        ]
 
 
 def build_auth_provider(

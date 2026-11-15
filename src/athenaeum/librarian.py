@@ -254,6 +254,7 @@ from athenaeum.quarantine import record_attempt as _record_quarantine_attempt
 from athenaeum.registry import assert_handles_placed, collect_handles
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.relevance_classify import gate_classified_entities, gate_update_actions
 from athenaeum.relevance_policy import (
     RelevancePolicy,
     filter_relevance_never,
@@ -3247,6 +3248,7 @@ def process_one(
             config=config,
             stats=t2_stats,
             person_candidates=person_hints or None,
+            relevance_policy=relevance_policy,
         )
         result.degraded += t2_stats.degraded
         result.truncated += t2_stats.truncated  # issue athenaeum#476
@@ -3362,6 +3364,29 @@ def process_one(
         classified = name_gate_outcome.kept
         address_escalations.extend(name_gate_outcome.escalations)
 
+        # Issue athenaeum#2647: the relevance policy's post-classify gate -- the
+        # SAME ``gate_classified_entities`` call sits in
+        # ``batch.process_batch_run``. A confident ``never`` match is dropped;
+        # an unsure one escalates to the reasoning tier and, if that is
+        # unsure too, is dropped (never held). ``None``/empty policy: no-op.
+        _rel_jsonl = raw.path.suffix.lower() == ".jsonl"
+        if relevance_policy is not None and relevance_policy.rules:
+            _rel_outcome = gate_classified_entities(
+                classified,
+                relevance_policy,
+                raw_ref=raw.ref,
+                raw_content=raw.content,
+                jsonl=_rel_jsonl,
+                client=client,
+                usage=usage,
+                config=config,
+            )
+            classified = _rel_outcome.kept
+            result.relevance_drops.extend(_rel_outcome.drops)
+            for _rd in _rel_outcome.drops:
+                if _rd.existing_uid in hint_decisions:
+                    hint_decisions[_rd.existing_uid] = ("classify", "dropped")
+
         # Build actions
         actions = []
         # Issue athenaeum#1866: hint-derived actions (a candidate the tier-2
@@ -3405,6 +3430,23 @@ def process_one(
                         observations=raw.content[:2000],
                     )
                 )
+
+        # Issue athenaeum#2647: a fact landing on an EXISTING page is judged by
+        # that page's own type/tags/uid -- the Tier-3 relevance gate, shared
+        # with ``batch.process_batch_run`` and run before any Tier-3 call.
+        if relevance_policy is not None and relevance_policy.rules:
+            actions, _rel_update_drops = gate_update_actions(
+                actions,
+                relevance_policy,
+                index=index,
+                raw_content=raw.content,
+                jsonl=_rel_jsonl,
+                raw_ref=raw.ref,
+            )
+            result.relevance_drops.extend(_rel_update_drops)
+            for _rd in _rel_update_drops:
+                if _rd.existing_uid in hint_decisions:
+                    hint_decisions[_rd.existing_uid] = ("classify", "dropped")
 
         if not actions:
             log.info("  No actions needed for %s", raw.ref)
@@ -10240,7 +10282,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # for the file) get one ledger row each, through
                             # the same recorder, so a never-rule drop is never
                             # silent. A WHOLE-raw drop takes the row below.
-                            if ctx.drop_log_enabled:
+                            #
+                            # Issue athenaeum#2647: when the whole raw ended up
+                            # dropped (``_is_drop``) because the post-classify /
+                            # Tier-3 relevance gates removed everything, the
+                            # whole-raw row below carries their reason instead
+                            # of N per-item rows, matching the batch transport.
+                            _rel_whole = bool(
+                                _is_drop
+                                and not result.skipped
+                                and getattr(result, "relevance_drops", [])
+                            )
+                            if ctx.drop_log_enabled and not _rel_whole:
                                 for _rd in getattr(result, "relevance_drops", []):
                                     drops_mod.record_drop(
                                         _drops_cache_dir,
@@ -10259,6 +10312,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     else drops_mod.DROP_STAGE_CLASSIFY
                                 )
                                 _drop_reason = result.skipped[-1] if result.skipped else None
+                                if _rel_whole:
+                                    _drop_stage = drops_mod.DROP_STAGE_OTHER
+                                    _drop_reason = result.relevance_drops[-1].reason
                                 drops_mod.record_drop(
                                     _drops_cache_dir,
                                     raw_ref=raw.ref,
