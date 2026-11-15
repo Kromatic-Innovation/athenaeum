@@ -5,6 +5,12 @@ No test in this module makes a real compile call (issue athenaeum#2316
 ruling 5) — every call to :func:`run_import` substitutes a fake
 ``compile_fn``. Fixtures write memory files under ``tmp_path`` only; no
 ``/home``, ``/Users``, or ``~`` path literal appears anywhere here.
+
+``TestDefaultCompileBatch`` (issue athenaeum#2582) is the one exception to
+"every call substitutes a fake ``compile_fn``": it calls the REAL
+:func:`_default_compile_batch` directly, with only its own deepest
+dependency — :func:`athenaeum.librarian.run` itself — patched to a
+recording/sentinel-detecting stand-in, never a real compile call.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import pytest
 
 from athenaeum._cmd_import_memory import (
     EXIT_INCOMPLETE,
+    _default_compile_batch,
     _is_imported,
     _pending_files,
     load_state,
@@ -552,3 +559,82 @@ class TestRunImport:
         )
         assert rc == EXIT_INCOMPLETE
         assert lock_calls == []
+
+
+class TestDefaultCompileBatch:
+    """Real calls to :func:`_default_compile_batch` (issue athenaeum#2582).
+
+    ``_default_compile_batch`` used to call ``librarian.run(knowledge_root=...)``
+    without ``raw_root``/``wiki_root``, so a real call fell back to
+    ``librarian.run``'s own ``DEFAULT_RAW_ROOT``/``DEFAULT_WIKI_ROOT`` — the
+    operator's home knowledge base — instead of the root named by
+    ``knowledge_root``. Both tests below patch only
+    :func:`athenaeum.librarian.run` itself (the deepest external dependency
+    of the function under test); neither makes a real compile call.
+    """
+
+    def test_passes_raw_and_wiki_roots_derived_from_knowledge_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: a real call records ``raw_root``/``wiki_root`` under the
+        NAMED root, never missing and never pointing outside it."""
+        recorded: dict[str, object] = {}
+
+        def _fake_run(**kwargs: object) -> int:
+            recorded.update(kwargs)
+            return 0
+
+        monkeypatch.setattr("athenaeum.librarian.run", _fake_run)
+
+        knowledge_root = tmp_path / "named-root"
+        rc = _default_compile_batch(knowledge_root, max_files=7, max_api_calls=42)
+
+        assert rc == 0
+        # Fails loudly (KeyError) if either kwarg is missing, as the
+        # pre-fix call left them. athenaeum#2582.
+        raw_root = recorded["raw_root"]
+        wiki_root = recorded["wiki_root"]
+        assert raw_root == knowledge_root / "raw"
+        assert wiki_root == knowledge_root / "wiki"
+        assert knowledge_root in Path(raw_root).parents
+        assert knowledge_root in Path(wiki_root).parents
+        assert recorded["knowledge_root"] == knowledge_root
+        assert recorded["max_files"] == 7
+        assert recorded["max_api_calls"] == 42
+
+    def test_default_roots_are_never_touched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3 counter-example: with ``librarian.run``'s OWN defaults
+        pointed at a sentinel directory (mirroring its real
+        ``DEFAULT_RAW_ROOT``/``DEFAULT_WIKI_ROOT`` contract — a param used
+        only when a caller omits the keyword), an import into a temp root
+        leaves the sentinel directory untouched. Regressing to the pre-fix
+        call (``knowledge_root=`` only) would make this stand-in fall back
+        to its own sentinel defaults and write there — failing this test.
+        """
+        sentinel_raw = tmp_path / "sentinel-home" / "raw"
+        sentinel_wiki = tmp_path / "sentinel-home" / "wiki"
+
+        def _fake_run(
+            *,
+            raw_root: Path = sentinel_raw,
+            wiki_root: Path = sentinel_wiki,
+            **_: object,
+        ) -> int:
+            # Simulate a real compile touching both roots it was given —
+            # exactly what the home-corpus pass athenaeum#2582 reported did.
+            raw_root.mkdir(parents=True, exist_ok=True)
+            wiki_root.mkdir(parents=True, exist_ok=True)
+            (raw_root / "touched.marker").write_text("x", encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr("athenaeum.librarian.run", _fake_run)
+
+        knowledge_root = tmp_path / "named-root"
+        rc = _default_compile_batch(knowledge_root, max_files=5, max_api_calls=10)
+
+        assert rc == 0
+        assert (knowledge_root / "raw" / "touched.marker").exists()
+        assert not sentinel_raw.exists()
+        assert not sentinel_wiki.exists()

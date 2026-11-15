@@ -610,6 +610,69 @@ def parse_alias_move(action: str) -> tuple[str, str] | None:
     return uid, alias
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2589: shared content gets a page of its own.
+#
+# "Content shared by two or more distinct subjects" is a judgement this
+# single-page pass has no way to make on its own authority -- it needs to
+# know what ANOTHER page already says, which is cross-page knowledge this
+# slice's model call never gets (``page text reaches a model only through
+# fence_untrusted`` -- see the module docstring; nothing here grants a
+# second page's body to that fence). So, exactly like :data:`ALIAS_MOVE_VERB`
+# before it, this disposition and its page action are grammar the APPLIER
+# understands, not vocabulary the model is ever taught: the packaged
+# ``page_recompile_plan.md`` prompt names neither, so a model-authored plan
+# can never carry one, and :func:`validate_plan` rejects a ``shared:<group>``
+# disposition exactly as it rejects any other verb outside
+# :data:`ARG_DISPOSITIONS` -- ``unknown-disposition``. The grammar exists so
+# an operator-authored or later-slice plan record CAN list one.
+# ---------------------------------------------------------------------------
+
+#: The per-unit disposition naming a unit's membership in a shared-content
+#: group (issue athenaeum#2589 AC1) -- a sibling of ``child``/``standalone``,
+#: except its destination is neither the parent page nor a brand-new page
+#: with no relation to anyone: it is ONE new page two or more EXISTING
+#: subject pages, named by one :data:`SHARED_SUBJECT_VERB` page action per
+#: subject, each link to via the parent/child relation
+#: (:mod:`athenaeum.page_relations`, issue athenaeum#2535), ``via="fold"``.
+#:
+#: Deliberately NOT a member of :data:`ARG_DISPOSITIONS` -- see this
+#: section's header comment for why.
+SHARED_VERB = "shared"
+
+#: Written ``"shared-subject:<group>:<uid>"`` (issue athenaeum#2589 AC1):
+#: one row per EXISTING subject page a :data:`SHARED_VERB` group concerns.
+#: Two or more rows naming two or more DISTINCT uids for the same group is
+#: what makes the group a genuine shared-content candidate at all (AC4's
+#: counter-example -- content concerning only one subject -- never reaches
+#: this grammar, because there is only ever one uid to name).
+#:
+#: Deliberately NOT a member of :data:`PAGE_ACTIONS`, mirroring
+#: :data:`ALIAS_MOVE_VERB`'s own reasoning exactly (see this section's
+#: header comment).
+SHARED_SUBJECT_VERB = "shared-subject"
+
+
+def parse_shared_subject(action: str) -> tuple[str, str] | None:
+    """``"shared-subject:<group>:<uid>"`` -> ``(group, uid)``, else ``None``.
+
+    ``None`` for any other verb and for a malformed argument (no second
+    colon, an empty group or an empty uid) -- mirrors
+    :func:`parse_alias_move`'s own contract exactly.
+    """
+    verb, argument = split_disposition(action)
+    if verb != SHARED_SUBJECT_VERB:
+        return None
+    group, sep, uid = argument.partition(":")
+    if not sep:
+        return None
+    group = group.strip()
+    uid = uid.strip()
+    if not group or not uid:
+        return None
+    return group, uid
+
+
 #: :class:`PlanIssue` codes :func:`resolve_standalone_groups` can add.
 STANDALONE_NAME_IS_SOURCE_CODE = "standalone-name-is-the-source-page"
 STANDALONE_NAME_INACTIVE_CODE = "standalone-name-resolves-to-inactive-page"
@@ -2011,6 +2074,8 @@ __all__ = [
     "PLAN_KNOB",
     "SCOPE_CROSS_PAGE",
     "SCOPE_STRUCTURE_ONLY",
+    "SHARED_SUBJECT_VERB",
+    "SHARED_VERB",
     "STANDALONE_NAME_INACTIVE_CODE",
     "STANDALONE_NAME_IS_SOURCE_CODE",
     "STANDALONE_NAME_NO_UID_CODE",
@@ -2039,6 +2104,7 @@ __all__ = [
     "normalise_unit_text",
     "page_content_hash",
     "parse_alias_move",
+    "parse_shared_subject",
     "plan_page",
     "propose_plan",
     "read_label_cache",

@@ -268,6 +268,67 @@ def validate_coordinate_payload(payload: Any) -> list[str]:
     ]
 
 
+#: Issue athenaeum#2526: the ``conflict_type`` a ``question`` item carries
+#: when the short-name guard (athenaeum#1173) suppressed a Tier-3 create for a
+#: short, generic name and parked the observation instead of losing it (see
+#: :data:`athenaeum.tiers.NOTICE_CLASS_CONFLICT_TYPES`). A plain literal, not
+#: imported from :mod:`athenaeum.tiers` — this module never imports the
+#: tier pipeline, matching :data:`WIDEN_CANDIDATES_LABEL`'s own "the lowest
+#: layer that needs to read it" placement above. Duplicated as a literal
+#: in :mod:`athenaeum.answers` (its own ``_NO_SOURCE_WRITEBACK`` set) rather
+#: than imported, for the same reason :mod:`athenaeum.answers`'s own
+#: ``_FOLD_CONFLICT_TYPE`` is a local literal and not imported from anywhere
+#: else either.
+SHORT_NAME_ESCALATED_CONFLICT_TYPE = "short_name_escalated"
+
+
+def _question_schema() -> dict[str, Any]:
+    """The ``question`` decision type's answer schema.
+
+    Free text (:data:`_SCHEMA_FREE_TEXT`'s shape) plus an OPTIONAL ``name``
+    property, declared here — at the type level, not only in the per-item
+    narrowed schema :func:`response_schema_for_item` returns for a
+    :data:`SHORT_NAME_ESCALATED_CONFLICT_TYPE` item — because this is also
+    the schema :func:`validate_answer` checks an answer against at the two
+    call sites that validate BEFORE an item's own ``conflict_type`` is in
+    scope (``athenaeum._cmd_decisions._cmd_answer``, which only has
+    ``args.type`` ("question") and the raw answer JSON; :func:`athenaeum.
+    triage.submit_answer`, same shape). ``name`` is meaningful only when
+    the item being answered is a short-name-collision notice (issue
+    athenaeum#2526) — an optional qualified name to additionally rename the
+    chosen target page to, through the athenaeum#2488 rename primitive. A
+    stray ``name`` on an ordinary contradiction/widen question is
+    schema-valid but inert: nothing reads it unless the item's own
+    ``conflict_type`` is :data:`SHORT_NAME_ESCALATED_CONFLICT_TYPE` — see
+    :mod:`athenaeum.decision_answers`'s ``_apply_short_name_escalated_answer``.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "The resolution, in the operator's own words — or, for a "
+                    "short-name-collision notice, the uid of the existing page "
+                    "to attach the parked observation to."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Only meaningful for a short-name-collision notice: an "
+                    "optional qualified replacement name for the target page "
+                    "(the old name is kept in aliases:)."
+                ),
+            },
+            "note": _NOTE_PROPERTY,
+        },
+        "required": ["verdict"],
+        "additionalProperties": False,
+    }
+
+
 def _approve_reject_schema(*, description: str) -> dict[str, Any]:
     """A two-token ``approve``/``reject`` answer schema."""
     return {
@@ -412,7 +473,7 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
     "question": {
         "reversibility": REVERSIBILITY_REVERSIBLE,
         "routing": ROUTING_COMPETENCE,
-        "schema": _SCHEMA_FREE_TEXT,
+        "schema": _question_schema(),
         "default_action": "leave unresolved",
         "default_consequences": (
             "Both conflicting claims stay live; recall may surface either one, "
@@ -862,11 +923,41 @@ def match_widen_candidate(answer: str, candidates: list[str]) -> str | None:
 def response_schema_for_item(item: dict[str, Any]) -> dict[str, Any]:
     """:func:`response_schema_for`, narrowed per item where the item carries
     its own closed answer set (issue athenaeum#2115): a widen question's
-    ``verdict`` is an enum of its candidate values, not free text."""
+    ``verdict`` is an enum of its candidate values, not free text.
+
+    Issue athenaeum#2526: a :data:`SHORT_NAME_ESCALATED_CONFLICT_TYPE` item
+    is narrowed the other direction — its ``verdict`` is not free text OR a
+    closed enum, but a target page uid, so the published schema restates
+    ``verdict``'s description (and ``name``'s) in those terms rather than
+    :func:`_question_schema`'s generic wording. The underlying shape
+    (``verdict`` required string, ``name`` optional string) is unchanged —
+    this only sharpens what each property means for this one notice type,
+    the same "declares a real answer shape" bar the widen branch below
+    already set for its own conflict type.
+    """
     decision_type = str(item.get("type") or "")
     schema = response_schema_for(decision_type)
     payload = item.get("payload")
     if decision_type == "question" and isinstance(payload, dict):
+        conflict_type = str(payload.get("conflict_type") or "")
+        if conflict_type == SHORT_NAME_ESCALATED_CONFLICT_TYPE:
+            schema["properties"]["verdict"] = {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "The uid of an existing page to attach this notice's "
+                    "parked observation to."
+                ),
+            }
+            schema["properties"]["name"] = {
+                "type": "string",
+                "description": (
+                    "Optional: a new qualified name to rename the target "
+                    "page to first (old name kept in aliases:), through the "
+                    "athenaeum#2488 rename primitive."
+                ),
+            }
+            return schema
         candidates = widen_candidates(str(payload.get("description") or ""))
         if candidates:
             schema["properties"]["verdict"] = {

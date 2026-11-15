@@ -13007,8 +13007,12 @@ def reindex(
     (:func:`session_end`, issue athenaeum#350) share, so both apply the *same* backend
     resolution, extra-intake roots, and index globs. ``incremental`` (default,
     issue athenaeum#348) applies only the add/change/delete hash-diff delta — a fast
-    no-op when the wiki has not changed since the last build. A ``vector``
-    backend that is not installed raises ``ImportError`` to the caller.
+    no-op when the wiki has not changed since the last build. Issue
+    athenaeum#2592: a ``vector`` backend that is not installed no longer
+    raises ``ImportError`` to the caller -- it degrades to ``fts5`` with one
+    logged warning (the same promise the generated ``athenaeum.yaml``
+    comment and ``VectorBackend.query`` already make for the query side),
+    and the returned ``backend_name`` reflects the backend actually used.
     """
     from athenaeum.config import (
         resolve_embedding_model,
@@ -13034,17 +13038,48 @@ def reindex(
     )
 
     if backend_name == "vector":
-        pages = build_vector_index(
-            wiki_root,
-            resolved_cache,
-            extra_roots=extra_roots,
-            incremental=incremental,
-            include_globs=include_globs,
-            exclude_globs=exclude_globs,
-            embedding_model=resolve_embedding_model(config),
-            full_rehash_max_age_days=full_rehash_max_age_days,
-            config=config,
-        )
+        try:
+            pages = build_vector_index(
+                wiki_root,
+                resolved_cache,
+                extra_roots=extra_roots,
+                incremental=incremental,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+                embedding_model=resolve_embedding_model(config),
+                full_rehash_max_age_days=full_rehash_max_age_days,
+                config=config,
+            )
+        except ImportError as exc:
+            # Issue athenaeum#2592: the shipped `athenaeum.yaml` comment
+            # promises "a default install without [chromadb] degrades to
+            # fts5 at query time with one logged warning, no traceback"
+            # (config.py's `_DEFAULTS["search_backend"]` docstring, same
+            # promise restated in the generated yaml's `search_backend`
+            # comment block). `VectorBackend.query` already honors that at
+            # QUERY time (search.py) -- this is the SAME promise applied to
+            # the BUILD side, so `session_end` (the only caller of this
+            # function) succeeds on a chromadb-less install instead of
+            # raising, and actually produces the fts5 index the query-time
+            # fallback needs to find something to answer from.
+            log.warning(
+                'search_backend="vector" is configured but chromadb is not '
+                "installed (%s); falling back to the fts5 backend for this "
+                "reindex -- install the vector extra (pip install "
+                "athenaeum[vector]) for semantic search.",
+                exc,
+            )
+            backend_name = "fts5"
+            pages = build_fts5_index(
+                wiki_root,
+                resolved_cache,
+                extra_roots=extra_roots,
+                incremental=incremental,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+                full_rehash_max_age_days=full_rehash_max_age_days,
+                config=config,
+            )
     else:
         pages = build_fts5_index(
             wiki_root,
@@ -13115,7 +13150,16 @@ def _reindex_would_change(
     (``bool(count)``) therefore skips the rebuild. There is nothing to index,
     so the only loss is that the empty index file is recreated one tick later
     than it could have been.
+
+    Issue athenaeum#2592: mirrors :func:`reindex`'s own chromadb-missing
+    fallback (``vector`` → ``fts5``) via ``importlib.util.find_spec`` before
+    picking which manifest to diff against — without this, a chromadb-free
+    install diffs forever against a ``vector`` manifest that is never
+    written (``reindex`` writes ``fts5``'s instead), always reports a
+    pending change, and the athenaeum#1456 idle fast path never fires.
     """
+    import importlib.util
+
     from athenaeum.config import (
         resolve_embedding_model,
         resolve_index_globs,
@@ -13140,6 +13184,29 @@ def _reindex_would_change(
     # (yaml > shipped default) — the old inline `fts5` fallback fired for
     # every library caller that hand-built a config dict.
     backend_name = backend or resolve_search_backend(config)
+    # Issue athenaeum#2592: `reindex()` degrades a configured `vector`
+    # backend to `fts5` when chromadb is not installed (the same promise
+    # the generated `athenaeum.yaml`'s `search_backend` comment makes), and
+    # the manifest it writes afterward is the `fts5` one -- never the
+    # `vector` one, which never exists on that install. This preview MUST
+    # mirror that same fallback decision before picking which manifest to
+    # diff against, or it always diffs against a vector manifest that will
+    # never exist, always reports "changed", and `session_end` never takes
+    # the athenaeum#1456 idle fast path on a chromadb-free install: a
+    # silent, permanent "reindex on every tick" regression, not a crash,
+    # so no pre-existing test caught it (measured: three consecutive
+    # `session_end` calls against an unchanged corpus all redid the full
+    # reindex instead of short-circuiting).
+    #
+    # `importlib.util.find_spec` -- not `import chromadb` -- answers
+    # "would `VectorBackend._get_chromadb()` succeed" without this cheap
+    # preview paying the one cost its own docstring promises it never
+    # pays: it must not itself import chromadb or load an embedding model.
+    # `find_spec` only resolves the module's location; it does not execute
+    # chromadb's `__init__.py` (which is where the real cost -- and the
+    # real `ImportError` -- would come from).
+    if backend_name == "vector" and importlib.util.find_spec("chromadb") is None:
+        backend_name = "fts5"
     manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
     manifest_path = resolved_cache / manifest_name
     extra_roots = resolve_extra_intake_roots(knowledge_root, config)

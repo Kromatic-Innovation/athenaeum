@@ -238,17 +238,48 @@ def check_interpreter_version(
 _MCP_FIX = "claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge"
 
 
-def check_mcp_registered(claude_config_dir: Path) -> CheckResult:
-    """Whether ``athenaeum`` is registered under ``.claude.json``'s
-    ``mcpServers`` (issue athenaeum#2298 AC1), per the registration the README's
-    Quick start and ``examples/claude-code/README.md`` both document.
+def _mcp_candidate_paths(claude_config_dir: Path, home: Path | None) -> list[Path]:
+    """Ordered, de-duplicated candidate ``.claude.json`` locations (issue
+    athenaeum#2594).
+
+    Real Claude Code installs write the user-scope MCP registration to
+    EITHER of two places depending on version: inside the (possibly
+    ``CLAUDE_CONFIG_DIR``-relocated) config directory this module already
+    checked (``<claude_config_dir>/.claude.json``), or -- measured on
+    Claude Code 2.1.325 with no ``CLAUDE_CONFIG_DIR`` set -- at the plain
+    home-level path (``<home>/.claude.json``, a sibling of ``.claude/``,
+    not a child of it). Checking only the first location means a correct
+    ``claude mcp add --scope user`` run on the second kind of install
+    reports FAIL with a fix that is the exact command the user just ran.
+    The first candidate that exists wins; neither existing is the genuine
+    "not registered" case (AC2).
     """
-    claude_json_path = claude_config_dir / ".claude.json"
-    if not claude_json_path.is_file():
+    resolved_home = (home if home is not None else Path.home()).expanduser()
+    candidates = [claude_config_dir / ".claude.json", resolved_home / ".claude.json"]
+    deduped: list[Path] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def check_mcp_registered(claude_config_dir: Path, *, home: Path | None = None) -> CheckResult:
+    """Whether ``athenaeum`` is registered under ``.claude.json``'s
+    ``mcpServers`` (issue athenaeum#2298 AC1, extended by athenaeum#2594 to
+    search both locations real Claude Code versions write it to), per the
+    registration the README's Quick start and ``examples/claude-code/README.md``
+    both document. ``home`` mirrors :func:`check_schedule_state`'s own
+    injection -- the same real-home concept, defaulting to the real home
+    directory when not given.
+    """
+    candidates = _mcp_candidate_paths(claude_config_dir, home)
+    claude_json_path = next((p for p in candidates if p.is_file()), None)
+    if claude_json_path is None:
+        locations = " or ".join(str(p) for p in candidates)
         return CheckResult(
             name="mcp",
             status="fail",
-            detail=f"no {claude_json_path} found",
+            detail=f"no {locations} found",
             fix=_MCP_FIX,
         )
     try:
@@ -269,7 +300,9 @@ def check_mcp_registered(claude_config_dir: Path) -> CheckResult:
             fix=_MCP_FIX,
         )
     return CheckResult(
-        name="mcp", status="ok", detail="athenaeum MCP server registered"
+        name="mcp",
+        status="ok",
+        detail=f"athenaeum MCP server registered in {claude_json_path}",
     )
 
 
@@ -663,6 +696,80 @@ def check_page_relations(wiki_root: Path) -> CheckResult:
     )
 
 
+def check_merge_rejected_with_targets(wiki_root: Path) -> CheckResult:
+    """A ``merge_rejected_with:`` entry naming no live page (issue
+    athenaeum#2546 AC4) -- e.g. the page it named was removed by hand
+    outside the fold/rename primitives (both of which keep an old identity
+    resolvable via ``aliases:``, so a routine rename or fold never trips
+    this). Read-only: parses existing frontmatter only, same as
+    :func:`check_page_relations`.
+
+    Resolution is identity-extended exactly like
+    :func:`athenaeum.declared_relationships.declared_relationship` -- an
+    entry matching ANY live page's ``name:`` OR one of its ``aliases:``
+    counts as resolved -- via
+    :func:`athenaeum.declared_relationships.unresolved_merge_rejected_with`,
+    so this reuses the one primitive rather than re-deriving the match.
+    """
+    from athenaeum.declared_relationships import (
+        DeclaredRelationshipFacts,
+        unresolved_merge_rejected_with,
+    )
+    from athenaeum.models import parse_frontmatter
+
+    if not wiki_root.is_dir():
+        return CheckResult(
+            name="merge_rejected_with_targets", status="ok", detail="0 dangling link(s)"
+        )
+
+    facts: list[DeclaredRelationshipFacts] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        if name or rejected:
+            facts.append(
+                DeclaredRelationshipFacts(
+                    name=name, merge_rejected_with=rejected, aliases=aliases
+                )
+            )
+
+    dangling = unresolved_merge_rejected_with(facts)
+    if not dangling:
+        return CheckResult(
+            name="merge_rejected_with_targets", status="ok", detail="0 dangling link(s)"
+        )
+    shown = ", ".join(f"{page!r} -> {entry!r}" for page, entry in dangling[:5])
+    if len(dangling) > 5:
+        shown += f", ... ({len(dangling) - 5} more)"
+    return CheckResult(
+        name="merge_rejected_with_targets",
+        status="fail",
+        detail=f"{len(dangling)} dangling merge_rejected_with link(s): {shown}",
+        fix=(
+            "the named page no longer exists under wiki/ with that name or "
+            "alias -- fix the frontmatter by hand, or revoke the stale link "
+            "with `athenaeum decisions revoke-merge-rejection --apply`"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration + rendering.
 # ---------------------------------------------------------------------------
@@ -683,7 +790,9 @@ def run_checks(
     :func:`athenaeum.config.resolve_cache_dir`, :func:`default_claude_config_dir`),
     and no check below writes anything. ``home`` (issue athenaeum#2304) is the
     same injection :func:`athenaeum.schedule.status` takes, defaulting to the
-    real home directory.
+    real home directory; the MCP check (issue athenaeum#2594) reuses it to
+    also search the home-level ``.claude.json`` real Claude Code versions
+    write the user-scope registration to.
     """
     from athenaeum.config import load_config, resolve_cache_dir
 
@@ -696,13 +805,14 @@ def run_checks(
     return [
         check_package_version(fetch=fetch),
         check_interpreter_version(),
-        check_mcp_registered(resolved_claude_dir),
+        check_mcp_registered(resolved_claude_dir, home=home),
         check_hooks_present(resolved_claude_dir),
         check_key_mode(config, resolved_cache_dir),
         check_search_index(resolved_cache_dir, config),
         check_last_compile(resolved_cache_dir),
         check_schedule_state(home=home),
         check_page_relations(knowledge_root / "wiki"),
+        check_merge_rejected_with_targets(knowledge_root / "wiki"),
     ]
 
 

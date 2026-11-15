@@ -50,6 +50,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - [`athenaeum decisions recompare`](#athenaeum-decisions-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - [`athenaeum decisions revalidate`](#athenaeum-decisions-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
+- [`athenaeum decisions revoke-merge-rejection`](#athenaeum-decisions-revoke-merge-rejection) (command) — Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 - [`athenaeum decisions scrub-pii`](#athenaeum-decisions-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum decompose-page`](#athenaeum-decompose-page) (command) — Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
@@ -491,6 +492,7 @@ Subcommands:
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - `athenaeum decisions recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - `athenaeum decisions revalidate` — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
+- `athenaeum decisions revoke-merge-rejection` — Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
 - `athenaeum decisions scan-retractions` — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 - `athenaeum decisions scrub-pii` — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 
@@ -642,6 +644,18 @@ Re-validate existing unresolved merge proposals against the CURRENT suppression 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--apply` | off (flag absent) | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decisions revoke-merge-rejection`
+
+Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--a` | — | — | One of the two pages (a slug, a `<slug>.md` filename, or a path). |
+| `--apply` | off (flag absent) | — | Write the removal. Default: dry-run — print the plan, write nothing. |
+| `--b` | — | — | The other of the two pages. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
@@ -817,7 +831,7 @@ Read-only health check of an athenaeum install — package version, interpreter,
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
 | `--claude-config-dir` | — | — | Claude Code config directory holding settings.json/.claude.json (default: CLAUDE_CONFIG_DIR env, else ~/.claude) |
-| `--home` | — | — | Home directory to check the `athenaeum schedule` state under (; default: the real home directory). |
+| `--home` | — | — | Home directory to check the `athenaeum schedule` state under, and to search for a home-level.claude.json MCP registration; default: the real home directory. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum drain`
@@ -1716,6 +1730,7 @@ Start the MCP memory server
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--audience` | — | — | : pin this server to a restricted read scope. Comma-separated role/group ids (e.g. 'operations,voltaire'). The recall tool then returns only pages tagged for one of these roles (plus 'access: open' pages); untagged/confidential/personal pages are withheld. Unset = owner = full access. Overrides ATHENAEUM_AUDIENCE and serve.audience in athenaeum.yaml. |
+| `--audit-log` | — | — | Path to the per-call remote audit log. Only written under --transport http with auth configured: one JSON line per tool call naming the verified caller, the tool, a digest of its arguments (never the argument text) and which page uids came back (never page text). Refused calls (bad token, scope, non-allowlisted identity) are recorded too. Overrides ATHENAEUM_SERVE_AUDIT_LOG and serve.audit_log in athenaeum.yaml. Unset = <cache-dir>/remote-audit.jsonl. |
 | `--auth-allowed-identities` | — | — | Comma-separated allowlist of identities permitted to use this server: `sub` claim values, or email addresses the issuer marked verified. A token that verifies but presents no allowlisted identity is refused with the same 401 an invalid token gets. Required with --auth-issuer; an empty list is refused rather than read as 'anyone the issuer vouches for'. Overrides ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES and serve.auth.allowed_identities in athenaeum.yaml. |
 | `--auth-issuer` | — | — | Make --transport http an OAuth 2.1 RESOURCE SERVER delegating to this external authorization server. The value is the issuer identifier a bearer token's `iss` claim must carry; its key set is read from <issuer>/.well-known/jwks.json. athenaeum never issues a token, stores a credential or shows a consent screen. Setting this (with --auth-resource and --auth-allowed-identities) is also what lifts the loopback-only bind restriction. Overrides ATHENAEUM_SERVE_AUTH_ISSUER and serve.auth.issuer in athenaeum.yaml. Unset = no auth = loopback only. |
 | `--auth-resource` | — | — | This server's canonical public URL -- the ONE audience this process serves. Every token's `aud` claim must equal it, it is the `resource` advertised in the RFC 9728 protected resource metadata, and it is what a client passes as the `resource` parameter when requesting a token. Never read back from a token claim or a request parameter: one process, one audience. Required with --auth-issuer. Overrides ATHENAEUM_SERVE_AUTH_RESOURCE and serve.auth.resource in athenaeum.yaml. |

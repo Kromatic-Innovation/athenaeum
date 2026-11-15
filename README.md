@@ -73,6 +73,14 @@ expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
 `key_mode` when neither an API key nor the `claude` CLI is available)
 until the steps below are complete; each FAIL names its fix.
 
+The `[mcp]` extra above is all a fresh install needs. `athenaeum init`'s
+default config (`search_backend: vector`) wants the optional `[vector]`
+extra for semantic search, but without it `recall`, `reindex` and
+`session-end` all degrade to the `fts5` backend automatically, with a
+one-time warning on stderr — never a hard failure. Add the `[vector]`
+extra to the install command above later if you want semantic (not just
+keyword) matching.
+
 Want to confirm it works before wiring anything up or spending API budget?
 
 ```bash

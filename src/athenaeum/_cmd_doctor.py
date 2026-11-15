@@ -70,7 +70,9 @@ def add_doctor_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=None,
         help="Home directory to check the `athenaeum schedule` state under "
-        "(issue athenaeum#2304; default: the real home directory).",
+        "(issue athenaeum#2304), and to search for a home-level "
+        ".claude.json MCP registration (issue athenaeum#2594); default: "
+        "the real home directory.",
     )
     doctor_parser.set_defaults(func=cmd_doctor)
 

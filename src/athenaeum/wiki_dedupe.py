@@ -187,6 +187,7 @@ from athenaeum.models import (
     TokenUsage,
     is_tombstone,
     parse_frontmatter,
+    parse_merge_rejected_with,
     slugify,
     validity_bound_str,
 )
@@ -408,6 +409,18 @@ def discover_wiki_dedupe_candidates(
 
         name = str(meta.get("name") or path.stem)
         description = str(meta.get("description") or "")
+        # Issue athenaeum#2546: populate merge_rejected_with so the clusterer
+        # can split a rejected pair out of a raw similarity cluster BEFORE
+        # it ever reaches the pairwise comparator (see
+        # ``_split_rejected_pairs`` below) -- this field existed on
+        # AutoMemoryFile since athenaeum#715 but was never read here, so the
+        # wiki-dedupe clusterer ignored every rejection until now. Fail-open
+        # on a malformed value, matching every other frontmatter read in
+        # this loop.
+        try:
+            rejected_with = parse_merge_rejected_with(meta)
+        except ValueError:
+            rejected_with = []
         candidates.append(
             AutoMemoryFile(
                 path=path,
@@ -420,6 +433,7 @@ def discover_wiki_dedupe_candidates(
                 # lockstep gap should this record ever reach is_inactive().
                 valid_from=validity_bound_str(meta, "valid_from"),
                 valid_until=validity_bound_str(meta, "valid_until"),
+                merge_rejected_with=rejected_with,
                 _content=body,
             )
         )
@@ -562,7 +576,110 @@ def find_wiki_page_clusters(
         embeddings=embeddings,
         embedder_sources=embedder_sources,
     )
+    clusters = _split_rejected_pairs(clusters, files, wiki_root, config=config)
     return [c for c in clusters if len(c.member_paths) >= 2]
+
+
+def _split_rejected_pairs(
+    clusters: list[Cluster],
+    files: Sequence[AutoMemoryFile],
+    wiki_root: Path,
+    *,
+    config: dict[str, Any] | None,
+) -> list[Cluster]:
+    """Drop a cluster member whenever it and another member of the SAME
+    cluster are linked by a still-in-force ``merge_rejected_with:`` (issue
+    athenaeum#2546, "the clusterer" honouring the never-merge link).
+
+    A pure similarity pass has no concept of a human ruling -- without
+    this, a cluster containing a rejected pair {A, B} would reach the
+    pairwise comparator, which DOES refuse that exact pair (Gate 1's
+    declared-pair short-circuit), but a cluster {A, B, X} would still let
+    A+X and B+X each propose/fold independently, uniting the rejected
+    pair transitively through X. Dropping the loser of each rejected pair
+    from the RAW cluster closes that hole before any pair reaches the
+    comparator at all.
+
+    Cooldown-aware (issue athenaeum#2077/#2107, pre-existing) via
+    :func:`athenaeum.prior_rulings.rejection_still_binds` -- the same
+    shared check the ``propose-fold`` guard and the fold-apply preflight
+    in :mod:`athenaeum.pending_merges` now also use (issue athenaeum#2546
+    review finding), so all three sites decay identically: a pair with a
+    queued-and-resolved rejection whose ``librarian.
+    rejected_merge_cooldown_days`` has lapsed is left for the pair loop's
+    own (already-existing) lapsed-rejection handling instead of being
+    dropped here. A ``merge_rejected_with:`` entry with NO matching
+    ``_pending_merges.md``/archive record at all (hand-authored frontmatter,
+    or athenaeum#2546's own durable link with no decay) has nothing to
+    expire, so it is always treated as a conflict -- this is what keeps
+    the default (`rejected_merge_cooldown_days=0`, "never expires") durable.
+
+    Iterative: dropping one member of a pair can still leave two OTHER
+    members of the same cluster in conflict, so this re-scans until no
+    conflicting pair remains among the survivors. A cluster that
+    collapses below 2 live members is dropped entirely (mirrors this
+    function's caller, which already drops every size-1 cluster for the
+    same "no signal" reason).
+    """
+    from athenaeum.prior_rulings import rejection_still_binds
+
+    def _still_binding(name_i: str, name_j: str) -> bool:
+        return rejection_still_binds(wiki_root, name_i, name_j, config=config)
+
+    by_relpath: dict[str, AutoMemoryFile] = {}
+    for am in files:
+        try:
+            relpath = am.path.resolve().relative_to(wiki_root.resolve()).as_posix()
+        except ValueError:
+            relpath = am.path.name
+        by_relpath[relpath] = am
+
+    out: list[Cluster] = []
+    for cluster in clusters:
+        members = [p for p in cluster.member_paths if p in by_relpath]
+        name_slugs = {p: slugify(by_relpath[p].name or Path(p).stem) for p in members}
+        rejected_slugs = {
+            p: {slugify(n) for n in by_relpath[p].merge_rejected_with} for p in members
+        }
+        dropped: set[str] = set()
+        progressed = True
+        while progressed:
+            progressed = False
+            live = [p for p in members if p not in dropped]
+            for i, p_i in enumerate(live):
+                for p_j in live[i + 1 :]:
+                    if not (
+                        name_slugs[p_j] in rejected_slugs[p_i]
+                        or name_slugs[p_i] in rejected_slugs[p_j]
+                    ):
+                        continue
+                    if not _still_binding(Path(p_i).name, Path(p_j).name):
+                        log.info(
+                            "wiki-dedupe clusterer: merge_rejected_with between %s "
+                            "and %s has lapsed (cooldown); leaving both in cluster "
+                            "%s for a fresh comparison (athenaeum#2546/#2077)",
+                            p_i,
+                            p_j,
+                            cluster.cluster_id,
+                        )
+                        continue
+                    log.info(
+                        "wiki-dedupe clusterer: dropping %s from cluster %s -- "
+                        "merge_rejected_with links it to %s (athenaeum#2546)",
+                        p_j,
+                        cluster.cluster_id,
+                        p_i,
+                    )
+                    dropped.add(p_j)
+                    progressed = True
+                    break
+                if progressed:
+                    break
+        remaining = [p for p in members if p not in dropped]
+        if len(remaining) >= 2:
+            cluster.member_paths = remaining
+            out.append(cluster)
+    return out
 
 
 def _group_coordinate_members_by_claim(

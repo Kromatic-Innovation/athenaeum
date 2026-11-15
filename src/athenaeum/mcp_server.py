@@ -3538,6 +3538,7 @@ def create_server(
     jwks_http_client: Any | None = None,
     config: dict | None = None,
     transport: str | None = None,
+    audit_log_path: Path | None = None,
 ) -> FastMCP:
     """Create and return a configured FastMCP server instance.
 
@@ -3663,6 +3664,17 @@ def create_server(
             so every existing caller is byte-identical. It does NOT change
             which tools are registered or any tool's schema: ``tools/list``
             is identical on both transports, by construction and by test.
+        audit_log_path: Issue athenaeum#2603 — this process's resolved
+            ``serve.audit_log`` location (``athenaeum.config.resolve_serve_audit_log``
+            folded with ``athenaeum.audit_log.resolve_audit_log_file``), or
+            ``None``. Only consulted when *serve_auth* is set: every
+            scope-gated tool dispatch and every token/identity refusal then
+            appends one JSON line (never the token, never argument text,
+            never page bodies — see ``athenaeum.audit_log``'s module
+            docstring). With *serve_auth* ``None`` — every ``stdio`` server
+            and every unauthenticated HTTP one — this is inert even if set:
+            there is no scope guard to wrap and no verifier to attribute a
+            refusal to, so nothing is ever written.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -3745,7 +3757,9 @@ def create_server(
         from athenaeum.mcp_auth import build_auth_provider
 
         _auth_provider = build_auth_provider(
-            serve_auth, jwks_http_client=jwks_http_client
+            serve_auth,
+            jwks_http_client=jwks_http_client,
+            audit_log_path=audit_log_path,
         )
 
     # Issue athenaeum#2387: under ``serve.profile: remote`` the served
@@ -3826,7 +3840,98 @@ def create_server(
         all has already passed the transport's bearer-token enforcement, so
         the usual case here is a token that is valid but narrower than this
         tool needs; an absent token still fails closed.
+
+        Issue athenaeum#2603: this is also the ONE per-call audit-log write
+        point for every scope-gated dispatch — the "wrap the guarded
+        dispatch point once" the issue's plan names. Three outcomes, one
+        record each, through ``_record_or_raise`` (below), which wraps
+        ``athenaeum.audit_log.record_tool_call``: ``refused`` when
+        *required_scope* is missing (covering both a narrower-than-needed
+        token and the degenerate absent-token case above), ``error`` when
+        *fn* raises (the exception's TYPE NAME is recorded as ``reason`` —
+        never ``str(exc)``, which could otherwise echo back the very
+        argument or page text this log must never hold), and ``ok``
+        otherwise. Inert (writes nothing) when ``audit_log_path`` is
+        ``None``, which it never is when ``serve_auth`` is set — see
+        ``create_server``'s own parameter docstring.
+
+        **A write failure (``OSError`` — full disk, a read-only cache
+        directory, a permissions change) is DELIBERATELY left to propagate
+        for the ``ok`` and ``error`` outcomes.** This is a security control
+        on a ``moscow:must`` item whose whole premise is "the operator
+        cannot tell what a remote caller read" — an audit log that can be
+        silently disabled by exhausting disk space is worse than no audit
+        log at all, because the operator keeps trusting an instrument that
+        has gone blind. The call is reported to the caller as failed
+        (FastMCP's own dispatcher catches the propagating ``OSError`` the
+        same as any other tool exception and masks it into a normal
+        ``isError`` result — this does not crash the process or the
+        connection; only THIS call fails). The known, accepted cost: the
+        ``ok``/``error`` write happens AFTER ``fn`` has already run, so for
+        a WRITE tool the side effect (e.g. ``remember``'s file) may already
+        be durable by the time the failure is reported — the caller sees
+        "failed" for work the server already did. A pre-flight write-
+        availability probe was considered and rejected: the dominant real
+        failure (``ENOSPC`` on an ALREADY-EXISTING file, which is what this
+        file is on every call after the first) is only raised by the
+        actual ``write(2)``, never by merely opening the file, so a cheap
+        probe would not reliably catch it, and a real probe write doubles
+        the I/O per call to close a narrow race that a persistent disk-full
+        condition will surface on the very next call regardless. This is
+        the same ambiguous-outcome-on-a-lost-response class every MCP
+        caller already has to tolerate (no transport here promises
+        exactly-once delivery); see ``docs/guides/remote.md``.
+
+        **The ``refused`` outcome is different and is handled specially.**
+        Its write happens BEFORE ``fn`` is ever called, so nothing has
+        happened yet for a write failure to make ambiguous — the call was
+        going to be refused either way. ``_record_or_raise`` still re-raises
+        there (so "every call is attempted" holds, and the ``OSError``
+        still surfaces to the caller as a failure, satisfying fail-closed),
+        but see ``_IdentityAllowlistVerifier._record_refusal`` in
+        ``athenaeum.mcp_auth`` for the ONE narrower carve-out this review
+        finding (PR athenaeum#2637) surfaced: that sibling refusal site sits
+        one layer further out, where only ``AuthenticationError`` is caught
+        by Starlette's own middleware — an unhandled ``OSError`` there tears
+        down the whole ASGI task group rather than failing one request, a
+        materially worse failure than anything here. That site logs loudly
+        and does NOT re-raise, because the identity was already going to be
+        refused regardless of whether the audit write succeeds — there is
+        no fail-open risk in NOT re-raising a write failure for an outcome
+        that denies either way.
         """
+
+        def _record_or_raise(**kwargs: Any) -> None:
+            """Append one audit record, or log loudly and propagate on failure.
+
+            The logging is purely for operator-side diagnosability (an
+            ``error``-level line naming the path, the tool and the outcome,
+            BEFORE the ``OSError`` reaches the caller as a failed call) — it
+            changes nothing about the fail-closed decision above; the
+            ``raise`` is unconditional.
+            """
+            from athenaeum.audit_log import record_tool_call
+
+            # Every call site below only calls this when `audit_log_path is
+            # not None` -- asserted rather than re-checked so mypy narrows
+            # the `Path | None` parameter the same way the caller already
+            # has, instead of carrying an unreachable `None` branch here too.
+            assert audit_log_path is not None
+            try:
+                record_tool_call(audit_log_path, **kwargs)
+            except OSError:
+                log.error(
+                    "Failed to append a remote-audit-log record to %s "
+                    "(tool=%r, outcome=%r): the audit log is unwritable "
+                    "(full disk, permissions, or a read-only path). Failing "
+                    "CLOSED: this call is reported as an error rather than "
+                    "recorded unaudited.",
+                    audit_log_path,
+                    kwargs.get("tool_name"),
+                    kwargs.get("outcome"),
+                    exc_info=True,
+                )
+                raise
 
         @functools.wraps(fn)
         def _guarded(*args: Any, **kwargs: Any) -> Any:
@@ -3835,12 +3940,42 @@ def create_server(
 
             access = get_access_token()
             granted = set(access.scopes) if access is not None else set()
+            claims = access.claims if access is not None else None
             if required_scope not in granted:
+                if audit_log_path is not None:
+                    _record_or_raise(
+                        tool_name=fn.__name__,
+                        outcome="refused",
+                        claims=claims,
+                        reason="insufficient_scope",
+                    )
                 raise InsufficientScopeError(
                     [required_scope],
                     message=_insufficient_scope_message(fn.__name__, required_scope),
                 )
-            return fn(*args, **kwargs)
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                if audit_log_path is not None:
+                    _record_or_raise(
+                        tool_name=fn.__name__,
+                        outcome="error",
+                        claims=claims,
+                        args=args,
+                        kwargs=kwargs,
+                        reason=type(exc).__name__,
+                    )
+                raise
+            if audit_log_path is not None:
+                _record_or_raise(
+                    tool_name=fn.__name__,
+                    outcome="ok",
+                    claims=claims,
+                    args=args,
+                    kwargs=kwargs,
+                    result=result,
+                )
+            return result
 
         return _guarded
 
