@@ -5590,6 +5590,67 @@ def write_dimensions_config(knowledge_root: Path, dimensions_config: list[dict[s
     return config_path
 
 
+def write_owner_config(
+    knowledge_root: Path, *, uid: str, aliases: list[str] | None = None
+) -> bool:
+    """Record ``owner.uid`` and union *aliases* into ``athenaeum.yaml``'s
+    top-level ``owner:`` block (issue athenaeum#2652), surgically.
+
+    Same single-block edit as :func:`write_dimensions_config`: only the live
+    ``owner:`` block's own line span is replaced (an absent block, or one
+    present only as the commented example, is appended at EOF), so every
+    comment and every other key elsewhere in the file stays byte-identical.
+    Other keys INSIDE an existing ``owner:`` block (``google_contact``,
+    ``emails``, ``asserter``) are carried through; only ``uid`` and
+    ``aliases`` are touched. An already-set ``uid`` is never replaced, and an
+    alias already present is not repeated, so a re-run is a no-op.
+
+    Returns ``True`` when the file was written, ``False`` when it already
+    held everything asked for (nothing is written in that case).
+    """
+    from athenaeum.atomic_io import atomic_write_text
+
+    config_path = Path(knowledge_root) / "athenaeum.yaml"
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    lines = text.splitlines(keepends=True)
+    span = _find_top_level_block(lines, "owner")
+
+    current: dict[str, Any] = {}
+    if span is not None:
+        parsed = yaml.safe_load("".join(lines[span[0] : span[1]]))
+        if isinstance(parsed, dict) and isinstance(parsed.get("owner"), dict):
+            current = dict(parsed["owner"])
+
+    updated = dict(current)
+    if not str(updated.get("uid") or "").strip():
+        updated["uid"] = uid
+    existing = updated.get("aliases")
+    merged = [str(a) for a in existing] if isinstance(existing, list) else []
+    for alias in aliases or []:
+        if alias.strip() and alias not in merged:
+            merged.append(alias)
+    if merged:
+        updated["aliases"] = merged
+
+    if updated == current:
+        return False
+
+    block = yaml.safe_dump(
+        {"owner": updated}, sort_keys=False, allow_unicode=True, default_flow_style=False
+    )
+    if span is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] = lines[-1] + "\n"
+        new_text = "".join(lines)
+        if new_text and not new_text.endswith("\n\n"):
+            new_text += "\n"
+        new_text += block
+    else:
+        new_text = "".join(lines[: span[0]]) + block + "".join(lines[span[1] :])
+    atomic_write_text(config_path, new_text)
+    return True
+
+
 def _find_dimension_entry_index(entries: list[Any], dimension_name: str) -> int | None:
     """Index of the ``dimensions:`` list entry named *dimension_name*, or
     ``None``. Shared by :func:`retire_operator_dimension` and

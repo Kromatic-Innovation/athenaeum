@@ -171,6 +171,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "provenance": ("athenaeum._cmd_provenance", "add_provenance_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
     "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
+    "owner": ("athenaeum._cmd_owner", "add_owner_subparser"),
     "subject-population": (
         "athenaeum._cmd_subject_population",
         "add_subject_population_subparser",
@@ -232,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
+    from athenaeum._cmd_owner import add_owner_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
     from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_provenance import add_provenance_subparser
@@ -340,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers
     )  # reindex, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
+    add_owner_subparser(subparsers)  # owner set (issue athenaeum#2652)
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
     # attribution show|place|ack-observe-report (issue athenaeum#2212)
     add_attribution_subparser(subparsers)
