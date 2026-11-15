@@ -365,6 +365,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
         resolve_audience,
+        resolve_audience_choice,
         resolve_cache_dir,
         resolve_screening,
         resolve_search_backend,
@@ -490,14 +491,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     # Issue athenaeum#312: resolve the serve-time read-scope pin (CLI > env > yaml).
     # None = owner = full access (existing single-user behavior).
+    # The unset/owner distinction (athenaeum#2604) is only acted on below, once
+    # the profile is known.
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
-    if caller_audience is not None:
-        print(
-            "[audience] recall restricted to roles: "
-            f"{', '.join(sorted(caller_audience))} "
-            "(untagged/confidential/personal pages withheld)",
-            file=sys.stderr,
-        )
+    audience_kind = resolve_audience_choice(cfg, getattr(args, "audience", None))
 
     # Issue athenaeum#320: resolve intake screening (env > yaml > off). Fails fast with
     # a clear message on a mis-set screening block rather than serving with a
@@ -532,6 +529,34 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except RemotePolicyError as exc:
         print(f"[remote-policy] invalid configuration: {exc}", file=sys.stderr)
         return 1
+    # Issue athenaeum#2604: an unset audience means the whole corpus, so a
+    # remote HTTP server must be told which one -- refuse before binding.
+    # Everywhere else `owner` stays an ordinary role id, as before.
+    if transport == "http" and remote_policy is not None and remote_policy.profile == "remote":
+        if audience_kind == "unset":
+            print(
+                "[audience] refusing to serve --profile remote with no audience: an "
+                "unset audience means the whole corpus. Set a role "
+                "(--audience <role>, serve.audience, or ATHENAEUM_AUDIENCE) to restrict "
+                "what remote callers can read, or set owner explicitly "
+                "(--audience owner) to serve every page.",
+                file=sys.stderr,
+            )
+            return 1
+        if audience_kind == "owner":
+            caller_audience = None
+            print(
+                "[audience] owner — every page is readable by authenticated remote callers",
+                file=sys.stderr,
+            )
+    if caller_audience is not None:
+        print(
+            f"[audience] {', '.join(sorted(caller_audience))} "
+            "(recall restricted to these roles; "
+            "untagged/confidential/personal pages withheld)",
+            file=sys.stderr,
+        )
+
     if remote_policy is not None:
         print(
             "[remote-policy] excluded fields: "

@@ -2,6 +2,24 @@
 
 # Upgrading and data lifecycle
 
+## I want to know why `serve --profile remote` now refuses to start
+
+`athenaeum serve --transport http --profile remote` now exits non-zero when no
+audience is configured (athenaeum#2604). An unset audience has always meant
+owner, the whole corpus, and a remote server should not serve that by omission.
+An existing remote deployment that never set `serve.audience` must choose one
+before it will start again:
+
+- a role: `--audience <role>`, `serve.audience: <role>` or
+  `ATHENAEUM_AUDIENCE=<role>` (comma-separate several); or
+- owner, deliberately: the same three spellings with the value `owner`. It
+  starts as before and prints
+  `[audience] owner — every page is readable by authenticated remote callers`
+  to stderr. A blank value counts as unset.
+
+stdio serving, and HTTP without `--profile remote`, are unchanged; there
+`owner` remains an ordinary role id, as before.
+
 ## I want to know what's gone in 0.24.0
 
 `athenaeum merges` and `athenaeum questions` are removed in 0.24.0. Every

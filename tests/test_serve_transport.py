@@ -626,3 +626,113 @@ class TestHttpTransportServesMcp:
 
         assert {"recall", "remember", "entity_schema"} <= tool_names
         assert "Lean Startup" in recall_text
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2604 — an unset audience is refused under http + --profile remote.
+# ---------------------------------------------------------------------------
+
+
+class _CreateRecorder(_RunRecorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_kwargs: dict[str, object] = {}
+
+
+@pytest.fixture
+def audience_server(monkeypatch: pytest.MonkeyPatch) -> _CreateRecorder:
+    recorder = _CreateRecorder()
+    import athenaeum.mcp_server as mcp_mod
+
+    def _fake_create_server(**kwargs: object) -> _CreateRecorder:
+        recorder.create_kwargs = kwargs
+        return recorder
+
+    monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+    monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
+    return recorder
+
+
+_REMOTE = ["--transport", "http", "--profile", "remote"]
+
+
+class TestRemoteProfileRefusesAnUnsetAudience:
+    def test_unset_audience_is_refused_before_binding(
+        self,
+        knowledge_dir: Path,
+        audience_server: _CreateRecorder,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main(["serve", "--path", str(knowledge_dir), *_REMOTE])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "--audience <role>" in err
+        assert "--audience owner" in err
+        assert audience_server.calls == []
+        assert audience_server.create_kwargs == {}
+
+    def test_blank_audience_counts_as_unset(
+        self, knowledge_dir: Path, audience_server: _CreateRecorder
+    ) -> None:
+        rc = main(["serve", "--path", str(knowledge_dir), *_REMOTE, "--audience", " "])
+        assert rc != 0
+        assert audience_server.calls == []
+
+    @pytest.mark.parametrize("how", ["flag", "env", "yaml"])
+    def test_explicit_owner_starts_and_says_so(
+        self,
+        how: str,
+        knowledge_dir: Path,
+        audience_server: _CreateRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        argv = ["serve", "--path", str(knowledge_dir), *_REMOTE]
+        if how == "flag":
+            argv += ["--audience", "Owner"]
+        elif how == "env":
+            monkeypatch.setenv("ATHENAEUM_AUDIENCE", "owner")
+        else:
+            (knowledge_dir / "athenaeum.yaml").write_text(
+                "search_backend: keyword\nserve:\n  audience: owner\n", encoding="utf-8"
+            )
+        assert main(argv) == 0
+        assert (
+            "[audience] owner — every page is readable by authenticated remote callers"
+            in capsys.readouterr().err
+        )
+        assert audience_server.create_kwargs["caller_audience"] is None
+        assert len(audience_server.calls) == 1
+
+    def test_role_audience_starts_and_names_the_roles(
+        self,
+        knowledge_dir: Path,
+        audience_server: _CreateRecorder,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        argv = ["serve", "--path", str(knowledge_dir), *_REMOTE, "--audience", "ops,Dev"]
+        assert main(argv) == 0
+        assert "[audience] dev, ops" in capsys.readouterr().err
+        assert audience_server.create_kwargs["caller_audience"] == {"ops", "dev"}
+
+    def test_stdio_with_remote_profile_is_unchanged(
+        self, knowledge_dir: Path, audience_server: _CreateRecorder
+    ) -> None:
+        argv = ["serve", "--path", str(knowledge_dir), "--profile", "remote"]
+        assert main(argv) == 0
+        assert audience_server.create_kwargs["caller_audience"] is None
+        assert audience_server.calls == [((), {})]
+
+    def test_http_without_remote_profile_is_unchanged(
+        self, knowledge_dir: Path, audience_server: _CreateRecorder
+    ) -> None:
+        argv = ["serve", "--path", str(knowledge_dir), "--transport", "http"]
+        assert main(argv) == 0
+        assert audience_server.create_kwargs["caller_audience"] is None
+
+    def test_owner_is_still_an_ordinary_role_outside_remote_http(
+        self, knowledge_dir: Path, audience_server: _CreateRecorder
+    ) -> None:
+        argv = ["serve", "--path", str(knowledge_dir), "--audience", "owner"]
+        assert main(argv) == 0
+        assert audience_server.create_kwargs["caller_audience"] == {"owner"}

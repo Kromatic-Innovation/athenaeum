@@ -901,6 +901,34 @@ def _normalize_audience_roles(values: Any) -> set[str]:
     return {v.strip().lower() for v in values if isinstance(v, str) and v.strip()}
 
 
+def _configured_audience_roles(
+    config: dict[str, Any] | None,
+    cli_value: str | None,
+    section: str,
+    key: str,
+) -> set[str] | None:
+    """Return the normalized audience roles from the first tier that sets one.
+
+    CLI > env > yaml. ``None`` means no tier set the key at all; an empty set
+    means a tier set it blank (athenaeum#312).
+    """
+    if cli_value is not None:
+        return _normalize_audience_roles(cli_value.split(","))
+
+    env = os.environ.get("ATHENAEUM_AUDIENCE")
+    if env is not None:
+        return _normalize_audience_roles(env.split(","))
+
+    if isinstance(config, dict):
+        section_cfg = config.get(section)
+        if isinstance(section_cfg, dict):
+            raw = section_cfg.get(key)
+            if isinstance(raw, str):
+                return _normalize_audience_roles(raw.split(","))
+            return _normalize_audience_roles(raw)
+    return None
+
+
 def resolve_audience(
     config: dict[str, Any] | None,
     cli_value: str | None = None,
@@ -924,25 +952,32 @@ def resolve_audience(
     whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
     operator's external RBAC). No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
-    if cli_value is not None:
-        roles = _normalize_audience_roles(cli_value.split(","))
-        return roles or None
+    return _configured_audience_roles(config, cli_value, "serve", "audience") or None
 
-    env = os.environ.get("ATHENAEUM_AUDIENCE")
-    if env is not None:
-        roles = _normalize_audience_roles(env.split(","))
-        return roles or None
 
-    if isinstance(config, dict):
-        serve_cfg = config.get("serve")
-        if isinstance(serve_cfg, dict):
-            raw = serve_cfg.get("audience")
-            if isinstance(raw, str):
-                roles = _normalize_audience_roles(raw.split(","))
-                return roles or None
-            roles = _normalize_audience_roles(raw)
-            return roles or None
-    return None
+def resolve_audience_choice(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str:
+    """Classify the configured audience as ``unset``, ``owner`` or ``roles`` (athenaeum#2604).
+
+    Same tiers as :func:`resolve_audience` (CLI > env > ``serve.audience``):
+
+    - ``"unset"`` -- nothing configured, or only blank values.
+    - ``"owner"`` -- the value is exactly ``owner`` (case-folded, the SOLE
+      role): a deliberate choice to serve every page.
+    - ``"roles"`` -- one or more role ids.
+
+    ``resolve_audience`` keeps its contract for its other callers; only
+    ``serve --transport http --profile remote`` reads the distinction, to
+    refuse "unset" and to treat ``owner`` as full access.
+    """
+    roles = _configured_audience_roles(config, cli_value, "serve", "audience")
+    if not roles:
+        return "unset"
+    if roles == {"owner"}:
+        return "owner"
+    return "roles"
 
 
 def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:

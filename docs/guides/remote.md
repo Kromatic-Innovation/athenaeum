@@ -171,7 +171,7 @@ serve:
   port: 8000
   profile: remote
   excluded_fields: off
-  audience: ops            # optional read scope; see below
+  audience: ops            # required under profile remote: a role, or `owner` on purpose
   auth:
     issuer: https://id.example.net
     resource: https://memory.example.net/mcp
@@ -206,7 +206,7 @@ What each block buys you:
 | `--path-prefix` | The URL path the endpoint is mounted at, default `/mcp`. CLI-only: unlike the three above it has no environment variable and no yaml key. |
 | `serve.profile: remote` | Does not serve `resolve_question`, `resolve_merge` or `review_audit_item` — adjudicating your own decision queue is an owner action. `remember` and `raise_decision` stay on, because a remote agent contributing memories is the point. |
 | `serve.excluded_fields: off` | Withholds every off-corpus excluded value. The `remote` profile already pins this; setting it explicitly documents the intent. |
-| `serve.audience` | A read filter pinned for the life of the process. Untagged, `confidential` and `personal` pages become invisible. The caller cannot widen it. |
+| `serve.audience` | Required under `--transport http --profile remote` (an unset audience is refused). A read filter pinned for the life of the process. Untagged, `confidential` and `personal` pages become invisible. The caller cannot widen it. The value `owner` serves every page. |
 | `serve.auth.issuer` | Whose signatures this server trusts. Setting it is also what lifts the non-loopback bind refusal — the same act that makes every request carry a verified token. |
 | `serve.auth.resource` | The one audience this process serves, and the `resource` value the host must request. |
 | `serve.auth.allowed_identities` | `sub` values, or issuer-verified emails. Never empty. |
@@ -737,11 +737,17 @@ yours to rotate. What there is:
   a tunnel, an SSH forward, a stdio-to-HTTP shim or a container port mapping either.
   Any of those publishes an unauthenticated server with full read and write access to
   your entire knowledge store to whoever finds the URL, and URLs are found.
-- **Do not serve the owner audience by default.** Leaving `serve.audience` unset means
-  owner, which means every page in the store — untagged, `confidential` and
-  `personal` included — is in scope for a remote host. Pin the narrowest audience
-  that makes the deployment useful, and widen it deliberately, later, with a reason.
-  Owner-by-default is the single costliest misconfiguration available here.
+- **Do not serve the owner audience by accident.** An unset audience means owner,
+  which means every page in the store — untagged, `confidential` and `personal`
+  included — is in scope for a remote host. `serve --transport http --profile remote`
+  therefore refuses to start with no audience configured, and the message names both
+  ways out: pin the narrowest audience that makes the deployment useful
+  (`--audience <role>`), or choose owner on purpose (`--audience owner`,
+  `serve.audience: owner` or `ATHENAEUM_AUDIENCE=owner`), which prints
+  `[audience] owner — every page is readable by authenticated remote callers` at
+  startup. Serving the whole corpus remotely is legitimate for a single-operator
+  deployment; owner as an unexamined default is the costliest misconfiguration
+  available here, and widening a pinned role later, with a reason, is the safer path.
 - **Do not set `excluded_fields: on` without understanding where the values go.**
   `on` lets a remote caller resolve excluded, off-corpus fields — the contact data
   deliberately kept off entity pages. Every value it returns goes to the host
