@@ -240,6 +240,7 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
 )
 from athenaeum.store import now_iso
+from athenaeum.store_links import admit_page_write
 
 log = logging.getLogger(__name__)
 
@@ -2463,6 +2464,27 @@ def write_apply(
     # The Plan's write order, in one place: NEW pages first (sub-pages then
     # standalone pages -- a pure addition either way), then every existing
     # move target, then the parent LAST.
+    # athenaeum#2619: refuse the whole apply, before anything is written, if any
+    # page it would write links to a page on a more private store.
+    for _path, _text in (
+        [(sp.path, sp.text) for sp in computed.sub_pages]
+        + [(sp.path, sp.text) for sp in computed.standalone_pages]
+        + [(t.path, t.text) for t in computed.targets]
+        + [(computed.parent_path, computed.parent_text)]
+    ):
+        if not admit_page_write(
+            wiki_root, _path, _text, index=index, config=config, source="page-recompile"
+        ):
+            return ApplyOutcome(
+                ok=False,
+                reason=(
+                    f"store-boundary: {_path.name} would link to a page on a more "
+                    "private store; nothing was written"
+                ),
+                plan_id=resolved_plan_id,
+                uid=plan.uid,
+            )
+
     new_paths = [sp.path for sp in computed.sub_pages] + [
         sp.path for sp in computed.standalone_pages
     ]
