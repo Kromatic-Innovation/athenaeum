@@ -93,13 +93,20 @@ class TestLocalEdit:
         assert policy.resolve(tags=["personal/travel"]) == "always"
         assert policy.resolve(tags=["personal"]) == "never"
 
+    def test_subject_uid_parameter_scopes_the_rule(self, kb: Path) -> None:
+        out = _call(_server(kb), "set_capture_rule", verdict="never", subject_uid="ada-example")
+        assert out["ok"] and out["rule"]["subject"] == "ada-example"
+        policy = load_relevance_policy(kb / "wiki")
+        assert policy.resolve(subject="ada-example") == "never"
+        assert policy.resolve(subject="someone-else") is None
+
     def test_invalid_rule_writes_nothing(self, kb: Path) -> None:
         server = _server(kb)
         for kwargs in (
             {"verdict": "maybe", "tag": "personal"},
             {"verdict": "always", "tag": "no-such-tag"},
             {"verdict": "always"},
-            {"verdict": "always", "subject": "a|b"},
+            {"verdict": "always", "subject_uid": "a|b"},
         ):
             out = _call(server, "set_capture_rule", **kwargs)
             assert out["ok"] is False and out["error_code"] == "invalid_rule"

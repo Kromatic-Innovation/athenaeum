@@ -4228,7 +4228,7 @@ def create_server(
         verdict: str,
         type: str | None = None,
         tag: str | None = None,
-        subject: str | None = None,
+        subject_uid: str | None = None,
         rationale: str = "",
     ) -> dict:
         """Record a standing capture rule as POLICY, not as a fact.
@@ -4242,13 +4242,14 @@ def create_server(
 
         You, the calling model, translate the user's words into a structured
         rule. This tool does no language parsing. Give `verdict` plus at
-        least one of `type`, `tag`, `subject`:
+        least one of `type`, `tag`, `subject_uid`:
 
         - `verdict`: `always` (capture matching facts) or `never` (do not).
         - `type`: an entity type from the deployment's type vocabulary.
         - `tag`: a tag from its tag vocabulary; a tag also covers its
           `/`-separated children (`personal` covers `personal/travel`).
-        - `subject`: an entity uid the rule is scoped to.
+        - `subject_uid`: the `uid` (frontmatter) of the entity the rule is
+          scoped to.
 
         A rule naming several keys matches only when all of them match. The
         new rule is added LAST and the last matching rule wins, so it
@@ -4265,7 +4266,7 @@ def create_server(
             verdict: `always` or `never`.
             type: Optional entity type the rule matches.
             tag: Optional tag the rule matches.
-            subject: Optional entity uid the rule matches.
+            subject_uid: Optional entity uid the rule matches.
             rationale: Optional one-line reason, shown to the operator when
                 the rule is proposed.
 
@@ -4292,7 +4293,7 @@ def create_server(
         try:
             if is_http:
                 record, created = file_rule_edit_proposal(
-                    wiki_root, verdict, type, tag, subject, rationale=rationale.strip()
+                    wiki_root, verdict, type, tag, subject_uid, rationale=rationale.strip()
                 )
                 return {
                     "ok": True,
@@ -4306,7 +4307,9 @@ def create_server(
                         else "An identical proposal is already pending approval."
                     ),
                 }
-            result = apply_rule_edit(wiki_root, verdict, type, tag, subject, transport="stdio")
+            result = apply_rule_edit(
+                wiki_root, verdict, type, tag, subject_uid, transport="stdio"
+            )
         except RelevancePolicyError as exc:
             return {"ok": False, "error_code": "invalid_rule", "message": str(exc)}
         return {
