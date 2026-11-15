@@ -162,3 +162,14 @@ def test_no_owner_configured_is_unchanged(tmp_path: Path) -> None:
     assert resolve_owner(load_config(root)) is None
     text = (root / "athenaeum.yaml").read_text(encoding="utf-8")
     assert yaml.safe_load(text).get("owner") is None
+
+
+def test_malformed_config_refuses_before_writing_anything(kb: Path) -> None:
+    # Seer review on PR athenaeum#2677: a malformed athenaeum.yaml must not read
+    # as "no owner yet" and mint an orphan person page on every run.
+    (kb / "athenaeum.yaml").write_text("owner: [unclosed\n", encoding="utf-8")
+    before = _snapshot(kb)
+    with pytest.raises(ValueError, match="not valid YAML"):
+        set_owner(kb, "Ada Example")
+    assert _snapshot(kb) == before
+    assert _pages(kb) == []

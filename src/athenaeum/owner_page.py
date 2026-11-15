@@ -80,6 +80,21 @@ def set_owner(
     wiki_root = Path(knowledge_root) / "wiki"
     wiki_root.mkdir(parents=True, exist_ok=True)
 
+    # ``load_config`` tolerates a malformed ``athenaeum.yaml`` (it falls back to
+    # defaults), which here would read as "no owner yet" and mint a fresh uid
+    # and person page on every run, orphaning the previous one. Refuse before
+    # writing anything instead (Seer review on PR athenaeum#2677).
+    config_path = Path(knowledge_root) / "athenaeum.yaml"
+    if config_path.exists():
+        import yaml
+
+        try:
+            yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"{config_path} is not valid YAML ({exc.__class__.__name__}); "
+                "fix it before running `athenaeum owner set` -- nothing was written"
+            ) from exc
     owner = resolve_owner(load_config(Path(knowledge_root)))
     uid = (owner or {}).get("uid") or generate_uid()
     warnings = [single_word_alias_warning(a) for a in [name, *extra] if len(a.split()) < 2]
