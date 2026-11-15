@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.middleware import Middleware
 from pydantic import AnyHttpUrl
 
 from athenaeum.serve_auth import SIGNING_ALGORITHM, ServeAuth
@@ -199,6 +200,29 @@ class _IdentityAllowlistVerifier(JWTVerifier):
                 access.claims.get("sub"),
             )
             return None
+        # Issue athenaeum#2602: the client allowlist. Checked AFTER the
+        # identity so a stranger's token is still refused as an identity
+        # first, and answered with the same bare 401 for the same oracle
+        # reason. The log line names the client id the token presented
+        # (both claims, since a disagreement between them is itself the
+        # refusal), never the token.
+        client_refusal = self._serve_auth.client_refusal(access.claims)
+        if client_refusal is not None:
+            self._record_refusal(reason=client_refusal, claims=access.claims)
+            logger.warning(
+                "Bearer token rejected: client azp=%r client_id=%r is not in "
+                "serve.auth.allowed_clients (%s)",
+                access.claims.get("azp"),
+                access.claims.get("client_id"),
+                client_refusal,
+            )
+            return None
+        # The per-client read-only cap narrows the token's scopes here, at
+        # the one place every request passes, so no downstream check can see
+        # the write scope for a capped client. `capped_scopes` only removes.
+        capped = self._serve_auth.capped_scopes(access.claims, access.scopes)
+        if capped != list(access.scopes):
+            access = access.model_copy(update={"scopes": capped})
         return access
 
 
@@ -291,6 +315,36 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
             await app(scope, receive, intercept if scope.get("method") == "GET" else send)
 
         return wrapped
+
+
+class ReadOnlyClientToolFilter(Middleware):
+    """Hide write tools from ``tools/list`` for a read-only-capped client.
+
+    Issue athenaeum#2602. Installed by ``create_server`` only when some
+    ``serve.auth.allowed_clients`` entry sets ``read_only: true``, so every
+    other server's ``tools/list`` stays identical for every token. For a
+    capped client, a tool whose ``readOnlyHint`` is not literally ``True``
+    is dropped from the listing -- the same fail-closed reading
+    :meth:`ServeAuth.required_scope` uses. Listing is a convenience only:
+    the call itself is still refused by the scope check whether or not the
+    tool was listed.
+    """
+
+    def __init__(self, serve_auth: ServeAuth) -> None:
+        self._serve_auth = serve_auth
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+        from fastmcp.server.dependencies import get_access_token
+
+        tools = await call_next(context)
+        access = get_access_token()
+        if access is None or not self._serve_auth.client_is_read_only(access.claims):
+            return tools
+        return [
+            tool
+            for tool in tools
+            if tool.annotations is not None and tool.annotations.read_only_hint is True
+        ]
 
 
 def build_auth_provider(

@@ -210,6 +210,7 @@ What each block buys you:
 | `serve.auth.issuer` | Whose signatures this server trusts. Setting it is also what lifts the non-loopback bind refusal — the same act that makes every request carry a verified token. |
 | `serve.auth.resource` | The one audience this process serves, and the `resource` value the host must request. |
 | `serve.auth.allowed_identities` | `sub` values, or issuer-verified emails. Never empty. |
+| `serve.auth.allowed_clients` | Optional. The apps allowed to connect, by the `azp` / `client_id` their tokens carry; `read_only: true` on an entry keeps that app from writing. Worth setting when your provider allows dynamic client registration. yaml only. |
 | `serve.auth.scopes` | Rename the read/write pair to scopes your provider actually issues. |
 | `serve.audit_log` | Where the per-call audit log lands (see [The per-call audit log](#the-per-call-audit-log)). Optional; defaults under the cache directory. Only written with `serve.auth.*` configured. |
 
