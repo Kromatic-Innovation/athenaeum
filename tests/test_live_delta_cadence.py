@@ -439,7 +439,9 @@ class TestResolveFullCompileEveryDays:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_full_compile_flag_threads_into_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_full_compile_flag_threads_into_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     import athenaeum.librarian as lib_mod
     from athenaeum import cli
 
@@ -450,12 +452,14 @@ def test_cli_full_compile_flag_threads_into_run(monkeypatch: pytest.MonkeyPatch)
         return 0
 
     monkeypatch.setattr(lib_mod, "run", fake_run)
-    rc = cli.main(["run", "--dry-run", "--full-compile"])
+    rc = cli.main(["run", "--knowledge-root", str(tmp_path), "--dry-run", "--full-compile"])
     assert rc == 0
     assert seen.get("full_compile") is True
 
 
-def test_cli_full_compile_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_full_compile_defaults_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     import athenaeum.librarian as lib_mod
     from athenaeum import cli
 
@@ -466,6 +470,6 @@ def test_cli_full_compile_defaults_false(monkeypatch: pytest.MonkeyPatch) -> Non
         return 0
 
     monkeypatch.setattr(lib_mod, "run", fake_run)
-    rc = cli.main(["run", "--dry-run"])
+    rc = cli.main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
     assert rc == 0
     assert seen.get("full_compile") is False

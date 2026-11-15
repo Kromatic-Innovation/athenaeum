@@ -5,6 +5,13 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+From the next release on, each release opens with a short `**Summary.**`
+paragraph, followed by sections headed with the Keep a Changelog names, in
+this order and only the ones that apply: `### Removed`, `### Changed`,
+`### Added`, `### Fixed`, `### Security`. Each heading appears once per
+release, so release-notes tooling can parse them. Older release sections are
+kept as they were written.
+
 ## [Unreleased]
 
 ### Added
@@ -26,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A new `set_capture_rule` MCP tool records "always/never remember X" as policy, not as a fact (athenaeum#2649).** The calling model passes a structured rule (`verdict` `always`/`never` plus a `type`, `tag` and/or `subject`; no language parsing, no LLM call), and the rule is appended to `wiki/_schema/relevance-policy.md` after validation through the same loader `athenaeum relevance-policy` and the `relevance_policy` tool read back (last match wins, so the new rule overrides what it overlaps; existing lines and comments are untouched; invalid rules write nothing). Over local stdio the file is edited directly and every edit appends a record (rules before and after, transport, time) to `wiki/_relevance_policy_audit.jsonl`. Under `--transport http` a remote client cannot edit: the tool files a proposal (`wiki/_relevance_policy_edit_proposals.jsonl`, modelled on the policy-pack-edit proposals) that appears in the decisions queue as a `relevance-policy-edit` item, owner-only; approving it applies the same audited edit and rejecting it leaves the policy unchanged. Restricted callers are refused. Forward-only: existing pages are not touched.
 - **Never-merge rulings now survive page splits (athenaeum#2651).** Every sub-page a page-recompile split creates inherits each `merge_rejected_with` entry its parent holds (carried with the same helper a fold uses), so the wiki-page clusterer and `propose-fold` still refuse to unite a sub-page with a page the parent was ruled distinct from. A queued plan that moves units onto, or attaches, a page linked to the source by `merge_rejected_with` now lists that ruling in the `page-recompile` decision item (outline field `never_merge_rulings`, plus a flag sentence in the item summary); it stays approvable -- flagged, not refused. Undoing a split removes the sub-pages together with their inherited links.
 - **`never` relevance rules are now enforced before any tier runs (athenaeum#2644).** With a `wiki/_schema/relevance-policy.md` in place, a fact whose declared `type` / `tags` / `uid` resolve to `never` is not compiled, on the synchronous librarian, the batch transport and the auto-memory phase alike (one shared decision, `relevance_policy.gate_raw_content`, so the transports cannot drift). The gate runs ahead of the Tier-0 passthrough and structured-upsert paths, which never reach an LLM. A dropped fact is recorded in the drop ledger (reason `relevance-policy: never ... (rule N, line L)`) and the raw note is deleted on processing as before; a raw mixing items (`.jsonl` records or concatenated `---` frontmatter documents) loses only the covered items; auto-memory files are skipped, never deleted. No policy file: behaviour unchanged. An invalid policy file stops the run before any raw is touched. Forward only; no prompt text, model setting or LLM call changed.
+- **A removed config key that is still set now warns in `athenaeum run` and `athenaeum doctor`, not only in the log (athenaeum#2686).** `athenaeum run` prints one `WARNING:` line to stderr per key, and `athenaeum doctor` gains a `removed_config_keys` row at the new `WARN` level (a warning never changes the exit code). Both read the same list `load_config` already warns from, so the three cannot disagree. A key counts as set whatever its value.
+- **`athenaeum --help` groups the subcommands (athenaeum#2686).** The flat list of about 70 names is now grouped under Setup and health, Everyday, Decisions, Maintenance and repair, Audit and verification, Hook and integration helpers, and Experimental and measurement. Every command is still reachable and every invocation parses as before; a test fails if a new subcommand is not assigned to a group.
 
 ### Fixed
 

@@ -185,6 +185,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "schedule",
         "page_relations",
         "merge_rejected_with_targets",
+        "removed_config_keys",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
@@ -842,3 +843,37 @@ def test_default_claude_config_dir_falls_back_to_home(
 ) -> None:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     assert doctor.default_claude_config_dir() == Path.home() / ".claude"
+
+
+# ---------------------------------------------------------------------------
+# Removed config keys: a WARN row, never a FAIL (issue athenaeum#2686).
+# ---------------------------------------------------------------------------
+
+
+def test_removed_config_key_warns_in_doctor(healthy_install: dict) -> None:
+    cfg_path = healthy_install["knowledge_root"] / "athenaeum.yaml"
+    existing = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+    cfg_path.write_text(
+        existing
+        + "\nlibrarian:\n  delta:\n    enabled: true\n  relatedness_writer: false\n",
+        encoding="utf-8",
+    )
+    results = _run_healthy(healthy_install)
+    row = next(r for r in results if r.name == "removed_config_keys")
+    assert row.status == "warn"
+    assert "librarian.delta.enabled" in row.detail
+    assert "librarian.relatedness_writer" in row.detail
+    assert "always on" in row.detail
+    # A warning is not a failure: the exit code stays zero.
+    assert doctor.exit_code(results) == 0
+    text = doctor.format_report(results)
+    assert "[WARN] removed_config_keys:" in text
+    assert "fix: delete the listed key(s)" in text
+    assert "All checks passed, with 1 warning(s)." in text
+
+
+def test_no_removed_config_keys_is_ok(healthy_install: dict) -> None:
+    row = next(
+        r for r in _run_healthy(healthy_install) if r.name == "removed_config_keys"
+    )
+    assert row.status == "ok"

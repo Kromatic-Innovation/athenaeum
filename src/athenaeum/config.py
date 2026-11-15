@@ -280,6 +280,55 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
 }
 
 
+def find_removed_config_keys(config: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(dotted_key, reason)`` for each removed key set in *config*.
+
+    Single source of truth for "which removed keys did the operator still
+    set": :func:`load_config` (log warning), ``athenaeum run`` (stderr
+    notice) and ``athenaeum doctor`` (WARN row) all read it, so the three
+    surfaces cannot disagree. A key counts as set when it is present at all,
+    whatever its value -- an explicit ``enabled: true`` is as stale as
+    ``enabled: false``. Reads nothing and logs nothing.
+    """
+    found: list[tuple[str, str]] = []
+    for removed_key, reason in _REMOVED_CONFIG_KEYS.items():
+        section, _, rest = removed_key.partition(".")
+        section_cfg = config.get(section)
+        if not isinstance(section_cfg, dict):
+            continue
+        if "." in rest:
+            subsection, _, subkey = rest.partition(".")
+            nested_cfg = section_cfg.get(subsection)
+            present = isinstance(nested_cfg, dict) and subkey in nested_cfg
+        else:
+            present = rest in section_cfg
+        if present:
+            found.append((removed_key, reason))
+    return found
+
+
+def removed_config_keys_in_file(knowledge_root: Path | None = None) -> list[tuple[str, str]]:
+    """:func:`find_removed_config_keys` over *knowledge_root*'s ``athenaeum.yaml``.
+
+    Same file resolution as :func:`load_config`; a missing or unreadable file
+    yields ``[]``. Logs nothing (``load_config`` already logs).
+    """
+    root = knowledge_root if knowledge_root is not None else Path.home() / "knowledge"
+    try:
+        raw = yaml.safe_load((root / "athenaeum.yaml").read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return []
+    return find_removed_config_keys(raw) if isinstance(raw, dict) else []
+
+
+def format_removed_key_notice(key: str, reason: str) -> str:
+    """One plain-English line naming a removed key and what replaced it."""
+    return (
+        f"config key `{key}` is set but no longer has any effect: {reason}. "
+        "Delete it from athenaeum.yaml."
+    )
+
+
 def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     """Load athenaeum config from *knowledge_root*/athenaeum.yaml.
 
@@ -315,24 +364,13 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
         else:
             result[key] = user_val
 
-    for removed_key, reason in _REMOVED_CONFIG_KEYS.items():
-        section, _, rest = removed_key.partition(".")
-        section_cfg = result.get(section)
-        if not isinstance(section_cfg, dict):
-            continue
-        if "." in rest:
-            subsection, _, subkey = rest.partition(".")
-            nested_cfg = section_cfg.get(subsection)
-            present = isinstance(nested_cfg, dict) and subkey in nested_cfg
-        else:
-            present = rest in section_cfg
-        if present:
-            logger.warning(
-                "Ignoring removed config key %s in %s: %s.",
-                removed_key,
-                config_path,
-                reason,
-            )
+    for removed_key, reason in find_removed_config_keys(result):
+        logger.warning(
+            "Ignoring removed config key %s in %s: %s.",
+            removed_key,
+            config_path,
+            reason,
+        )
 
     # Issue athenaeum#2550: `librarian.oversize_page_action: split` is
     # deprecated, not removed outright like `_REMOVED_CONFIG_KEYS` above --
