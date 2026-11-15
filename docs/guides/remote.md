@@ -318,7 +318,7 @@ bind on loopback, point the tunnel at it, and set `serve.auth.resource` to the p
 URL (`https://kb.example.com/mcp`). A tunnel is not an exception to the rule that
 athenaeum's own auth block must be configured; it is an authenticated server whose
 only listener is the tunnel's local connector. See
-[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)
 for creating one.
 
 ```yaml
@@ -396,8 +396,8 @@ never given, come from an address you can list, or hold your client certificate
 the MCP path:
 
 - an interactive access gate such as
-  [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/);
-- [service tokens](https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/),
+  [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/);
+- [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/),
   which require a header the host will not send;
 - an IP allowlist, because hosted clients call from provider address ranges you do
   not control;
