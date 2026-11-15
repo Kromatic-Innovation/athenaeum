@@ -262,7 +262,9 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
                 await send(start)
                 await send(message)
 
-            await app(scope, receive, intercept)
+            # Only the GET document is JSON; a CORS preflight answers 200 with
+            # a plain-text body that must pass through untouched.
+            await app(scope, receive, intercept if scope.get("method") == "GET" else send)
 
         return wrapped
 

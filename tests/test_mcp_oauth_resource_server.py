@@ -788,6 +788,26 @@ class TestProtectedResourceMetadata:
         assert headers["content-length"] == str(len(raw))
         assert headers["cache-control"] == "public, max-age=3600"
 
+    def test_a_cors_preflight_is_not_rewritten(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The OPTIONS answer is not JSON and must reach the client intact."""
+
+        async def _body(app: Any) -> tuple[int, bytes]:
+            async with _raw_client(app) as client:
+                response = await client.options(
+                    "/.well-known/oauth-protected-resource",
+                    headers={
+                        "Origin": "https://client.example.invalid",
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+                return response.status_code, response.content
+
+        status, raw = _drive(corpus, issuer, _serve_auth(), _body)
+        assert status == 200
+        assert b"authorization_servers" not in raw
+
     @pytest.mark.parametrize("resource", [RESOURCE, RESOURCE + "/mcp"])
     def test_the_resource_field_is_unchanged_by_the_issuer_fix(
         self, corpus: Path, issuer: _FakeIssuer, resource: str
