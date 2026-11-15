@@ -808,6 +808,41 @@ class TestProtectedResourceMetadata:
         assert status == 200
         assert b"authorization_servers" not in raw
 
+    def test_a_multi_chunk_body_is_rewritten_with_one_start_message(self) -> None:
+        """A body streamed in several chunks is buffered, rewritten once, and
+        sent behind exactly one ``http.response.start`` whose Content-Length
+        matches the bytes actually sent."""
+        from athenaeum.mcp_auth import build_auth_provider
+
+        provider = build_auth_provider(_serve_auth())
+        document = b'{"resource":"x","authorization_servers":["https://normalized.invalid/"]}'
+
+        async def inner(scope: Any, receive: Any, send: Any) -> None:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-length", str(len(document)).encode())],
+                }
+            )
+            await send({"type": "http.response.body", "body": document[:10], "more_body": True})
+            await send({"type": "http.response.body", "body": document[10:], "more_body": False})
+
+        sent: list[dict[str, Any]] = []
+
+        async def collect(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        wrapped = provider._with_raw_issuer(inner)  # type: ignore[attr-defined]
+        asyncio.run(wrapped({"type": "http", "method": "GET"}, None, collect))
+
+        starts = [m for m in sent if m["type"] == "http.response.start"]
+        bodies = [m for m in sent if m["type"] == "http.response.body"]
+        assert len(starts) == 1
+        body = b"".join(m["body"] for m in bodies)
+        assert json.loads(body)["authorization_servers"] == [ISSUER]
+        assert dict(starts[0]["headers"])[b"content-length"] == str(len(body)).encode()
+
     @pytest.mark.parametrize("resource", [RESOURCE, RESOURCE + "/mcp"])
     def test_the_resource_field_is_unchanged_by_the_issuer_fix(
         self, corpus: Path, issuer: _FakeIssuer, resource: str

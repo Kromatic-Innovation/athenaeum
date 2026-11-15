@@ -233,6 +233,7 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
 
         async def wrapped(scope: Any, receive: Any, send: Any) -> None:
             start: dict[str, Any] | None = None
+            chunks: list[bytes] = []
 
             async def intercept(message: dict[str, Any]) -> None:
                 nonlocal start
@@ -242,8 +243,14 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
                 if message["type"] != "http.response.body" or start is None:
                     await send(message)
                     return
-                body = message.get("body", b"")
-                if start["status"] == 200 and body and not message.get("more_body"):
+                # Buffer a (possibly multi-chunk) body so the start message is
+                # sent exactly once, with a Content-Length matching what is
+                # actually sent.
+                chunks.append(message.get("body", b""))
+                if message.get("more_body"):
+                    return
+                body = b"".join(chunks)
+                if start["status"] == 200 and body:
                     document = json.loads(body)
                     document["authorization_servers"] = [self._issuer]
                     # Same compact, non-ASCII-escaping form pydantic emits, so
@@ -251,16 +258,15 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
                     body = json.dumps(
                         document, separators=(",", ":"), ensure_ascii=False
                     ).encode("utf-8")
-                    message = {**message, "body": body}
-                    start = {
-                        **start,
-                        "headers": [
-                            (k, str(len(body)).encode() if k.lower() == b"content-length" else v)
-                            for k, v in start.get("headers", [])
-                        ],
-                    }
+                start = {
+                    **start,
+                    "headers": [
+                        (k, str(len(body)).encode() if k.lower() == b"content-length" else v)
+                        for k, v in start.get("headers", [])
+                    ],
+                }
                 await send(start)
-                await send(message)
+                await send({"type": "http.response.body", "body": body, "more_body": False})
 
             # Only the GET document is JSON; a CORS preflight answers 200 with
             # a plain-text body that must pass through untouched.
