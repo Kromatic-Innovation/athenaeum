@@ -124,6 +124,13 @@ class _TargetResolver:
         return self._by_file.get(ref) or self._by_file.get(PurePosixPath(ref).stem)
 
 
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:  # pragma: no cover - defensive
+        return path
+
+
 def _page_uid(path: Path) -> str:
     try:
         meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -141,9 +148,16 @@ def _violations_for(
     resolver: _TargetResolver,
     config: dict[str, Any] | None,
     skip: set[tuple[str, str]] | None = None,
+    surface_override: Mapping[Path, str] | None = None,
+    involving: set[Path] | None = None,
 ) -> list[LinkViolation]:
     locator = index.locator
-    source_surface = surface_name_of(locator, source_path)
+    override = surface_override or {}
+
+    def surface_of(path: Path) -> str:
+        return override.get(_resolved(path)) or surface_name_of(locator, path)
+
+    source_surface = surface_of(source_path)
     if surface_visibility(source_surface, config) <= 0:
         return []  # nothing is more private than rank 0
     found: list[LinkViolation] = []
@@ -153,7 +167,11 @@ def _violations_for(
         target = resolver.resolve(ref)
         if target is None:
             continue
-        target_surface = surface_name_of(locator, target)
+        if involving is not None and not (
+            _resolved(source_path) in involving or _resolved(target) in involving
+        ):
+            continue
+        target_surface = surface_of(target)
         if link_forbidden(source_surface, target_surface, config):
             found.append(
                 LinkViolation(
@@ -302,18 +320,22 @@ class StoreLinkReport:
         return not self.violations
 
 
-def scan_store_links(knowledge_root: Path, config: dict[str, Any] | None = None) -> StoreLinkReport:
-    """Every existing link that breaks the visibility rule (read-only)."""
-    if config is None:
-        config = load_config(knowledge_root)
+def _scan(
+    knowledge_root: Path,
+    config: dict[str, Any],
+    surface_override: Mapping[Path, str] | None,
+    involving: set[Path] | None = None,
+) -> StoreLinkReport:
     wiki_root = knowledge_root / "wiki"
     index = EntityIndex(wiki_root, resolve_locator_surfaces(knowledge_root, config))
     resolver = _TargetResolver(index)
+    override = {_resolved(p): s for p, s in (surface_override or {}).items()}
     scanned = 0
     found: list[LinkViolation] = []
     for _key, path in index.locator.iter_pages():
         scanned += 1
-        if surface_visibility(surface_name_of(index.locator, path), config) <= 0:
+        source_surface = override.get(_resolved(path)) or surface_name_of(index.locator, path)
+        if surface_visibility(source_surface, config) <= 0:
             continue
         try:
             meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -327,6 +349,34 @@ def scan_store_links(knowledge_root: Path, config: dict[str, Any] | None = None)
                 index=index,
                 resolver=resolver,
                 config=config,
+                surface_override=override,
+                involving=involving,
             )
         )
     return StoreLinkReport(pages_scanned=scanned, violations=tuple(found))
+
+
+def scan_store_links(knowledge_root: Path, config: dict[str, Any] | None = None) -> StoreLinkReport:
+    """Every existing link that breaks the visibility rule (read-only)."""
+    if config is None:
+        config = load_config(knowledge_root)
+    return _scan(knowledge_root, config, None)
+
+
+def scan_links_after_move(
+    knowledge_root: Path,
+    moves: Mapping[Path, str],
+    config: dict[str, Any] | None = None,
+) -> StoreLinkReport:
+    """The links that WOULD break the visibility rule once *moves* happened (athenaeum#2620).
+
+    *moves* maps each page that is about to move to the name of the surface it
+    will live on afterwards. Every page is judged with moved pages taken at
+    their post-move surface -- the same resolution and rule as
+    :func:`scan_store_links` -- and only violations that involve a moved page
+    (as source or target) are returned: a link that is already bad and untouched
+    by the move is the lint's business. Read-only.
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+    return _scan(knowledge_root, config, moves, involving={_resolved(p) for p in moves})

@@ -1290,6 +1290,44 @@ def _commit_all(repo: Path, label: str) -> str | None:
     ).stdout.strip()
 
 
+def commit_repo(repo: Path, label: str) -> str | None:
+    """Public form of :func:`_commit_all`: commit every change in *repo*.
+
+    Returns the new HEAD SHA, or ``None`` when there was nothing to commit (or
+    no ``.git``). Used by the per-type store move (athenaeum#2620) to take its
+    own restore points.
+    """
+    return _commit_all(repo, label)
+
+
+def repo_head(repo: Path) -> str | None:
+    """The HEAD commit SHA of the git repository at *repo*, or ``None`` (no repo / no commit)."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def repo_is_clean(repo: Path) -> bool:
+    """Whether *repo* has no modified, staged or untracked files."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(repo), capture_output=True, text=True
+    )
+    return status.returncode == 0 and not status.stdout.strip()
+
+
+def restore_repo(repo: Path, sha: str) -> None:
+    """Return *repo*'s working tree and HEAD to commit *sha* (``reset --hard`` + ``clean -fd``).
+
+    Ignored files are left alone. Raises ``subprocess.CalledProcessError`` on failure.
+    """
+    subprocess.run(["git", "reset", "--hard", sha], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "clean", "-fd"], cwd=str(repo), check=True, capture_output=True)
+
+
 class FilesystemStore:
     """``Store`` over :mod:`athenaeum.atomic_io` + :mod:`pathlib` (issue athenaeum#976).
 
@@ -1402,6 +1440,10 @@ class FilesystemStore:
         if found in knowledge.parents:
             return None
         return found
+
+    def surface_repo(self, surface: str) -> Path | None:
+        """Public form of :meth:`_surface_repo` (athenaeum#2620)."""
+        return self._surface_repo(surface)
 
     def capabilities_for(self, surface: str) -> StoreCapabilities:
         """The capability profile of *surface* (design note §4.5 R2).
