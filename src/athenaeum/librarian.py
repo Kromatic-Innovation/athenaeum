@@ -278,7 +278,7 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.storage import open_store
+from athenaeum.storage import open_store, resolve_indexed_surfaces
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -13180,7 +13180,7 @@ def reindex(
     # (yaml > shipped default) — the old inline `fts5` fallback fired for
     # every library caller that hand-built a config dict.
     backend_name = backend or resolve_search_backend(config)
-    extra_roots = resolve_extra_intake_roots(knowledge_root, config)
+    extra_roots = resolve_indexed_surfaces(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
     full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(
         knowledge_root, config
@@ -13358,7 +13358,7 @@ def _reindex_would_change(
         backend_name = "fts5"
     manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
     manifest_path = resolved_cache / manifest_name
-    extra_roots = resolve_extra_intake_roots(knowledge_root, config)
+    extra_roots = resolve_indexed_surfaces(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
 
     stored = _load_manifest(manifest_path)

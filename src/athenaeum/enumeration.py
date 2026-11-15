@@ -123,6 +123,7 @@ from athenaeum.entity_schema import resolve_entity_classes
 from athenaeum.models import is_page_authorized, parse_frontmatter, resolve_page_type
 from athenaeum.page_relations import is_hidden_split_child
 from athenaeum.search import FTS5Backend
+from athenaeum.storage import IndexedRoot, as_indexed_surface
 
 #: Default row limit when the caller doesn't specify one (matches
 #: ``athenaeum people``'s ``--limit`` default). ``0`` means unlimited,
@@ -309,7 +310,7 @@ def _sort_value(meta: dict[str, object], sort_key: str) -> tuple[int, float, str
 
 
 def _resolve_candidate_path(
-    filename: str, wiki_root: Path, extra_roots: Sequence[Path]
+    filename: str, wiki_root: Path, extra_roots: Sequence[IndexedRoot]
 ) -> Path | None:
     """Resolve an FTS5-indexed filename back to an on-disk path.
 
@@ -323,9 +324,10 @@ def _resolve_candidate_path(
     if "/" not in filename:
         return wiki_root / filename
     root_name, _, rel = filename.partition("/")
-    for root in extra_roots:
-        if root.name == root_name:
-            return root / rel
+    for item in extra_roots:
+        surface = as_indexed_surface(item)
+        if surface.prefix == root_name:
+            return surface.root / rel
     return None
 
 
@@ -385,7 +387,7 @@ def enumerate_entities(
     fields: Sequence[str] = (),
     with_pii: bool = False,
     caller_audience: set[str] | None = None,
-    extra_roots: Sequence[Path] | None = None,
+    extra_roots: Sequence[IndexedRoot] | None = None,
     config: dict[str, Any] | None = None,
     known_classes: Collection[str] | None = None,
     include_split: bool = False,
