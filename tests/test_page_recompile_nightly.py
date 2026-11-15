@@ -1581,8 +1581,10 @@ class TestAC11Documentation:
             assert f"**Default:** `{default}`" in section, (key, default)
 
     def test_the_changelog_unreleased_entry_leads_with_the_three_facts(self) -> None:
-        changelog = (self._repo() / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0]
+        # The per-merge entries live in the release's build notes.
+        unreleased = (
+            self._repo() / "docs" / "changelog" / "0.24.0-build-notes.md"
+        ).read_text(encoding="utf-8")
         entry = next(
             block
             for block in unreleased.split("\n- ")

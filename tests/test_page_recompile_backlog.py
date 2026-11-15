@@ -510,10 +510,13 @@ class TestPageNamesAreVerboseOnly:
 
 class TestChangelog:
     def test_unreleased_names_the_backlog_and_the_deprecation(self) -> None:
-        changelog = (
-            Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+        # The per-merge entries live in the release's build notes.
+        unreleased = (
+            Path(__file__).resolve().parent.parent
+            / "docs"
+            / "changelog"
+            / "0.24.0-build-notes.md"
         ).read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0]
 
         assert "athenaeum#2536" in unreleased
         assert "page-recompile backlog" in unreleased
