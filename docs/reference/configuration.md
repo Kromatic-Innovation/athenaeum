@@ -5300,6 +5300,27 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
+### `resolve_audience_choice`
+
+- **YAML path:** `serve.audience`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'unset'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Classify the configured audience as ``unset``, ``owner`` or ``roles``.
+
+Same tiers as `resolve_audience` (CLI > env > ``serve.audience``):
+
+- ``"unset"`` -- nothing configured, or only blank values.
+- ``"owner"`` -- the value is exactly ``owner`` (case-folded, the SOLE
+ role): a deliberate choice to serve every page.
+- ``"roles"`` -- one or more role ids.
+
+``resolve_audience`` keeps its contract for its other callers; only
+``serve --transport http --profile remote`` reads the distinction, to
+refuse "unset" and to treat ``owner`` as full access.
+
 ### `resolve_serve_audit_log`
 
 - **YAML path:** `serve.audit_log`
