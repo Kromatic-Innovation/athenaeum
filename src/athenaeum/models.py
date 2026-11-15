@@ -3877,10 +3877,14 @@ class EntityIndex:
         """Check if a wiki page uses the full entity template format (has uid field)."""
         return path in self._entity_format_paths
 
-    def register(self, entity: WikiEntity) -> None:
-        """Add a newly created entity to the index."""
+    def register(self, entity: WikiEntity, *, root: Path | None = None) -> None:
+        """Add a newly created entity to the index.
+
+        *root* is the directory the page was written to when that is not the
+        wiki (a per-type surface, athenaeum#2618).
+        """
         key = entity.name.lower()
-        path = self.wiki_root / entity.filename
+        path = (root or self.wiki_root) / entity.filename
         self._by_name[key] = IndexEntry(entity.uid, path, entity.type or None)
         self._entities[entity.uid] = {
             "uid": entity.uid,
