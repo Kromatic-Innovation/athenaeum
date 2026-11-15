@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit way to reverse a rejection. `athenaeum doctor` reports a
   `merge_rejected_with:` entry that resolves to no existing page.
 
+- **Every decision-queue item now carries the host-agnostic item contract (`contract_version: 1`)**
+  (athenaeum#2528, slice S1 of athenaeum#2489). `list_pending_decisions` (and the
+  MCP tool and `athenaeum decisions` CLI built on it) adds `state` / `hold_reason`,
+  `answerable` (true exactly when the type has an answer applier), a `presentation`
+  (`context`, `job`, `options` with pros/cons derived from the response schema,
+  `recommendation` or null, `framed_by`), a `fingerprint` and a `priority`, alongside
+  every existing field. `presentation` extends `frame_decision` with deterministic
+  templates for every item type (no LLM call) and is persisted to
+  `wiki/_decision_presentations.jsonl`, keyed by item id and a digest of the item's
+  decision-relevant fields; a change to one re-frames the item and changes its
+  fingerprint.
+
 - **Remote mode now writes a per-call audit log of remote tool calls**
   (athenaeum#2603): one append-only JSON line per scope-gated tool
   dispatch under `--transport http` with `serve.auth.*` configured —
