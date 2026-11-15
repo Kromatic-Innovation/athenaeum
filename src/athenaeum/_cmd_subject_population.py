@@ -113,9 +113,10 @@ def _git_uncommitted_targets(knowledge_root: Path, paths: list[Path]) -> list[Pa
     site. ``roots={}`` is correct: this call never touches any
     ``StoreKey``-addressed surface, only the git-argv helper.
     """
-    from athenaeum.store import FilesystemStore
+    from athenaeum.config import load_config
+    from athenaeum.storage import open_store
 
-    store = FilesystemStore(knowledge_root, roots={})
+    store = open_store(load_config(knowledge_root), knowledge_root)
     return store.uncommitted_paths(paths)
 
 

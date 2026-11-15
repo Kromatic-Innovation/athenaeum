@@ -757,6 +757,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One `open_store(config, knowledge_root)` factory is now the only production door to `FilesystemStore` (athenaeum#2614).** Thirteen call sites built `FilesystemStore(knowledge_root, {})` by hand — a store that knew no configured storage surface — and the page-recompile apply/undo snapshots passed the whole config dict where the surface map belongs. All now go through `athenaeum.storage.open_store`, so a store's surfaces always reflect `storage:` config; a guard test fails if a new direct construction appears outside `store.py`, `storage.py` and `off_corpus.py`. No behaviour change on a deployment without `storage:` config.
 - **Page recompile now restructures oversized pages automatically by
   default; this is a real behaviour change, not just a new feature.**
   `librarian.page_recompile.mode` defaults to `auto` (was `queue`) and
