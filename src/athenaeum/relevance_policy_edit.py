@@ -11,7 +11,9 @@ Two routes, chosen by the transport the server is running under:
 
 * **Local (stdio)** — :func:`apply_rule_edit` edits the file directly and
   appends one record to ``wiki/_relevance_policy_audit.jsonl`` (rules before
-  and after, client transport, time).
+  and after, client transport, time). It also holds one ``override`` record
+  per explicit-remember fact that a ``never`` rule matched
+  (:func:`record_override`, athenaeum#2646).
 * **Remote (``--transport http``)** — :func:`file_rule_edit_proposal` only
   appends a proposal to ``wiki/_relevance_policy_edit_proposals.jsonl``
   (modelled on :mod:`athenaeum.policy_pack_edit_proposals`). It surfaces in the
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +66,7 @@ LEDGER_VERSION = 1
 AUDIT_FILENAME = "_relevance_policy_audit.jsonl"
 PROPOSALS_FILENAME = "_relevance_policy_edit_proposals.jsonl"
 
+OVERRIDE_KIND = "override"
 PROPOSAL_KIND = "proposal"
 APPROVE_KIND = "approve"
 REJECT_KIND = "reject"
@@ -243,6 +247,48 @@ def apply_rule_edit(
         audit_path(wiki_root), (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     )
     return EditResult(True, _rule_dict(key), _snapshot(before), _snapshot(after), after)
+
+
+def record_override(
+    wiki_root: Path,
+    overrides: "Sequence[Any]",
+    *,
+    transport: str,
+    now: datetime | None = None,
+) -> int:
+    """Append one ``override`` audit record per overridden item (athenaeum#2646).
+
+    *overrides* are :class:`athenaeum.relevance_policy.RelevanceDrop` objects
+    from a gate result: a fact flagged ``explicit_remember`` that a ``never``
+    rule matched. Each record names the rule, the client *transport* (``stdio``
+    or ``http``) and the time, in the same ledger as rule edits. Returns the
+    number of records written. Raises ``OSError`` if the ledger is unwritable;
+    the caller decides whether that blocks the write.
+    """
+    for drop in overrides:
+        record = {
+            "v": LEDGER_VERSION,
+            "kind": OVERRIDE_KIND,
+            "at": now_iso(now),
+            "transport": transport,
+            "rule": _rule_dict_from(drop.rule),
+            "rule_number": drop.rule.number,
+            "rule_line": drop.rule.line,
+        }
+        append_line_durable(
+            audit_path(wiki_root),
+            (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return len(overrides)
+
+
+def _rule_dict_from(rule: Any) -> dict[str, str | None]:
+    return {
+        "verdict": rule.verdict,
+        "type": rule.type,
+        "tag": rule.tag,
+        "subject": rule.subject,
+    }
 
 
 def read_audit(wiki_root: Path) -> list[dict[str, Any]]:

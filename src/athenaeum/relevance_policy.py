@@ -47,7 +47,10 @@ deterministic pre-tier decision. ``librarian.process_one``,
 pipeline transports cannot drift. It reads only DECLARED metadata (frontmatter
 ``type`` / ``tags`` / ``uid``), never the body and never an LLM. A fact is
 dropped only when the last matching rule is ``never``; ``always`` is a prompt
-hint (a later slice) and exempts nothing here.
+hint (a later slice) and exempts nothing here. The one exemption is the
+explicit-remember marker (``explicit_remember: true`` in the item's
+frontmatter, athenaeum#2646): a flagged fact is kept and reported in
+``overrides`` instead of dropped.
 
 An *item* is one declared fact inside a raw: a ``.jsonl`` record, or one of
 several concatenated ``---``-delimited frontmatter documents in a markdown
@@ -308,6 +311,13 @@ DROP_REASON_PREFIX = "relevance-policy"
 
 _EXCERPT_CHARS = 500
 
+#: Frontmatter key ``remember(explicit_request=True)`` stamps on the raw
+#: (athenaeum#2646). A fact carrying a truthy marker is a deliberate human
+#: "remember this": the gate never drops it, whatever ``never`` rule matches,
+#: and reports the rule it overrode in :attr:`RelevanceGateResult.overrides`
+#: so the caller (which knows the transport and the clock) can audit it.
+EXPLICIT_REMEMBER_KEY = "explicit_remember"
+
 
 @dataclass(frozen=True)
 class RelevanceDrop:
@@ -339,6 +349,9 @@ class RelevanceGateResult:
     drops: tuple[RelevanceDrop, ...] = ()
     kept_content: str = ""
     n_items: int = 0
+    #: Items a ``never`` rule covered but the explicit-remember marker
+    #: exempted (athenaeum#2646). Kept, never dropped; each names its rule.
+    overrides: tuple[RelevanceDrop, ...] = ()
 
     @property
     def fully_dropped(self) -> bool:
@@ -369,6 +382,13 @@ def _declared_tags(meta: dict[str, object]) -> list[str]:
     if isinstance(raw, Iterable):
         return [str(t).strip() for t in raw if str(t).strip()]
     return []
+
+
+def _is_explicit_remember(meta: dict[str, object]) -> bool:
+    value = meta.get(EXPLICIT_REMEMBER_KEY)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return value is True
 
 
 def _declared(meta: dict[str, object]) -> tuple[str | None, list[str], str | None]:
@@ -437,17 +457,30 @@ def gate_raw_content(
     if policy is None or not policy.rules:
         return RelevanceGateResult(kept_content=content)
     items = _split_jsonl(content) if jsonl else _split_markdown(content)
+    # The explicit-remember marker on the raw note's own (top) frontmatter
+    # covers every item in it: ``remember(explicit_request=True)`` stamps only
+    # that block, and the human asked for the whole note (Seer review on PR
+    # athenaeum#2680). An item may also carry the marker itself.
+    note_explicit = not jsonl and bool(items) and _is_explicit_remember(items[0].meta)
     drops: list[RelevanceDrop] = []
+    overrides: list[RelevanceDrop] = []
     kept: list[str] = []
     for index, item in enumerate(items):
         rule = policy.match(*_declared(item.meta))
         if rule is not None and rule.verdict == "never":
-            drops.append(RelevanceDrop(rule, index, item.text.strip()[:_EXCERPT_CHARS]))
+            hit = RelevanceDrop(rule, index, item.text.strip()[:_EXCERPT_CHARS])
+            if note_explicit or _is_explicit_remember(item.meta):
+                overrides.append(hit)  # explicit human request beats ``never``
+                kept.append(item.text)
+            else:
+                drops.append(hit)
         else:
             kept.append(item.text)
     if not drops:
-        return RelevanceGateResult(kept_content=content, n_items=len(items))
-    return RelevanceGateResult(tuple(drops), "".join(kept), len(items))
+        return RelevanceGateResult(
+            kept_content=content, n_items=len(items), overrides=tuple(overrides)
+        )
+    return RelevanceGateResult(tuple(drops), "".join(kept), len(items), tuple(overrides))
 
 
 def filter_relevance_never(

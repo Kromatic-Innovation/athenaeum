@@ -135,7 +135,7 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
         "required": ["query"],
     },
     "remember": {
-        "properties": ["bucket", "content", "source", "sources", "valid_until"],
+        "properties": ["bucket", "content", "explicit_request", "source", "sources", "valid_until"],
         "required": ["content"],
     },
     "resolve_merge": {"properties": ["decision", "id", "note"], "required": ["decision", "id"]},
