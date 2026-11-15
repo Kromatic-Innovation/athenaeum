@@ -1133,3 +1133,335 @@ class TestResolvePageTypeFieldGroupsDirect:
         assert result["person"]["deal"] == ("crm_deal_name", "crm_deal_amount")
         assert result["person"]["role"] == ("crm_title",)
         assert result["company"]["deal"] == ("crm_deal_name",)
+
+
+# --- issue athenaeum#2587: section drop rules + `remember` provenance keys ---
+#
+# Still config-only: this "recipe" is a second, independent
+# `librarian.structured_upsert` config local to this section (never touches
+# the module-level `CONFIG` above, which the earlier tests still exercise
+# unchanged). The shapes below model the household "cooking" skill's
+# conversion from an Ingredients/Steps layout to a Shopping/Check pantry/
+# Prep/Cooking/Serve layout, with `recipe_format` as the format marker --
+# the issue's worked example -- but nothing under test reads that type name;
+# a differently-named config-only type would behave identically.
+
+KITCHEN_UID = "recipe-test-kitchen-v1"
+
+KITCHEN_CONFIG: dict = {
+    "librarian": {
+        "structured_upsert": {
+            "recipe": {
+                "sections": [
+                    "Shopping",
+                    "Check pantry",
+                    "Prep",
+                    "Cooking",
+                    "Serve",
+                    "Notes",
+                    "Source",
+                ],
+                "append_sections": ["Notes", "Source"],
+                "drop_sections": [
+                    {
+                        "when_any": [
+                            "Shopping",
+                            "Check pantry",
+                            "Prep",
+                            "Cooking",
+                            "Serve",
+                        ],
+                        "drop": ["Ingredients", "Steps"],
+                    }
+                ],
+                "set_keys": ["recipe_format"],
+            }
+        }
+    }
+}
+
+KITCHEN_OLD_PAGE = f"""\
+---
+uid: {KITCHEN_UID}
+type: recipe
+name: Test Stew
+access: personal
+created: '2026-10-01'
+updated: '2026-10-01'
+---
+
+# Test Stew
+
+## Ingredients
+
+- 1 onion
+- 2 carrots
+
+## Steps
+
+1. Chop the vegetables.
+2. Simmer for an hour.
+
+## Notes
+
+- Freezes well.
+
+## Source
+
+- https://example.test/stew
+"""
+
+# Shaped like a real `remember` write with `sources` omitted: `source`,
+# `model` and `originSessionId` are exactly the keys
+# `mcp_server.remember_write` stamps in that case (the wiki-level
+# `_DEFAULT_INFERRED_SOURCE` default plus `_default_inferred_extras`), not a
+# guessed set.
+KITCHEN_RAW = f"""\
+---
+uid: {KITCHEN_UID}
+type: recipe
+name: Test Stew
+source: claude:inferred
+model: claude-sonnet-5
+originSessionId: 9f2b6e2a-aaaa-4444-8888-000000000001
+recipe_format: kitchen-v1
+---
+
+# Test Stew
+
+## Shopping
+
+- Onion
+- Carrots
+
+## Check pantry
+
+- Salt
+- Pepper
+
+## Prep
+
+- Dice the onion and carrots.
+
+## Cooking
+
+- Simmer for an hour.
+
+## Serve
+
+- Ladle into bowls.
+
+## Notes
+
+- Kid-friendly.
+
+## Source
+
+- Converted by the cooking skill.
+"""
+
+
+def test_kitchen_format_raw_drops_old_sections_and_accepts_remember_provenance(
+    tmp_path: Path,
+) -> None:
+    """AC1: a converted-recipe raw shaped exactly like a `remember` write
+    (carrying `source`/`model`/`originSessionId`) replaces the page's old
+    Ingredients/Steps layout with the new household sections, drops the old
+    sections entirely rather than leaving them stale next to the new ones,
+    sets the format marker, and still appends to Notes/Source as before --
+    using a config-only type, so the engine itself stays type-agnostic."""
+    wiki = tmp_path / "kitchen-wiki"
+    wiki.mkdir()
+    (wiki / f"{KITCHEN_UID}.md").write_text(KITCHEN_OLD_PAGE, encoding="utf-8")
+    raw = _raw(tmp_path, KITCHEN_RAW, "kitchen.md")
+
+    out = tier0_structured_upsert(raw, EntityIndex(wiki), wiki, TYPES, config=KITCHEN_CONFIG)
+    assert out is not None and out.status == "applied"
+
+    meta, body = parse_frontmatter((wiki / f"{KITCHEN_UID}.md").read_text(encoding="utf-8"))
+    assert _headings(body) == [
+        "# Test Stew",
+        "## Shopping",
+        "## Check pantry",
+        "## Prep",
+        "## Cooking",
+        "## Serve",
+        "## Notes",
+        "## Source",
+    ]
+    # Old sections are gone outright, not merely left stale.
+    assert "Ingredients" not in body
+    assert "- 1 onion" not in body
+    assert "Chop the vegetables." not in body
+    # New sections' content is present.
+    assert "- Onion" in body and "- Carrots" in body
+    assert meta["recipe_format"] == "kitchen-v1"
+    # Notes/Source: existing line kept once, new line appended, as before.
+    assert body.count("Freezes well.") == 1
+    assert "Kid-friendly." in body
+    assert "https://example.test/stew" in body and "Converted by the cooking skill." in body
+    # The remember-stamped provenance keys were accepted (no refusal above)
+    # but never merged onto the structured page -- it keeps its own.
+    assert "model" not in meta
+    assert "originSessionId" not in meta
+    assert "source" not in meta
+    # Identity envelope untouched.
+    assert (meta["uid"], meta["type"], meta["created"], meta["access"]) == (
+        KITCHEN_UID,
+        "recipe",
+        "2026-10-01",
+        "personal",
+    )
+
+
+def test_drop_sections_skipped_when_raw_ranks_below_the_page(tmp_path: Path) -> None:
+    """A drop rule is gated by *allow_replace* exactly like `replace_sections`:
+    a lower-ranked raw must not retire a higher-ranked page's sections."""
+    ranked_config: dict = {
+        "librarian": {
+            "structured_upsert": {
+                "recipe": {
+                    **KITCHEN_CONFIG["librarian"]["structured_upsert"]["recipe"],
+                    "ordered_keys": {"fetch_status": ["draft", "final"]},
+                }
+            }
+        }
+    }
+    wiki = tmp_path / "kitchen-wiki"
+    wiki.mkdir()
+    page = KITCHEN_OLD_PAGE.replace(
+        "created: '2026-10-01'\n", "created: '2026-10-01'\nfetch_status: final\n"
+    )
+    (wiki / f"{KITCHEN_UID}.md").write_text(page, encoding="utf-8")
+    raw = KITCHEN_RAW.replace(
+        "recipe_format: kitchen-v1\n", "recipe_format: kitchen-v1\nfetch_status: draft\n"
+    )
+
+    out = tier0_structured_upsert(
+        _raw(tmp_path, raw, "kitchen.md"), EntityIndex(wiki), wiki, TYPES, config=ranked_config
+    )
+    assert out is not None and out.status == "applied"
+    _, body = parse_frontmatter((wiki / f"{KITCHEN_UID}.md").read_text(encoding="utf-8"))
+    # Old sections survive a rank-regressed raw; new sections are still
+    # inserted (insertion is unconditional, only replace/drop are gated).
+    assert "## Ingredients" in body and "## Steps" in body
+
+
+def test_unknown_raw_key_other_than_remember_provenance_is_still_refused(
+    tmp_path: Path, wiki: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Accepting `remember`'s provenance keys does not widen the refusal gate
+    for anything else: a genuinely unconfigured key is still refused, naming
+    it, exactly as `test_unknown_raw_frontmatter_key_is_refused_naming_it`
+    already covers -- this adds `model`/`originSessionId` alongside it to
+    confirm they do NOT get credited toward the same refusal."""
+    raw_text = FULL_RAW.replace(
+        "servings: '8'\n",
+        "servings: '8'\nmodel: claude-sonnet-5\noriginSessionId: s-1\nbogus_key: x\n",
+    )
+    with caplog.at_level(logging.WARNING):
+        out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "refused" and out.reason == "unappliable"
+    assert "bogus_key" in caplog.text
+    assert "model" not in caplog.text
+    assert "originSessionId" not in caplog.text
+
+
+def test_remember_shaped_raw_is_applied_not_refused(tmp_path: Path, wiki: Path) -> None:
+    """The common path this issue is about: a raw carrying exactly the keys
+    `remember` stamps when its caller omits `sources` (`source` is already
+    declared in the module `CONFIG`'s `set_keys` above; `model` and
+    `originSessionId` are not declared anywhere) applies instead of being
+    refused."""
+    raw_text = FULL_RAW.replace(
+        "servings: '8'\n",
+        "servings: '8'\nmodel: claude-sonnet-5\noriginSessionId: s-1\n",
+    )
+    out = _upsert(_raw(tmp_path, raw_text), wiki)
+    assert out is not None and out.status == "applied"
+    meta, _ = _page(wiki)
+    assert "model" not in meta and "originSessionId" not in meta
+
+
+class TestResolveStructuredUpsertDropSections:
+    """Direct coverage of ``resolve_structured_upsert``'s ``drop_sections``
+    parsing (issue athenaeum#2587), matching the standing of
+    ``test_config_strips_identity_keys_and_stray_sections`` for the other
+    section lists."""
+
+    def test_valid_rule_is_read(self) -> None:
+        specs = resolve_structured_upsert(
+            {
+                "librarian": {
+                    "structured_upsert": {
+                        "recipe": {
+                            "sections": ["Shopping", "Prep"],
+                            "drop_sections": [
+                                {"when_any": ["Shopping", "Prep"], "drop": ["Ingredients", "Steps"]}
+                            ],
+                        }
+                    }
+                }
+            }
+        )
+        assert specs["recipe"].drop_sections == (
+            (frozenset({"shopping", "prep"}), frozenset({"ingredients", "steps"})),
+        )
+
+    def test_trigger_not_in_sections_is_dropped_from_the_rule(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            specs = resolve_structured_upsert(
+                {
+                    "librarian": {
+                        "structured_upsert": {
+                            "recipe": {
+                                "sections": ["Shopping"],
+                                "drop_sections": [
+                                    {"when_any": ["Shopping", "Mystery"], "drop": ["Ingredients"]}
+                                ],
+                            }
+                        }
+                    }
+                }
+            )
+        assert specs["recipe"].drop_sections == (
+            (frozenset({"shopping"}), frozenset({"ingredients"})),
+        )
+        assert "Mystery" in caplog.text
+
+    def test_rule_with_no_valid_trigger_is_dropped_entirely(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            specs = resolve_structured_upsert(
+                {
+                    "librarian": {
+                        "structured_upsert": {
+                            "recipe": {
+                                "sections": ["Shopping"],
+                                "drop_sections": [
+                                    {"when_any": ["Mystery"], "drop": ["Ingredients"]},
+                                    {"when_any": ["Shopping"], "drop": []},
+                                    "not-a-dict",
+                                ],
+                            }
+                        }
+                    }
+                }
+            )
+        assert specs["recipe"].drop_sections == ()
+
+    def test_non_list_drop_sections_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            specs = resolve_structured_upsert(
+                {
+                    "librarian": {
+                        "structured_upsert": {
+                            "recipe": {"sections": ["Shopping"], "drop_sections": "nope"}
+                        }
+                    }
+                }
+            )
+        assert specs["recipe"].drop_sections == ()
