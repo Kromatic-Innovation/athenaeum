@@ -265,6 +265,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `short_name_escalated` guard (athenaeum#1173) now resolves a short
+  single-token create against existing pages' `name:`/`aliases:` before
+  escalating: exactly one match attaches the observation to that page and
+  raises no escalation item at all (so a short name kept as an alias by
+  `athenaeum entity rename` — athenaeum#2488 — no longer escalates every
+  later mention forever); no match still escalates exactly as before; two
+  or more matches still escalate, now naming every candidate page
+  (athenaeum#2527).
 - `athenaeum import-memory --path <root>` now compiles the root it staged
   files into, not the default knowledge base. `_default_compile_batch`
   called `librarian.run(knowledge_root=...)` without `raw_root`/`wiki_root`,
