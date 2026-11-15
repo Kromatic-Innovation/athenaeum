@@ -389,6 +389,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal's source pages on the archived block, and the archive binds every
   proposer until one of those pages actually changes (athenaeum#2514).
 
+- `athenaeum schedule install` now schedules the `athenaeum` that is running
+  `install`, not whichever one is first on `PATH`. The binary is resolved from
+  the running environment first (the entry point in `sys.argv[0]`, then the
+  console script beside the interpreter) and falls back to `PATH` only when
+  neither exists; `install` prints the resolved binary path so a mismatch is
+  visible (athenaeum#2583).
+
 - A human-approved fold into a canonical page that has no frontmatter — or
   an empty `{}` block — now backfills that page's separator coordinates from
   the folded sources in the fold preflight, so it applies instead of raising
