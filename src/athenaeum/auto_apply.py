@@ -114,6 +114,7 @@ from typing import Any
 from athenaeum.comparator import VERDICT_DUPLICATE, ComparatorPage, CompareOutcome
 from athenaeum.models import is_tombstone
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
+from athenaeum.prior_rulings import rejection_still_binds
 from athenaeum.verdict_effects import (
     EffectResult,
     _canonical_side,
@@ -336,6 +337,20 @@ def enact_verdict_effect(
         search_backend=search_backend,
         embedding_model=embedding_model,
         auto_applied=True,
+        # Issue athenaeum#2546 review finding: without this, a pair whose
+        # rejected_merge_cooldown_days (issue athenaeum#2077) already
+        # lapsed -- the exact reason the comparator reached a fresh
+        # "duplicate" verdict here instead of short-circuiting at Gate 1 --
+        # would have this auto-apply refused forever by the fold-apply
+        # preflight's merge_rejected_with check, against STALE on-disk
+        # frontmatter the pair loop only ever lifts in memory. Computed
+        # HERE (not inside pending_merges.resolve_merge) because that
+        # module cannot import athenaeum.prior_rulings — see
+        # _apply_fold_into_existing's docstring for the import-cycle
+        # reason.
+        rejection_cooldown_lapsed=not rejection_still_binds(
+            wiki_root, path_a.name, path_b.name, config=config
+        ),
     )
     if not result.get("ok"):
         details["auto_apply_blocked_reason"] = result.get("error_code") or "auto_fold_failed"

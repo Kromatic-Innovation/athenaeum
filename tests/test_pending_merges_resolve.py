@@ -194,6 +194,41 @@ def test_resolve_merge_reject_writes_no_refines(tmp_path: Path) -> None:
     assert a_meta.get("merge_rejected_with") == ["b"]
 
 
+def test_resolve_merge_reject_writes_both_pages(tmp_path: Path) -> None:
+    """athenaeum#2546 AC1: reject stamps merge_rejected_with on BOTH sources.
+
+    athenaeum#715 only stamped source A (naming B) -- sufficient for
+    declared_relationship's "either side" check, but not enough for a
+    later fold: if A is the one folded away, B needs its OWN copy of the
+    link to carry forward (see test_fold_carries_both_sides_merge_rejected_with).
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a = tmp_path / "feedback_a.md"
+    src_b = tmp_path / "feedback_b.md"
+    _write_source(src_a, name="a")
+    _write_source(src_b, name="b")
+
+    write_pending_merge(
+        merges,
+        merge_target_name="both-sides-merge",
+        sources=[str(src_a), str(src_b)],
+        rationale="r",
+        draft_merged_body="draft",
+        confidence=0.9,
+    )
+    from athenaeum.pending_merges import parse_pending_merges
+
+    pm_id = parse_pending_merges(merges)[0].id
+    result = resolve_merge(merges, pm_id, "reject")
+    assert result["ok"] is True
+    assert "warning" not in result
+
+    a_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+    b_meta, _ = parse_frontmatter(src_b.read_text(encoding="utf-8"))
+    assert a_meta.get("merge_rejected_with") == ["b"]
+    assert b_meta.get("merge_rejected_with") == ["a"]
+
+
 def test_resolve_merge_reject_is_idempotent(tmp_path: Path) -> None:
     """Rejecting the same pair twice must not duplicate the entry."""
     src_a = tmp_path / "feedback_a.md"

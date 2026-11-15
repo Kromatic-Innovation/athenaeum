@@ -196,6 +196,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         classify_write_kind,
         filename_slug_by_uid,
         find_fold_target_collisions,
+        find_merge_rejection_conflict,
         identity_slug,
         write_pending_merge,
     )
@@ -352,6 +353,35 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # source set (harmless: the fold write path excludes it from deletion).
     sources = [str(into_path)] + [str(p) for p in source_paths]
 
+    # Issue athenaeum#2546 ("honoured everywhere" — propose-fold's own
+    # refusal): refuse at PROPOSAL time, before anything is queued, when
+    # --into and any --source (or two --sources) are linked by
+    # merge_rejected_with — directly, or through a fold chain (alias-aware,
+    # so a link against either page's pre-rename/pre-fold identity still
+    # matches). Checked on both dry-run and --apply, same as every other
+    # refusal above.
+    #
+    # Cooldown-aware (issue athenaeum#2546 review finding), consistent with
+    # the wiki-dedupe clusterer and the fold-apply preflight below it in
+    # pending_merges.py: "proposed again" after the configured
+    # rejected_merge_cooldown_days lapses (issue athenaeum#2077) is exactly
+    # what the nightly clusterer already does for the identical pair, so an
+    # operator-driven propose-fold refusing unconditionally here would be
+    # STRICTER than the automatic path for the same pair.
+    conflict = find_merge_rejection_conflict([into_path, *source_paths])
+    if conflict is not None:
+        a, b = conflict
+        from athenaeum.prior_rulings import rejection_still_binds
+
+        if rejection_still_binds(wiki_root, a.name, b.name, config=load_config(args.path)):
+            return _fail(
+                f"{a.name} and {b.name} are linked by merge_rejected_with (an "
+                "operator previously rejected merging them); refusing to "
+                "propose a fold that would unite them, directly or through this "
+                "fold chain. Revoke the link first (athenaeum decisions "
+                "revoke-merge-rejection) if the ruling no longer applies."
+            )
+
     # 3. Draft page text — verbatim canonical text unless overridden.
     #
     # Issue athenaeum#2125: ``draft_merged_body`` is whole PAGE text
@@ -458,6 +488,137 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         f"({len(source_paths)} source(s)). Approve with the resolver "
         "(`resolve_merge`) — approval is unchanged."
     )
+    return 0
+
+
+def _cmd_revoke_merge_rejection(args: argparse.Namespace) -> int:
+    """``athenaeum decisions revoke-merge-rejection --a PAGE --b PAGE``.
+
+    Issue athenaeum#2546 AC3: an explicit operator action that reverses a
+    ``resolve_merge(reject)`` ruling (the ``merge_rejected_with:`` link
+    recorded on both pages, athenaeum#715/athenaeum#2546) — the "equivalent
+    documented path" to ``decisions challenge-coordinate``, which is
+    purpose-built to stale-mark comparator verdicts whose basis names a
+    revoked COORDINATE answer (issue athenaeum#1994/#717) and has no
+    concept of a declared-relationship frontmatter field to reuse here.
+
+    Removes, from EACH page that carries one, the ``merge_rejected_with:``
+    entry naming the OTHER page BY EITHER SIDE'S FULL IDENTITY (its current
+    ``name:`` OR any of its ``aliases:``) — not just the current name.
+    Without that widening, a link written against a page's PRE-rename name
+    would be unrevocable by naming the page's new identity: the reading
+    path (:func:`athenaeum.declared_relationships.declared_relationship`)
+    is alias-aware so the link keeps being honoured forever, but a
+    current-name-only strip here could never find the old-named entry to
+    remove it — exactly the asymmetry this command exists to avoid. Reuses
+    :func:`athenaeum.declared_relationships.identity_slugs` rather than
+    re-deriving the union.
+
+    Dry-run by default — prints what WOULD change, writes nothing;
+    ``--apply`` writes. Refuses (exit 2) when neither page carries a link
+    naming the other, so a typo'd pair never silently reports success.
+    """
+    from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.declared_relationships import DeclaredRelationshipFacts, identity_slugs
+    from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
+
+    wiki_root = _resolve_wiki_root(args)
+
+    def _fail(message: str) -> int:
+        if args.json:
+            sys.stdout.write(json.dumps({"ok": False, "error": message}) + "\n")
+        else:
+            print(f"error: {message}", file=sys.stderr)
+        return 2
+
+    def _resolve(flag: str, ref: str) -> Path | str:
+        found = _resolve_wiki_page(wiki_root, ref)
+        if found is None:
+            by_uid = _resolve_page_by_uid(wiki_root, ref)
+            if len(by_uid) > 1:
+                return (
+                    f"{flag} {ref!r} is ambiguous: uid matches "
+                    + ", ".join(p.name for p in by_uid)
+                )
+            if not by_uid:
+                return f"{flag} {ref!r} is not an existing wiki page under {wiki_root}"
+            found = by_uid[0]
+        return found
+
+    resolved_a = _resolve("--a", args.a)
+    if isinstance(resolved_a, str):
+        return _fail(resolved_a)
+    resolved_b = _resolve("--b", args.b)
+    if isinstance(resolved_b, str):
+        return _fail(resolved_b)
+    path_a, path_b = resolved_a, resolved_b
+    if path_a == path_b:
+        return _fail("--a and --b name the same page")
+
+    def _meta_and_identity(path: Path) -> tuple[dict, set[str]]:
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            meta = {}
+        name = meta.get("name")
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(x) for x in aliases_raw if isinstance(x, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        facts = DeclaredRelationshipFacts(
+            name=str(name) if isinstance(name, str) and name.strip() else path.stem,
+            aliases=aliases,
+        )
+        return meta, identity_slugs(facts)
+
+    meta_a, identity_a = _meta_and_identity(path_a)
+    meta_b, identity_b = _meta_and_identity(path_b)
+
+    def _drop_entry(meta: dict, other_identity: set[str]) -> tuple[dict, bool]:
+        raw = meta.get("merge_rejected_with")
+        if not isinstance(raw, list):
+            return meta, False
+        kept = [r for r in raw if slugify(str(r)) not in other_identity]
+        if len(kept) == len(raw):
+            return meta, False
+        new_meta = dict(meta)
+        if kept:
+            new_meta["merge_rejected_with"] = kept
+        else:
+            new_meta.pop("merge_rejected_with", None)
+        return new_meta, True
+
+    new_meta_a, changed_a = _drop_entry(meta_a, identity_b)
+    new_meta_b, changed_b = _drop_entry(meta_b, identity_a)
+
+    if not changed_a and not changed_b:
+        return _fail(
+            f"{path_a.name} and {path_b.name} carry no merge_rejected_with "
+            "link naming each other; nothing to revoke"
+        )
+
+    plan = {
+        "ok": True,
+        "applied": bool(args.apply),
+        "a": str(path_a),
+        "b": str(path_b),
+        "a_changed": changed_a,
+        "b_changed": changed_b,
+    }
+    if args.apply:
+        if changed_a:
+            _, body_a = parse_frontmatter(path_a.read_text(encoding="utf-8"))
+            atomic_write_text(path_a, render_frontmatter(new_meta_a) + body_a)
+        if changed_b:
+            _, body_b = parse_frontmatter(path_b.read_text(encoding="utf-8"))
+            atomic_write_text(path_b, render_frontmatter(new_meta_b) + body_b)
+
+    if args.json:
+        sys.stdout.write(json.dumps(plan) + "\n")
+        return 0
+    verb = "Revoked" if args.apply else "Would revoke"
+    print(f"{verb} the merge_rejected_with link between {path_a.name} and {path_b.name}.")
     return 0
 
 
@@ -1036,6 +1197,39 @@ def _add_propose_fold_subparser(sub: argparse._SubParsersAction) -> argparse.Arg
         help="Queue the proposal. Default: dry-run — print the plan, write nothing.",
     )
     return fold_p
+
+
+def _add_revoke_merge_rejection_subparser(
+    sub: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    revoke_p = sub.add_parser(
+        "revoke-merge-rejection",
+        help=(
+            "Revoke a merge_rejected_with link between two pages (issue "
+            "athenaeum#2546) — the explicit operator action that reverses a "
+            "prior `resolve_merge(reject)` ruling. Dry-run by default; "
+            "--apply to write."
+        ),
+    )
+    _add_merges_common_args(revoke_p)
+    revoke_p.add_argument(
+        "--a",
+        required=True,
+        metavar="PAGE",
+        help="One of the two pages (a slug, a `<slug>.md` filename, or a path).",
+    )
+    revoke_p.add_argument(
+        "--b",
+        required=True,
+        metavar="PAGE",
+        help="The other of the two pages.",
+    )
+    revoke_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the removal. Default: dry-run — print the plan, write nothing.",
+    )
+    return revoke_p
 
 
 def _add_provenance_subparser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:

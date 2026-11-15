@@ -166,6 +166,60 @@ class TestSessionEndComposition:
         assert list((root / "wiki").glob("p-0001-*.md"))
         assert (cache / "ingest-manifest.json").is_file()
 
+    def test_vector_backend_without_chromadb_degrades_to_fts5_and_succeeds(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2592: a fresh install that followed the README quick
+        start (``pip install athenaeum[mcp]`` only) gets ``search_backend:
+        vector`` from ``athenaeum init`` -- and that config's own comment
+        ("a default install without [chromadb] degrades to fts5 at query
+        time with one logged warning, no traceback", mirrored in
+        ``config.py``'s ``_DEFAULTS["search_backend"]`` docstring) promises a
+        degrade, not a failure. Before this fix, ``session_end`` raised
+        ``ImportError`` straight out of ``librarian.reindex`` the moment the
+        compile-gated reindex ran under ``backend="vector"`` with chromadb
+        absent -- surfacing to the CLI wrapper as a hard
+        ``{"error": "ImportError: ...", "exit_code": 1}``, and (just as
+        importantly) never building even the FTS5 index the query-time
+        fallback needs something to answer from.
+
+        Simulate chromadb's absence through ``VectorBackend._get_chromadb``
+        -- the one choke point every backend method goes through for its
+        chromadb handle -- rather than uninstalling the real chromadb this
+        environment has.
+        """
+        from athenaeum.librarian import session_end
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+            backend="vector",
+        )
+
+        assert result.exit_code == 0, "must degrade, never error, per the yaml promise"
+        assert result.reindexed is True
+        assert result.reindex_pages >= 1
+        # The backend actually used is reported, not the one requested -- a
+        # caller inspecting the summary must see what really got built.
+        assert result.backend == "fts5"
+        # And the fts5 index genuinely exists on disk for a later query to
+        # read -- not just a reported count.
+        assert (cache / "wiki-index.db").is_file()
+        assert (cache / "fts5-manifest.json").is_file()
+
     def test_idle_session_end_is_noop_and_skips_reindex(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
@@ -558,6 +612,111 @@ class TestReindexGateOnStaleness:
         assert second.ingest.noop is True
         assert second.reindexed is False
         assert second.reindex_would_change == 0
+
+    def test_vector_backend_without_chromadb_idle_tick_also_stays_cheap(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#2592 (Seer review follow-up): on a chromadb-free
+        install, the FIRST ``session_end`` tick degrades ``vector`` to
+        ``fts5`` and writes an **fts5** manifest (the fix pinned in
+        ``TestSessionEndComposition``). ``_reindex_would_change`` used to
+        keep resolving the manifest from the CONFIGURED backend
+        (``resolve_search_backend`` → still ``"vector"``) regardless of
+        what the prior reindex actually wrote -- so on every later idle
+        tick it diffed against a ``vector`` manifest that will never exist
+        on this install shape, always reported the whole corpus as
+        pending, and ``session_end`` redid a full reindex on EVERY call
+        instead of taking the athenaeum#1456 idle fast path. Not a crash
+        (no test caught it) -- a silent, permanent performance regression
+        on exactly the install shape this issue is about.
+
+        Measured directly (not inferred) against the real CLI before this
+        fix: three consecutive ``session-end`` calls against an unchanged
+        corpus all reported ``"reindexed": true`` and
+        ``"reindex_would_change": 1``, never the idle fast path.
+
+        Simulates chromadb's absence twice, matching the two call sites
+        that each independently decide "is chromadb available":
+        ``VectorBackend._get_chromadb`` (the real build's seam, used by the
+        first tick's actual fallback reindex) and
+        ``importlib.util.find_spec`` (the preview's own cheap check, which
+        must never actually import chromadb per its own docstring
+        invariant) scoped to the ``"chromadb"`` name only, so other
+        ``find_spec`` callers in the same process are unaffected.
+        """
+        import importlib.util as _importlib_util
+
+        import athenaeum.librarian as lib
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        real_find_spec = _importlib_util.find_spec
+
+        def _find_spec_no_chromadb(name: str, *a: object, **k: object) -> object:
+            if name == "chromadb":
+                return None
+            return real_find_spec(name, *a, **k)
+
+        monkeypatch.setattr(_importlib_util, "find_spec", _find_spec_no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True
+        assert first.backend == "fts5"  # degraded, per the athenaeum#2592 fix
+        assert (cache / "fts5-manifest.json").is_file()
+        assert not (cache / "vector-manifest.json").exists()
+
+        reindex_calls: list[bool] = []
+        real_reindex = lib.reindex
+        monkeypatch.setattr(
+            lib,
+            "reindex",
+            lambda *a, **k: (reindex_calls.append(True), real_reindex(*a, **k))[1],
+        )
+
+        second = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        # The fixed behaviour: nothing changed → the idle fast path, not
+        # another full reindex. Before the fix this was `reindexed is True`
+        # and `reindex_would_change == 1`, every single call.
+        assert second.ingest.noop is True
+        assert reindex_calls == [], "idle tick must not call reindex() at all"
+        assert second.reindexed is False
+        assert second.reindex_pages == 0
+        assert second.reindex_would_change == 0
+
+        # And it stays idle on a THIRD tick too -- not a one-time settle.
+        third = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.ingest.noop is True
+        assert third.reindexed is False
+        assert third.reindex_would_change == 0
 
     def test_unembedded_class_does_not_wedge_the_gate_open(
         self, tmp_path: Path, mock_anthropic: MagicMock
@@ -1322,6 +1481,53 @@ class TestSessionEndCLI:
         # The nested ingest summary round-trips.
         assert payload["ingest"]["command"] == "ingest"
         assert payload["ingest"]["compiled"] == 1
+
+    def test_vector_backend_without_chromadb_cli_exits_zero(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#2592, CLI-wrapper half: before this fix,
+        ``cmd_session_end``'s own ``except Exception`` wrapper turned the
+        ``ImportError`` out of ``librarian.reindex`` into
+        ``{"error": "ImportError: Vector backend requires chromadb. ...",
+        "exit_code": 1}`` -- exactly the failure the clean-machine report
+        recorded for ``athenaeum session-end`` under the shipped
+        ``search_backend: vector`` default. The library-level fallback
+        (asserted in ``TestSessionEndComposition``) must reach all the way
+        through this CLI wrapper to a clean exit 0.
+        """
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "vector",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "error" not in payload
+        assert payload["command"] == "session-end"
+        assert payload["reindexed"] is True
+        assert payload["backend"] == "fts5"
+        assert payload["exit_code"] == 0
 
     def test_single_flight_lock_held(
         self,

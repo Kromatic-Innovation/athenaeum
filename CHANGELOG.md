@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shared content gets one page of its own that the related pages link to (athenaeum#2589).** A page-recompile plan can route a unit shared by two or more distinct subject pages to one newly-minted shared page instead of copying it onto each subject, via a new `shared:<group>` disposition paired with one `shared-subject:<group>:<uid>` page action per subject. The shared page records every subject it concerns through the parent/child relation athenaeum#2535 shipped (`page_relations.set_relation`, `via="fold"`), and each subject page gets a link back through the SAME relation — recall and listings show it through the surface athenaeum#2538 already built, with no new rendering path. Gated by the new `librarian.shared_content_page_type` config knob (mechanism, not policy): with nothing declared, a `shared:<group>` disposition downgrades to a plain `child:<group>` and no shared page is ever minted — behaviour is unchanged by default. Content concerning only one subject is refused (`shared-group-too-few-subjects`) rather than silently routed, so it stays on that subject's own page as before. Does not touch the never-merge link (athenaeum#2546) or the fold/merge-queue pipeline (`pending_merges.py`/`merge.py`/`wiki_dedupe.py`/`comparator.py`), both out of scope here.
+- **A rejected merge now leaves a durable never-merge link honored by
+  every merge path (athenaeum#2546).** Rejecting a merge or fold question
+  writes `merge_rejected_with:` onto BOTH pages (previously only one,
+  athenaeum#715) and the decision carries through folds: when a page folds
+  into a canonical, the canonical keeps its own link and absorbs any the
+  folded-away page held, and a link naming a page's pre-rename name (the
+  athenaeum#2488 rename primitive) or a page since folded into another
+  still resolves via `aliases:`. The nightly similarity clusterer, `athenaeum
+  decisions propose-fold`, and approving a queued fold now all refuse to
+  unite two linked pages, directly or through a fold chain. New `athenaeum
+  decisions revoke-merge-rejection --a PAGE --b PAGE [--apply]` is the
+  explicit way to reverse a rejection. `athenaeum doctor` reports a
+  `merge_rejected_with:` entry that resolves to no existing page.
+
 - **Remote mode now writes a per-call audit log of remote tool calls**
   (athenaeum#2603): one append-only JSON line per scope-gated tool
   dispatch under `--transport http` with `serve.auth.*` configured —
@@ -185,6 +200,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and rewrites inbound `[[wikilinks]]` (reusing the fold's own rewrite
   helper). Idempotent, and takes the run lock on `--apply` (athenaeum#2488).
 
+- A `short_name_escalated` decision-queue item (raised when the short-name
+  guard suppresses a Tier-3 create for a short, generic name) is now
+  answerable instead of only archivable as text: answer it with the uid of
+  an existing page to attach the parked observation to, plus an optional
+  qualified `name` to rename that page first — through the athenaeum#2488
+  rename primitive, so the old name lands in `aliases:` with provenance
+  recorded. `athenaeum ingest-answers` applies the answer (observation
+  attached, item resolved) rather than archiving it inert; a uid that does
+  not resolve is refused with a clear error and the item stays open
+  (athenaeum#2526).
+
 - `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
   ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
   and source object produced a compiled page, or says plainly that none was
@@ -270,6 +296,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same counts under a `page_recompile` key (schema v4), and the new
   `athenaeum status --json` emits the whole snapshot, backlog block
   included, as JSON (athenaeum#2536).
+- `librarian.structured_upsert.<type>` gained `drop_sections`: a list of
+  `{when_any: [...], drop: [...]}` rules so a type-config change can express
+  "these new sections replace those old ones" — when a raw fills in any
+  `when_any` section, every `drop` section (which need not even be listed
+  in the type's current `sections`) is removed from the page outright
+  instead of being left stale next to the new ones. The structured-upsert
+  engine also now accepts the provenance keys the `remember` MCP tool
+  itself stamps when a caller omits `sources` (`model`, `originSessionId`,
+  `source`) on every configured type unconditionally, rather than refusing
+  a write because `remember`'s own default stamped it; they are never
+  merged onto the page. Both are general engine capabilities, not anything
+  recipe-specific (athenaeum#2587).
 
 ### Deprecated
 
@@ -289,6 +327,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later mention forever); no match still escalates exactly as before; two
   or more matches still escalate, now naming every candidate page
   (athenaeum#2527).
+- `athenaeum import-memory --path <root>` now compiles the root it staged
+  files into, not the default knowledge base. `_default_compile_batch`
+  called `librarian.run(knowledge_root=...)` without `raw_root`/`wiki_root`,
+  so a real run fell back to `librarian.run`'s own defaults — the home
+  directory's `~/knowledge` — and compiled that corpus instead of the one
+  named by `--path`, while the files staged into the named root were never
+  compiled. Both roots are now passed explicitly, derived from the named
+  root the same way `athenaeum run` and `athenaeum drain` already do
+  (athenaeum#2582).
+- `athenaeum doctor`'s `mcp` check now also looks for the user-scope MCP
+  registration at the home-level `.claude.json` (a sibling of `.claude/`,
+  not a child of it), which is where current Claude Code writes it after
+  `claude mcp add --scope user`. Previously the check looked only inside
+  the `.claude` config directory, so a correct install reported `FAIL`
+  with a fix that was the command the user had just run; a genuinely
+  unregistered install still reports `FAIL` (athenaeum#2594).
+- `athenaeum reindex` and `athenaeum session-end` no longer error with
+  "Vector backend requires chromadb" under the shipped default
+  (`search_backend: vector`) when the `[vector]` extra is not installed —
+  the exact install the README quick start's `pip install athenaeum[mcp]`
+  produces. Both now degrade to the `fts5` backend with one logged
+  warning and succeed, honoring the fallback the generated
+  `athenaeum.yaml`'s own `search_backend` comment already promised for
+  recall queries (`VectorBackend.query`) but, until now, not for building
+  the index those queries read. A clean install following the README
+  quick start through `athenaeum session-end` now gets a working `recall`
+  with no extra install step (athenaeum#2592).
 
 - Merge proposals a human rejected, and proposals `athenaeum decisions
   revalidate --apply` archived as stale, are no longer re-proposed the next

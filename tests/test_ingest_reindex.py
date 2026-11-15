@@ -1453,3 +1453,58 @@ class TestReindexCLI:
         assert "FTS5 index rebuilt" in out
         payload = json.loads(out.strip().splitlines()[-1])
         assert payload["command"] == "reindex"
+
+    def test_vector_backend_without_chromadb_degrades_to_fts5(
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#2592: the generated ``athenaeum.yaml`` comment and
+        ``config.py``'s ``_DEFAULTS["search_backend"]`` docstring both promise
+        "a default install without [chromadb] degrades to fts5 ... with one
+        logged warning, no traceback" -- previously true only of QUERYING
+        (``VectorBackend.query``'s own fallback), never of ``reindex``, which
+        hard-failed with exit 1 and "Vector backend requires chromadb" the
+        moment ``search_backend: vector`` (the shipped default) met a
+        chromadb-less install -- exactly the README quick-start install.
+
+        Simulate chromadb's absence via the ONE choke point every
+        ``VectorBackend`` method goes through to get its handle
+        (``_get_chromadb``, see that method's docstring) rather than
+        uninstalling the real chromadb this environment has — this is the
+        repo's own documented seam for exercising this path.
+        """
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError(
+                "No module named 'chromadb'"
+            )
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        rc = main(
+            [
+                "reindex",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "vector",
+            ]
+        )
+
+        assert rc == 0, "a missing [vector] extra must degrade, never error"
+        captured = capsys.readouterr()
+        assert "[warn]" in captured.err
+        assert "chromadb" in captured.err
+        assert "pip install athenaeum[vector]" in captured.err
+        assert "FTS5 index rebuilt" in captured.out
+        payload = json.loads(captured.out.strip().splitlines()[-1])
+        assert payload["command"] == "reindex"
+        assert payload["backend"] == "fts5"
+        assert payload["exit_code"] == 0
+        assert payload["pages"] == 2
