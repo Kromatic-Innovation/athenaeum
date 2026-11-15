@@ -238,6 +238,30 @@ class TestApply:
             storage_move.apply_move(plan, _cfg(kb), kb)
         assert (_tree_digest(kb / "wiki"), _tree_digest(_recipes(kb))) == digests
 
+    def test_failed_commit_restores_both_repos_and_writes_no_record(
+        self, kb: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        digests = (_tree_digest(kb), _tree_digest(_recipes(kb)))
+        heads = (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD"))
+        calls = {"n": 0}
+        real = storage_move.commit_repo
+
+        def flaky(repo: Path, label: str) -> str | None:
+            calls["n"] += 1
+            if calls["n"] == 4:  # 2 snapshots, then wiki commit ok, target commit fails
+                raise subprocess.CalledProcessError(1, ["git", "commit"])
+            return real(repo, label)
+
+        monkeypatch.setattr(storage_move, "commit_repo", flaky)
+        plan = storage_move.plan_move(_cfg(kb), kb, "recipe", "recipes")
+        with pytest.raises(subprocess.CalledProcessError):
+            storage_move.apply_move(plan, _cfg(kb), kb)
+        assert calls["n"] == 4
+        assert (_tree_digest(kb), _tree_digest(_recipes(kb))) == digests
+        assert (_git(kb, "rev-parse", "HEAD"), _git(_recipes(kb), "rev-parse", "HEAD")) == heads
+        assert _git(kb, "status", "--porcelain") == ""
+        assert not list((tmp_path / "cache").glob("storage_moves/*.json"))
+
 
 class TestAfterTheMove:
     @pytest.fixture

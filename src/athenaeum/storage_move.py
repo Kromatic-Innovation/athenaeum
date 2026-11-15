@@ -272,21 +272,24 @@ def apply_move(
         if sha is None:
             raise MoveRefused(f"the {role} repository {repo} has no commit to restore to")
         before[role] = sha
+    done = f"athenaeum: storage move-type {plan.entity_type} -> {plan.target_name}"
+    after: dict[str, str] = {}
     try:
         plan.target.root.mkdir(parents=True, exist_ok=True)
         for m in plan.moves:
             shutil.move(str(m.src), str(m.dst))
+        for role, repo in repos.items():
+            commit_repo(repo, done)
+            head = repo_head(repo)
+            if head is None:
+                raise MoveRefused(f"the {role} repository {repo} has no HEAD after the commit")
+            after[role] = head
     except BaseException:
+        # Any failure (a move, a commit hook, identity or lock trouble) puts
+        # BOTH repositories back at their snapshots; no record is written.
         for role, repo in repos.items():
             restore_repo(repo, before[role])
         raise
-    done = f"athenaeum: storage move-type {plan.entity_type} -> {plan.target_name}"
-    after: dict[str, str] = {}
-    for role, repo in repos.items():
-        commit_repo(repo, done)
-        head = repo_head(repo)
-        assert head is not None
-        after[role] = head
     record = MoveRecord(
         record_id=f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}",
         entity_type=plan.entity_type,
