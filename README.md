@@ -6,6 +6,11 @@
 
 **Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
+```bash
+uv tool install --python 3.13 'athenaeum[mcp]'   # or: pip install 'athenaeum[mcp]'
+athenaeum init                                    # then see Quick start below
+```
+
 <p align="center">
   <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
 </p>
@@ -67,12 +72,17 @@ athenaeum init
 
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+
+# Check the setup (read-only). FAILs are expected at this point; see below.
+athenaeum doctor
 ```
 
-`athenaeum doctor` is a read-only health check. Run on a fresh install, it is
+`athenaeum doctor` is a read-only health check. **On a fresh install it will
+show FAILs, and that is expected.** Right after the commands above it is
 expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
 `key_mode` when neither an API key nor the `claude` CLI is available)
-until the steps below are complete; each FAIL names its fix.
+until the steps below are complete; each FAIL names its fix. Run it again
+once you have finished the quick start, and it should come back clean.
 
 The `[mcp]` extra above is all a fresh install needs. `athenaeum init`'s
 default config (`search_backend: vector`) wants the optional `[vector]`

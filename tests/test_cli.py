@@ -1092,6 +1092,42 @@ class TestIngestMerges:
         assert not (wiki / "_pending_merges_archive.md").exists()
 
 
+class TestRunRemovedConfigKeys:
+    """athenaeum#2686: `run` prints a stderr notice for a removed key still set."""
+
+    def test_removed_key_prints_stderr_notice(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", lambda **kw: 0)
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  name_collision_scan: false\n"
+        )
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "WARNING:" in err
+        assert "librarian.name_collision_scan" in err
+        assert "always on" in err
+
+    def test_no_removed_key_prints_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(librarian_mod, "run", lambda **kw: 0)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert "removed" not in capsys.readouterr().err
+
+
 class TestRunMaxApiCallsFlag:
     """Issue athenaeum#220 fix round — CLI coverage for --max-api-calls."""
 
