@@ -146,6 +146,12 @@ from athenaeum.sidecar_blocks import (
 )
 from athenaeum.storage import refuse_read_only_write
 from athenaeum.store import now_iso
+from athenaeum.store_boundary import (
+    CrossStoreMergeError,
+    assert_same_surface,
+    extra_surface_roots,
+    locator_for,
+)
 from athenaeum.verdicts import content_hash
 
 log = logging.getLogger(__name__)
@@ -421,6 +427,50 @@ def _is_tombstone_file(path: Path) -> bool:
     return is_tombstone(meta)
 
 
+def _identity_pages_in_root(target_slug: str, root: Path, *, recursive: bool) -> list[Path]:
+    """The per-root half of :func:`find_identity_pages` (one surface root)."""
+    found: list[Path] = []
+    if recursive:
+        try:
+            bare_pages = sorted(root.rglob(f"{target_slug}.md"))
+            candidates = sorted(root.rglob(f"*-{target_slug}.md"))
+        except OSError:
+            return found
+        for bare in bare_pages:
+            rel = bare.relative_to(root)
+            if (
+                bare.is_file()
+                and not bare.name.startswith("_")
+                and not any(p.startswith(".") for p in rel.parts)
+                and not _is_tombstone_file(bare)
+            ):
+                found.append(bare)
+    else:
+        bare = root / f"{target_slug}.md"
+        if bare.is_file() and not _is_tombstone_file(bare):
+            found.append(bare)
+        try:
+            candidates = sorted(root.glob(f"*-{target_slug}.md"))
+        except OSError:
+            candidates = []
+    for fpath in candidates:
+        if fpath.name.startswith("_") or not fpath.is_file():
+            continue
+        try:
+            f_text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        f_meta, _ = parse_frontmatter(f_text)
+        # Issue athenaeum#2082: a tombstone (``status: folded``) is a redirect
+        # left by an earlier fold, not a live page — it neither owns the slug
+        # nor makes it ambiguous, and can never be a fold target.
+        if is_tombstone(f_meta):
+            continue
+        if identity_slug(fpath, f_meta) == target_slug:
+            found.append(fpath)
+    return found
+
+
 def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     """Every live page under *wiki_root* that owns ``merge_target_name``'s slug.
 
@@ -446,29 +496,11 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     target_slug = slugify(merge_target_name)
     if not target_slug:
         return []
-    found: list[Path] = []
-    bare = wiki_root / f"{target_slug}.md"
-    if bare.is_file() and not _is_tombstone_file(bare):
-        found.append(bare)
-    try:
-        candidates = sorted(wiki_root.glob(f"*-{target_slug}.md"))
-    except OSError:
-        candidates = []
-    for fpath in candidates:
-        if fpath.name.startswith("_") or not fpath.is_file():
-            continue
-        try:
-            f_text = fpath.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        f_meta, _ = parse_frontmatter(f_text)
-        # Issue athenaeum#2082: a tombstone (``status: folded``) is a redirect
-        # left by an earlier fold, not a live page — it neither owns the slug
-        # nor makes it ambiguous, and can never be a fold target.
-        if is_tombstone(f_meta):
-            continue
-        if identity_slug(fpath, f_meta) == target_slug:
-            found.append(fpath)
+    found = _identity_pages_in_root(target_slug, wiki_root, recursive=False)
+    # athenaeum#2619: the extra surfaces are part of the same lookup space, so a
+    # target that lives on one resolves to its real page (wiki pages first).
+    for extra in extra_surface_roots(wiki_root):
+        found.extend(_identity_pages_in_root(target_slug, extra, recursive=True))
     return found
 
 
@@ -798,7 +830,17 @@ def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
     if direct.is_file():
         return direct
     candidate = Path(wiki_root).expanduser() / Path(source).name
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    # athenaeum#2619: a page on an extra surface is part of the same lookup space.
+    for extra in extra_surface_roots(Path(wiki_root).expanduser()):
+        rel = extra / Path(source)
+        if not Path(source).is_absolute() and rel.is_file():
+            return rel
+        found = sorted(extra.rglob(Path(source).name))
+        if found:
+            return found[0]
+    return None
 
 
 def source_content_digest(
@@ -1404,14 +1446,21 @@ def _rewrite_block_resolved(
     return "\n".join(new_lines).rstrip() + "\n"
 
 
-def _read_only_preflight(paths: Iterable[Path], root: Path, *, op: str) -> dict | None:
+def _read_only_preflight(paths: Iterable[Path | str], root: Path, *, op: str) -> dict | None:
     """A ``{"ok": False, "error_code": "read_only_surface", ...}`` refusal when any
     of *paths* lies on a read-only surface (athenaeum#2621), else ``None``.
 
     Run BEFORE any mutation: a merge or fold that would rewrite, tombstone or
     re-link a page on a read-only mount is refused whole, never half-applied.
     """
-    for path in paths:
+    for item in paths:
+        # A string is a stored ``**Sources**`` entry: resolve it the way the
+        # merge itself does, so a page on an extra surface is found too.
+        path = (
+            (resolve_source_path(item, wiki_root=root) or Path(item))
+            if isinstance(item, str)
+            else item
+        )
         refusal = refuse_read_only_write(path, root.parent, op=op)
         if refusal is not None:
             return {
@@ -2174,7 +2223,7 @@ def _apply_fold_into_existing(
     # each source and re-links siblings; refuse whole when any page it would
     # touch lives on a read-only surface.
     _ro_block = _read_only_preflight(
-        [target_path, *(Path(src) for src in pm.sources)], wiki_root, op="fold"
+        [target_path, *pm.sources], wiki_root, op="fold"
     )
     if _ro_block is not None:
         return {
@@ -3049,6 +3098,10 @@ def _archive_stale_merge_block(
     atomic_write_text(archive_path, combined)
 
 
+#: ``resolve_merge`` error code for a merge across two surfaces (athenaeum#2619).
+CROSS_STORE_MERGE_ERROR_CODE = "cross_store_merge"
+
+
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
@@ -3274,6 +3327,38 @@ def resolve_merge(
             "resolved_block": None,
         }
 
+    # athenaeum#2619: a merge (or attach) never crosses a surface. Refused before
+    # any write, checkbox unflipped, as a named error code.
+    if decision in ("approve", "attach-as-subpage"):
+        _guard_root = wiki_root or merges_path.parent
+        _guard_locator = locator_for(_guard_root)
+        if _guard_locator.surfaces:
+            _guard_pages = [
+                p
+                for p in (
+                    resolve_source_path(src, wiki_root=_guard_root)
+                    for src in target_pm.sources
+                )
+                if p is not None
+            ]
+            _guard_target = resolve_target_page(target_pm.merge_target_name, _guard_root)
+            # A target no page owns would be CREATED under wiki/: fail closed
+            # when that would pull surface pages into the wiki surface.
+            _guard_pages.append(
+                _guard_target
+                if _guard_target is not None
+                else _guard_root / f"{slugify(target_pm.merge_target_name)}.md"
+            )
+            try:
+                assert_same_surface(_guard_locator, _guard_pages)
+            except CrossStoreMergeError as exc:
+                return {
+                    "ok": False,
+                    "error_code": CROSS_STORE_MERGE_ERROR_CODE,
+                    "message": str(exc),
+                    "resolved_block": None,
+                }
+
     warning: str | None = None
     extra_response: dict = {}
     # Issue athenaeum#716: the fold-specific ledger keys (`folded_sources`,
@@ -3316,7 +3401,7 @@ def resolve_merge(
         # Issue athenaeum#2621: refuse BEFORE any mutation when the target or
         # any source page lives on a read-only surface.
         _ro_block = _read_only_preflight(
-            [target_path, *(Path(src) for src in target_pm.sources)],
+            [target_path, *target_pm.sources],
             root,
             op=f"merge ({write_kind})",
         )
@@ -3564,7 +3649,7 @@ def resolve_merge(
         root = wiki_root or merges_path.parent
         resolved_target = resolve_target_page(target_pm.merge_target_name, root)
         _ro_block = _read_only_preflight(
-            [p for p in (resolved_target, *(Path(s_) for s_ in target_pm.sources)) if p],
+            [p for p in (resolved_target, *target_pm.sources) if p],
             root,
             op="attach-as-subpage",
         )

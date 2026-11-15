@@ -695,3 +695,57 @@ class TestRelationsRefuseAReadOnlySurface:
         with pytest.raises(ReadOnlySurfaceError):
             remove_relation(kb / "wiki", child_uid="concept-p", config=cfg)
         assert (ro_page.read_bytes(), wiki_page.read_bytes()) == before
+
+
+class TestCrossSurfaceWritePathsRespectReadOnly:
+    """Write paths that can now reach pages on an extra surface (athenaeum#2619)."""
+
+    def _yaml(self, kb: Path) -> None:
+        (kb / "athenaeum.yaml").write_text(
+            "storage:\n  adapters:\n    recipes:\n      backing_store: markdown\n"
+            "      surface_root: recipes\n      read_only: true\n"
+            "      corpus_policy:\n        embedded: true\n",
+            encoding="utf-8",
+        )
+
+    def test_merge_inside_a_read_only_surface_is_refused(self, kb: Path) -> None:
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        self._yaml(kb)
+        soup = _page(kb / "recipes" / "aaaa-soup.md", "aaaa", "Soup")
+        stew = _page(kb / "recipes" / "bbbb-stew.md", "bbbb", "Stew")
+        before = (soup.read_bytes(), stew.read_bytes())
+        merges = kb / "wiki" / "_pending_merges.md"
+        write_pending_merge(
+            merges,
+            merge_target_name="Soup",
+            sources=[str(soup), str(stew)],
+            rationale="same",
+            draft_merged_body="merged",
+            confidence=0.9,
+        )
+        text = merges.read_text()
+        res = resolve_merge(
+            merges, parse_pending_merges(merges)[0].id, "approve", wiki_root=kb / "wiki"
+        )
+        assert res["ok"] is False and res["error_code"] == "read_only_surface"
+        assert "ReadOnlySurfaceError" in res["message"]
+        assert merges.read_text() == text  # checkbox not flipped
+        assert (soup.read_bytes(), stew.read_bytes()) == before
+
+    def test_page_recompile_of_a_page_on_a_read_only_surface_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.page_recompile_apply import write_apply
+        from tests.test_page_recompile_apply import _BODY, _simple_plan, _write_page
+
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY, type="reference")
+        _simple_plan(wiki, body=_BODY)
+        # The whole wiki/ is declared read-only: the apply must write nothing.
+        cfg = _config(root="wiki")
+        before = {p.name: p.read_bytes() for p in wiki.iterdir() if p.is_file()}
+        outcome = write_apply(wiki, uid="page0001", client=None, config=cfg)
+        assert not outcome.ok
+        assert "ReadOnlySurfaceError" in (outcome.reason or "")
+        assert {p.name: p.read_bytes() for p in wiki.iterdir() if p.is_file()} == before

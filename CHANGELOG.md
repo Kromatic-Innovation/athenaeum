@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Compile now writes a new page to the surface its type maps to (athenaeum#2618).** Entity creation, batch apply and page recompile (sub-pages and standalone pages) ask `athenaeum.storage.page_write_root_for_class` where the page's type lives, so a type mapped to an indexed surface outside `wiki/` via `storage.mapping` lands there instead of in `wiki/`, is committed by that surface's snapshot (its own repo, when it has one) and is returned by recall. A type mapped to a surface that is not indexed (`embedded: false`, such as the built-in `excluded` surface) is refused with `SurfaceNotIndexedError` before anything is written (a page recompile reports it as a `surface-not-indexed` plan issue); only the existing excluded-surface writers may write there. A structured upsert still rewrites the page where the locator found it. Operational files beside pages (pending queues, manifests, `_schema`) stay in the primary wiki. A deployment with no `storage:` mapping writes the same bytes to the same paths as before.
 - **A raw note that a `never` relevance rule covers is no longer added to the recall index (athenaeum#2648).** When `remember` refreshes the index (and on any other index build that scans a `recall.extra_intake_roots` raw root, such as `athenaeum reindex`), a raw whose declared `type` / `tags` / `uid` resolve to `never` and that lacks the explicit-remember marker is skipped, so `recall` and the per-prompt hook cannot return it before compile drops it. A raw with any covered item stays out whole, because a hit renders the raw file itself. Raws with no `never` match, raws flagged `explicit_remember`, deployments with no policy file, and compiled storage surfaces are indexed exactly as before; an unreadable policy file fails open (indexed, with a warning). Forward only: an already-indexed raw leaves the index when its content next changes.
 - **`remember` takes an `explicit_request` flag that overrides `never` relevance rules, with an audit record (athenaeum#2646).** An assistant sets it only when the user explicitly asked to remember the content (the tool description says so). The raw is stamped `explicit_remember: true` in its frontmatter and the relevance gate (`gate_raw_content`, which stays pure) no longer drops it: it keeps the item and reports the rule it overrode. When a flagged fact matches a `never` rule, `remember` appends an `override` record (rule, client transport `stdio` or `http`, time) to `wiki/_relevance_policy_audit.jsonl` before writing the raw; if that append fails the write is refused, so no override goes unaudited. Behaviour is identical on both transports; unflagged facts and deployments with no policy file are unchanged.
+- **Per-type stores never merge across stores, and a shared page may not link to a private one (athenaeum#2619).** Each `storage.adapters` entry takes an integer `visibility` (higher = more widely shared; the built-in wiki surface and any surface that omits it are rank 0, the most private; a negative or non-integer value is a `StorageConfigError`). Merge discovery skips a pair whose pages sit on two different surfaces, and applying one (`resolve_merge`, `merge_duplicate_persons`) is refused with a named error (`cross_store_merge` / `CrossStoreMergeError`) before anything is written. A librarian write that would add a link (a `related:` row, `parent:`, a `[[wikilink]]` or a markdown link) from a page to a page on a more private surface is refused, parked under `wiki/_store_link_rejected/`, ledgered, and logged with both page uids and both surface names; a link from a private page to a shared page resolves as before. `athenaeum store-link-lint [--json]` lists every existing link that breaks the rule and exits 2 when there is one; it rewrites nothing. A deployment with no `storage:` config, or none that declares `visibility`, behaves exactly as before.
 - **`athenaeum import-memory` records a relevance-policy refusal as handled (athenaeum#2645).** A staged auto-memory file whose every declared item a `never` rule covers is left on disk by the compile pass, so it used to look "not compiled" and was restaged, and re-refused, on every run, consuming the per-run file cap. After the compile, `import-memory` now consults the same gate (`filter_relevance_never`) on each staged file still present; a refused file is written to `import_memory_state.json` with a `refused` field holding the rule that decided it, is not restaged on the next run (until its source file changes), and does not consume the cap. The staged copy is never deleted. No policy file: behaviour unchanged.
 - **One page locator finds a page by uid or name on every indexed surface, not only `wiki/` (athenaeum#2617).** `EntityIndex` (and the persisted entity-index cache), `read_entity`, recall's link-name rendering and the librarian's structured-upsert target lookup now read `wiki/` plus the configured storage surfaces the search index builder includes (`embedded: true`, with its exclusion guards), through the new `PageLocator`. A surface that is not indexed is never visible. The same uid on two surfaces raises `AmbiguousPageUidError` (surfaced by `read_entity` as a named error) instead of silently taking the first match. A deployment with no extra storage surface behaves exactly as before; maintenance and audit commands that walk `wiki/` are unchanged.
 - **`athenaeum owner set --name NAME [--alias ALIAS ...]` records the owner without hand-editing config (athenaeum#2652).** Non-interactive and idempotent: it creates the owner's person page (uid from `generate_uid`, `access: personal`, no email or phone written) and records `owner.uid` plus the name and aliases in `athenaeum.yaml` as a single-block edit that leaves every comment and other key untouched, so existing installs can opt in. A second run changes nothing; a new alias adds only that alias. A single-word alias prints a warning that the name matcher ignores single words. `athenaeum init --owner-name NAME` calls the same code path. With no owner configured, behaviour is unchanged.
@@ -23,12 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.24.0] - 2026-11-15
 
-**Summary.** 0.24.0 is a MINOR, breaking bump from 0.23.5 under the pre-1.0
-policy (a minor version may break). It is the clean-up release that 0.23.5
-announced: it removes the `athenaeum merges` and `athenaeum questions` commands
-and a set of other unused commands, switches and keys, and it adds page
-recompile, which runs every night by default. Read "Upgrading from 0.23.5"
-before installing.
+**Summary.** **Upgrading turns on a nightly page recompile.** Every night the
+librarian now makes model calls (up to 3 pages a night, 10 while any page is over
+the hard size ceiling) and rewrites oversized pages without asking: structure-only
+changes (a parent summary plus sub-pages), undoable with
+`athenaeum recompile undo <plan-id>`. To approve each write, set
+`librarian.page_recompile.mode: queue`; to turn it off, set `mode: off`.
+
+0.24.0 is also a MINOR, breaking bump from 0.23.5 under the pre-1.0 policy (a
+minor version may break). It is the clean-up release that 0.23.5 announced: it
+removes the `athenaeum merges` and `athenaeum questions` commands and a set of
+other unused commands, switches and keys. A removed command prints its
+replacement on stderr and exits 2 instead of a bare "invalid choice". Read
+"Upgrading from 0.23.5" before installing.
 
 **Removed, and what replaces each item** (a stale yaml key for any removed key
 is ignored with a warning; a removed environment variable simply has no effect)
@@ -69,6 +77,9 @@ is ignored with a warning; a removed environment variable simply has no effect)
   `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED`. Behaviour is unchanged; existing files
   are left in place and ignored. The one-time warnings about ledgers left at
   their pre-move location are gone.
+- **Breaking for a custom `pricing:` section** (it replaces the built-in table):
+  it must now price `claude-sonnet-5`, the default for the new page recompile
+  models, or `athenaeum run` refuses to start.
 
 **Behaviour changes** (an install that changes no configuration will notice these)
 
@@ -79,8 +90,6 @@ is ignored with a warning; a removed environment variable simply has no effect)
   pages are queued for your answer. Inspect with `athenaeum recompile list --applied`,
   reverse with `athenaeum recompile undo <plan-id>`, ask before every write with
   `librarian.page_recompile.mode: queue`, or turn it off with `mode: off`.
-- If you set a custom `pricing:` section (it replaces the built-in table), it must
-  now price `claude-sonnet-5`, or `athenaeum run` refuses to start.
 - `athenaeum context`, `codex-context` and the Codex adapter follow your
   configured `search_backend` and recall ceiling instead of fixed defaults. On a
   default install that is `vector`, so a Codex snapshot can change order. Set
@@ -142,9 +151,10 @@ import paths may change in any minor release without a deprecation cycle)
 3. Search your `athenaeum.yaml` and environment for the removed keys listed
    above. Nothing breaks (they are ignored), but a switch you relied on to turn
    a behaviour off no longer does.
-4. If the nightly page recompile is not wanted, set
-   `librarian.page_recompile.mode: off` (or `queue` to approve each write) before
-   the next run. If you use a custom `pricing:` table, add `claude-sonnet-5`.
+4. If you use a custom `pricing:` table, add `claude-sonnet-5` to it first, or
+   `athenaeum run` refuses to start. If the nightly page recompile is not wanted,
+   set `librarian.page_recompile.mode: off` (or `queue` to approve each write)
+   before the next run.
 5. Code that reads MCP `resolve_*` responses: use `message`, not `block`/`error`.
 
 ```bash

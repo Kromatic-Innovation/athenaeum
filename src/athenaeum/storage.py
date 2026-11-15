@@ -154,6 +154,12 @@ class StorageAdapter:
     #: pulls and indexes but never writes (athenaeum#2621). Every write path
     #: refuses it with :class:`ReadOnlySurfaceError`. Default ``False``.
     read_only: bool = False
+    #: How widely the pages on this surface are shared (athenaeum#2619):
+    #: higher = more widely shared. ``0`` (the default, and the built-in wiki
+    #: surface's fixed rank) is the most private. A page may not link to a
+    #: page on a LOWER-ranked (more private) surface; an unranked deployment
+    #: has every surface at 0, so nothing is refused.
+    visibility: int = 0
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -261,6 +267,18 @@ def _policy_from_mapping(raw: Any) -> CorpusPolicy:
     )
 
 
+def _visibility_from_config(name: str, raw: Any) -> int:
+    """The ``visibility`` rank of one adapter entry: absent -> 0, else a non-negative int."""
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise StorageConfigError(
+            f"storage.adapters.{name}.visibility must be a non-negative integer, "
+            f"got {raw!r}"
+        )
+    return raw
+
+
 def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
     """Build a :class:`StorageAdapter` from one ``storage.adapters`` entry."""
     if not isinstance(raw, dict):
@@ -290,6 +308,7 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
         purgeable=_coerce_bool(raw.get("purgeable"), default=True),
+        visibility=_visibility_from_config(name, raw.get("visibility")),
     )
 
 
@@ -339,6 +358,22 @@ def resolve_adapter_for_class(
             f"{adapter_name!r}; known adapters: {sorted(adapters)}"
         )
     return adapter
+
+
+def surface_visibility(name: str, config: dict[str, Any] | None) -> int:
+    """The visibility rank of the surface called *name* (athenaeum#2619).
+
+    *name* is a surface name as :class:`~athenaeum.models.PageLocator` reports
+    it: ``"wiki"`` for the default surface (an alias of
+    :data:`DEFAULT_ADAPTER_NAME`) or an adapter name. The built-in wiki surface
+    is rank 0, the most private. An adapter that declares no ``visibility``,
+    and a name that matches no adapter, are also 0 -- so an unranked
+    deployment is judged identically everywhere and refuses nothing.
+    """
+    adapter = available_adapters(config).get(
+        DEFAULT_ADAPTER_NAME if name == "wiki" else name
+    )
+    return adapter.visibility if adapter is not None else 0
 
 
 # ---------------------------------------------------------------------------

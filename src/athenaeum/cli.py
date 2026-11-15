@@ -129,6 +129,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "schedule": ("athenaeum._cmd_schedule", "add_schedule_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
+    "store-link-lint": (
+        "athenaeum._cmd_store_link_lint",
+        "add_store_link_lint_subparser",
+    ),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
         "add_recovery_yield_subparser",
@@ -255,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
+    from athenaeum._cmd_store_link_lint import add_store_link_lint_subparser
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_triage import add_triage_subparser
@@ -294,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
+    add_store_link_lint_subparser(subparsers)  # store-link-lint (athenaeum#2619)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     # questions / merges removed in 0.24.0 (issue athenaeum#2457), as the
     # athenaeum#1992 deprecation announced: `decisions` carries every mode
@@ -420,34 +426,58 @@ def _build_lazy_parser(command: str) -> argparse.ArgumentParser:
     return parser
 
 
-#: Top-level verbs removed outright (no deprecation period) that still get
-#: a specific, helpful message naming their replacement rather than
-#: argparse's generic "invalid choice" error -- issue athenaeum#2550 AC5.
-#: Checked in :func:`main` BEFORE any parser is built (same pre-parse peek
-#: :func:`_peek_subcommand` already does for the fast-dispatch path), so a
-#: removed name is never re-added to any parser's ``choices`` just to carry
-#: this message. Earlier one-shot-repair removals (issue athenaeum#2466:
-#: ``paste-cleanup``, ``dedup-oversize-escalations``, the three
-#: ``auto-memory`` sub-verbs) deliberately got NO entry here and still
-#: don't -- they predate this mechanism, and retrofitting it onto them is
-#: out of this issue's scope; see ``tests/test_cli.py``'s
-#: ``TestSevenOneShotRepairCommandsRemoved`` for their own, plainer,
-#: "unknown choice" coverage.
-_REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT: dict[str, str] = {
-    "split-oversize": "athenaeum recompile",
+_NO_REPLACEMENT = "the defect it repaired is fixed, so there is no replacement"
+
+#: Commands removed outright (no deprecation period) that get one specific
+#: line on stderr and exit 2, instead of argparse's generic "invalid choice"
+#: error plus a list of every subcommand (issue athenaeum#2550 AC5, extended
+#: to every 0.24.0 removal). Keys are the leading non-option tokens of the
+#: invocation: one token for a top-level verb, two for a sub-verb of a noun
+#: that is still registered (``storage``). Checked in :func:`main` BEFORE any
+#: parser is built (same pre-parse peek the fast-dispatch path uses), so a
+#: removed name is never re-added to any parser's ``choices`` and never
+#: appears in ``--help``.
+_REMOVED_COMMANDS: dict[tuple[str, ...], str] = {
+    ("split-oversize",): "use `athenaeum recompile`",
+    ("merges",): "use `athenaeum decisions ...` (same sub-commands and flags)",
+    ("questions",): "use `athenaeum decisions ...` (same sub-commands and flags)",
+    ("rebuild-index",): "use `athenaeum reindex`",
+    ("paste-cleanup",): _NO_REPLACEMENT,
+    ("dedup-oversize-escalations",): _NO_REPLACEMENT,
+    ("auto-memory",): _NO_REPLACEMENT,
+    ("storage", "prune-dispositions"): _NO_REPLACEMENT,
+    ("storage", "audit-h1-redaction"): _NO_REPLACEMENT,
 }
+
+
+def _removed_command_message(argv: list[str]) -> str | None:
+    """Return the stderr line for a removed command in ``argv``, or ``None``."""
+    tokens: list[str] = []
+    for token in argv:
+        if token in ("-h", "--help") and not tokens:
+            return None
+        if not token.startswith("-"):
+            tokens.append(token)
+            if len(tokens) == 2:
+                break
+    for width in (2, 1):
+        key = tuple(tokens[:width])
+        if len(key) == width and key in _REMOVED_COMMANDS:
+            shown = " ".join(key)
+            return (
+                f"athenaeum: `athenaeum {shown}` was removed in 0.24.0; "
+                f"{_REMOVED_COMMANDS[key]}. See docs/guides/upgrading.md."
+            )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     command = _peek_subcommand(argv)
 
-    if command in _REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT:
-        replacement = _REMOVED_TOP_LEVEL_COMMANDS_WITH_REPLACEMENT[command]
-        print(
-            f"athenaeum: '{command}' was removed; use '{replacement}' instead.",
-            file=sys.stderr,
-        )
+    removed = _removed_command_message(argv)
+    if removed is not None:
+        print(removed, file=sys.stderr)
         return 2
 
     if command is None and "--version" in argv and "-h" not in argv and "--help" not in argv:

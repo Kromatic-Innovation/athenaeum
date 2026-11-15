@@ -3385,6 +3385,10 @@ class ProcessingResult:
     #: as ``field_constraint_rejected=N`` in the run summary, mirroring the
     #: ``type_rejected`` convention above.
     field_constraint_rejected: int = 0
+    #: Pages whose write was refused because it links to a page on a more
+    #: private surface (athenaeum#2619); logged with both uids, never counted
+    #: in ``created``/``updated``.
+    store_link_rejected: int = 0
     #: Count of correspondent addresses this file's Tier-3 create phase
     #: recorded on a created person page's EXCLUDED contact record (issue
     #: athenaeum#1948). Almost always 0 or 1 per file: a conversation-summary

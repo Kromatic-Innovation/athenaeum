@@ -81,6 +81,7 @@ from athenaeum.config import (
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.storage import ReadOnlySurfaceError, require_writable_path
+from athenaeum.store_links import admit_page_write
 
 if TYPE_CHECKING:
     from athenaeum.models import EntityIndex, RawFile
@@ -101,6 +102,7 @@ REASON_UNRESOLVED_UID = "unresolved-uid"
 REASON_UNAPPLIABLE = "unappliable"
 #: The page the uid names lives on a ``read_only`` surface (athenaeum#2621).
 REASON_READ_ONLY_SURFACE = "read-only-surface"
+REASON_STORE_BOUNDARY = "store-boundary"
 #: Issue athenaeum#2197: the raw's value for a declared single-valued field
 #: group's field differs from a different value the page already holds.
 #: Refused (never applied, never partially merged) so the existing page is
@@ -635,12 +637,21 @@ def tier0_structured_upsert(
         validate_wiki_meta(merged_meta, declared_types=valid_types)
     except ValueError as exc:  # pydantic.ValidationError subclasses ValueError
         return refuse(REASON_UNAPPLIABLE, f"merged frontmatter fails the schema: {exc}")
+    merged_text = (
+        render_frontmatter(merged_meta)
+        + "\n"
+        + (new_body if new_body is not None else existing_body)
+    )
     if not dry_run:
-        atomic_write_text(
-            page_path,
-            render_frontmatter(merged_meta)
-            + "\n"
-            + (new_body if new_body is not None else existing_body),
-        )
+        # athenaeum#2619: a refusal leaves the raw on disk like every other refusal here.
+        if not admit_page_write(
+            wiki_root, page_path, merged_text, index=index, config=config,
+            source="structured-upsert",
+        ):
+            return refuse(
+                REASON_STORE_BOUNDARY,
+                "the merged page would link to a page on a more private store",
+            )
+        atomic_write_text(page_path, merged_text)
     log.info("  T0 structured-upsert: %s → %s (merged)", name, page_path.name)
     return StructuredUpsertOutcome(STATUS_APPLIED, uid, name)

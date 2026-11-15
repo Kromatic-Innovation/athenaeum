@@ -125,6 +125,7 @@ from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.storage import page_write_root_for_class, refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
+from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED,
     STATUS_REFUSED,
@@ -2509,6 +2510,9 @@ def process_batch_run(
             # All calls for this file succeeded — apply writes (updates
             # first, then creates, matching the synchronous order).
             _applied_updated_uids: list[str] = []
+            # athenaeum#2619: set when the store-boundary link guard refuses a
+            # write; the raw is then retained, never deleted.
+            _link_refused = False
             _prevented_uids: list[str] = []
             _ro_refused = 0
             for _update_idx, (path, content) in enumerate(pending_updates):
@@ -2523,6 +2527,12 @@ def process_batch_run(
                 if _ro_refusal is not None:
                     log.warning("  Refused (read-only surface): %s", _ro_refusal)
                     _ro_refused += 1
+                    continue
+                if not admit_page_write(
+                    wiki_root, path, content, index=index, config=resolved_config,
+                    source="batch-merge",
+                ):
+                    _link_refused = True
                     continue
                 atomic_write_text(path, content)
                 if _update_idx < len(updated_uids):
@@ -2584,6 +2594,12 @@ def process_batch_run(
                     log.warning("  Refused (read-only surface): %s", _ro_refusal)
                     _ro_refused += 1
                     continue
+                if not admit_page_write(
+                    wiki_root, _create_root / entity.filename, rendered, index=index,
+                    config=resolved_config, source="batch-create",
+                ):
+                    _link_refused = True
+                    continue
                 atomic_write_text(_create_root / entity.filename, rendered)
                 index.register(entity, root=_create_root)
                 written_entities.append(entity)
@@ -2621,9 +2637,11 @@ def process_batch_run(
                 # Issue athenaeum#2621: a read-only refusal never consumes the raw.
                 result.read_only_refused += _ro_refused
                 log.warning("  Retained (not deleted): %s", st.raw.path)
-                continue
-            st.raw.path.unlink()
-            log.info("  Deleted: %s", st.raw.path)
+            elif _link_refused:
+                log.warning("  Retained (store-boundary link refused): %s", st.raw.path)
+            else:
+                st.raw.path.unlink()
+                log.info("  Deleted: %s", st.raw.path)
         except _BatchItemError as exc:
             log.error(
                 "Batch result failed for %s (request %s) — retried next run",

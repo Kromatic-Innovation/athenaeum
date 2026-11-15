@@ -296,6 +296,7 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
 )
@@ -2431,6 +2432,13 @@ def _apply_tier3_results(
             log.warning("  Refused (read-only surface): %s", _ro_refusal)
             _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
             continue
+        if not admit_page_write(
+            wiki_root, _update_path, _update_content, index=index, config=config,
+            source="tier3-merge",
+        ):
+            result.store_link_rejected += 1
+            result.retain_raw = True  # a refused page must not consume its raw
+            continue
         atomic_write_text(_update_path, _update_content)
         if _update_idx < len(updated_uids):
             _admitted_updated_uids.append(updated_uids[_update_idx])
@@ -2536,6 +2544,14 @@ def _apply_tier3_results(
         )
         if _ro_refusal is not None:
             _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
+            continue
+        # Store-boundary link guard (athenaeum#2619): refuse a page that links
+        # to a page on a more private surface than the one it lands on.
+        if not admit_page_write(
+            wiki_root, page_path, rendered, index=index, config=config, source="tier3-create"
+        ):
+            result.store_link_rejected += 1
+            result.retain_raw = True  # a refused page must not consume its raw
             continue
         atomic_write_text(page_path, rendered)
         index.register(entity, root=_create_root)

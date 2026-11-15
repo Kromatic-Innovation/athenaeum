@@ -5905,6 +5905,13 @@ pulled before each index build, indexed and served as compiled pages, and
 never written or pushed. Every write path refuses it with
 ``ReadOnlySurfaceError``.
 
+An entry may carry an integer ``visibility``: how widely
+the surface is shared, higher = more widely shared, default 0 (the most
+private, same as the built-in wiki surface). A page may not link to a page
+on a lower-ranked surface, and pages on different surfaces are never merged.
+A negative or non-integer value is a ``StorageConfigError``. With no
+``visibility`` declared anywhere nothing is refused.
+
 ### `resolve_excluded_fields_config`
 
 - **YAML path:** `storage.excluded_fields`

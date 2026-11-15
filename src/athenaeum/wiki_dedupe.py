@@ -196,6 +196,7 @@ from athenaeum.progress import PhaseHeartbeat
 from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
+from athenaeum.store_boundary import locator_for, same_surface
 from athenaeum.vecmath import cosine, mean_pool
 from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME, queue_coordinate_batch
 
@@ -1142,6 +1143,9 @@ def propose_wiki_page_merges(
     # pass reports its OWN occurrences even if an earlier pass already flushed
     # in this same process.
     begin_content_relation_unavailable_tracking()
+    # athenaeum#2619: a merge never crosses a surface, so a pair whose two pages
+    # live on different surfaces is never proposed.
+    surface_locator = locator_for(knowledge_root / "wiki", config)
     try:
         for cluster in clusters:
             heartbeat.tick(cluster.cluster_id)
@@ -1196,6 +1200,16 @@ def propose_wiki_page_merges(
                 # comparator's own MEMORY_CLASS dimension is not yet ENFORCED.
                 # A cross-class pair is skipped entirely — no proposal, no
                 # ledger entry, no LLM call.
+                if surface_locator.surfaces and not same_surface(
+                    surface_locator, path_a, path_b
+                ):
+                    log.info(
+                        "wiki-page dedup: cross-store pair skipped: %s / %s",
+                        path_a,
+                        path_b,
+                    )
+                    continue
+
                 rejection = cross_class_precheck(sources)
                 if rejection is not None:
                     log.info(
