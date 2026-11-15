@@ -92,6 +92,8 @@ from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     SOURCE_TYPES,
+    AmbiguousPageUidError,
+    PageLocator,
     coerce_bucket,
     is_page_authorized,
     parse_bucket,
@@ -118,6 +120,7 @@ from athenaeum.storage import (
     as_indexed_surface,
     is_excluded,
     is_recallable,
+    resolve_locator_surfaces,
     storage_policy_configured,
     write_raw_intake,
 )
@@ -959,7 +962,17 @@ def entity_read(
         usage_classes = None
 
     wiki_root = knowledge_root / "wiki"
-    entity_index = entity_index_for_uid(wiki_root, uid, cache_dir=cache_dir)
+    # athenaeum#2617: the page may live on any indexed surface, not only wiki/.
+    # The same uid on two surfaces is refused by name rather than first-matched.
+    try:
+        entity_index = entity_index_for_uid(
+            wiki_root,
+            uid,
+            cache_dir=cache_dir,
+            surfaces=resolve_locator_surfaces(knowledge_root, config),
+        )
+    except AmbiguousPageUidError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, indent=2)
     page_path = entity_index.get_by_uid(uid)
     if page_path is None:
         # athenaeum#1394: EntityIndex only scans `wiki_root`, so a `type:
@@ -1152,8 +1165,9 @@ class _LinkNameIndex:
     as it did before this existed. Never an empty dash, never a dropped link.
     """
 
-    def __init__(self, wiki_root: Path) -> None:
+    def __init__(self, wiki_root: Path, surfaces: Sequence[Any] = ()) -> None:
         self._wiki_root = wiki_root
+        self._surfaces = tuple(surfaces)
         self._stems: dict[str, Path] | None = None
         self._names: dict[str, str | None] = {}
         #: Full-frontmatter memo (issue athenaeum#2538), keyed and resolved the
@@ -1179,6 +1193,10 @@ class _LinkNameIndex:
                 paths = []
             stems: dict[str, Path] = {}
             for path in paths:
+                stems.setdefault(path.stem, path)
+            # athenaeum#2617: a link target may live on an indexed surface; the
+            # wiki wins a stem clash, and the page's own uid settles the rest.
+            for _key, path in PageLocator(self._wiki_root, self._surfaces).iter_surface_pages():
                 stems.setdefault(path.stem, path)
             self._stems = stems
         return self._stems
@@ -2348,7 +2366,7 @@ def _recall_via_backend(
     # ``**Links:**`` line's uid -> name lookup. Constructed here, used only
     # from inside the loop, and inert (no filesystem access at all) for a
     # call whose hits carry no outbound links.
-    link_names = _LinkNameIndex(wiki_root)
+    link_names = _LinkNameIndex(wiki_root, resolve_locator_surfaces(wiki_root.parent, config))
     for filename, name, score in hits:
         page_path, display_prefix = _resolve_hit_path(
             filename,
