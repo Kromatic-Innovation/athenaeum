@@ -12,6 +12,13 @@
 > paths retired; one comparator domain still dark" below for the full
 > account of what replaced it.
 
+> **Command names.** This document predates 0.24.0. The `athenaeum questions`
+> and `athenaeum merges` commands it mentions were replaced by
+> `athenaeum decisions` in 0.24.0 and no longer exist. Read every
+> `athenaeum questions ...` or `athenaeum merges ...` below as the matching
+> `athenaeum decisions ...` mode; see
+> [Upgrading](../guides/upgrading.md) for the full mapping.
+
 This document describes the full contradiction-detection-and-resolution pipeline
 that landed via PRs athenaeum#125 (cross-scope toggle), athenaeum#126 (Opus resolver and
 provenance precedence), and athenaeum#128 (pending-questions sidecar surface).
