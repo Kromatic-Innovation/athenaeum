@@ -643,7 +643,13 @@ class TestAnIssuerLiftsTheNonLoopbackRefusal:
         )
         assert rc == 0
         assert fake_server.calls == [
-            {"transport": "http", "host": "0.0.0.0", "port": 8000, "path": MCP_PATH}
+            {
+                "transport": "http",
+                "host": "0.0.0.0",
+                "port": 8000,
+                "path": MCP_PATH,
+                "host_origin_protection": False,
+            }
         ]
         # And the pins really reached the server, not just the guard.
         built = fake_server.create_kwargs["serve_auth"]

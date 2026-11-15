@@ -352,7 +352,13 @@ class TestNonLoopbackBindIsRefusedBeforeBinding:
         # `bound`, not `host`: the bracketed literal is accepted from the
         # operator but normalised before it reaches the socket layer.
         assert fake_server.calls == [
-            ((), {"transport": "http", "host": bound, "port": 8124, "path": "/mcp"})
+            ((), {
+                "transport": "http",
+                "host": bound,
+                "port": 8124,
+                "path": "/mcp",
+                "host_origin_protection": True,
+            })
         ]
 
     def test_a_non_loopback_host_in_yaml_is_refused_too(
@@ -391,7 +397,13 @@ class TestFlagPrecedence:
         )
         assert main(["serve", "--path", str(knowledge_dir)]) == 0
         assert fake_server.calls == [
-            ((), {"transport": "http", "host": "::1", "port": 9100, "path": "/mcp"})
+            ((), {
+                "transport": "http",
+                "host": "::1",
+                "port": 9100,
+                "path": "/mcp",
+                "host_origin_protection": True,
+            })
         ]
 
     def test_env_beats_yaml(
@@ -409,7 +421,13 @@ class TestFlagPrecedence:
         monkeypatch.setenv("ATHENAEUM_SERVE_PORT", "9200")
         assert main(["serve", "--path", str(knowledge_dir)]) == 0
         assert fake_server.calls == [
-            ((), {"transport": "http", "host": "127.0.0.2", "port": 9200, "path": "/mcp"})
+            ((), {
+                "transport": "http",
+                "host": "127.0.0.2",
+                "port": 9200,
+                "path": "/mcp",
+                "host_origin_protection": True,
+            })
         ]
 
     def test_cli_beats_env_and_yaml(
@@ -442,7 +460,13 @@ class TestFlagPrecedence:
         )
         assert rc == 0
         assert fake_server.calls == [
-            ((), {"transport": "http", "host": "127.0.0.3", "port": 9300, "path": "/memory"})
+            ((), {
+                "transport": "http",
+                "host": "127.0.0.3",
+                "port": 9300,
+                "path": "/memory",
+                "host_origin_protection": True,
+            })
         ]
 
     def test_resolvers_default_without_config_env_or_cli(self) -> None:
@@ -523,7 +547,13 @@ class TestHttpTransportDoesNotScanTheCorpus:
         assert rc == 0
         assert len(built) == 1
         assert recorder.calls == [
-            ((), {"transport": "http", "host": "127.0.0.1", "port": 8125, "path": "/mcp"})
+            ((), {
+                "transport": "http",
+                "host": "127.0.0.1",
+                "port": 8125,
+                "path": "/mcp",
+                "host_origin_protection": True,
+            })
         ]
 
 
