@@ -186,6 +186,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     ),
     "relate": ("athenaeum._cmd_relate", "add_relate_subparser"),
     "recompile": ("athenaeum._cmd_recompile", "add_recompile_subparser"),
+    "relevance-policy": (
+        "athenaeum._cmd_relevance_policy",
+        "add_relevance_policy_subparser",
+    ),
 }
 
 
@@ -241,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_recover_parked import add_recover_parked_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
     from athenaeum._cmd_relate import add_relate_subparser
+    from athenaeum._cmd_relevance_policy import add_relevance_policy_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
@@ -348,6 +353,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_relate_subparser(subparsers)
     # recompile candidates (issue athenaeum#2534)
     add_recompile_subparser(subparsers)
+    # relevance-policy (issue athenaeum#2643)
+    add_relevance_policy_subparser(subparsers)
 
     return parser
 

@@ -86,6 +86,7 @@ PIN_PARAMETER_NAMES = frozenset(
 PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
     "calibration_summary": {"properties": [], "required": []},
     "entity_schema": {"properties": [], "required": []},
+    "relevance_policy": {"properties": [], "required": []},
     "enumerate_entities": {
         # Re-pinned for athenaeum#2538 AC7: `include_split` is the flag that
         # includes a split-created sub-page, excluded from this tool's

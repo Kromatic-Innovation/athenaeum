@@ -34,7 +34,7 @@ Three pieces, and only one of them is Claude-specific:
 
 ### 1.2 What the MCP server assumes about its process
 
-`create_server` registers 15 tools (`recall`, `entity_schema`, `enumerate_entities`,
+`create_server` registers 16 tools (`recall`, `entity_schema`, `relevance_policy`, `enumerate_entities`,
 `remember`, `list_pending_questions`, `resolve_question`, `raise_decision`,
 `list_pending_merges`, `list_pending_decisions`, `read_entity`, `list_axiom_audit`,
 `scan_retraction_cascade`, `calibration_summary`, `review_audit_item`,
@@ -167,7 +167,7 @@ ChatGPT ──HTTPS──► reverse proxy (TLS, deployment) ──► athenaeum
    │                                                     │  ├─ identity → audience (one process per audience)
    │                                                     │  ├─ remote profile pins (tool allowlist, with_pii off)
    └──OAuth (PKCE S256, CIMD/DCR)──► authorization server (deployment)
-                                                         └─ same create_server(), same 15 tools minus the disabled ones
+                                                         └─ same create_server(), same 16 tools minus the disabled ones
 ```
 
 - **Transport (athenaeum#2199).** `athenaeum serve --transport http --host --port`

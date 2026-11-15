@@ -118,6 +118,44 @@ A degraded run still exits `0` by default; pass `athenaeum run
 --strict-budget` to make a budget-tripped run exit nonzero instead —
 opt-in, for exit-code-based alerting.
 
+## Relevance policy (`wiki/_schema/relevance-policy.md`)
+
+An operator-owned file in the `wiki/_schema/` family (alongside
+`observation-filter.md`, `types.md` and `tags.md`) that declares what this
+deployment should and should not remember. It is **optional and not created by
+`athenaeum init`**: when the file is absent the policy is empty and nothing
+changes. This release only defines, validates and reports the policy
+(athenaeum#2643, part of athenaeum#2598); no write path enforces it yet.
+
+Rules are one markdown table, read top to bottom:
+
+```markdown
+| Verdict | Type | Tag | Subject |
+|---------|------|-----|---------|
+| never   |      | personal | |
+| always  |      | personal/travel | |
+```
+
+- **Verdict** — `always` or `never`.
+- **Type** / **Tag** — a value from `types.md` / `tags.md`. Blank or `-` means
+  "any". A Tag rule also covers its `/`-separated descendants, so `personal`
+  covers `personal/travel`. The tag must itself be listed in `tags.md`.
+- **Subject** — optional entity uid; blank or `-` means any subject.
+- A rule needs at least one of Type, Tag or Subject; naming several means all
+  must match.
+
+**Order matters: the last matching rule wins.** Put a general rule first and
+its exceptions after it: in the example every `personal` fact is `never`
+except `personal/travel`, which resolves to `always`. A fact no rule matches
+has no policy and behaves as before.
+
+An unknown verdict, type or tag, or a rule with no key, fails validation with a
+message naming the rule by number and line. `athenaeum relevance-policy`
+(add `--json` for machine output) and the read-only `relevance_policy` MCP tool
+list the effective rules in order. When the file exists the librarian run
+summary reports `relevance_policy=<8-hex hash>` next to `schema_fragments=`
+(`invalid` if the file fails validation).
+
 ## Data lifecycle and upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw

@@ -79,6 +79,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drops=disabled` rather than `drops=0`. Mechanism only — what counts as
   worth keeping is unchanged (see athenaeum#2598, out of scope here).
   (athenaeum#2609)
+- **Relevance policy file, loader, validator and read-back (athenaeum#2643,
+  slice 1 of athenaeum#2598).** An optional operator-owned
+  `wiki/_schema/relevance-policy.md` declares ordered `always` / `never`
+  capture rules keyed on `types.md` / `tags.md` values and an optional
+  subject uid; the last matching rule wins, so `never` tag `personal` then
+  `always` tag `personal/travel` resolves travel to `always`. An unknown
+  type or tag fails validation naming the rule. `athenaeum relevance-policy`
+  and a read-only `relevance_policy` MCP tool list the effective rules in
+  order, and the run summary reports `relevance_policy=<hash>` next to
+  `schema_fragments=`. A missing file is a complete no-op; nothing enforces
+  the policy yet.
 - **Page recompile now runs in the nightly librarian run and is ON by
   default: it makes model calls every night (up to 3 pages a run, 10 while
   any page is still over the hard ceiling) and you turn it off with
