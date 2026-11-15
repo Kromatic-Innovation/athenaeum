@@ -123,6 +123,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.storage import refuse_read_only_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED,
     STATUS_REFUSED,
@@ -2511,6 +2512,12 @@ def process_batch_run(
                     if _update_idx < len(updated_uids):
                         _prevented_uids.append(str(updated_uids[_update_idx]).strip())
                     continue
+                _ro_refusal = refuse_read_only_write(
+                    path, wiki_root.parent, resolved_config, op="compile update"
+                )
+                if _ro_refusal is not None:
+                    log.warning("  Refused (read-only surface): %s", _ro_refusal)
+                    continue
                 atomic_write_text(path, content)
                 if _update_idx < len(updated_uids):
                     _applied_updated_uids.append(str(updated_uids[_update_idx]).strip())
@@ -2544,6 +2551,15 @@ def process_batch_run(
                     source="batch",
                 ):
                     result.type_rejected += 1
+                    continue
+                _ro_refusal = refuse_read_only_write(
+                    wiki_root / entity.filename,
+                    wiki_root.parent,
+                    resolved_config,
+                    op="compile create",
+                )
+                if _ro_refusal is not None:
+                    log.warning("  Refused (read-only surface): %s", _ro_refusal)
                     continue
                 atomic_write_text(wiki_root / entity.filename, rendered)
                 index.register(entity)

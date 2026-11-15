@@ -80,6 +80,7 @@ from athenaeum.config import (
 )
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.schemas import validate_wiki_meta
+from athenaeum.storage import ReadOnlySurfaceError, require_writable_path
 
 if TYPE_CHECKING:
     from athenaeum.models import EntityIndex, RawFile
@@ -98,6 +99,8 @@ REASON_TYPE_MISMATCH = "type-mismatch"
 REASON_INELIGIBLE = "ineligible"
 REASON_UNRESOLVED_UID = "unresolved-uid"
 REASON_UNAPPLIABLE = "unappliable"
+#: The page the uid names lives on a ``read_only`` surface (athenaeum#2621).
+REASON_READ_ONLY_SURFACE = "read-only-surface"
 #: Issue athenaeum#2197: the raw's value for a declared single-valued field
 #: group's field differs from a different value the page already holds.
 #: Refused (never applied, never partially merged) so the existing page is
@@ -546,6 +549,11 @@ def tier0_structured_upsert(
     page_path = index.get_by_uid(uid)
     if page_path is None or not page_path.exists():
         return refuse(REASON_UNRESOLVED_UID, "uid does not resolve to an existing page")
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    try:
+        require_writable_path(page_path, wiki_root.parent, config, op="structured upsert")
+    except ReadOnlySurfaceError as exc:
+        return refuse(REASON_READ_ONLY_SURFACE, f"{type(exc).__name__}: {exc}")
     existing_meta, existing_body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
     if not existing_meta:
         return refuse(REASON_UNRESOLVED_UID, f"page {page_path.name} has no frontmatter")

@@ -253,6 +253,18 @@ class StoreCapabilityError(RuntimeError):
     """
 
 
+class ReadOnlySurfaceError(StoreCapabilityError):
+    """Raised when a write is attempted on a surface declared ``read_only``
+    (athenaeum#2621).
+
+    A read-only surface is a mount of content this install consumes but never
+    changes (a shared git clone). Every write path refuses it, loudly, through
+    this one named error. Re-exported by :mod:`athenaeum.storage`, which also
+    owns the path-based guard (:func:`athenaeum.storage.require_writable_path`)
+    for the writers that write through a ``Path`` rather than the store.
+    """
+
+
 class UnknownSurfaceError(KeyError):
     """Raised by :class:`FilesystemStore` for a ``StoreKey.surface`` absent
     from the ``roots`` mapping it was constructed with.
@@ -1328,6 +1340,7 @@ class FilesystemStore:
         roots: Mapping[str, Path],
         *,
         non_purgeable_surfaces: Collection[str] = (),
+        read_only_surfaces: Collection[str] = (),
     ) -> None:
         self._knowledge_root = Path(knowledge_root)
         self._roots = dict(roots)
@@ -1335,6 +1348,9 @@ class FilesystemStore:
         # Empty by default, so every surface keeps the store-level
         # ``purgeable=True`` it always had.
         self._non_purgeable = frozenset(non_purgeable_surfaces)
+        # Surfaces whose adapter declares ``read_only: true`` (athenaeum#2621):
+        # every mutating method refuses a key on one of these.
+        self._read_only = frozenset(read_only_surfaces)
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
@@ -1421,6 +1437,27 @@ class FilesystemStore:
             if repo != self._knowledge_root
         }
 
+    def push_repos(self) -> dict[Path, tuple[str, ...]]:
+        """:meth:`sync_repos` minus repositories held only by read-only surfaces.
+
+        What the post-run push iterates (athenaeum#2621): a read-only mount is
+        pulled but never pushed.
+        """
+        return {
+            repo: names
+            for repo, names in self.sync_repos().items()
+            if not all(name in self._read_only for name in names)
+        }
+
+    def read_only_pull_repos(self) -> dict[Path, tuple[str, ...]]:
+        """:meth:`sync_repos` narrowed to repositories held only by read-only
+        surfaces: the mounts pulled before every index build (athenaeum#2621)."""
+        return {
+            repo: names
+            for repo, names in self.sync_repos().items()
+            if all(name in self._read_only for name in names)
+        }
+
     def sync_repos(self) -> dict[Path, tuple[str, ...]]:
         """:meth:`own_repo_surfaces` narrowed to repos that have a remote."""
         return {
@@ -1428,6 +1465,17 @@ class FilesystemStore:
             for repo, names in self.own_repo_surfaces().items()
             if _repo_has_remote(repo)
         }
+
+    def _require_writable(self, surface: str, op: str) -> None:
+        if surface in self._read_only:
+            raise ReadOnlySurfaceError(
+                f"{op} refused on surface {surface!r}: it is declared read_only "
+                "(a shared mount this install never writes)"
+            )
+
+    def read_only_surfaces(self) -> frozenset[str]:
+        """The surfaces this store refuses to write (athenaeum#2621)."""
+        return self._read_only
 
     def _require_destructive_ok(self, surface: str, op: str) -> None:
         caps = self.capabilities_for(surface)
@@ -1516,6 +1564,7 @@ class FilesystemStore:
         version' *is* exclusive create"). ``expect=<token>`` refuses unless
         the current version equals *expect* exactly.
         """
+        self._require_writable(key.surface, "put")
         path = self._path_for(key)
         current = self._version_for(path)
         if expect is None:
@@ -1539,11 +1588,13 @@ class FilesystemStore:
         """``O_APPEND`` + ``fsync`` (design note §4.6 / §6.2) via
         :func:`append_line_durable` — the primitive the 12 duplicated
         per-module ledger writers §2.4 counts collapse onto."""
+        self._require_writable(key.surface, "append")
         append_line_durable(self._path_for(key), line)
 
     def delete(self, key: StoreKey, *, expect: str | None = None) -> bool:
         """``expect=None`` deletes unconditionally (``False`` if already absent,
         matching "no ``exists()``", §6.3); ``expect=<token>`` is a CAS delete."""
+        self._require_writable(key.surface, "delete")
         self._require_destructive_ok(key.surface, "delete")
         path = self._path_for(key)
         current = self._version_for(path)
@@ -1571,6 +1622,8 @@ class FilesystemStore:
         closed, loudly") is the conservative default absent an explicit
         ``expect=`` parameter on this method.
         """
+        self._require_writable(src.surface, "move")
+        self._require_writable(dst.surface, "move")
         self._require_destructive_ok(src.surface, "move")
         src_path = self._path_for(src)
         dst_path = self._path_for(dst)
@@ -1610,7 +1663,9 @@ class FilesystemStore:
         # R2 (athenaeum#2615): a surface that is its own git repository is a
         # restore point of its own. Committed here so every existing caller
         # gets it for free; the return value stays the knowledge root's SHA.
-        for repo in self.own_repo_surfaces():
+        for repo, surfaces in self.own_repo_surfaces().items():
+            if all(name in self._read_only for name in surfaces):
+                continue  # a read-only mount is never committed into (athenaeum#2621)
             _commit_all(repo, label)
         return sha
 
@@ -1624,6 +1679,8 @@ class FilesystemStore:
         """
         points: dict[str, str] = {}
         for repo, surfaces in self.versioned_surface_repos().items():
+            if all(name in self._read_only for name in surfaces):
+                continue
             sha = _commit_all(repo, label)
             if sha is not None:
                 for surface in surfaces:

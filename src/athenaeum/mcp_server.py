@@ -1624,7 +1624,9 @@ def _reorder_hits_by_supersession(
     return current + superseded
 
 
-def _is_uncompiled_display_prefix(display_prefix: str) -> bool:
+def _is_uncompiled_display_prefix(
+    display_prefix: str, extra_roots: Sequence[IndexedRoot] = ()
+) -> bool:
     """True when *display_prefix* names a raw-intake (pre-compile) hit.
 
     Issue athenaeum#2313 (AC5): a hit resolved from one of
@@ -1635,11 +1637,19 @@ def _is_uncompiled_display_prefix(display_prefix: str) -> bool:
     which is federated from a DIFFERENT corpus, not raw intake. Decided purely
     from :func:`_resolve_hit_path`'s ``display_prefix`` string, which already
     disambiguates all three shapes — no frontmatter read needed.
+
+    Issue athenaeum#2621: a hit from a configured storage SURFACE (an
+    :class:`~athenaeum.storage.IndexedSurface` with ``intake=False``, e.g. a
+    read-only mount of a shared recipe repository) holds compiled pages, so it
+    is not uncompiled; pass *extra_roots* so the prefix can be matched.
     """
-    return not (
-        display_prefix.startswith("wiki/")
-        or display_prefix.startswith(_OFF_CORPUS_HIT_PREFIX)
-    )
+    if display_prefix.startswith("wiki/") or display_prefix.startswith(_OFF_CORPUS_HIT_PREFIX):
+        return False
+    for item in extra_roots:
+        surface = as_indexed_surface(item)
+        if not surface.intake and display_prefix.startswith(f"{surface.prefix}/"):
+            return False
+    return True
 
 
 def _reorder_hits_uncompiled_last(
@@ -1674,7 +1684,7 @@ def _reorder_hits_uncompiled_last(
         _, display_prefix = _resolve_hit_path(
             hit[0], wiki_root, extra_roots, off_corpus_root=off_corpus_root
         )
-        if _is_uncompiled_display_prefix(display_prefix):
+        if _is_uncompiled_display_prefix(display_prefix, extra_roots):
             uncompiled.append(hit)
         else:
             compiled.append(hit)
@@ -2525,7 +2535,9 @@ def _recall_via_backend(
         # wiki page at a glance, the same way `_reorder_hits_uncompiled_last`
         # above already ranks it below one.
         uncompiled_marker = (
-            " [uncompiled]" if _is_uncompiled_display_prefix(display_prefix) else ""
+            " [uncompiled]"
+            if _is_uncompiled_display_prefix(display_prefix, extra_roots)
+            else ""
         )
         block = (
             f"{display_name} (score: {score:.1f}){uncompiled_marker}\n"

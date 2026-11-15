@@ -286,7 +286,12 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.storage import open_store, resolve_indexed_surfaces, resolve_locator_surfaces
+from athenaeum.storage import (
+    open_store,
+    refuse_read_only_write,
+    resolve_indexed_surfaces,
+    resolve_locator_surfaces,
+)
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -742,12 +747,18 @@ class SurfaceSyncState:
 
 
 def _surface_sync_repos(
-    knowledge_root: Path, config: dict | None, surface_sync: "SurfaceSyncState"
+    knowledge_root: Path,
+    config: dict | None,
+    surface_sync: "SurfaceSyncState",
+    *,
+    for_push: bool = False,
 ) -> dict[Path, tuple[str, ...]]:
     """Surfaces that are their own git repo with a remote; a discovery failure
-    is recorded (and logged), never swallowed silently."""
+    is recorded (and logged), never swallowed silently. *for_push* drops
+    read-only mounts (athenaeum#2621: pulled, never pushed)."""
     try:
-        return open_store(config, knowledge_root).sync_repos()
+        store = open_store(config, knowledge_root)
+        return store.push_repos() if for_push else store.sync_repos()
     except Exception as exc:  # noqa: BLE001 — recorded in the run summary below
         log.warning("surface sync: could not enumerate surface repositories: %s", exc)
         surface_sync.record(("*",), "discover", "failed", type(exc).__name__)
@@ -763,6 +774,38 @@ def _capture_surface_heads(
     """Record each syncable surface repo's HEAD (call right after the pre-run pull)."""
     for repo in _surface_sync_repos(knowledge_root, config, surface_sync):
         surface_sync.heads_at_start[repo] = _capture_head(repo)
+
+
+def pull_read_only_surfaces(
+    knowledge_root: Path, config: dict | None = None
+) -> dict[str, bool]:
+    """Pull every read-only mount that is its own git repository (athenaeum#2621).
+
+    Called before each index build, independent of ``librarian.pull_before_run``
+    (a read-only surface exists to be kept current). Returns ``{surface: ok}``.
+    A failed pull is logged as a WARNING (``git_pull`` does it) and reported
+    here as ``False``; it never raises, and the last good checkout stays on
+    disk, so the index build that follows still serves it. A deployment with no
+    read-only surface returns ``{}``.
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+    try:
+        repos = open_store(config, knowledge_root).read_only_pull_repos()
+    except Exception as exc:  # noqa: BLE001 — a discovery failure must not block the index
+        log.warning("read-only surface pull: could not enumerate surfaces: %s", exc)
+        return {}
+    outcome: dict[str, bool] = {}
+    for repo, surfaces in repos.items():
+        ok = git_pull(repo, remote=resolve_push_remote(config), branch=None)
+        if not ok:
+            log.warning(
+                "read-only surface pull failed for %s; indexing the last good copy",
+                ", ".join(surfaces),
+            )
+        for name in surfaces:
+            outcome[name] = ok
+    return outcome
 
 
 def _maybe_pull_before_run(
@@ -867,7 +910,9 @@ def _push_surface_repos(
     surface_sync: SurfaceSyncState,
 ) -> None:
     """Push each own-repo surface whose HEAD moved this run; record every outcome."""
-    for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
+    for repo, surfaces in _surface_sync_repos(
+        knowledge_root, config, surface_sync, for_push=True
+    ).items():
         start = surface_sync.heads_at_start.get(repo)
         if start is None:
             log.info("post-run push skipped for %s: no pre-run HEAD captured", ", ".join(surfaces))
@@ -1303,6 +1348,14 @@ def tier0_handle_upsert(
     if dry_run:
         return entity, True
 
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    _ro_refusal = refuse_read_only_write(
+        existing_path, wiki_root.parent, op="tier-0 page update"
+    )
+    if _ro_refusal is not None:
+        log.warning("  Refused (read-only surface): %s", _ro_refusal)
+        return entity, False
+
     atomic_write_text(
         existing_path,
         render_frontmatter(merged_meta) + "\n" + existing_body,
@@ -1571,6 +1624,14 @@ def tier0_bounce_verdict_mark(
     if dry_run:
         return entity, True
 
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    _ro_refusal = refuse_read_only_write(
+        existing_path, wiki_root.parent, op="tier-0 page update"
+    )
+    if _ro_refusal is not None:
+        log.warning("  Refused (read-only surface): %s", _ro_refusal)
+        return entity, False
+
     atomic_write_text(
         existing_path,
         render_frontmatter(merged_meta) + "\n" + existing_body,
@@ -1739,6 +1800,14 @@ def tier0_do_not_email_mark(
 
     if dry_run:
         return entity, True
+
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    _ro_refusal = refuse_read_only_write(
+        existing_path, wiki_root.parent, op="tier-0 page update"
+    )
+    if _ro_refusal is not None:
+        log.warning("  Refused (read-only surface): %s", _ro_refusal)
+        return entity, False
 
     atomic_write_text(
         existing_path,
@@ -2334,6 +2403,13 @@ def _apply_tier3_results(
             if _update_idx < len(updated_uids):
                 _prevented_uids.append(str(updated_uids[_update_idx]).strip())
             continue
+        # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+        _ro_refusal = refuse_read_only_write(
+            _update_path, wiki_root.parent, config, op="compile update"
+        )
+        if _ro_refusal is not None:
+            log.warning("  Refused (read-only surface): %s", _ro_refusal)
+            continue
         atomic_write_text(_update_path, _update_content)
         if _update_idx < len(updated_uids):
             _admitted_updated_uids.append(updated_uids[_update_idx])
@@ -2417,6 +2493,12 @@ def _apply_tier3_results(
                 entity.name,
                 len(_create_violations),
             )
+            continue
+        _ro_refusal = refuse_read_only_write(
+            page_path, wiki_root.parent, config, op="compile create"
+        )
+        if _ro_refusal is not None:
+            log.warning("  Refused (read-only surface): %s", _ro_refusal)
             continue
         atomic_write_text(page_path, rendered)
         index.register(entity)
@@ -13176,6 +13258,9 @@ def reindex(
     # (yaml > shipped default) — the old inline `fts5` fallback fired for
     # every library caller that hand-built a config dict.
     backend_name = backend or resolve_search_backend(config)
+    # Issue athenaeum#2621: refresh read-only mounts first; a failed pull is
+    # logged and the last good copy is indexed.
+    pull_read_only_surfaces(knowledge_root, config)
     extra_roots = resolve_indexed_surfaces(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
     full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(

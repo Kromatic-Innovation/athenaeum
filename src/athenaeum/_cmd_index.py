@@ -540,6 +540,18 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     from athenaeum.storage import resolve_indexed_surfaces
 
+    # Issue athenaeum#2621: pull read-only mounts before building; a failed
+    # pull is reported and the last good copy is indexed.
+    if getattr(args, "as_of", None) is None:
+        from athenaeum.librarian import pull_read_only_surfaces
+
+        for _surface, _ok in pull_read_only_surfaces(knowledge_root, cfg).items():
+            if not _ok:
+                print(
+                    f"[warn] pull of read-only surface {_surface!r} failed; "
+                    "indexing the last good copy.",
+                    file=sys.stderr,
+                )
     extra_roots = resolve_indexed_surfaces(knowledge_root, cfg)
     include_globs, exclude_globs = resolve_index_globs(cfg)
     embedding_model = resolve_embedding_model(cfg)

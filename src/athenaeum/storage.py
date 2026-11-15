@@ -74,7 +74,7 @@ from athenaeum.config import (
     resolve_storage_adapters,
     resolve_storage_mapping,
 )
-from athenaeum.store import FilesystemStore, Store
+from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
 
 # One-directional edge, real (not deferred): athenaeum.store (L0/L1) imports
 # NOTHING from this module (see its module docstring's "Layering" note), so
@@ -150,6 +150,10 @@ class StorageAdapter:
     #: non-purgeable, so a destructive operation on it is refused unless the
     #: surface is also versioned (inside a git working tree).
     purgeable: bool = True
+    #: ``read_only: true`` in config declares the surface a mount this install
+    #: pulls and indexes but never writes (athenaeum#2621). Every write path
+    #: refuses it with :class:`ReadOnlySurfaceError`. Default ``False``.
+    read_only: bool = False
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -273,8 +277,15 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         raise StorageConfigError(
             f"storage.adapters.{name}.surface_root must be a non-empty string"
         )
+    read_only = raw.get("read_only", False)
+    if not isinstance(read_only, bool):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.read_only must be a boolean (true/false), "
+            f"got {read_only!r}"
+        )
     return StorageAdapter(
         name=name,
+        read_only=read_only,
         backing_store=backing_store.strip(),
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
@@ -506,7 +517,114 @@ def open_store(
     non_purgeable = {
         name for name, adapter in available_adapters(config).items() if not adapter.purgeable
     }
-    return FilesystemStore(knowledge_root, roots, non_purgeable_surfaces=non_purgeable)
+    read_only = {name for name, adapter in available_adapters(config).items() if adapter.read_only}
+    return FilesystemStore(
+        knowledge_root,
+        roots,
+        non_purgeable_surfaces=non_purgeable,
+        read_only_surfaces=read_only,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Read-only surfaces: the ONE path-based write guard (athenaeum#2621)
+# ---------------------------------------------------------------------------
+
+
+def read_only_surface_roots(
+    config: dict[str, Any] | None, knowledge_root: Path
+) -> dict[str, Path]:
+    """``{surface name: resolved root}`` for every surface declared ``read_only``."""
+    if config is None:
+        config = load_config(knowledge_root)
+    return {
+        name: adapter.resolve_root(knowledge_root).resolve()
+        for name, adapter in available_adapters(config).items()
+        if adapter.read_only
+    }
+
+
+def read_only_surface_of(
+    path: Path, config: dict[str, Any] | None, knowledge_root: Path
+) -> str | None:
+    """The read-only surface *path* lives on, else ``None``."""
+    roots = read_only_surface_roots(config, knowledge_root)
+    if not roots:
+        return None
+    resolved = Path(path).resolve()
+    for name, root in roots.items():
+        if resolved == root or root in resolved.parents:
+            return name
+    return None
+
+
+def is_read_only_path(
+    path: Path, config: dict[str, Any] | None, knowledge_root: Path
+) -> bool:
+    """Whether *path* lies under a surface declared ``read_only``."""
+    return read_only_surface_of(path, config, knowledge_root) is not None
+
+
+def require_writable_path(
+    path: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    op: str = "write",
+) -> None:
+    """Raise :class:`ReadOnlySurfaceError` when *path* is on a read-only surface.
+
+    The ONE guard for writers that write through a bare ``Path`` instead of
+    the store (compile, structured upsert, merge, fold, repair, retire,
+    migration): each calls it with the page it is about to change or remove,
+    BEFORE the write. A deployment declaring no ``read_only`` surface pays one
+    config read and gets a no-op.
+    """
+    surface = read_only_surface_of(path, config, knowledge_root)
+    if surface is not None:
+        raise ReadOnlySurfaceError(
+            f"{op} refused on {path}: it lives on surface {surface!r}, declared "
+            "read_only (a shared mount this install never writes)"
+        )
+
+
+def require_writable_paths(
+    paths: Sequence[Path],
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    op: str = "write",
+) -> None:
+    """:func:`require_writable_path` over *paths*, reading the config once.
+
+    Used at the entry of an apply operation, so it refuses whole before the
+    first page is changed rather than half-way through.
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+    for path in paths:
+        require_writable_path(path, knowledge_root, config, op=op)
+
+
+def refuse_read_only_write(
+    path: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    op: str = "write",
+) -> str | None:
+    """Non-raising form of :func:`require_writable_path` for a batch writer.
+
+    Returns the refusal message (``"ReadOnlySurfaceError: ..."``) when *path*
+    is on a read-only surface, else ``None``. A writer that loops over many
+    pages (compile) uses this to skip the one page, log the refusal and carry
+    on, rather than abort the run; the page is left byte-for-byte untouched.
+    """
+    try:
+        require_writable_path(path, knowledge_root, config, op=op)
+    except ReadOnlySurfaceError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------

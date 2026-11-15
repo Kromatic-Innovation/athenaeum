@@ -144,6 +144,7 @@ from athenaeum.sidecar_blocks import (
     scan_fence_state,
     split_blocks,
 )
+from athenaeum.storage import refuse_read_only_write
 from athenaeum.store import now_iso
 from athenaeum.verdicts import content_hash
 
@@ -1403,7 +1404,28 @@ def _rewrite_block_resolved(
     return "\n".join(new_lines).rstrip() + "\n"
 
 
-def _add_merge_rejection_declaration(source_path: Path, other_name: str) -> bool:
+def _read_only_preflight(paths: Iterable[Path], root: Path, *, op: str) -> dict | None:
+    """A ``{"ok": False, "error_code": "read_only_surface", ...}`` refusal when any
+    of *paths* lies on a read-only surface (athenaeum#2621), else ``None``.
+
+    Run BEFORE any mutation: a merge or fold that would rewrite, tombstone or
+    re-link a page on a read-only mount is refused whole, never half-applied.
+    """
+    for path in paths:
+        refusal = refuse_read_only_write(path, root.parent, op=op)
+        if refusal is not None:
+            return {
+                "ok": False,
+                "error_code": "read_only_surface",
+                "message": refusal,
+                "resolved_block": None,
+            }
+    return None
+
+
+def _add_merge_rejection_declaration(
+    source_path: Path, other_name: str, root: Path | None = None
+) -> bool:
     """Append ``other_name`` to ``merge_rejected_with:`` in ``source_path``'s frontmatter.
 
     Issue athenaeum#715. Used by ``resolve_merge(reject)`` to record an
@@ -1427,6 +1449,15 @@ def _add_merge_rejection_declaration(source_path: Path, other_name: str) -> bool
     This function stops writing NEW ones; it does not rewrite any
     existing store — that is a separate, not-yet-scheduled migration.
     """
+    # Issue athenaeum#2621: never stamp a page on a read-only mount.
+    _ro = refuse_read_only_write(
+        source_path,
+        (root or source_path.parent).parent,
+        op="merge rejection stamp",
+    )
+    if _ro is not None:
+        log.warning("pending_merges: %s", _ro)
+        return False
     if not source_path.is_file():
         log.warning("pending_merges: source file missing: %s", source_path)
         return False
@@ -2139,6 +2170,19 @@ def _apply_fold_into_existing(
     ``athenaeum run`` is already excluded by the same run lock that guards
     every other mutating CLI command; no additional lock is needed here.
     """
+    # Step -2 (issue athenaeum#2621): a fold rewrites the canonical, tombstones
+    # each source and re-links siblings; refuse whole when any page it would
+    # touch lives on a read-only surface.
+    _ro_block = _read_only_preflight(
+        [target_path, *(Path(src) for src in pm.sources)], wiki_root, op="fold"
+    )
+    if _ro_block is not None:
+        return {
+            "ok": False,
+            "error_code": _ro_block["error_code"],
+            "message": _ro_block["message"],
+        }
+
     # Read the PRE-EXISTING target's frontmatter first — its ``aliases:``
     # (accumulated by any prior fold) must survive the draft-body overwrite
     # in step 1 below, so this MUST happen before that write.
@@ -3269,6 +3313,16 @@ def resolve_merge(
         )
         write_kind = target_pm.write_kind
 
+        # Issue athenaeum#2621: refuse BEFORE any mutation when the target or
+        # any source page lives on a read-only surface.
+        _ro_block = _read_only_preflight(
+            [target_path, *(Path(src) for src in target_pm.sources)],
+            root,
+            op=f"merge ({write_kind})",
+        )
+        if _ro_block is not None:
+            return _ro_block
+
         if write_kind == "fold-into-existing":
             # Issue athenaeum#748: re-verify the fold target actually exists
             # before taking the delete-sources path. ``write_pending_merge``
@@ -3509,6 +3563,13 @@ def resolve_merge(
         # (athenaeum#2535) rather than one of them being absorbed.
         root = wiki_root or merges_path.parent
         resolved_target = resolve_target_page(target_pm.merge_target_name, root)
+        _ro_block = _read_only_preflight(
+            [p for p in (resolved_target, *(Path(s_) for s_ in target_pm.sources)) if p],
+            root,
+            op="attach-as-subpage",
+        )
+        if _ro_block is not None:
+            return _ro_block
         if resolved_target is None:
             return {
                 "ok": False,
@@ -3655,7 +3716,9 @@ def resolve_merge(
             )
         else:
             try:
-                _add_merge_rejection_declaration(src_a, other_name)
+                _add_merge_rejection_declaration(
+                    src_a, other_name, wiki_root or merges_path.parent
+                )
             except OSError:
                 warnings.append(
                     "merge_rejection_write_failed: source A unavailable or "
@@ -3668,7 +3731,9 @@ def resolve_merge(
             )
         else:
             try:
-                _add_merge_rejection_declaration(src_b, self_name)
+                _add_merge_rejection_declaration(
+                    src_b, self_name, wiki_root or merges_path.parent
+                )
             except OSError:
                 warnings.append(
                     "merge_rejection_write_failed: source B unavailable or "

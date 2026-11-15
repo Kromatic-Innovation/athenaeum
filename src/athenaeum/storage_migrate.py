@@ -96,7 +96,7 @@ from athenaeum.pii import (
     name_field_pii_values,
 )
 from athenaeum.sensitivity import classify
-from athenaeum.storage import surface_root_for_class
+from athenaeum.storage import require_writable_paths, surface_root_for_class
 
 
 def _classified_values(
@@ -1037,6 +1037,12 @@ def apply_name_email_rename(
         raise ValueError(f"cannot apply a deferred rename plan: {plan.page_path}")
 
     assert plan.excluded_page_path is not None
+    # Issue athenaeum#2621: refuse before any write when a page involved is on a read-only surface.
+    require_writable_paths(
+        [plan.excluded_page_path, plan.new_page_path, plan.page_path],
+        wiki_root.parent,
+        op="storage migration",
+    )
     plan.excluded_page_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(plan.excluded_page_path, plan.excluded_page_text or "")
 

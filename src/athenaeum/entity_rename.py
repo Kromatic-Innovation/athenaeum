@@ -60,6 +60,7 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.entity_index_cache import locate_entity_page
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
+from athenaeum.storage import require_writable_paths
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -271,6 +272,10 @@ def apply_rename(
         raise ValueError("cannot apply a no-op rename preview (name unchanged)")
 
     new_page_path = preview.new_page_path or preview.page_path
+    # Issue athenaeum#2621: refuse before any write when the page is on a read-only surface.
+    require_writable_paths(
+        [new_page_path, preview.page_path], wiki_root.parent, op="entity rename"
+    )
     atomic_write_text(new_page_path, preview.rewritten_text)
     if new_page_path != preview.page_path and preview.page_path.is_file():
         preview.page_path.unlink()

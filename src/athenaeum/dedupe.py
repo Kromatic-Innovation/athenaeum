@@ -46,6 +46,7 @@ import yaml
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.storage import refuse_read_only_write
 
 # Honorifics + suffixes to drop before name matching.
 _HONORIFICS = {
@@ -997,6 +998,14 @@ def merge_duplicate_persons(
             report.already_merged += 1
             continue
         pair_dropped: dict[str, int] = {}
+        # Issue athenaeum#2621: never merge into or out of a page on a read-only mount.
+        _ro_root = wiki_root.parent if wiki_root is not None else cpath.parent.parent
+        _ro_refusal = refuse_read_only_write(
+            cpath, _ro_root, op="person merge"
+        ) or refuse_read_only_write(apath, _ro_root, op="person merge")
+        if _ro_refusal is not None:
+            report.errors.append(f"{pair.absorbed_uid}: {_ro_refusal}")
+            continue
         try:
             outcome = _perform_merge(
                 cpath,
