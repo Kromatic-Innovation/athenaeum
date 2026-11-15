@@ -53,11 +53,13 @@ from athenaeum._cmd_merges import (
     _add_provenance_subparser,
     _add_recompare_subparser,
     _add_revalidate_subparser,
+    _add_revoke_merge_rejection_subparser,
     _add_scrub_pii_subparser,
     _cmd_propose_fold,
     _cmd_provenance,
     _cmd_recompare,
     _cmd_revalidate,
+    _cmd_revoke_merge_rejection,
     _cmd_scrub_pii,
 )
 from athenaeum.answers import raise_pending_question
@@ -414,6 +416,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "recompare",
         "scrub-pii",
         "propose-fold",
+        "revoke-merge-rejection",
         "provenance",
     ):
         print(
@@ -421,7 +424,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
             "{list,next,count,scan-retractions,raise-confirmation,answer,"
             "pending-answers,budget,"
             "challenge-coordinate,migrate,revalidate,recompare,scrub-pii,"
-            "propose-fold,provenance} [...]",
+            "propose-fold,revoke-merge-rejection,provenance} [...]",
             file=sys.stderr,
         )
         return 2
@@ -458,6 +461,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "propose-fold":
         return _cmd_propose_fold(args)
+
+    if sub == "revoke-merge-rejection":
+        return _cmd_revoke_merge_rejection(args)
 
     if sub == "provenance":
         return _cmd_provenance(args)
@@ -1123,4 +1129,5 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
     _add_recompare_subparser(d_sub)
     _add_scrub_pii_subparser(d_sub)
     _add_propose_fold_subparser(d_sub)
+    _add_revoke_merge_rejection_subparser(d_sub)
     _add_provenance_subparser(d_sub)

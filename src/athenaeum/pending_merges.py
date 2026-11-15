@@ -106,6 +106,10 @@ from athenaeum.decision_framing import (
     WIDEN_CANDIDATES_LABEL,
     match_widen_candidate,
 )
+from athenaeum.declared_relationships import (
+    DeclaredRelationshipFacts,
+    merge_rejection_conflict,
+)
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
     UNIVERSAL_MARKER,
@@ -502,6 +506,52 @@ def find_fold_target_collisions(
         for fpath in find_identity_pages(merge_target_name, wiki_root)
         if fpath.resolve() != canonical_resolved and fpath.resolve() not in other_resolved
     ]
+
+
+def find_merge_rejection_conflict(paths: list[Path]) -> tuple[Path, Path] | None:
+    """First pair of *paths* mutually linked by ``merge_rejected_with:``, or
+    ``None`` (issue athenaeum#2546, "honoured everywhere" — ``propose-fold``'s
+    own refusal, before a proposal is ever queued).
+
+    Reads each path's CURRENT frontmatter fresh (name, ``aliases:`` and
+    ``merge_rejected_with:``) and delegates the actual pairwise check to
+    :func:`athenaeum.declared_relationships.merge_rejection_conflict`, so
+    this is a thin disk-reading adapter, not a second implementation of the
+    match — alias-aware exactly like
+    :func:`~athenaeum.declared_relationships.declared_relationship`, so a
+    link recorded against one of *paths*' pre-rename name, or a page since
+    folded into one of them, is still caught. A missing/unreadable file
+    reads as an empty-identity page (never raises, never itself the cause
+    of a false conflict).
+    """
+    facts: list[DeclaredRelationshipFacts] = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        meta, _ = parse_frontmatter(text)
+        if not isinstance(meta, dict):
+            meta = {}
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        facts.append(
+            DeclaredRelationshipFacts(name=name, merge_rejected_with=rejected, aliases=aliases)
+        )
+    conflict = merge_rejection_conflict(facts)
+    if conflict is None:
+        return None
+    i, j = conflict
+    return paths[i], paths[j]
 
 
 def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
@@ -1547,6 +1597,30 @@ def _add_aliases_to_frontmatter(meta: dict, new_aliases: list[str]) -> dict:
     return out
 
 
+def _add_merge_rejected_with_to_frontmatter(meta: dict, new_entries: list[str]) -> dict:
+    """Return ``meta`` with ``new_entries`` unioned into ``merge_rejected_with:``.
+
+    Issue athenaeum#2546 ("carried through folds"): the sibling of
+    :func:`_add_aliases_to_frontmatter` for the OTHER field a fold must
+    carry forward — a never-merge link is adjudicated per claim, not per
+    file, so it must survive the file that held it folding away. Same
+    dedup-by-slug, order-preserving append; non-list/absent existing value
+    is treated as empty.
+    """
+    existing_raw = meta.get("merge_rejected_with")
+    existing = [str(r) for r in existing_raw] if isinstance(existing_raw, list) else []
+    existing_slugs = {slugify(r) for r in existing}
+    merged = list(existing)
+    for entry in new_entries:
+        if slugify(entry) not in existing_slugs:
+            existing_slugs.add(slugify(entry))
+            merged.append(entry)
+    out = dict(meta)
+    if merged:
+        out["merge_rejected_with"] = merged
+    return out
+
+
 def _purge_vector_ids(
     slugs: list[str],
     *,
@@ -1953,6 +2027,7 @@ def _apply_fold_into_existing(
     embedding_model: str | None,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
     human_approved: bool = True,
+    rejection_cooldown_lapsed: bool = False,
 ) -> dict:
     """Execute the ``fold-into-existing`` write path (issue athenaeum#425; issue
     athenaeum#716 lane 716-B turned step 5 from a delete into a tombstone and
@@ -2159,6 +2234,80 @@ def _apply_fold_into_existing(
                     "exactly one live canonical per fold set, and a "
                     "tombstone's folded_into is set once and never "
                     "overwritten."
+                ),
+            }
+
+    # Step -1b.5 (issue athenaeum#2546, "honoured everywhere"): refuse the
+    # fold outright when the canonical and any folded-away source -- or two
+    # folded-away sources -- are linked by merge_rejected_with, directly or
+    # through a fold chain (an entry naming one side's PRIOR identity,
+    # reachable via that side's aliases:). This is the actual enforcement
+    # point: the comparator's Gate 1 only ever sees ONE pair at a time and
+    # would happily approve A+X and, separately, B+X, each uniting a
+    # rejected A/B pair transitively once both land on X. Unconditional --
+    # applies to an auto-applied fold exactly as to a human-approved one,
+    # the same posture as the tombstone checks just above.
+    def _rejection_facts(meta: dict[str, Any]) -> DeclaredRelationshipFacts:
+        name = meta.get("name")
+        if not isinstance(name, str):
+            name = ""
+        rejected_raw = meta.get("merge_rejected_with")
+        rejected = [str(r) for r in rejected_raw] if isinstance(rejected_raw, list) else []
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(a) for a in aliases_raw if isinstance(a, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        return DeclaredRelationshipFacts(name=name, merge_rejected_with=rejected, aliases=aliases)
+
+    _rejection_members = [target_path, *[Path(s) for s in folded_sources]]
+    _rejection_facts_list = [_rejection_facts(prior_meta)] + [
+        _rejection_facts(source_metas[s]) for s in folded_sources
+    ]
+    _conflict = merge_rejection_conflict(_rejection_facts_list)
+    if _conflict is not None:
+        i, j = _conflict
+        # Issue athenaeum#2546 review finding: this refusal must be
+        # cooldown-aware, same as the wiki-dedupe clusterer
+        # (athenaeum.prior_rulings.rejection_still_binds, issue
+        # athenaeum#2077/#2107) -- otherwise it silently breaks the
+        # reversible-verdict fold-on-duplicate auto-apply
+        # (athenaeum.auto_apply): that path calls write_pending_merge
+        # immediately followed by resolve_merge ("approve") for a pair the
+        # comparator ALREADY freshly re-decided is a duplicate once the
+        # cooldown lapsed (the pair loop lifts the stale stamp in-memory
+        # before comparing) -- an unconditional refusal HERE would
+        # re-litigate that already-settled question against the STALE
+        # on-disk frontmatter and stick the fold forever.
+        #
+        # ``rejection_cooldown_lapsed`` is a plain BOOL, computed by the
+        # CALLER via :func:`athenaeum.prior_rulings.rejection_still_binds`
+        # -- this module cannot import :mod:`athenaeum.prior_rulings`
+        # itself (that module already imports `parse_pending_merges`/
+        # `source_content_digest` FROM here; importing it back would be a
+        # 2-node cycle `tests/test_import_graph_acyclic.py` forbids). Every
+        # current caller that passes `True` (athenaeum.auto_apply,
+        # athenaeum.reasoning_screens, athenaeum.name_collisions,
+        # athenaeum.decision_answers, the fold-question ratify path in
+        # athenaeum._cmd_pending) has exactly two sources, so the pair it
+        # already checked via `rejection_still_binds` IS the pair this
+        # preflight would find -- this does not generalize to a 3+-source
+        # fold with ONE lapsed pair among several, which stays refused
+        # (fails closed) until a caller needs that shape. Defaults to
+        # ``False`` (strict), so a caller that does not thread it through
+        # keeps the exact pre-fix refusal.
+        if not rejection_cooldown_lapsed:
+            return {
+                "ok": False,
+                "error_code": "fold_rejected_pair",
+                "message": (
+                    f"{_rejection_members[i]} and {_rejection_members[j]} are linked "
+                    "by merge_rejected_with (an operator previously rejected merging "
+                    "them); refusing to fold them onto the same canonical page, "
+                    "directly or through this fold chain. Revoke the link first "
+                    "(athenaeum decisions revoke-merge-rejection) if the ruling no "
+                    "longer applies."
                 ),
             }
 
@@ -2595,6 +2744,27 @@ def _apply_fold_into_existing(
     new_meta = _add_aliases_to_frontmatter(
         carried_meta, folded_slugs + identity_aliases
     )
+    # Issue athenaeum#2546 AC2 ("carried through folds"): the canonical
+    # keeps its OWN merge_rejected_with (read from prior_meta -- the draft
+    # body just overwritten into target_path in step 1 may carry none at
+    # all), and any merge_rejected_with a folded-away source held is
+    # merged into it too. Self-references are stripped: an entry naming
+    # the canonical itself, or naming one of THIS SAME fold's other
+    # sources, is moot the instant both land on the one surviving page --
+    # a page cannot be recorded as rejecting a merge with itself.
+    prior_rejected_raw = prior_meta.get("merge_rejected_with")
+    carried_rejections = (
+        [str(r) for r in prior_rejected_raw] if isinstance(prior_rejected_raw, list) else []
+    )
+    for src in folded_sources:
+        src_rejected_raw = source_metas[src].get("merge_rejected_with")
+        if isinstance(src_rejected_raw, list):
+            carried_rejections.extend(str(r) for r in src_rejected_raw)
+    self_identity_slugs = {target_slug} | {slugify(s) for s in folded_slugs}
+    carried_rejections = [
+        r for r in carried_rejections if slugify(r) not in self_identity_slugs
+    ]
+    new_meta = _add_merge_rejected_with_to_frontmatter(new_meta, carried_rejections)
     if new_meta != target_meta:
         final_target_text = render_frontmatter(new_meta) + target_body
         atomic_write_text(target_path, final_target_text)
@@ -2848,12 +3018,31 @@ def resolve_merge(
     auto_applied: bool = False,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
     answered_at: str | None = None,
+    rejection_cooldown_lapsed: bool = False,
 ) -> dict:
     """Mark a pending-merge block as resolved.
 
     ``answered_at`` (issue athenaeum#1990): the decision-time metric's
     resolution timestamp, forwarded to :func:`_rewrite_block_resolved`.
     Defaults to the current instant when not supplied.
+
+    ``rejection_cooldown_lapsed`` (issue athenaeum#2546 review finding, on a
+    ``"fold-into-existing"`` approve only): forwarded to
+    :func:`_apply_fold_into_existing`'s ``merge_rejected_with`` preflight —
+    a plain bool, not a config knob this function resolves itself, because
+    this module cannot import :mod:`athenaeum.prior_rulings` (see that
+    function's docstring for the import-cycle reason). Defaults to
+    ``False`` (strict), so every pre-existing caller that does not pass it
+    keeps the exact pre-athenaeum#2546 refusal. A caller with exactly two
+    sources and a resolved config in scope (``athenaeum.auto_apply``,
+    ``athenaeum.reasoning_screens``, ``athenaeum.name_collisions``,
+    ``athenaeum.decision_answers``, the fold-question ratify path in
+    ``athenaeum._cmd_pending``) computes it via
+    :func:`athenaeum.prior_rulings.rejection_still_binds` over its own two
+    paths and passes ``not rejection_still_binds(...)`` through, so a
+    lapsed rejection does not block a fold the comparator has ALREADY
+    freshly re-decided should happen — see the issue athenaeum#2546 review
+    finding for the auto-apply regression this closes.
 
     Args:
         merges_path: Path to ``_pending_merges.md``.
@@ -3154,6 +3343,7 @@ def resolve_merge(
                 search_backend=search_backend,
                 embedding_model=embedding_model,
                 registry=registry,
+                rejection_cooldown_lapsed=rejection_cooldown_lapsed,
                 # Issue athenaeum#2076: the athenaeum#2069 widen path (universal
                 # marker / fold_widen_impossible decision) now applies to
                 # any proposal a HUMAN has approved, regardless of origin
@@ -3425,35 +3615,41 @@ def resolve_merge(
         # store (out of scope here).
         src_a = Path(target_pm.sources[0])
         src_b = Path(target_pm.sources[1])
-        # Prefer source B's frontmatter `name:` so renames / custom slugs
-        # round-trip; fall back to the filename stem (minus conventional
-        # prefix) only when the frontmatter is missing/unreadable.
-        other_name: str | None = None
-        if src_b.is_file():
-            try:
-                b_text = src_b.read_text(encoding="utf-8")
-                b_meta, _ = parse_frontmatter(b_text)
-                if isinstance(b_meta, dict):
-                    raw_name = b_meta.get("name")
-                    if isinstance(raw_name, str) and raw_name.strip():
-                        other_name = raw_name.strip()
-            except (OSError, UnicodeDecodeError):
-                other_name = None
-        if other_name is None:
-            other_stem = src_b.stem
-            for prefix in (
-                "feedback_",
-                "project_",
-                "reference_",
-                "user_",
-                "recall_",
-            ):
-                if other_stem.startswith(prefix):
-                    other_stem = other_stem[len(prefix) :]
-                    break
-            other_name = other_stem
+
+        def _frontmatter_name_or_stem(path: Path) -> str:
+            """Prefer the page's own frontmatter ``name:`` so renames /
+            custom slugs round-trip; fall back to the filename stem (minus
+            a conventional raw-intake prefix) only when the frontmatter is
+            missing/unreadable."""
+            if path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    meta, _ = parse_frontmatter(text)
+                    if isinstance(meta, dict):
+                        raw_name = meta.get("name")
+                        if isinstance(raw_name, str) and raw_name.strip():
+                            return raw_name.strip()
+                except (OSError, UnicodeDecodeError):
+                    pass
+            stem = path.stem
+            for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
+                if stem.startswith(prefix):
+                    return stem[len(prefix) :]
+            return stem
+
+        other_name = _frontmatter_name_or_stem(src_b)
+        self_name = _frontmatter_name_or_stem(src_a)
+        warnings: list[str] = []
+        # Issue athenaeum#2546 AC1: write the honest, non-directional
+        # declaration onto BOTH sources, each naming the other — not only
+        # source A as athenaeum#715 originally did. `declared_relationship`
+        # already suppressed the pair from either side carrying the link
+        # alone, but a fold-carry (`_apply_fold_write` below) only reads the
+        # SURVIVING side's own frontmatter, so whichever of A/B later gets
+        # folded away must have carried its own copy for the other's link
+        # to be there to carry forward.
         if not src_a.is_file():
-            warning = (
+            warnings.append(
                 "merge_rejection_write_failed: source A unavailable or unwritable; "
                 "merge will re-propose on next run"
             )
@@ -3461,10 +3657,25 @@ def resolve_merge(
             try:
                 _add_merge_rejection_declaration(src_a, other_name)
             except OSError:
-                warning = (
+                warnings.append(
                     "merge_rejection_write_failed: source A unavailable or "
                     "unwritable; merge will re-propose on next run"
                 )
+        if not src_b.is_file():
+            warnings.append(
+                "merge_rejection_write_failed: source B unavailable or unwritable; "
+                "merge will re-propose on next run"
+            )
+        else:
+            try:
+                _add_merge_rejection_declaration(src_b, self_name)
+            except OSError:
+                warnings.append(
+                    "merge_rejection_write_failed: source B unavailable or "
+                    "unwritable; merge will re-propose on next run"
+                )
+        if warnings:
+            warning = "; ".join(warnings)
 
     primary_parts = ["# Pending Merges", *rewritten]
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"

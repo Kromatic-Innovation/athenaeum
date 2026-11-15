@@ -184,6 +184,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "last_compile",
         "schedule",
         "page_relations",
+        "merge_rejected_with_targets",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
@@ -624,6 +625,60 @@ def test_page_relations_one_sided_pair_fails_and_names_fix(tmp_path: Path) -> No
     assert result.status == "fail"
     assert "1" in result.detail
     assert "athenaeum relate" in result.fix
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2546 AC4: merge_rejected_with pointing at no existing page.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_rejected_with_missing_wiki_dir_is_ok(tmp_path: Path) -> None:
+    result = doctor.check_merge_rejected_with_targets(tmp_path / "no-such-wiki")
+    assert result.status == "ok"
+    assert "0" in result.detail
+
+
+def test_merge_rejected_with_resolved_pair_is_ok(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "a.md").write_text(
+        '---\nname: A\nmerge_rejected_with: ["B"]\n---\nbody\n', encoding="utf-8"
+    )
+    (wiki / "b.md").write_text("---\nname: B\n---\nbody\n", encoding="utf-8")
+
+    result = doctor.check_merge_rejected_with_targets(wiki)
+    assert result.status == "ok"
+    assert "0" in result.detail
+
+
+def test_merge_rejected_with_dangling_entry_fails_and_names_both(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "a.md").write_text(
+        '---\nname: A\nmerge_rejected_with: ["Ghost Page"]\n---\nbody\n', encoding="utf-8"
+    )
+
+    result = doctor.check_merge_rejected_with_targets(wiki)
+    assert result.status == "fail"
+    assert "1" in result.detail
+    assert "Ghost Page" in result.detail
+    assert "revoke-merge-rejection" in result.fix
+
+
+def test_merge_rejected_with_resolves_via_alias_after_rename(tmp_path: Path) -> None:
+    """A link naming B's OLD name must not be flagged once B carries that
+    old name as an alias (athenaeum#2488 rename primitive)."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "a.md").write_text(
+        '---\nname: A\nmerge_rejected_with: ["Old B Name"]\n---\nbody\n', encoding="utf-8"
+    )
+    (wiki / "b.md").write_text(
+        '---\nname: New B Name\naliases: ["Old B Name"]\n---\nbody\n', encoding="utf-8"
+    )
+
+    result = doctor.check_merge_rejected_with_targets(wiki)
+    assert result.status == "ok"
 
 
 def test_interpreter_below_floor_fails(healthy_install: dict) -> None:

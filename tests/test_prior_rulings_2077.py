@@ -520,6 +520,124 @@ class TestQueuedDuplicateNamesEarlierRuling:
         self._assert_names_ruling(questions)
 
 
+class TestAutoApplyActuallyFoldsOnceCooldownLapses:
+    """Issue athenaeum#2546 review finding (Seer, PR athenaeum#2638): the
+    fold-apply preflight that refuses two merge_rejected_with-linked pages
+    (added by athenaeum#2546 itself) must not re-litigate, against STALE
+    on-disk frontmatter, a question the comparator has ALREADY freshly
+    re-decided once the athenaeum#2077 cooldown lapsed. Without
+    cooldown-awareness threaded into resolve_merge/
+    _apply_fold_into_existing, the reversible-verdict fold-on-duplicate
+    auto-apply (athenaeum.auto_apply) silently degraded from "folds
+    immediately" to "queues forever" for exactly this case —
+    TestQueuedDuplicateNamesEarlierRuling's own tests did not catch it
+    because they assert only the proposal's RATIONALE text, which is
+    written before the (then-failing) approve attempt.
+    """
+
+    def test_fold_on_duplicate_auto_apply_actually_tombstones_once_lapsed(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.models import is_tombstone, parse_frontmatter
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from tests.conftest import init_git_repo
+        from tests.test_wiki_dedupe import (
+            _BODY_A,
+            _BODY_B,
+            _content_payload,
+            _fake_embed,
+            _fake_llm_client,
+            _write_page,
+        )
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        a = _write_page(wiki, "venture-a.md", body=_BODY_A)
+        b = _write_page(wiki, "venture-b.md", body=_BODY_B)
+        _rule(wiki, a, b, "reject", answered_at=OLD, base_name="venture-a")
+        init_git_repo(wiki)
+        cfg = {
+            "librarian": {
+                "comparator_enabled": True,
+                "rejected_merge_cooldown_days": 30,
+                "verdict_ledger_enabled": True,
+                "reversible_verdict_auto_apply_enabled": True,
+            }
+        }
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(root)
+        with lock:
+            results = propose_wiki_page_merges(
+                root,
+                config=cfg,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert [r["action"] for r in results] == ["fold-auto-applied"], results
+
+        a_meta, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        b_meta, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert is_tombstone(a_meta) != is_tombstone(b_meta), (
+            "expected exactly one side tombstoned by the completed fold"
+        )
+
+    def test_zero_cooldown_keeps_the_refusal_strict(self, tmp_path: Path) -> None:
+        """The default (``rejected_merge_cooldown_days`` unset/0) must stay
+        exactly as strict as before this fix -- cooldown-awareness is an
+        opt-in, never a silent widening of what auto-apply can override."""
+        from athenaeum.models import is_tombstone, parse_frontmatter
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from tests.conftest import init_git_repo
+        from tests.test_wiki_dedupe import (
+            _BODY_A,
+            _BODY_B,
+            _content_payload,
+            _fake_embed,
+            _fake_llm_client,
+            _write_page,
+        )
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        a = _write_page(wiki, "venture-a.md", body=_BODY_A)
+        b = _write_page(wiki, "venture-b.md", body=_BODY_B)
+        _rule(wiki, a, b, "reject", answered_at=OLD, base_name="venture-a")
+        init_git_repo(wiki)
+        # No rejected_merge_cooldown_days -- resolves to 0 (never expires),
+        # so the pair loop never lifts the stamp and Gate 1 still settles
+        # it as "distinct" without ever reaching the fold-apply preflight
+        # at all. This is the pre-existing (unrelated to this fix) strict
+        # default, kept as a sanity check that the fix is opt-in.
+        cfg = {
+            "librarian": {
+                "comparator_enabled": True,
+                "verdict_ledger_enabled": True,
+                "reversible_verdict_auto_apply_enabled": True,
+            }
+        }
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(root)
+        with lock:
+            results = propose_wiki_page_merges(
+                root,
+                config=cfg,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert results == []
+        client.messages.create.assert_not_called()
+        a_meta, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        b_meta, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert not is_tombstone(a_meta)
+        assert not is_tombstone(b_meta)
+
+
 class TestStampDoesNotOutliveCooldown:
     """Issue athenaeum#2107: the ``merge_rejected_with`` stamp a rejection
     leaves on the pages must follow the cooldown, not outlive it."""

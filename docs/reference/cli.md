@@ -50,6 +50,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - [`athenaeum decisions recompare`](#athenaeum-decisions-recompare) (command) — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - [`athenaeum decisions revalidate`](#athenaeum-decisions-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
+- [`athenaeum decisions revoke-merge-rejection`](#athenaeum-decisions-revoke-merge-rejection) (command) — Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 - [`athenaeum decisions scrub-pii`](#athenaeum-decisions-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum decompose-page`](#athenaeum-decompose-page) (command) — Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
@@ -488,6 +489,7 @@ Subcommands:
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - `athenaeum decisions recompare` — Re-run the five-verdict comparator over every unresolved merge proposal and record a verdict per source pair in the verdict ledger. Dry-run by default; --apply writes to the LEDGER only — this command never approves, rejects, or archives a proposal, and PII-hazard proposals always route to a human regardless of verdict. --apply acquires the run lock and exits 75 if another process already holds it.
 - `athenaeum decisions revalidate` — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
+- `athenaeum decisions revoke-merge-rejection` — Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
 - `athenaeum decisions scan-retractions` — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
 - `athenaeum decisions scrub-pii` — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 
@@ -639,6 +641,18 @@ Re-validate existing unresolved merge proposals against the CURRENT suppression 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--apply` | off (flag absent) | — | Archive proposals the current gate would suppress. Default: dry-run — report only, write nothing. |
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decisions revoke-merge-rejection`
+
+Revoke a merge_rejected_with link between two pages — the explicit operator action that reverses a prior `resolve_merge(reject)` ruling. Dry-run by default; --apply to write.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--a` | — | — | One of the two pages (a slug, a `<slug>.md` filename, or a path). |
+| `--apply` | off (flag absent) | — | Write the removal. Default: dry-run — print the plan, write nothing. |
+| `--b` | — | — | The other of the two pages. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 

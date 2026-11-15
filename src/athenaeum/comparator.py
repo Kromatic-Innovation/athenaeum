@@ -342,7 +342,7 @@ def page_from_path(path: Path) -> ComparatorPage:
 
 
 def _declared_relationship_facts(page: ComparatorPage) -> DeclaredRelationshipFacts:
-    """Extract one page's four declared-relationship facts from its frontmatter.
+    """Extract one page's declared-relationship facts from its frontmatter.
 
     Issue athenaeum#1682: feeds :func:`athenaeum.declared_relationships.declared_relationship`
     -- the ported primitive behind :mod:`athenaeum.merge`'s
@@ -350,6 +350,16 @@ def _declared_relationship_facts(page: ComparatorPage) -> DeclaredRelationshipFa
     an :class:`~athenaeum.models.AutoMemoryFile`. ``supersedes_names`` keeps
     only the ``name`` key of each ``supersedes:`` record, mirroring
     :meth:`athenaeum.models.AutoMemoryFile.supersedes_names`.
+
+    ``aliases`` (issue athenaeum#2546) is read straight off the frontmatter
+    ``aliases:`` list -- the same field the athenaeum#2488 rename primitive and
+    the fold write path both append to -- so a ``merge_rejected_with`` link
+    recorded against this page's pre-rename name, or against a page since
+    folded into this one, still matches via
+    :func:`~athenaeum.declared_relationships.declared_relationship`'s
+    identity-extended check. No raising parser exists for ``aliases:`` (it
+    has none of the three durable-contract shapes below), so a non-list
+    value is treated as empty rather than logged.
 
     Fail-open on a malformed ``refines``/``supersedes``/``merge_rejected_with``
     value: :func:`~athenaeum.models.parse_refines` and its two siblings raise
@@ -379,11 +389,17 @@ def _declared_relationship_facts(page: ComparatorPage) -> DeclaredRelationshipFa
     supersedes_names = [
         rec["name"] for rec in supersedes if isinstance(rec, dict) and rec.get("name")
     ]
+    aliases_raw = meta.get("aliases")
+    if isinstance(aliases_raw, list):
+        aliases = [str(a) for a in aliases_raw if isinstance(a, str) and a.strip()]
+    else:
+        aliases = []
     return DeclaredRelationshipFacts(
         name=name,
         refines=refines,
         supersedes_names=supersedes_names,
         merge_rejected_with=merge_rejected_with,
+        aliases=aliases,
     )
 
 

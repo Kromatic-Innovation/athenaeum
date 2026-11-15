@@ -48,6 +48,7 @@ def _write_page(
     description: str = "",
     tags: list[str] | None = None,
     superseded_by: str = "",
+    merge_rejected_with: list[str] | None = None,
     body: str = "",
 ) -> Path:
     wiki_root.mkdir(parents=True, exist_ok=True)
@@ -59,6 +60,9 @@ def _write_page(
         lines.extend(f"  - {t}" for t in tags)
     if superseded_by:
         lines.append(f"superseded_by: {superseded_by}")
+    if merge_rejected_with:
+        quoted = ", ".join(f'"{n}"' for n in merge_rejected_with)
+        lines.append(f"merge_rejected_with: [{quoted}]")
     lines.append("---")
     lines.append(body)
     path = wiki_root / filename
@@ -571,6 +575,68 @@ class TestWikiClusterFormationIsCompleteLinkage:
         # out-of-chain source.
         all_sources = {Path(s).name for r in results for s in r["sources"]}
         assert all_sources <= {f"chain-{i}.md" for i in range(7)}
+
+
+class TestRejectedPairSplitFromCluster:
+    """Issue athenaeum#2546 ("honoured everywhere" — the clusterer): a raw
+    similarity cluster containing two ``merge_rejected_with``-linked pages
+    must be split (never handed to the comparator / a fold as one group
+    that unites them), the counter-example the issue's AC requires.
+    """
+
+    def test_cluster_containing_a_rejected_pair_is_split(self, tmp_path: Path) -> None:
+        from athenaeum.wiki_dedupe import find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        # A, B, C all cluster together under the fake embedder (same shape
+        # as duplicate_topic_wiki). A and B were previously ruled "two
+        # different things" by an operator.
+        _write_page(
+            wiki_root,
+            "venture-a.md",
+            name="Venture A",
+            body=_BODY_A,
+            merge_rejected_with=["Venture B"],
+        )
+        _write_page(wiki_root, "venture-b.md", name="Venture B", body=_BODY_B)
+        _write_page(wiki_root, "venture-c.md", name="Venture C", body=_BODY_C)
+
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.8, embedding_provider=_fake_embed
+        )
+
+        for cluster in clusters:
+            names = {Path(p).stem for p in cluster.member_paths}
+            assert not {"venture-a", "venture-b"} <= names, (
+                f"rejected pair A/B both present in cluster {cluster.cluster_id}: "
+                f"{names}"
+            )
+        # The pair is split, not the whole candidate group refused: C still
+        # clusters with whichever of A/B survived the split.
+        assert any(len(c.member_paths) >= 2 for c in clusters), (
+            "expected at least one surviving 2+ member cluster after the split"
+        )
+
+    def test_rejected_pair_alone_yields_no_cluster(self, tmp_path: Path) -> None:
+        """Two pages, mutually rejected, with nothing else to cluster with —
+        the AC's "or refused" branch: dropping the loser leaves a
+        singleton, which this function already drops."""
+        from athenaeum.wiki_dedupe import find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(
+            wiki_root,
+            "venture-a.md",
+            name="Venture A",
+            body=_BODY_A,
+            merge_rejected_with=["Venture B"],
+        )
+        _write_page(wiki_root, "venture-b.md", name="Venture B", body=_BODY_B)
+
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.8, embedding_provider=_fake_embed
+        )
+        assert clusters == []
 
 
 # --- Issue athenaeum#1142: durable embedder + suppression attribution ---

@@ -532,6 +532,55 @@ class TestReferenceRewriteAndAliases:
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["aliases"] == ["already-there", "old-a"]
 
+    def test_fold_carries_merge_rejected_with_from_both_sides(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2546 AC2 ("carried through folds"): when C folds into A,
+        A keeps its OWN merge_rejected_with AND C's is merged into it. A
+        bogus self-reference already sitting on the target (naming itself
+        -- a legacy data glitch the new athenaeum#2546 resolver preflight
+        cannot see, since it only compares the target against EACH SOURCE,
+        never against itself) is stripped rather than carried forward.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target,
+            name="Canonical",
+            body="old\n",
+            extra={"merge_rejected_with": '["unrelated-rejection", "Canonical"]'},
+        )
+        src_c = wiki / "old-c.md"
+        _write_wiki_page(
+            src_c,
+            name="Old C",
+            body="c\n",
+            extra={"merge_rejected_with": '["c-own-rejection"]'},
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_c)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        rejected = meta.get("merge_rejected_with")
+        assert isinstance(rejected, list)
+        assert set(rejected) == {"unrelated-rejection", "c-own-rejection"}
+        assert "Canonical" not in rejected
+        assert "old-c" not in rejected
+
     def test_aliases_deduped_on_second_merge(self, tmp_path: Path) -> None:
         """A second fold that re-folds an already-aliased slug must not
         duplicate the aliases: entry."""
@@ -2351,3 +2400,52 @@ class TestFoldGraphInvariants:
         assert live == ["C"]
         assert tombstone_target(a_meta) == "page-b"
         assert tombstone_target(b_meta) == "page-c"
+
+    def test_fold_refuses_to_unite_a_rejected_pair(self, tmp_path: Path) -> None:
+        """athenaeum#2546 ("honoured everywhere" / "the resolver"): folding
+        TWO sources that are mutually merge_rejected_with into the SAME
+        canonical is refused in one shot — this is the direct case; the
+        transitive "A+X approved, then separately B+X approved" case is
+        covered at the clusterer level (test_wiki_dedupe.py), since the
+        resolver only ever sees one already-queued proposal at a time.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="c\n")
+        src_a = wiki / "page-a.md"
+        _write_wiki_page(
+            src_a,
+            name="Page A",
+            body="a\n",
+            extra={"merge_rejected_with": '["Page B"]'},
+        )
+        src_b = wiki / "page-b.md"
+        _write_wiki_page(src_b, name="Page B", body="b\n")
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a), str(src_b)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_rejected_pair"
+        assert result["resolved_block"] is None
+        # Nothing was written — neither source was tombstoned.
+        a_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        b_meta, _ = parse_frontmatter(src_b.read_text(encoding="utf-8"))
+        assert not is_tombstone(a_meta)
+        assert not is_tombstone(b_meta)
+        # The proposal is NOT archived — a human revoking the link (via
+        # `athenaeum decisions revoke-merge-rejection`) makes the SAME
+        # queued proposal approvable on a later retry.
+        assert pm_id in {pm.id for pm in parse_pending_merges(merges_path)}

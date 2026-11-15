@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Shared content gets one page of its own that the related pages link to (athenaeum#2589).** A page-recompile plan can route a unit shared by two or more distinct subject pages to one newly-minted shared page instead of copying it onto each subject, via a new `shared:<group>` disposition paired with one `shared-subject:<group>:<uid>` page action per subject. The shared page records every subject it concerns through the parent/child relation athenaeum#2535 shipped (`page_relations.set_relation`, `via="fold"`), and each subject page gets a link back through the SAME relation — recall and listings show it through the surface athenaeum#2538 already built, with no new rendering path. Gated by the new `librarian.shared_content_page_type` config knob (mechanism, not policy): with nothing declared, a `shared:<group>` disposition downgrades to a plain `child:<group>` and no shared page is ever minted — behaviour is unchanged by default. Content concerning only one subject is refused (`shared-group-too-few-subjects`) rather than silently routed, so it stays on that subject's own page as before. Does not touch the never-merge link (athenaeum#2546) or the fold/merge-queue pipeline (`pending_merges.py`/`merge.py`/`wiki_dedupe.py`/`comparator.py`), both out of scope here.
+- **A rejected merge now leaves a durable never-merge link honored by
+  every merge path (athenaeum#2546).** Rejecting a merge or fold question
+  writes `merge_rejected_with:` onto BOTH pages (previously only one,
+  athenaeum#715) and the decision carries through folds: when a page folds
+  into a canonical, the canonical keeps its own link and absorbs any the
+  folded-away page held, and a link naming a page's pre-rename name (the
+  athenaeum#2488 rename primitive) or a page since folded into another
+  still resolves via `aliases:`. The nightly similarity clusterer, `athenaeum
+  decisions propose-fold`, and approving a queued fold now all refuse to
+  unite two linked pages, directly or through a fold chain. New `athenaeum
+  decisions revoke-merge-rejection --a PAGE --b PAGE [--apply]` is the
+  explicit way to reverse a rejection. `athenaeum doctor` reports a
+  `merge_rejected_with:` entry that resolves to no existing page.
 
 - **Page recompile now runs in the nightly librarian run and is ON by
   default: it makes model calls every night (up to 3 pages a run, 10 while
