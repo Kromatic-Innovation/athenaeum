@@ -138,6 +138,12 @@ class StorageAdapter:
     backing_store: str
     surface_root: str
     corpus_policy: CorpusPolicy
+    #: Whether a delete on this surface is a true erasure (design note §4.5
+    #: R2, athenaeum#2615). Defaults to ``True`` — what every surface has
+    #: always been. ``purgeable: false`` in config declares the surface
+    #: non-purgeable, so a destructive operation on it is refused unless the
+    #: surface is also versioned (inside a git working tree).
+    purgeable: bool = True
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -266,6 +272,7 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         backing_store=backing_store.strip(),
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
+        purgeable=_coerce_bool(raw.get("purgeable"), default=True),
     )
 
 
@@ -490,7 +497,10 @@ def open_store(
     }
     if extra_roots:
         roots.update(extra_roots)
-    return FilesystemStore(knowledge_root, roots)
+    non_purgeable = {
+        name for name, adapter in available_adapters(config).items() if not adapter.purgeable
+    }
+    return FilesystemStore(knowledge_root, roots, non_purgeable_surfaces=non_purgeable)
 
 
 _RAW_INTAKE_FILENAME_RETRIES = 5

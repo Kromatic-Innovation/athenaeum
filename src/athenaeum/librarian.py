@@ -694,12 +694,76 @@ def rebuild_index(wiki_root: Path) -> None:
     )
 
 
+@dataclass
+class SurfaceSyncState:
+    """Per-surface git sync bookkeeping for one run (design note §4.5 R2,
+    issue athenaeum#2615).
+
+    A storage surface whose root is its own git repository (and which has a
+    remote) is pulled before the run and pushed after it, exactly like the
+    knowledge repo. ``heads_at_start`` maps each such repo to its HEAD once
+    the pre-run pull is done (so the post-run push only pushes this run's
+    commits); ``results`` carries one row per surface per operation —
+    ``{"surface", "op", "outcome"}`` with ``outcome`` one of ``ok`` /
+    ``failed`` / ``skipped`` — rendered into the run summary so a failed or
+    skipped sync is never silent. Empty for a deployment with no extra
+    surfaces.
+    """
+
+    heads_at_start: dict[Path, str | None] = field(default_factory=dict)
+    results: list[dict[str, str]] = field(default_factory=list)
+
+    def record(self, surfaces: tuple[str, ...], op: str, outcome: str, reason: str = "") -> None:
+        for surface in surfaces:
+            row = {"surface": surface, "op": op, "outcome": outcome}
+            if reason:
+                row["reason"] = reason
+            self.results.append(row)
+
+    def as_profile_fields(self) -> dict[str, object]:
+        """Flat ``key=value`` tokens for the run-summary line."""
+        fields: dict[str, object] = {}
+        for outcome in ("ok", "failed", "skipped"):
+            names = [f"{r['surface']}:{r['op']}" for r in self.results if r["outcome"] == outcome]
+            if names:
+                fields[outcome] = ",".join(names)
+        fields["reason"] = (
+            "failed" if any(r["outcome"] == "failed" for r in self.results) else "completed"
+        )
+        return fields
+
+
+def _surface_sync_repos(
+    knowledge_root: Path, config: dict | None, surface_sync: "SurfaceSyncState"
+) -> dict[Path, tuple[str, ...]]:
+    """Surfaces that are their own git repo with a remote; a discovery failure
+    is recorded (and logged), never swallowed silently."""
+    try:
+        return open_store(config, knowledge_root).sync_repos()
+    except Exception as exc:  # noqa: BLE001 — recorded in the run summary below
+        log.warning("surface sync: could not enumerate surface repositories: %s", exc)
+        surface_sync.record(("*",), "discover", "failed", type(exc).__name__)
+        return {}
+
+
+def _capture_surface_heads(
+    knowledge_root: Path,
+    *,
+    config: dict | None,
+    surface_sync: SurfaceSyncState,
+) -> None:
+    """Record each syncable surface repo's HEAD (call right after the pre-run pull)."""
+    for repo in _surface_sync_repos(knowledge_root, config, surface_sync):
+        surface_sync.heads_at_start[repo] = _capture_head(repo)
+
+
 def _maybe_pull_before_run(
     knowledge_root: Path,
     *,
     config: dict | None,
     pull_before_run: bool,
     dry_run: bool,
+    surface_sync: SurfaceSyncState | None = None,
 ) -> None:
     """Pull the knowledge repo before the run starts, iff opted in.
 
@@ -710,16 +774,28 @@ def _maybe_pull_before_run(
     and push address the same knowledge remote, so there is no separate
     pull_remote/pull_branch config surface. Pull failure is non-fatal —
     ``git_pull`` logs a warning; the run proceeds against the local tree.
+
+    Issue athenaeum#2615: when *surface_sync* is supplied, every surface that is
+    its own git repository with a remote is pulled the same way, and each
+    outcome (including a failure) is recorded per surface on *surface_sync*.
     """
     if not pull_before_run or dry_run:
         return
-    if not (knowledge_root / ".git").exists():
+    if (knowledge_root / ".git").exists():
+        git_pull(
+            knowledge_root,
+            remote=resolve_push_remote(config),
+            branch=resolve_push_branch(config),
+        )
+    if surface_sync is None:
         return
-    git_pull(
-        knowledge_root,
-        remote=resolve_push_remote(config),
-        branch=resolve_push_branch(config),
-    )
+    for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
+        ok = git_pull(
+            repo,
+            remote=resolve_push_remote(config),
+            branch=resolve_push_branch(config),
+        )
+        surface_sync.record(surfaces, "pull", "ok" if ok else "failed")
 
 
 def _maybe_push_after_run(
@@ -729,6 +805,7 @@ def _maybe_push_after_run(
     push_after_run: bool,
     dry_run: bool,
     head_at_start: str | None,
+    surface_sync: SurfaceSyncState | None = None,
 ) -> None:
     """Push the knowledge repo iff the run committed at least one new commit.
 
@@ -750,6 +827,11 @@ def _maybe_push_after_run(
     if dry_run:
         log.debug("post-run push skipped: --dry-run (issue athenaeum#284)")
         return
+    # Issue athenaeum#2615: surfaces that are their own git repository are
+    # pushed independently of the knowledge repo's own gating below (which
+    # returns early), each with its outcome recorded per surface.
+    if surface_sync is not None:
+        _push_surface_repos(knowledge_root, config=config, surface_sync=surface_sync)
     if head_at_start is None:
         log.info(
             "post-run push skipped: no pre-run HEAD captured — nothing to push "
@@ -769,6 +851,32 @@ def _maybe_push_after_run(
         remote=resolve_push_remote(config),
         branch=resolve_push_branch(config),
     )
+
+
+def _push_surface_repos(
+    knowledge_root: Path,
+    *,
+    config: dict | None,
+    surface_sync: SurfaceSyncState,
+) -> None:
+    """Push each own-repo surface whose HEAD moved this run; record every outcome."""
+    for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
+        start = surface_sync.heads_at_start.get(repo)
+        if start is None:
+            log.info("post-run push skipped for %s: no pre-run HEAD captured", ", ".join(surfaces))
+            surface_sync.record(surfaces, "push", "skipped", "no-pre-run-head")
+            continue
+        if _capture_head(repo) in (None, start):
+            log.info("post-run push skipped for %s: no new commits this run", ", ".join(surfaces))
+            surface_sync.record(surfaces, "push", "skipped", "no-new-commits")
+            continue
+        ok = git_push(
+            repo,
+            remote=resolve_push_remote(config),
+            branch=resolve_push_branch(config),
+            track_failure_streak=False,
+        )
+        surface_sync.record(surfaces, "push", "ok" if ok else "failed")
 
 
 def _capture_head(knowledge_root: Path) -> str | None:
@@ -795,6 +903,8 @@ def git_push(
     knowledge_root: Path,
     remote: str = "origin",
     branch: str | None = None,
+    *,
+    track_failure_streak: bool = True,
 ) -> bool:
     """Push the knowledge repo's current branch to *remote* (issue athenaeum#284).
 
@@ -854,6 +964,8 @@ def git_push(
             result.returncode,
             reason,
         )
+        if not track_failure_streak:
+            return False
         _previous_push_state = push_state.load_state(_push_cache_dir)
         _consecutive = (
             _previous_push_state["consecutive"] + 1
@@ -880,7 +992,8 @@ def git_push(
                 reason,
             )
         return False
-    push_state.write_state(_push_cache_dir, consecutive=0, last_reason="")
+    if track_failure_streak:
+        push_state.write_state(_push_cache_dir, consecutive=0, last_reason="")
     log.info(
         "Pushed knowledge commits to %s%s",
         remote,
@@ -5473,6 +5586,9 @@ class RunContext:
     config: dict[str, Any] | None = None
     provider: str = "api"
     head_at_start: str | None = None
+    #: Issue athenaeum#2615: per-surface git pull/push bookkeeping (empty and
+    #: inert for a deployment with no extra git-backed surfaces).
+    surface_sync: SurfaceSyncState = field(default_factory=SurfaceSyncState)
     usage: TokenUsage = field(default_factory=TokenUsage)
     # Per-knob clients (issue athenaeum#841 — finishes the athenaeum#786 routing seam).
     # Replaces the single shared ``merge_client`` this pipeline used to build
@@ -6147,6 +6263,16 @@ class RunContext:
                 self.run_profile.append(("t1-screen", 0.0, _t1_census.as_profile_fields()))
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: t1 census skipped: %s", exc)
+        # Issue athenaeum#2615: per-surface git pull/push outcomes (omitted
+        # entirely when no extra git-backed surface took part, so a run with
+        # no extra surfaces keeps an unchanged run_profile).
+        try:
+            if self.surface_sync.results:
+                self.run_profile.append(
+                    ("surface-sync", 0.0, self.surface_sync.as_profile_fields())
+                )
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: surface sync skipped: %s", exc)
         # Issue athenaeum#1627 (audit-on-touch): append the run-scoped
         # audited/skipped_fresh/skipped_unavailable/coordinates_filled/
         # coordinates_undeterminable counters as their own phase entry —
@@ -6398,6 +6524,7 @@ class RunContext:
                 push_after_run=bool(self.push_after_run),
                 dry_run=self.dry_run,
                 head_at_start=self.head_at_start,
+                surface_sync=self.surface_sync,
             )
         # Issue athenaeum#2132 (AC3): and for whatever did NOT run. Every
         # phase in `_DEADLINE_STARVED_PHASES` that has no run-profile entry
@@ -6954,6 +7081,7 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
         config=ctx.config,
         pull_before_run=ctx.pull_before_run,
         dry_run=ctx.dry_run,
+        surface_sync=ctx.surface_sync,
     )
 
     # Issue athenaeum#284: capture HEAD at run-start (before ANY commit site fires)
@@ -6963,6 +7091,10 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
     # merge-only / cluster-only early-return paths. Per-call-site tracking
     # would miss the commits inside the retire pass.
     ctx.head_at_start = _capture_head(ctx.knowledge_root) if not ctx.dry_run else None
+    if not ctx.dry_run:
+        _capture_surface_heads(
+            ctx.knowledge_root, config=ctx.config, surface_sync=ctx.surface_sync
+        )
 
 
 def _arm_run_deadline(ctx: RunContext) -> None:
@@ -8693,6 +8825,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         push_after_run=ctx.push_after_run,
         dry_run=ctx.dry_run,
         head_at_start=ctx.head_at_start,
+        surface_sync=ctx.surface_sync,
     )
     ctx.emit_run_summary()
     return 0
@@ -11696,6 +11829,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         push_after_run=ctx.push_after_run,
         dry_run=ctx.dry_run,
         head_at_start=ctx.head_at_start,
+        surface_sync=ctx.surface_sync,
     )
 
     # Issue athenaeum#2160: the witness-attestation readout. AFTER the
@@ -12277,6 +12411,7 @@ def run(
             push_after_run=ctx.push_after_run,
             dry_run=dry_run,
             head_at_start=ctx.head_at_start,
+            surface_sync=ctx.surface_sync,
         )
         ctx.emit_run_summary()  # issue athenaeum#464
         return 0
