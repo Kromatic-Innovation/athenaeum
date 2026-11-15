@@ -40,6 +40,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaulting to `<cache_dir>/remote-audit.jsonl`, created at file mode
   `0600`; writes are line-atomic under concurrent callers. See
   `docs/guides/remote.md`.
+- **Every raw file the librarian drops now leaves a record.** When the
+  entity loop consumes a raw file without creating or updating anything —
+  a Tier-2 classify response that dropped every entity (including a
+  drop the observation filter caused; the two are mechanically
+  indistinguishable from the entity loop's own vantage point, so both are
+  recorded under one `classify` stage), a never-ingest refusal, or any
+  other all-skip outcome — it now gets one row in a new drop ledger under
+  the cache dir (`_drops.jsonl`, declared in `store.ARTIFACT_REGISTRY`),
+  holding the raw ref, a capped (500-char) excerpt with contact addresses
+  masked via the existing PII/excluded-field routing, the stage
+  (`classify` / `never-ingest` / `other`), the reason text where one was
+  given, the run id and a timestamp. The run summary's entity-phase segment
+  and `athenaeum status` report the run's drop count (`drops=<N>`), pointed
+  at `athenaeum drops list`. New `athenaeum drops list` and `athenaeum
+  drops restore <ref>` subcommands let an operator inspect recent drops and
+  re-queue one's recorded content as fresh raw intake. A new
+  `librarian.drop_action` config key (`delete`, the default and today's
+  behaviour, or `quarantine`) decides whether the dropped raw file is
+  deleted or moved into a quarantine directory under the cache dir, so
+  `drops restore` can recover the ORIGINAL bytes rather than just the
+  ledger's capped excerpt. The whole mechanism can be turned off with
+  `librarian.drop_log: false` (or the `ATHENAEUM_DROP_LOG` env override) —
+  when off, no drop rows are written and the run summary reports
+  `drops=disabled` rather than `drops=0`. Mechanism only — what counts as
+  worth keeping is unchanged (see athenaeum#2598, out of scope here).
+  (athenaeum#2609)
 - **Page recompile now runs in the nightly librarian run and is ON by
   default: it makes model calls every night (up to 3 pages a run, 10 while
   any page is still over the hard ceiling) and you turn it off with

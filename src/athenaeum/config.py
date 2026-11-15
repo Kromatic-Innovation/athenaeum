@@ -3396,6 +3396,81 @@ def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+#: Values :func:`resolve_drop_action` accepts for ``librarian.drop_action``
+#: (issue athenaeum#2609).
+VALID_DROP_ACTIONS = ("delete", "quarantine")
+
+
+def resolve_drop_log(config: dict[str, Any] | None) -> bool:
+    """Resolve the drop-ledger off switch (issue athenaeum#2609).
+
+    Every raw file the entity loop consumes without creating or updating
+    anything (a Tier-2 classify response that dropped every entity, an
+    observation-filter-shaped empty classify, a never-ingest refusal, or any
+    other all-skip outcome) gets one row in the drop ledger
+    (:mod:`athenaeum.drops`) by default — ON, because a silent drop with no
+    record at all is exactly the gap this issue closes. Precedence:
+    ``ATHENAEUM_DROP_LOG`` env > ``librarian.drop_log`` yaml > ``True``. Any
+    env value other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_ingestion_gate_enabled`'s shape.
+
+    When this resolves ``False``, the entity loop writes NO drop rows at
+    all this run, and the run summary's ``drops=`` token renders the literal
+    ``disabled`` instead of a count (see
+    :func:`athenaeum.librarian._render_run_summary`'s entity-phase fields) —
+    deliberately never ``drops=0``, which would read as "nothing was
+    dropped" rather than "nobody was watching".
+    """
+    env = os.environ.get("ATHENAEUM_DROP_LOG")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("drop_log")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
+def resolve_drop_action(config: dict[str, Any] | None) -> str:
+    """Resolve what happens to a dropped raw file's bytes on disk (issue
+    athenaeum#2609) from ``librarian.drop_action``.
+
+    One of :data:`VALID_DROP_ACTIONS`: ``"delete"`` (today's behaviour, and
+    the DEFAULT — unlinked exactly as before this issue) or ``"quarantine"``
+    (moved into a quarantine directory under the cache dir, so the ORIGINAL
+    bytes — not just the drop ledger's capped excerpt — survive for
+    ``athenaeum drops restore`` to recover verbatim). This key does not
+    change WHETHER a drop ledger row is written — only what happens to the
+    file; see :func:`resolve_drop_log` for the separate off switch.
+
+    No env override (only the off switch above gets one; this is a local
+    disk-hygiene choice an operator makes once, not something a CI/cron
+    invocation needs to flip per-run). A non-string or out-of-vocabulary
+    yaml value RAISES :class:`ValueError` rather than silently falling back
+    — mirroring :func:`resolve_screening`'s posture for its own closed
+    ``action`` vocabulary — so a typo'd ``librarian.drop_action: qurantine``
+    is loud, not a silent no-op that only surfaces the next time something
+    needs restoring. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("drop_action")
+            if isinstance(raw, str) and raw.strip():
+                candidate = raw.strip().lower()
+                if candidate not in VALID_DROP_ACTIONS:
+                    raise ValueError(
+                        f"librarian.drop_action={raw!r} is invalid; expected "
+                        f"one of {VALID_DROP_ACTIONS}."
+                    )
+                return candidate
+    return "delete"
+
+
 def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     """Resolve the unprompted push budget in tokens-per-turn (issue athenaeum#718).
 

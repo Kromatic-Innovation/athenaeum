@@ -77,6 +77,7 @@ from typing import NamedTuple, TypedDict, cast
 from athenaeum.config import (
     load_config,
     resolve_cache_dir,
+    resolve_drop_log,
     resolve_oversize_hard_ceiling_chars,
     resolve_page_flag_bytes,
     resolve_page_size_threshold_chars,
@@ -271,6 +272,23 @@ class StatusInfo(TypedDict):
     # available") rather than a misleading ``0`` until the plan ledger and
     # the nightly phase exist (AC4).
     page_recompile: dict[str, object]
+    # Issue athenaeum#2609: whether drop-ledger logging was on for the most
+    # recently CONFIGURED state (read live via
+    # :func:`athenaeum.config.resolve_drop_log`, not from a past run — the
+    # off switch can change between runs and the live value is what a
+    # reader deciding "do I need to check `athenaeum drops list`" cares
+    # about).
+    drop_log_enabled: bool
+    # Issue athenaeum#2609: the most recent run's drop count, read from the
+    # drop ledger itself (the newest row's ``run_id``, then every row
+    # sharing it) rather than re-deriving from the run-summary ledger — the
+    # SAME ledger ``athenaeum drops list`` reads, so this count and that
+    # command's output can never disagree. ``None`` when the drop ledger is
+    # empty (no run has ever recorded a drop) or drop logging has never
+    # written to it, which reads identically to "nothing to report" — never
+    # a misleading ``0`` for "drop logging is off" (see ``drop_log_enabled``
+    # above for that distinction).
+    recent_drop_count: int | None
 
 
 #: Printed for a :data:`StatusInfo` ``page_recompile`` field whose producer
@@ -951,6 +969,23 @@ def status(knowledge_root: Path) -> StatusInfo:
             "status: hook-degradation read skipped (%s): %s", type(exc).__name__, exc
         )
 
+    # Issue athenaeum#2609: the drop ledger's own most-recent-run count,
+    # read directly (never from the run-summary ledger's copy) so this and
+    # `athenaeum drops list` can never disagree. Best-effort, same
+    # discipline as every other advisory read above.
+    drop_log_enabled = True
+    recent_drop_count: int | None = None
+    try:
+        from athenaeum.drops import count_for_run, latest_run_id
+
+        drop_log_enabled = resolve_drop_log(config)
+        _drop_cache_dir = resolve_cache_dir()
+        _latest_run = latest_run_id(_drop_cache_dir)
+        if _latest_run is not None:
+            recent_drop_count = count_for_run(_drop_cache_dir, _latest_run)
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug("status: drop-ledger read skipped (%s): %s", type(exc).__name__, exc)
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -976,6 +1011,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         "decision_budget": decision_budget,
         "hook_degradation": hook_degradation,
         "page_recompile": page_recompile,
+        "drop_log_enabled": drop_log_enabled,
+        "recent_drop_count": recent_drop_count,
     }
 
 
@@ -1130,6 +1167,21 @@ def format_status(info: StatusInfo, *, verbose: bool = False) -> str:
             f"{librarian_refusal_consecutive} consecutive run(s) refused to "
             f"do any work (reason={_reason_token or 'unknown'}) — issue athenaeum#1283"
         )
+
+    # Issue athenaeum#2609: the run's drop count, with the pointer to how to
+    # list them. ``.get`` keeps a pre-athenaeum#2609 status dict formatting
+    # cleanly. "disabled" (never "0") when librarian.drop_log/
+    # ATHENAEUM_DROP_LOG turned drop logging off, mirroring the run-summary
+    # line's own `drops=disabled` convention.
+    if not info.get("drop_log_enabled", True):
+        lines.append("Drops (most recent run): disabled (librarian.drop_log)")
+    else:
+        _recent_drops = info.get("recent_drop_count")
+        if _recent_drops is not None:
+            lines.append(
+                f"Drops (most recent run): {_recent_drops} "
+                "— see 'athenaeum drops list'"
+            )
 
     # Issue athenaeum#712: verdict-ledger duty cycle (nights-in-wave / nights,
     # target <=25%), one line per branch with an open/closed comparator

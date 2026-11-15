@@ -3418,6 +3418,28 @@ class ProcessingResult:
     #: ``tests/evals/person_hint.py``, which reports it purely as
     #: attribution alongside the page-delta grade).
     person_hint_decisions: list[tuple[str, str, str]] = field(default_factory=list)
+    #: True when a deterministic Tier-0 step (issue athenaeum#2609, Seer
+    #: review on PR athenaeum#2639) positively matched and handled this raw
+    #: file's content WITHOUT growing ``created``/``updated`` — a hard-bounce
+    #: mark onto the PII/contacts excluded surface
+    #: (``tier0_bounce_mark``, which always writes there regardless of
+    #: ``created``/``updated``), or a ``tier0_handle_upsert`` /
+    #: ``tier0_bounce_verdict_mark`` / ``tier0_do_not_email_mark`` call whose
+    #: own existing-page lookup found NO new delta to write because the
+    #: content was ALREADY reflected on disk (each logs its own "no-op").
+    #: Default ``False``.
+    #:
+    #: Exists because the entity loop's drop-ledger predicate used to infer
+    #: "dropped" from the bare ABSENCE of a create/update — which conflated
+    #: "nothing happened to this content" with "something happened to it
+    #: somewhere other than ``created``/``updated``". Both the bounce-mark
+    #: write and a confirmed-already-applied no-op are the opposite of data
+    #: loss: the first records new contact-surface state, the second proves
+    #: the content is already captured. Neither should ever produce a drop
+    #: row. This flag is the POSITIVE signal the predicate now consults
+    #: (``not _entity_made_change and not result.handled_no_op``) instead of
+    #: inferring from absence alone.
+    handled_no_op: bool = False
 
 
 # --- Schema loading ---
