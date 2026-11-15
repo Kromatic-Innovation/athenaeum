@@ -2894,6 +2894,8 @@ def remember_write(
     valid_until: str | None = None,
     inferred_source: str = _DEFAULT_INFERRED_SOURCE,
     stamp_env_provenance: bool = True,
+    explicit_request: bool = False,
+    audit_transport: str = "stdio",
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -3003,6 +3005,19 @@ def remember_write(
             the MCP ``remember`` tool passes both out of the same
             :class:`TransportDefaults`, so the two cannot diverge, and both
             default to the stdio answer for every other caller.
+        explicit_request: Issue athenaeum#2646 — the human explicitly asked to
+            remember this content. Stamps ``explicit_remember: true`` in the
+            raw's frontmatter, which the relevance gate honours: the fact is
+            never dropped by a ``never`` rule.
+        audit_transport: Client transport (``stdio`` / ``http``) recorded in
+            the override audit record. This function does not branch on it.
+
+    When *wiki_root* is given and the final raw carries the explicit-remember
+    marker (stamped by *explicit_request* or already in *content*'s own
+    frontmatter) AND a ``never`` rule matches it, one ``override`` audit
+    record is appended BEFORE the raw is written; if that append fails the
+    write is refused (an override never goes unaudited). A missing or
+    invalid policy file is a no-op.
 
     Returns:
         Confirmation message with the file path, or an error string.
@@ -3055,6 +3070,10 @@ def remember_write(
     # valid_until write path.
     if coerced_bucket:
         extras["bucket"] = coerced_bucket
+    if explicit_request:
+        from athenaeum.relevance_policy import EXPLICIT_REMEMBER_KEY
+
+        extras[EXPLICIT_REMEMBER_KEY] = True
     if valid_until:
         normalized_valid_until = validity_bound_str(
             {"valid_until": valid_until}, "valid_until"
@@ -3098,8 +3117,45 @@ def remember_write(
     final_content = _inject_provenance_frontmatter(
         content, wiki_source, field_sources_map, extras, screened_access=screened_access
     )
+    if wiki_root is not None:
+        override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
+        if override_error:
+            return override_error
     filepath = write_raw_intake(target_dir, final_content)
     return f"Saved to {filepath}"
+
+
+def _audit_relevance_override(wiki_root: Path, final_content: str, transport: str) -> str | None:
+    """Audit an explicit-remember fact that a ``never`` rule matches (athenaeum#2646).
+
+    Evaluated here, at remember time, because the transport is only known
+    here. The gate itself stays pure: it reports ``overrides``; this function
+    adds the transport and the clock. Returns an ``Error:`` string when the
+    audit record cannot be written (fail closed: no unaudited override), else
+    ``None``. An absent or invalid policy file means nothing can match.
+    """
+    from athenaeum.relevance_policy import (
+        RelevancePolicyError,
+        gate_raw_content,
+        load_relevance_policy,
+    )
+    from athenaeum.relevance_policy_edit import record_override
+
+    try:
+        policy = load_relevance_policy(wiki_root)
+    except (RelevancePolicyError, OSError):
+        return None
+    if not policy.rules:
+        return None
+    overrides = gate_raw_content(policy, final_content).overrides
+    if not overrides:
+        return None
+    try:
+        record_override(wiki_root, overrides, transport=transport)
+    except OSError as exc:
+        log.error("remember: cannot append relevance override audit record: %s", exc)
+        return "Error: relevance override could not be audited; nothing was saved."
+    return None
 
 
 def _inject_provenance_frontmatter(
@@ -4513,6 +4569,7 @@ def create_server(
         sources: str | dict | None = None,
         bucket: str | None = None,
         valid_until: str | None = None,
+        explicit_request: bool = False,
     ) -> str:
         """Save a piece of knowledge to the raw intake directory.
 
@@ -4567,6 +4624,12 @@ def create_server(
             valid_until: Optional SUGGESTED expiry date (``YYYY-MM-DD``, issue
                 athenaeum#904). A suggestion only — never overrides an explicit
                 ``valid_until`` the target already carries.
+            explicit_request: Set to ``true`` ONLY when the user explicitly
+                asked you to remember this content (for example "remember
+                that ..."). Never set it for something you decided to save on
+                your own. A flagged fact is exempt from the operator's
+                ``never`` capture rules (issue athenaeum#2646) and every such
+                override is recorded in an audit log. Default ``false``.
 
         Returns:
             Confirmation message with the file path.
@@ -4603,6 +4666,8 @@ def create_server(
             valid_until=valid_until,
             inferred_source=_transport_defaults.inferred_source,
             stamp_env_provenance=_transport_defaults.env_session_attribution,
+            explicit_request=explicit_request,
+            audit_transport="http" if transport == "http" else "stdio",
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(
