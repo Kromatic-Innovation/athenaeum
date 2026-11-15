@@ -1687,7 +1687,7 @@ Generate the platform's unit, write it, and load it. Refuses (exit 1) if no LLM 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--backend` | — | launchd, systemd, cron | Force a backend instead of auto-detecting from the platform (macOS is always launchd; Linux auto-detects systemd when `systemctl` is on PATH, else cron). |
-| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
+| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). When it is not the default, `install` also sets ATHENAEUM_CACHE_DIR in the generated unit, so the scheduled run uses this same cache directory. |
 | `--home` | — | — | Home directory the unit is written under / read from (default: the real home directory). Mainly for testing an unusual HOME layout. |
 | `--hour` | — | — | Hour (0-23, local time) to run at (default: 3). |
 | `--minute` | — | — | Minute (0-59) to run at (default: 0). |
@@ -1700,7 +1700,7 @@ Unload and delete everything `install` wrote. A no-op (exit 0) when nothing is i
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--backend` | — | launchd, systemd, cron | Force a backend instead of auto-detecting from the platform (macOS is always launchd; Linux auto-detects systemd when `systemctl` is on PATH, else cron). |
-| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
+| `--cache-dir` | — | — | Cache directory to read a cached ANTHROPIC_API_KEY from (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). When it is not the default, `install` also sets ATHENAEUM_CACHE_DIR in the generated unit, so the scheduled run uses this same cache directory. |
 | `--home` | — | — | Home directory the unit is written under / read from (default: the real home directory). Mainly for testing an unusual HOME layout. |
 | `--path` | `~/knowledge` | — | Knowledge directory the generated unit runs `athenaeum run` against (default: ~/knowledge) |
 
