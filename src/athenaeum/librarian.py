@@ -173,17 +173,14 @@ from athenaeum.delta import (
     splice_cluster_report,
 )
 from athenaeum.field_constraints import guard_entity_field_constraints
-from athenaeum.identity_resolution import match_person_mentions
 from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
-    PERSON_OBSERVATION_MAX_FANOUT,
     RAW_FILE_RE,
     check_raw_retention,
     discover_auto_memory_files,
     discover_raw_files,
-    is_structured_jsonl_raw_file,
     round_robin_by_source,
     tier0_passthrough,
 )
@@ -222,7 +219,12 @@ from athenaeum.never_ingest import (
     check_and_refuse,
     filter_never_ingest,
 )
-from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
+from athenaeum.person_hints import (
+    build_hint_action,
+    build_person_hints,
+    cap_hint_claims,
+)
+from athenaeum.person_registry import PERSON_TYPE, PersonRegistry
 from athenaeum.pii import (
     OBSERVED_CONTACT_OTHER_ENTITY,
     OBSERVED_CONTACT_RECORD_WITHOUT_UID,
@@ -2489,58 +2491,6 @@ def _apply_tier3_results(
         )
 
 
-#: Hard cap, per raw file, on how many tier-0 person-registry hits become
-#: HINT candidates in the tier-2 classify prompt (issue athenaeum#1866).
-#: Deliberately LARGER than :data:`~athenaeum.intake.PERSON_OBSERVATION_MAX_FANOUT`
-#: (the cap on how many hint-derived ACTIONS get built from the
-#: classifier's response): a candidate costs only a few hundred prompt
-#: tokens (uid + name + a bounded description) on a call tier 2 already
-#: makes, so it is cheap to let the classifier SEE more people than the
-#: file could plausibly end up writing to. The narrower fan-out cap still
-#: bounds what actually lands on disk. Logged (never silently dropped) when
-#: a file's hit count exceeds this.
-PERSON_HINT_MAX_CANDIDATES = 12
-
-#: Hard cap, in characters, on the one-line description built for each
-#: tier-2 person-hint candidate (issue athenaeum#1866's acceptance
-#: criteria). Sourced from the candidate page's frontmatter ``description:``
-#: or its first body line (mirroring ``decisions.source_info``'s gist
-#: convention), truncated with an ellipsis — a hint is there to help the
-#: classifier tell two same-named people apart, not to re-paste the page.
-PERSON_HINT_DESCRIPTION_MAX_CHARS = 200
-
-
-def _person_hint_description(entry: "PersonRegistryEntry") -> str:
-    """One bounded line describing *entry* for a tier-2 hint candidate.
-
-    Prefers the person page's frontmatter ``description:``; falls back to
-    its first non-blank, non-heading body line. Returns ``""`` (never
-    raises) when the page is unreadable or carries neither — an empty
-    description still renders as a valid, if less useful, hint line.
-    """
-    try:
-        text = entry.path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
-    meta, body = parse_frontmatter(text)
-    desc = ""
-    if isinstance(meta, dict):
-        raw_desc = meta.get("description")
-        if isinstance(raw_desc, str) and raw_desc.strip():
-            desc = raw_desc.strip()
-    if not desc:
-        for line in body.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            desc = stripped
-            break
-    collapsed = " ".join(desc.split())
-    if len(collapsed) > PERSON_HINT_DESCRIPTION_MAX_CHARS:
-        return collapsed[: PERSON_HINT_DESCRIPTION_MAX_CHARS - 1].rstrip() + "…"
-    return collapsed
-
-
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -3065,37 +3015,12 @@ def process_one(
         # (`PERSON_OBSERVATION_MAX_FANOUT`, the pre-existing, narrower cap —
         # see that constant's docstring in `athenaeum.intake`). Both log
         # anything over their cap rather than dropping it silently.
-        person_hints: list[dict[str, str]] = []
-        hint_uids: set[str] = set()
-        if person_registry is not None and not is_structured_jsonl_raw_file(raw):
-            person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
-            if len(person_hits) > PERSON_HINT_MAX_CANDIDATES:
-                skipped_hits = person_hits[PERSON_HINT_MAX_CANDIDATES:]
-                person_hits = person_hits[:PERSON_HINT_MAX_CANDIDATES]
-                log.warning(
-                    "  T0 person-registry consult: hint-candidate cap %d reached "
-                    "for %s — skipping %d additional match(es): %s",
-                    PERSON_HINT_MAX_CANDIDATES,
-                    raw.ref,
-                    len(skipped_hits),
-                    [hit.uid for hit in skipped_hits],
-                )
-            for hit in person_hits:
-                hint_uids.add(hit.uid)
-                person_hints.append(
-                    {
-                        "uid": hit.uid,
-                        "name": hit.name,
-                        "description": _person_hint_description(hit),
-                    }
-                )
-            if person_hints:
-                log.info(
-                    "  T0 person-registry consult: %d hint candidate(s) for %s: %s",
-                    len(person_hints),
-                    raw.ref,
-                    [h["uid"] for h in person_hints],
-                )
+        # Issue athenaeum#2653: the candidate list (literal registry hits plus
+        # the owner's reserved slot) is built by ONE helper shared with the
+        # batch transport -- see athenaeum.person_hints.build_person_hints.
+        hint_set = build_person_hints(raw, wiki_root, index, person_registry, config)
+        person_hints = hint_set.candidates
+        hint_uids = hint_set.uids
 
         # --- Tier 1: Programmatic matching ---
         # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
@@ -3296,38 +3221,15 @@ def process_one(
         # `PERSON_OBSERVATION_MAX_FANOUT` — see that constant's docstring in
         # `athenaeum.intake` for why this cap moved here rather than being
         # removed.
-        _hint_action_count = 0
+        # Issue athenaeum#2653: the owner's claim is exempt from that cap.
+        classified, _capped_uids = cap_hint_claims(
+            classified, hint_set.owner_uid, raw.ref
+        )
+        for _capped_uid in _capped_uids:
+            hint_decisions[_capped_uid] = ("classify", "dropped")
         for c in classified:
             if c.from_person_hint:
-                if _hint_action_count >= PERSON_OBSERVATION_MAX_FANOUT:
-                    log.warning(
-                        "  T2/T3 person-hint action cap %d reached for %s — "
-                        "dropping additional hint-derived claim for uid=%s",
-                        PERSON_OBSERVATION_MAX_FANOUT,
-                        raw.ref,
-                        c.existing_uid,
-                    )
-                    if c.existing_uid:
-                        hint_decisions[c.existing_uid] = ("classify", "dropped")
-                    continue
-                _hint_action_count += 1
-                actions.append(
-                    EntityAction(
-                        kind="update",
-                        name=c.name,
-                        entity_type="",
-                        tags=[],
-                        access="",
-                        existing_uid=c.existing_uid,
-                        # Issue athenaeum#1866 AC4: never the raw.content[:2000]
-                        # fallback — a hint-derived item's observations is
-                        # always the classifier's stated claim (parse_tier2_entities
-                        # drops any item whose claim text is empty before it
-                        # ever reaches here).
-                        observations=c.observations,
-                        from_person_hint=True,
-                    )
-                )
+                actions.append(build_hint_action(c))
                 continue
             actions.append(
                 EntityAction(
@@ -9383,6 +9285,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # ``write`` knob client — ``None`` falls back to
                         # *client* (the ``classify`` client) unchanged.
                         write_client=write_client,
+                        person_registry=person_registry,
                         # Issue athenaeum#1175: per-knob batch selection. A knob
                         # resolved OFF takes the synchronous path inside the
                         # batch transport, so the two can be mixed.

@@ -783,7 +783,20 @@ class TestBatchSyncEquivalence:
         _freeze_recorded_at(monkeypatch)
         before = (wiki / "uid-robin.md").read_text(encoding="utf-8")
 
-        batch_client = _FakeClient(_scripted_responder, allow_sync=False)
+        # Issue athenaeum#2653: the batch transport now offers a literal person
+        # match to the classifier as a hint (as the synchronous transport
+        # always has) instead of proposing an unconditional tier-1 merge. The
+        # classifier here affirms a claim for Robin, so a merge into Robin's
+        # page is still proposed and the routing guard is still what refuses it.
+        def _hinting_responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if params["model"] == DEFAULT_CLASSIFY_MODEL and "uid-robin" in user_msg:
+                return json.dumps(
+                    [{"candidate_uid": "uid-robin", "observations": "Replied about tiered pricing."}]
+                )
+            return _scripted_responder(params)
+
+        batch_client = _FakeClient(_hinting_responder, allow_sync=False)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
         _patch_uids(monkeypatch)
         assert (

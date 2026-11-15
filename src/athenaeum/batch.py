@@ -105,6 +105,12 @@ from athenaeum.models import (
     resolve_page_type,
 )
 from athenaeum.never_ingest import NEVER_INGEST_TIER_ENTITY, check_and_refuse
+from athenaeum.person_hints import (
+    PersonHintSet,
+    build_hint_action,
+    build_person_hints,
+    cap_hint_claims,
+)
 from athenaeum.pii_attribution import build_attribution_context
 from athenaeum.provider import (
     AnthropicBatchClientBackend,
@@ -156,6 +162,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from anthropic.types.messages.batch_create_params import Request
+
+    from athenaeum.person_registry import PersonRegistry
 
 log = logging.getLogger(__name__)
 
@@ -909,6 +917,10 @@ class _FileState:
     # collect pass. Raw stays on disk, nothing is written, and a lease keeps
     # the next run from resubmitting it.
     in_flight: bool = False
+    # Issue athenaeum#2653: the tier-2 person-hint candidates built at assembly
+    # (the same ``build_person_hints`` the synchronous transport calls).
+    # ``None`` on a state rebuilt from a resume handle; recomputed at parse time.
+    hint_set: PersonHintSet | None = None
 
 
 @dataclass
@@ -1203,6 +1215,7 @@ def process_batch_run(
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
     never_ingest_manifest: AuthorityManifest | None = None,
     relevance_policy: RelevancePolicy | None = None,
+    person_registry: "PersonRegistry | None" = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -1452,8 +1465,16 @@ def process_batch_run(
                 st.done = True
                 continue
 
+            # Issue athenaeum#2653: person-hint candidates (literal registry hits
+            # plus the owner's reserved slot) from the SAME helper the sync
+            # transport uses, so both decide identically on the same input.
+            st.hint_set = build_person_hints(raw, wiki_root, index, person_registry, config)
             # Issue athenaeum#662: filter junk-name matches before they cost a tier-3 call.
             st.matched = tier1_programmatic_match(raw, index, config=config)
+            # Issue athenaeum#1866: a uid that is a hint candidate must not ALSO
+            # be a tier1 match (it would bypass classify-then-verify).
+            if st.hint_set.uids:
+                st.matched = [m for m in st.matched if m[1] not in st.hint_set.uids]
             for name, _uid, fpath in st.matched:
                 if index.has_entity_format(fpath):
                     log.info("  T1 match (entity format): %s → %s", name, fpath.name)
@@ -1494,6 +1515,7 @@ def process_batch_run(
                         usage=usage,
                         config=config,
                         stats=sync_stats,
+                        person_candidates=st.hint_set.candidates or None,
                     )
                     result.degraded += sync_stats.degraded
                     result.truncated += sync_stats.truncated
@@ -1514,6 +1536,7 @@ def process_batch_run(
                                 valid_access,
                                 wiki_root=wiki_root,
                                 config=config,
+                                person_candidates=st.hint_set.candidates or None,
                             ),
                         )
                     )
@@ -1612,6 +1635,13 @@ def process_batch_run(
         if st.failed or st.done or st.deferred or st.in_flight:
             continue
         classified = []
+        if st.hint_set is None:
+            # A state rebuilt from a resume handle: recompute (deterministic on
+            # the same raw + corpus) so the parse sees the same candidate set.
+            st.hint_set = build_person_hints(
+                st.raw, wiki_root, index, person_registry, config
+            )
+        _hint_candidates = st.hint_set.candidates or None
         if st.classified is not None:
             # Issue athenaeum#1175: produced synchronously at assembly, already
             # parsed and already through tier2_classify's own repair/retry
@@ -1653,6 +1683,7 @@ def process_batch_run(
                 stats=t2_stats,
                 stop_reason=getattr(msg, "stop_reason", None),
                 wiki_root=wiki_root,
+                person_candidates=_hint_candidates,
             )
             # athenaeum#476: a batch response TRUNCATED at max_tokens dropped every
             # entity — retry ONCE synchronously with a LARGER budget (the same
@@ -1675,6 +1706,7 @@ def process_batch_run(
                     usage=usage,
                     config=config,
                     owner=owner,
+                    person_candidates=_hint_candidates,
                 )
                 if not retry_stats.degraded and not retry_stats.truncated:
                     log.info(
@@ -1788,7 +1820,13 @@ def process_batch_run(
         )
         classified = name_gate_outcome.kept
         st.address_escalations.extend(name_gate_outcome.escalations)
+        # Issue athenaeum#2653: hint-derived claims are capped and built by the
+        # same helpers the sync transport uses (the owner is exempt from the cap).
+        classified, _ = cap_hint_claims(classified, st.hint_set.owner_uid, st.raw.ref)
         for c in classified:
+            if c.from_person_hint:
+                st.actions.append(build_hint_action(c))
+                continue
             st.actions.append(
                 EntityAction(
                     kind="create" if c.is_new else "update",
