@@ -390,6 +390,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal's source pages on the archived block, and the archive binds every
   proposer until one of those pages actually changes (athenaeum#2514).
 
+- `athenaeum schedule install` now schedules the `athenaeum` that is running
+  `install`, not whichever one is first on `PATH`. The binary is resolved from
+  the running environment first (the entry point in `sys.argv[0]`, then the
+  console script beside the interpreter) and falls back to `PATH` only when
+  neither exists; `install` prints the resolved binary path so a mismatch is
+  visible (athenaeum#2583).
+
 - A human-approved fold into a canonical page that has no frontmatter — or
   an empty `{}` block — now backfills that page's separator coordinates from
   the folded sources in the fold preflight, so it applies instead of raising
@@ -402,6 +409,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on disk. An older answer file used to win, because every conformant file
   was dispatched in turn and the first one to land settled the decision
   (athenaeum#2514).
+
+- `athenaeum schedule install --cache-dir <dir>` (or `ATHENAEUM_CACHE_DIR`)
+  now carries that cache directory into the generated launchd, systemd and cron
+  unit as `ATHENAEUM_CACHE_DIR`. Previously the flag only chose where the key was
+  read from, so the scheduled `athenaeum run` wrote its state to the default
+  cache directory and could clobber another deployment's cache; the docs now
+  state which cache directory the scheduled run uses (athenaeum#2584).
 
 - `split-oversize` and the `librarian.oversize_page_action: split`
   disposition no longer split a compiled page at its lone top-level `#
