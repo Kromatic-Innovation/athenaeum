@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaulting to `<cache_dir>/remote-audit.jsonl`, created at file mode
   `0600`; writes are line-atomic under concurrent callers. See
   `docs/guides/remote.md`.
+- **Recall now has defined metrics and a scorer, so "does push work" has an answer that a raw use rate cannot give (athenaeum#2611).** `docs/design/recall-metrics.md` defines push coverage, recall-through, use precision and session use rate, the gold-set format, the definition of "used" with its still-unmeasured error rate, and why the raw push-use rate from athenaeum#2306 is not the target. `athenaeum.recall_metrics` scores them per task and in aggregate, with Wilson and task-level bootstrap intervals, from a gold set plus the push ledger and session transcripts. It reports pages the agent opened without a push separately, and documents that a recall listing counts as an open (an upper bound). A 14-task invented example gold set over the eval corpus is committed under `tests/evals/data/recall_metrics/`. Library-only: no CLI command or hook change, and athenaeum#2295's decision rule is unchanged in the repo.
 - **Every raw file the librarian drops now leaves a record.** When the
   entity loop consumes a raw file without creating or updating anything —
   a Tier-2 classify response that dropped every entity (including a

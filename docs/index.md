@@ -109,6 +109,7 @@ does not answer.
 - [Writer identity](design/writer-identity.md) — where authority over a fact comes from, and the opt-in
   enforcement flag.
 - [Contradiction detection](design/contradiction-detection.md)
+- [Recall metrics](design/recall-metrics.md) — push coverage, recall-through, use precision and session use rate, and the gold set that makes them computable.
 - [Auto-resolve](design/auto-resolve.md)
 - [Merge inflow restoration](design/merge-inflow-restoration.md)
 - [Recall architecture](design/recall-architecture.md)
