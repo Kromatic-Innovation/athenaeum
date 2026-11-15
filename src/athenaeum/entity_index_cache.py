@@ -67,12 +67,13 @@ import logging
 import os
 import re
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.models import EntityIndex, PageIndexRecord
+from athenaeum.models import EntityIndex, PageIndexRecord, PageLocator
 
 log = logging.getLogger(__name__)
 
@@ -174,9 +175,17 @@ def _write_cache(
         return False
 
 
-def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, LoadStats]:
-    """Build an :class:`EntityIndex` for *wiki_root*, re-parsing only changed pages."""
+def load_with_stats(
+    wiki_root: Path, cache_dir: Path, surfaces: "Sequence[Any]" = ()
+) -> tuple[EntityIndex, LoadStats]:
+    """Build an :class:`EntityIndex` for *wiki_root*, re-parsing only changed pages.
+
+    *surfaces* (athenaeum#2617) are extra indexed surfaces, walked through the
+    same :class:`~athenaeum.models.PageLocator` as the full scan; their pages
+    are cached under ``<prefix>/<relpath>`` so a wiki-only cache stays valid.
+    """
     wiki_root = Path(wiki_root)
+    locator = PageLocator(wiki_root, surfaces)
     path = cache_path(wiki_root, cache_dir)
     cached = _read_cache(path, wiki_root)
     cache_was_valid = cached is not None
@@ -185,9 +194,7 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
     fresh: dict[str, tuple[_Stamp, PageIndexRecord | None]] = {}
     ordered: list[tuple[Path, PageIndexRecord]] = []
     reparsed = 0
-    for fpath in sorted(wiki_root.glob("*.md")):
-        if fpath.name.startswith("_"):
-            continue
+    for key, fpath in locator.iter_pages():
         try:
             stamp = _stamp(fpath.stat())
         except OSError:
@@ -195,7 +202,7 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
             # scan's read would fail too and skip it. Not cached, so it is
             # retried next load.
             continue
-        prior = old.get(fpath.name)
+        prior = old.get(key)
         if prior is not None and prior[0] == stamp:
             record = prior[1]
         else:
@@ -206,7 +213,7 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
             parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
             record = parsed[0] if parsed is not None else None
             reparsed += 1
-        fresh[fpath.name] = (stamp, record)
+        fresh[key] = (stamp, record)
         if record is not None:
             ordered.append((fpath, record))
 
@@ -215,7 +222,7 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
     if not cache_was_valid or reparsed or removed:
         wrote = _write_cache(path, wiki_root, fresh)
 
-    index = EntityIndex.from_page_records(wiki_root, ordered)
+    index = EntityIndex.from_page_records(wiki_root, ordered, surfaces)
     return index, LoadStats(
         pages=len(fresh),
         reparsed=reparsed,
@@ -225,9 +232,11 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
     )
 
 
-def load_entity_index(wiki_root: Path, cache_dir: Path) -> EntityIndex:
+def load_entity_index(
+    wiki_root: Path, cache_dir: Path, surfaces: "Sequence[Any]" = ()
+) -> EntityIndex:
     """:func:`load_with_stats` without the stats."""
-    return load_with_stats(wiki_root, cache_dir)[0]
+    return load_with_stats(wiki_root, cache_dir, surfaces)[0]
 
 
 #: A uid safe to splice into a filename glob: no path separator, no glob
@@ -266,8 +275,14 @@ def locate_entity_page(
     *,
     entity_index: EntityIndex | None = None,
     cache_dir: Path | None = None,
+    surfaces: "Sequence[Any]" = (),
 ) -> Path | None:
     """Resolve a known *uid* to its entity page, or ``None`` (orphan).
+
+    *surfaces* (athenaeum#2617): extra indexed surfaces to look on as well as
+    ``wiki/``. With any, the filename fast path is skipped (it cannot see a
+    second page carrying the same uid) and a uid held on two surfaces raises
+    :class:`~athenaeum.models.AmbiguousPageUidError`.
 
     - *entity_index* given: that index decides, exactly as before.
     - *cache_dir* given (and *entity_index* not): the filename fast path
@@ -277,11 +292,11 @@ def locate_entity_page(
     """
     wiki_root = Path(wiki_root)
     if entity_index is None and cache_dir is not None:
-        fast = page_by_uid_filename(wiki_root, uid)
+        fast = page_by_uid_filename(wiki_root, uid) if not surfaces else None
         if fast is not None:
             return fast
-        entity_index = load_entity_index(wiki_root, cache_dir)
-    index = entity_index if entity_index is not None else EntityIndex(wiki_root)
+        entity_index = load_entity_index(wiki_root, cache_dir, surfaces)
+    index = entity_index if entity_index is not None else EntityIndex(wiki_root, surfaces)
     page_path = index.get_by_uid(uid)
     if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
         return None
@@ -293,6 +308,7 @@ def entity_index_for_uid(
     uid: str,
     *,
     cache_dir: Path | None = None,
+    surfaces: "Sequence[Any]" = (),
 ) -> EntityIndex:
     """An :class:`EntityIndex` whose ``get_by_uid(uid)`` answers correctly,
     built as cheaply as the fast-path/cache mechanism allows (issue athenaeum#2181).
@@ -315,10 +331,12 @@ def entity_index_for_uid(
     """
     wiki_root = Path(wiki_root)
     if cache_dir is not None:
-        fast = page_by_uid_filename(wiki_root, uid)
+        # With extra surfaces the fast path is skipped: it cannot see a second
+        # page carrying the same uid, and that must be a loud error (athenaeum#2617).
+        fast = page_by_uid_filename(wiki_root, uid) if not surfaces else None
         if fast is not None:
             parsed = EntityIndex.read_page_record(fast)
             if parsed is not None:
                 return EntityIndex.from_page_records(wiki_root, [(fast, parsed[0])])
-        return load_entity_index(wiki_root, cache_dir)
-    return EntityIndex(wiki_root)
+        return load_entity_index(wiki_root, cache_dir, surfaces)
+    return EntityIndex(wiki_root, surfaces)
