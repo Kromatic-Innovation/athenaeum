@@ -129,6 +129,14 @@ timer, or at session end. See "Compile raw → wiki" below.
    that would fail. `athenaeum schedule remove` undoes it. `athenaeum
    doctor` reports whether a schedule is installed.
 
+   The scheduled run uses the cache directory `install` resolved
+   (`--cache-dir`, else `ATHENAEUM_CACHE_DIR`, else `~/.cache/athenaeum`).
+   When that is not the default, the generated unit sets
+   `ATHENAEUM_CACHE_DIR` to it (launchd `EnvironmentVariables`, systemd
+   `Environment=`, or the cron line's env prefix), so a schedule pointed at a
+   second knowledge root with its own `--cache-dir` never writes the default
+   cache. With the default cache directory the unit sets nothing extra.
+
    ```bash
    athenaeum schedule install --path ~/knowledge
    ```
