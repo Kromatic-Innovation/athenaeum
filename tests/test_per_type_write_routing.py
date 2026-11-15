@@ -353,3 +353,56 @@ class TestBatchApply:
         assert not (other / "notes").exists()
 
 
+
+
+class TestSharedPageOnAMappedSurface:
+    """A shared page routed off ``wiki/`` still gets its fold relations and undo."""
+
+    def _cfg(self) -> dict[str, Any]:
+        cfg = _cfg("concept", "recipes")
+        cfg["librarian"] = {
+            "page_recompile": {"min_parent_chars": 1},
+            "shared_content_page_type": "concept",
+        }
+        return cfg
+
+    def test_relations_attach_across_surfaces_and_undo_removes_the_page(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.page_recompile_queue import VERDICT_APPROVE
+        from athenaeum.page_recompile_undo import UNDO_DIRECT, write_undo
+        from athenaeum.page_relations import read_relations
+        from tests.test_page_recompile_shared_content import (
+            _init_git_repo,
+            _seed,
+            _shared_plan,
+        )
+
+        wiki = tmp_path / "knowledge" / "wiki"
+        _source, subject_a, subject_b = _seed(wiki)
+        _init_git_repo(wiki.parent)
+        _plan, plan_id = _shared_plan(wiki, subject_uids=["subjecta1", "subjectb1"])
+
+        outcome = write_apply(
+            wiki, plan_id=plan_id, config=self._cfg(), verdict=VERDICT_APPROVE
+        )
+        assert outcome.ok, (outcome.reason, outcome.issues)
+        assert not outcome.post_write_issues, outcome.post_write_issues
+        shared_uid = outcome.created_uids[0]
+        shared_path = next((wiki.parent / "recipes").glob(f"{shared_uid}*.md"))
+        assert not list(wiki.glob(f"{shared_uid}*.md"))
+
+        shared_meta, _ = parse_frontmatter(shared_path.read_text(encoding="utf-8"))
+        assert {r["uid"]: r["via"] for r in shared_meta["related"]} == {
+            "subjecta1": "fold",
+            "subjectb1": "fold",
+        }
+        for subject in (subject_a, subject_b):
+            meta, _ = parse_frontmatter(subject.read_text(encoding="utf-8"))
+            parent = read_relations(meta).parent
+            assert parent is not None and parent.uid == shared_uid
+
+        undone = write_undo(wiki, plan_id=plan_id, config=self._cfg())
+        assert undone.action == UNDO_DIRECT, (undone.action, undone.reason, undone.blocked)
+        assert shared_uid in undone.deleted_uids
+        assert not shared_path.exists()

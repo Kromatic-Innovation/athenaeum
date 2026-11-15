@@ -233,7 +233,12 @@ from athenaeum.page_relations import (
 )
 from athenaeum.pending_merges import _add_merge_rejected_with_to_frontmatter
 from athenaeum.screening import more_restrictive
-from athenaeum.storage import SurfaceNotIndexedError, open_store, page_write_root_for_class
+from athenaeum.storage import (
+    SurfaceNotIndexedError,
+    open_store,
+    page_write_root_for_class,
+    resolve_locator_surfaces,
+)
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
@@ -1608,7 +1613,7 @@ def compute_apply(
         return ComputedApply(issues=tuple(issues))
 
     # AC6/AC7/AC12: page-level actions.
-    index_map = _index_pages_by_uid(wiki_root)
+    index_map = _index_pages_by_uid(wiki_root, config)
     prospective_children = {
         parent_uid: [c.uid for c in existing_relations.children] + [sp.uid for sp in sub_pages]
     }
@@ -1904,7 +1909,7 @@ def compute_apply(
 
     new_by_uid = {sp.uid: sp for sp in sub_pages}
     if existing_relations.children:
-        index_map = _index_pages_by_uid(wiki_root)
+        index_map = _index_pages_by_uid(wiki_root, config)
         existing_rows = {
             uid: (name, desc)
             for uid, name, desc in _children_display_rows(
@@ -2395,7 +2400,7 @@ def write_apply(
                 uid=plan.uid,
             )
 
-    index = EntityIndex(wiki_root)
+    index = EntityIndex(wiki_root, resolve_locator_surfaces(wiki_root.parent, config))
     page_path = index.get_by_uid(plan.uid)
     if page_path is None:
         return ApplyOutcome(
@@ -2538,6 +2543,7 @@ def write_apply(
                 child_uid=attachment.child_uid,
                 parent_uid=attachment.parent_uid,
                 via=attachment.via,
+                config=config,
             )
         except (RelationError, ValueError) as exc:
             attach_issues.append(
