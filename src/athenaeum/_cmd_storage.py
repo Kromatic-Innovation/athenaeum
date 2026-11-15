@@ -296,6 +296,95 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
 
+    move_p = s_sub.add_parser(
+        "move-type",
+        help=(
+            "Move every wiki page of one entity type into a configured, indexed "
+            "surface that lives in its own git repository. Dry-run by default "
+            "(lists the pages and any link that would break the store-link "
+            "rule); --apply snapshots both repositories, moves the pages and "
+            "commits each; --undo restores both repositories."
+        ),
+        description=(
+            "Move a type's pages into a per-type store.\n\n"
+            "  athenaeum storage move-type <type> --to <surface>            dry run\n"
+            "  athenaeum storage move-type <type> --to <surface> --apply    move\n"
+            "  athenaeum storage move-type --undo <record-id-or-file>       undo\n\n"
+            "The target must be a surface defined under storage.adapters with "
+            "embedded: true, living in its own git repository; the wiki must "
+            "be in git too. A dry run names every page that would move and every "
+            "link that, after the move, would point from the moved page to a "
+            "more private page (lower visibility rank); --apply refuses while "
+            "any remains. Page uids and file bytes are unchanged. After a "
+            "successful move, add the storage.mapping entry for the type (see "
+            "docs/reference/configuration.md) so new pages of the type are "
+            "written to the store. UNDO: --apply prints a record id and the "
+            "exact undo command; --undo resets the wiki repository and the "
+            "target repository to the commits taken before the move (including "
+            "removing the move commits), and refuses if either has moved on "
+            "since, unless --force."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    move_p.add_argument(
+        "entity_type",
+        nargs="?",
+        default=None,
+        metavar="TYPE",
+        help="The entity type (frontmatter `type:`) whose wiki pages move.",
+    )
+    move_p.add_argument(
+        "--to",
+        dest="to_surface",
+        default=None,
+        metavar="SURFACE",
+        help="Target surface: a storage.adapters name (embedded: true, own git repo).",
+    )
+    move_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge).",
+    )
+    move_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Perform the move. Without this flag the command is a dry run that "
+            "writes nothing. Refused while any link would break the store-link "
+            "rule or any destination file already exists."
+        ),
+    )
+    move_p.add_argument(
+        "--undo",
+        default=None,
+        metavar="RECORD",
+        help=(
+            "Undo a previous --apply: RECORD is the record id --apply printed "
+            "(found in the cache dir) or the path of its JSON file. Restores "
+            "both repositories to their pre-move snapshots."
+        ),
+    )
+    move_p.add_argument(
+        "--force",
+        action="store_true",
+        help="With --undo: reset even if a repository has moved on or has uncommitted changes.",
+    )
+    move_p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Where move records are kept (default: ATHENAEUM_CACHE_DIR env, "
+            "else ~/.cache/athenaeum)."
+        ),
+    )
+    move_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the dry-run plan as JSON.",
+    )
+
     lint_mapping_p = s_sub.add_parser(
         "lint-mapping",
         help=(
@@ -339,11 +428,130 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_lint_pii(args)
     if sub == "lint-mapping":
         return _cmd_storage_lint_mapping(args)
+    if sub == "move-type":
+        return _cmd_storage_move_type(args)
     print(
-        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping} [...]",
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,move-type} [...]",
         file=sys.stderr,
     )
     return 2
+
+
+def _reindex_after_move(knowledge_root: Path, config: dict[str, Any] | None) -> None:
+    """Refresh the search index: page names in it change with the surface."""
+    try:
+        from athenaeum.librarian import reindex as _reindex
+
+        backend_name, pages = _reindex(knowledge_root, config=config)
+    except Exception as exc:  # noqa: BLE001 - the move is done; only the index is stale
+        print(
+            f"warning: reindex failed ({exc}); recall will not see the new locations "
+            f"until you run `athenaeum reindex --path {knowledge_root}`.",
+            file=sys.stderr,
+        )
+        return
+    print(f"reindexed ({backend_name}, {pages} page(s)).")
+
+
+def _cmd_storage_move_type(args: argparse.Namespace) -> int:
+    """``storage move-type`` (athenaeum#2620): plan / apply / undo. Logic in
+    :mod:`athenaeum.storage_move`."""
+    import json
+
+    from athenaeum import storage_move
+
+    knowledge_root = _resolve_knowledge_root(args)
+    config = load_config(knowledge_root)
+    cache_dir = getattr(args, "cache_dir", None)
+
+    try:
+        if args.undo:
+            if args.entity_type or args.to_surface or args.apply:
+                print("error: --undo takes only a record (and --force).", file=sys.stderr)
+                return 2
+            record = storage_move.load_record(args.undo, cache_dir)
+            storage_move.undo_move(record, force=args.force)
+            for role, info in record.repos.items():
+                print(f"undone: {role} repo {info['repo']} restored to {info['before']}")
+            _reindex_after_move(knowledge_root, config)
+            return 0
+        if not args.entity_type or not args.to_surface:
+            print("error: TYPE and --to SURFACE are required.", file=sys.stderr)
+            return 2
+        plan = storage_move.plan_move(config, knowledge_root, args.entity_type, args.to_surface)
+        if args.apply:
+            return _apply_move_plan(plan, config, knowledge_root, cache_dir)
+    except storage_move.MoveRefused as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        payload = {
+            "type": plan.entity_type,
+            "target": plan.target_name,
+            "moves": [{"uid": m.uid, "from": str(m.src), "to": str(m.dst)} for m in plan.moves],
+            "collisions": [str(c) for c in plan.collisions],
+            "violations": [v.__dict__ for v in plan.violations],
+            "can_apply": plan.can_apply,
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
+        return 0 if plan.can_apply else 1
+    _print_move_plan(plan)
+    return 0 if plan.can_apply else 1
+
+
+def _print_move_plan(plan: "Any") -> None:
+    print(
+        f"dry run: {len(plan.moves)} page(s) of type {plan.entity_type!r} would move "
+        f"from wiki/ to surface {plan.target_name!r} ({plan.target.root})"
+    )
+    for m in plan.moves:
+        print(f"  move {m.src.name}  (uid {m.uid or '-'})")
+    for c in plan.collisions:
+        print(f"  COLLISION: {c} already exists")
+    print(f"{len(plan.violations)} link(s) would break the store-link rule:")
+    for v in plan.violations:
+        print(f"  {v.describe()}")
+    if not plan.mapping_routes_type:
+        print(
+            f"note: storage.mapping does not route {plan.entity_type!r} to "
+            f"{plan.target_name!r}; add `{plan.entity_type}: {plan.target_name}` so new "
+            "pages follow (docs/reference/configuration.md)."
+        )
+    if plan.can_apply:
+        print("ready: re-run with --apply to move.")
+    elif not plan.moves:
+        print("nothing to move.")
+    else:
+        print("NOT ready: --apply is refused until the collisions/links above are resolved.")
+
+
+def _apply_move_plan(
+    plan: "Any", config: dict[str, Any] | None, knowledge_root: Path, cache_dir: Path | None
+) -> int:
+    from athenaeum import storage_move
+
+    if not plan.can_apply:
+        _print_move_plan(plan)
+    record = storage_move.apply_move(plan, config, knowledge_root, cache_dir=cache_dir)
+    print(
+        f"moved {len(record.moved)} page(s) of type {record.entity_type!r} to "
+        f"{record.target_name!r}; both repositories committed."
+    )
+    for role, info in record.repos.items():
+        print(f"  {role} repo {info['repo']}: before {info['before']} after {info['after']}")
+    print(f"record: {storage_move.record_path(record.record_id, cache_dir)}")
+    print(
+        "undo (restores both repositories to the 'before' commits):\n"
+        f"  athenaeum storage move-type --undo {record.record_id} --path {knowledge_root}"
+    )
+    if not plan.mapping_routes_type:
+        print(
+            f"next: add `{plan.entity_type}: {plan.target_name}` under storage.mapping so "
+            "new pages of the type are written to the store."
+        )
+    _reindex_after_move(knowledge_root, config)
+    return 0
 
 
 def _apply_plan(

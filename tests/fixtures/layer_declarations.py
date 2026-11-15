@@ -357,6 +357,7 @@ MODULE_LAYER: dict[str, int] = {
     "shadow_parity": 4,
     "status": 4,
     "storage_migrate": 4,
+    "storage_move": 4,  # issue athenaeum#2620: per-type store move (L4 domain)
     "subject_population": 4,
     "surface_divergence": 4,
     "tiers": 4,
