@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`never` relevance rules are now enforced before any tier runs (athenaeum#2644).** With a `wiki/_schema/relevance-policy.md` in place, a fact whose declared `type` / `tags` / `uid` resolve to `never` is not compiled, on the synchronous librarian, the batch transport and the auto-memory phase alike (one shared decision, `relevance_policy.gate_raw_content`, so the transports cannot drift). The gate runs ahead of the Tier-0 passthrough and structured-upsert paths, which never reach an LLM. A dropped fact is recorded in the drop ledger (reason `relevance-policy: never ... (rule N, line L)`) and the raw note is deleted on processing as before; a raw mixing items (`.jsonl` records or concatenated `---` frontmatter documents) loses only the covered items; auto-memory files are skipped, never deleted. No policy file: behaviour unchanged. An invalid policy file stops the run before any raw is touched. Forward only; no prompt text, model setting or LLM call changed.
+
 ## [0.24.0] - 2026-11-15
 
 **Summary.** 0.24.0 is a MINOR, breaking bump from 0.23.5 under the pre-1.0
