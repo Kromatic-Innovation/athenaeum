@@ -134,3 +134,11 @@ def test_json_flag_before_subcommand_is_honoured(tmp_path, capsys, args):
     assert main(["relevance-policy", *args, "report", "--path", str(root)]) == 0
     out = capsys.readouterr().out
     assert (out.startswith("{")) == bool(args)
+
+
+def test_report_skips_a_page_whose_frontmatter_is_not_a_mapping(tmp_path):
+    root = _seed(tmp_path)
+    _wiki_pages(root)
+    (root / "wiki" / "odd.md").write_text("---\n- a\n- b\n---\nBody.\n")
+    matches = report_never_matches(load_relevance_policy(root / "wiki"), root / "wiki")
+    assert [m.path for m in matches] == ["ada.md"]

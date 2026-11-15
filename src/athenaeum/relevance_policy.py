@@ -608,6 +608,8 @@ def report_never_matches(policy: RelevancePolicy, wiki_root: Path) -> list[Never
             meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
+        if not isinstance(meta, dict):
+            continue  # a list/scalar frontmatter declares nothing to match
         type_, tags, uid = declared_facts(meta)
         rule = policy.match(type_, tags, uid)
         if rule is not None and rule.verdict == "never":
