@@ -286,3 +286,73 @@ def test_auto_memory_phase_drops_covered_file_but_never_deletes_it(tmp_path, mon
     rows = iter_drops(root / "cache")
     assert len(rows) == 1 and rows[0].reason.startswith("relevance-policy: never tag=personal")
     assert rows[0].raw_ref == "auto-memory/_unscoped/user_oat_milk.md"
+
+
+# --- resume path: a classify batch collected after a policy change -------------------
+
+_NEVER_ARCHIVED = (
+    "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n| never | | archived | |\n"
+)
+_KEPT_ITEM = (
+    "---\ntype: concept\ntags: [active]\n---\nStandalone fact about WidgetKept gadget.\n"
+)
+_COVERED_ITEM = (
+    "---\ntype: concept\ntags: [archived]\n---\nSecretCoveredMarker about WidgetDropped.\n"
+)
+
+
+def _collect_after_policy_change(tmp_path, monkeypatch, content):
+    from tests import test_batch_mode as tb
+
+    tb._patch_uids(monkeypatch)
+    scripted = tb._scripted_responder
+
+    def no_observations(params):
+        # Empty observations make the write tier fall back to the raw's own
+        # text, so a covered item left in the raw WOULD reach the write prompt.
+        out = scripted(params)
+        if params["model"] == tb.DEFAULT_CLASSIFY_MODEL and out != "[]":
+            return out.replace("Facts about WidgetKept.", "")
+        return out
+
+    monkeypatch.setattr(tb, "_scripted_responder", no_observations)
+    root, cache_dir, client, usage, raw_files = tb._spill_a_classify_batch(
+        tmp_path, "rp", [content]
+    )
+    # The policy arrives AFTER the batch was submitted.
+    (root / "wiki" / "_schema").mkdir(exist_ok=True)
+    (root / "wiki" / "_schema" / POLICY_FILENAME).write_text(_NEVER_ARCHIVED)
+    write_prompts: list[str] = []
+
+    def responder(params):
+        msg = params["messages"][0]["content"]
+        if "## Entity to create" in msg or "## Existing page content" in msg:
+            write_prompts.append(msg)
+        return no_observations(params)
+
+    write_client = tb._FakeClient(responder, allow_sync=True)
+    out = tb._collect(root, cache_dir, client, usage, write_client=write_client)
+    return root, raw_files, out, write_prompts
+
+
+def test_collected_classify_handle_wholly_covered_is_discarded(tmp_path, monkeypatch):
+    root, raw_files, out, write_prompts = _collect_after_policy_change(
+        tmp_path, monkeypatch, _COVERED_ITEM
+    )
+    assert out.reconciliation.get("relevance-policy") == 1
+    assert out.created == 0 and write_prompts == []
+    assert raw_files[0].path.exists()  # left on disk for the next run's gate
+    assert not list((root / "wiki").glob("*widget*"))
+
+
+def test_collected_classify_handle_mixed_raw_never_reaches_write_tier(tmp_path, monkeypatch):
+    root, raw_files, out, write_prompts = _collect_after_policy_change(
+        tmp_path, monkeypatch, _KEPT_ITEM + _COVERED_ITEM
+    )
+    assert not out.reconciliation.get("relevance-policy")
+    assert out.created == 1
+    assert write_prompts, "the uncovered item should have been written"
+    assert any("WidgetKept" in p for p in write_prompts)
+    assert all("SecretCoveredMarker" not in p for p in write_prompts)
+    for page in (root / "wiki").glob("*.md"):
+        assert "SecretCoveredMarker" not in page.read_text()

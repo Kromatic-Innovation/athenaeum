@@ -113,7 +113,7 @@ from athenaeum.provider import (
 )
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
-from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content
+from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_relevance_policy
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -2647,6 +2647,7 @@ RECONCILE_REASONS = (
     # Ref-level
     "raw-missing",  # leased raw file gone from disk; result discarded
     "raw-mutated",  # leased raw file changed under us; result discarded
+    "relevance-policy",  # athenaeum#2644: a `never` rule now covers the whole raw
     "request-expired",  # per-request expired — NOT billed, ordinary retry
     "request-errored",
     "request-canceled",
@@ -2704,6 +2705,8 @@ def _log_discard(reason: str, ref: str, batch_id: str) -> None:
         "is re-claimed from scratch",
         "leased raw file is gone"
         if reason == "raw-missing"
+        else "a relevance-policy `never` rule now covers the whole raw"
+        if reason == "relevance-policy"
         else "leased raw file CHANGED since claim time",
         ref,
         batch_id,
@@ -2716,8 +2719,15 @@ def _states_for_classify_handle(
     *,
     config: dict[str, object] | None,
     out: "BatchCollectResult",
+    relevance_policy: RelevancePolicy | None = None,
 ) -> tuple[list[_FileState], list[str]]:
     """Rebuild the per-file states a collected ``classify`` batch applies to.
+
+    The raw is re-read from disk here, so the athenaeum#2644 relevance gate is
+    re-applied exactly as the submitting run applied it: covered items never
+    reach the write tier. A raw that is now covered WHOLE (a ``never`` rule
+    added since submit) is handed back as dropped and stays on disk, so the
+    next run's gate drops it with full drop accounting.
 
     The tier-0/1 pass is re-run rather than restored: it is programmatic and
     free, and re-running it against the CURRENT index is strictly better than
@@ -2735,6 +2745,18 @@ def _states_for_classify_handle(
             out._count(reason or "raw-missing")
             dropped.append(record.ref)
             continue
+        if relevance_policy is not None and relevance_policy.rules:
+            _rp_gate = gate_raw_content(
+                relevance_policy,
+                raw.content,
+                jsonl=raw.path.suffix.lower() == ".jsonl",
+            )
+            if _rp_gate.fully_dropped:
+                _log_discard("relevance-policy", record.ref, handle.batch_id)
+                out._count("relevance-policy")
+                dropped.append(record.ref)
+                continue
+            raw._content = _rp_gate.kept_content
         st = _FileState(raw=raw)
         # Same in-memory guard the submitting run applied before assembling
         # the request, so the observations this file contributes are the same
@@ -2994,6 +3016,7 @@ def collect_pending_batches(
         wiki_root=wiki_root, config=config, cache_dir=effective_cache_dir
     )
     out = BatchCollectResult()
+    relevance_policy: RelevancePolicy | None = None  # athenaeum#2644, loaded lazily
     handles = batch_state.load(effective_cache_dir)
     if not handles:
         return out
@@ -3081,8 +3104,12 @@ def collect_pending_batches(
             continue
 
         if knob == "classify":
+            if relevance_policy is None:
+                # Loaded once per collect pass, only when a classify handle
+                # needs it; an invalid policy raises (fail closed), as at submit.
+                relevance_policy = load_relevance_policy(wiki_root)
             states, dropped = _states_for_classify_handle(
-                handle, index, config=config, out=out
+                handle, index, config=config, out=out, relevance_policy=relevance_policy
             )
         elif knob == "write":
             states, dropped = _states_for_write_handle(handle, out=out)
