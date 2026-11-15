@@ -314,6 +314,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.claude` config directory, so a correct install reported `FAIL`
   with a fix that was the command the user had just run; a genuinely
   unregistered install still reports `FAIL` (athenaeum#2594).
+- `athenaeum reindex` and `athenaeum session-end` no longer error with
+  "Vector backend requires chromadb" under the shipped default
+  (`search_backend: vector`) when the `[vector]` extra is not installed —
+  the exact install the README quick start's `pip install athenaeum[mcp]`
+  produces. Both now degrade to the `fts5` backend with one logged
+  warning and succeed, honoring the fallback the generated
+  `athenaeum.yaml`'s own `search_backend` comment already promised for
+  recall queries (`VectorBackend.query`) but, until now, not for building
+  the index those queries read. A clean install following the README
+  quick start through `athenaeum session-end` now gets a working `recall`
+  with no extra install step (athenaeum#2592).
 
 - Merge proposals a human rejected, and proposals `athenaeum decisions
   revalidate --apply` archived as stale, are no longer re-proposed the next

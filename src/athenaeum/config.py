@@ -154,8 +154,11 @@ _DEFAULTS: dict[str, Any] = {
     # athenaeum#1736 -- see docs/design/native-memory-baseline.md Section 7 for
     # the measured basis. "fts5" is now the opt-out
     # (search_backend: fts5). A default install without the vector extra
-    # (chromadb) degrades to fts5 at query time with one logged warning --
-    # see VectorBackend.query in athenaeum.search.
+    # (chromadb) degrades to fts5 with one logged warning, both at query
+    # time (VectorBackend.query in athenaeum.search) and at build time
+    # (librarian.reindex / _cmd_index.py's cmd_rebuild_index, issue
+    # athenaeum#2592) -- reindex and session-end build a real fts5 index
+    # instead of erroring, so the query-time fallback has something to read.
     "search_backend": "vector",
     "vector": {
         "provider": "chromadb",
@@ -5634,8 +5637,9 @@ auto_recall: true
 # default) or "fts5" (keyword only, the opt-out).
 # vector: Chromadb with local embeddings, fused with FTS5 via reciprocal-rank
 #   fusion (recall.hybrid, default on). Requires: pip install athenaeum[vector]
-#   -- a default install without it degrades to fts5 at query time with one
-#   logged warning, no traceback.
+#   -- a default install without it degrades to fts5 (both for recall
+#   queries and for `reindex`/`session-end`) with one logged warning, no
+#   traceback.
 # fts5: SQLite FTS5 with BM25 ranking and porter stemming. No extra
 #   dependencies. Set search_backend: fts5 to opt out of vector.
 search_backend: vector
