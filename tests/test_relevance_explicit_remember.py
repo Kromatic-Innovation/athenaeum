@@ -126,6 +126,34 @@ def test_unwritable_audit_log_refuses_the_write(kb: Path) -> None:
     assert out.startswith("Error:") and _raws(kb) == []
 
 
+MULTI_DOC = "Two notes from one chat.\n\n" + PERSONAL + WORK
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+def test_flag_covers_every_item_of_a_multi_document_note(kb: Path, transport: str) -> None:
+    # Seer review on PR athenaeum#2680: the flag stamps only the note's top
+    # frontmatter, yet the human asked for the whole note -- a later block a
+    # ``never`` rule covers must be kept and audited, not dropped.
+    assert _remember(kb, transport, content=MULTI_DOC, explicit_request=True).startswith(
+        "Saved to"
+    )
+    (raw,) = _raws(kb)
+    gate = _gate(kb, raw)
+    assert gate.drops == () and len(gate.overrides) == 1
+    assert "Likes oat milk." in gate.kept_content
+    (rec,) = read_audit(kb / "wiki")
+    assert rec["kind"] == "override" and rec["transport"] == transport
+
+
+def test_unflagged_multi_document_note_still_drops_the_covered_block(kb: Path) -> None:
+    assert _remember(kb, "stdio", content=MULTI_DOC).startswith("Saved to")
+    gate = _gate(kb, _raws(kb)[0])
+    assert len(gate.drops) == 1 and gate.overrides == ()
+    assert "Likes oat milk." not in gate.kept_content
+    assert "Runs the platform team." in gate.kept_content
+    assert read_audit(kb / "wiki") == []
+
+
 def test_marker_in_content_frontmatter_is_audited_too(kb: Path) -> None:
     content = PERSONAL.replace("tags: [personal]", "tags: [personal]\nexplicit_remember: true")
     _remember(kb, "http", content=content)
