@@ -482,6 +482,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--apply` to write) repairs pre-existing dangling tombstones whose bare
   slug resolves to exactly one live page (athenaeum#2545).
 
+- `push-metrics follow-through` now fills `channel_bucket` from the transcript `entrypoint` field (`cli`/`claude-desktop` -> interactive, `sdk-cli` -> headless; absent, unrecognised or conflicting -> unknown) through one documented `ENTRYPOINT_CHANNEL_MAP`, and labels the split a launch-surface proxy; length buckets now count user turns instead of all records, with cutoffs overridable via `--short-max-user-turns` / `--medium-max-user-turns` (athenaeum#2608).
 - `_detect_field_group_misfits` no longer refuses an ordinary same-record
   update (e.g. a deal's stage advancing while its name/amount stay put) as
   a field-group misfit: a misfit now requires that NO other field in the

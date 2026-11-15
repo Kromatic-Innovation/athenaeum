@@ -291,73 +291,179 @@ class TestOpenedWithoutPush:
         assert report.class_counts[follow_through.CLASS_NEITHER] == 1
 
 
+def _user_rec(text: str = "x", **extra: object) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": text}, **extra}
+
+
 class TestSessionLengthBucketing:
     def test_short_medium_long_boundaries(self) -> None:
-        assert (
-            follow_through._session_length_bucket(0) == follow_through.LENGTH_SHORT
-        )
-        assert (
-            follow_through._session_length_bucket(
-                follow_through.SHORT_SESSION_MAX_RECORDS - 1
-            )
-            == follow_through.LENGTH_SHORT
-        )
-        assert (
-            follow_through._session_length_bucket(follow_through.SHORT_SESSION_MAX_RECORDS)
-            == follow_through.LENGTH_MEDIUM
-        )
-        assert (
-            follow_through._session_length_bucket(
-                follow_through.MEDIUM_SESSION_MAX_RECORDS - 1
-            )
-            == follow_through.LENGTH_MEDIUM
-        )
-        assert (
-            follow_through._session_length_bucket(follow_through.MEDIUM_SESSION_MAX_RECORDS)
-            == follow_through.LENGTH_LONG
-        )
+        short_max = follow_through.SHORT_SESSION_MAX_USER_TURNS
+        medium_max = follow_through.MEDIUM_SESSION_MAX_USER_TURNS
+        bucket = follow_through._session_length_bucket
+        assert bucket(0) == follow_through.LENGTH_SHORT
+        assert bucket(short_max - 1) == follow_through.LENGTH_SHORT
+        assert bucket(short_max) == follow_through.LENGTH_MEDIUM
+        assert bucket(medium_max - 1) == follow_through.LENGTH_MEDIUM
+        assert bucket(medium_max) == follow_through.LENGTH_LONG
+
+    def test_thresholds_are_overridable(self) -> None:
+        t = follow_through.LengthThresholds(2, 4)
+        assert follow_through._session_length_bucket(1, t) == follow_through.LENGTH_SHORT
+        assert follow_through._session_length_bucket(2, t) == follow_through.LENGTH_MEDIUM
+        assert follow_through._session_length_bucket(4, t) == follow_through.LENGTH_LONG
+
+    def test_invalid_thresholds_rejected(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            follow_through.LengthThresholds(10, 5)
+        with pytest.raises(ValueError):
+            follow_through.LengthThresholds(0, 5)
+
+    def test_user_turns_exclude_tool_results_meta_and_assistant(self) -> None:
+        records: list[object] = [
+            _user_rec("hello"),
+            _user_rec("   "),
+            _user_rec("meta", isMeta=True),
+            {"type": "assistant", "message": {"role": "assistant", "content": "hi"}},
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t", "content": "r"}],
+                },
+            },
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "again"}]},
+            },
+            "not-a-dict",
+        ]
+        assert follow_through._count_user_turns(records) == 2
+
+    def test_many_records_few_user_turns_is_short(self) -> None:
+        records: list[object] = [_user_rec("go")] + [
+            {"type": "assistant", "message": {"role": "assistant", "content": "w"}}
+            for _ in range(200)
+        ]
+        turns = follow_through._count_user_turns(records)
+        assert follow_through._session_length_bucket(turns) == follow_through.LENGTH_SHORT
+
+    def test_report_uses_overridden_thresholds(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(cache, session_id="sess-len", pushed_id="lll11111", ts="2026-01-01T00:00:00Z")
+        _write_transcript(projects, "sess-len", [_user_rec(f"t{i}") for i in range(3)])
+        default = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        ).to_dict()
+        assert _segment_total(default, length="short") == 1
+        tight = follow_through.build_follow_through_report(
+            cache_dir=cache,
+            projects_root=projects,
+            short_max_user_turns=2,
+            medium_max_user_turns=3,
+        ).to_dict()
+        assert _segment_total(tight, length="long") == 1
+        assert tight["length_thresholds"] == {
+            "short_max_user_turns": 2,
+            "medium_max_user_turns": 3,
+        }
 
 
-class TestChannelNeverInferredFromLength:
-    def test_channel_bucket_always_unknown_regardless_of_length(self) -> None:
-        """issue athenaeum#2301: neither the push ledger nor the transcript
-        carries an interactive-vs-headless field, and the bucket must NEVER
-        be guessed from session length. Two record lists of very different
-        lengths must both resolve to CHANNEL_UNKNOWN."""
-        short_records: list[object] = [{"type": "user"}]
-        long_records: list[object] = [{"type": "user"} for _ in range(500)]
+def _segment_total(report: dict, *, length: str | None = None, channel: str | None = None) -> int:
+    return sum(
+        seg["pushed_page_total"]
+        for seg in report["segments"]
+        if (length is None or seg["length_bucket"] == length)
+        and (channel is None or seg["channel_bucket"] == channel)
+    )
+
+
+class TestChannelFromEntrypoint:
+    def test_each_mapped_value(self) -> None:
+        f = follow_through
+        for value, expected in (
+            ("cli", f.CHANNEL_INTERACTIVE),
+            ("claude-desktop", f.CHANNEL_INTERACTIVE),
+            ("sdk-cli", f.CHANNEL_HEADLESS),
+        ):
+            assert f.ENTRYPOINT_CHANNEL_MAP[value] == expected
+            assert f._session_channel_bucket([_user_rec(entrypoint=value)]) == expected
+
+    def test_absent_field_is_unknown(self) -> None:
         assert (
-            follow_through._session_channel_bucket(short_records)
+            follow_through._session_channel_bucket([_user_rec(), {"type": "assistant"}])
             == follow_through.CHANNEL_UNKNOWN
         )
+        assert follow_through._session_channel_bucket([]) == follow_through.CHANNEL_UNKNOWN
+
+    def test_unrecognised_or_malformed_value_is_unknown(self) -> None:
+        f = follow_through
+        assert f._session_channel_bucket([_user_rec(entrypoint="vscode-ext")]) == f.CHANNEL_UNKNOWN
+        assert f._session_channel_bucket([_user_rec(entrypoint=7)]) == f.CHANNEL_UNKNOWN
+        assert f._session_channel_bucket([_user_rec(entrypoint="")]) == f.CHANNEL_UNKNOWN
+        # An unrecognised value alongside a recognised one is not trusted.
+        assert (
+            f._session_channel_bucket([_user_rec(entrypoint="cli"), _user_rec(entrypoint="zzz")])
+            == f.CHANNEL_UNKNOWN
+        )
+
+    def test_conflicting_records_are_unknown(self) -> None:
+        f = follow_through
+        assert (
+            f._session_channel_bucket(
+                [_user_rec(entrypoint="cli"), _user_rec(entrypoint="sdk-cli")]
+            )
+            == f.CHANNEL_UNKNOWN
+        )
+
+    def test_agreeing_entrypoints_in_same_bucket_stay_mapped(self) -> None:
+        f = follow_through
+        assert (
+            f._session_channel_bucket(
+                [_user_rec(entrypoint="cli"), _user_rec(entrypoint="claude-desktop")]
+            )
+            == f.CHANNEL_INTERACTIVE
+        )
+
+    def test_channel_never_inferred_from_length(self) -> None:
+        long_records: list[object] = [{"type": "user"} for _ in range(500)]
         assert (
             follow_through._session_channel_bucket(long_records)
             == follow_through.CHANNEL_UNKNOWN
         )
 
-    def test_report_segments_only_ever_carry_the_unknown_channel_bucket(
-        self, tmp_path: Path
-    ) -> None:
+    def test_report_splits_by_channel_and_notes_proxy(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         projects = tmp_path / "projects"
-        _seed_push(cache, session_id="sess-ch", pushed_id="iii99999", ts="2026-01-01T00:00:00Z")
-        _write_transcript(
-            projects,
-            "sess-ch",
-            [
-                {
-                    "type": "user",
-                    "sessionId": "sess-ch",
-                    "timestamp": "2026-01-01T00:05:00Z",
-                    "message": {"role": "user", "content": "x"},
-                }
-            ],
-        )
+        for sid, pid, ep in (
+            ("sess-a", "aaa00001", "cli"),
+            ("sess-b", "bbb00002", "sdk-cli"),
+            ("sess-c", "ccc00003", None),
+        ):
+            _seed_push(cache, session_id=sid, pushed_id=pid, ts="2026-01-01T00:00:00Z")
+            extra = {"entrypoint": ep} if ep else {}
+            _write_transcript(projects, sid, [_user_rec("x", **extra)])
         report = follow_through.build_follow_through_report(
             cache_dir=cache, projects_root=projects
-        )
-        channel_buckets = {seg["channel_bucket"] for seg in report.to_dict()["segments"]}
-        assert channel_buckets == {follow_through.CHANNEL_UNKNOWN}
+        ).to_dict()
+        assert _segment_total(report, channel="interactive") == 1
+        assert _segment_total(report, channel="headless") == 1
+        assert _segment_total(report, channel="unknown") == 1
+        assert "launch-surface proxy" in report["channel_note"]
+        assert "1 session(s) are 'unknown'" in report["channel_note"]
+
+    def test_channel_note_when_no_session_unknown(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(cache, session_id="sess-d", pushed_id="ddd00004", ts="2026-01-01T00:00:00Z")
+        _write_transcript(projects, "sess-d", [_user_rec("x", entrypoint="claude-desktop")])
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        ).to_dict()
+        assert "launch-surface proxy" in report["channel_note"]
+        assert "no session is 'unknown'" in report["channel_note"]
 
 
 class TestNoIdentifiersInOutput:
