@@ -4195,7 +4195,7 @@ def create_server(
         listing the operator's relevance-policy rules (`always` / `never`,
         keyed on type, tag and optional subject uid) in evaluation order.
         Read-only: the policy lives in `wiki/_schema/relevance-policy.md` and
-        is edited there, never through this tool.
+        is edited there or through `set_capture_rule`, never through this tool.
 
         Rules are evaluated top to bottom and the LAST matching rule wins, so
         a later rule is an exception to an earlier one. A fact no rule
@@ -4218,6 +4218,104 @@ def create_server(
             return load_relevance_policy(wiki_root).to_dict()
         except RelevancePolicyError as exc:
             return {"present": True, "hash": None, "rules": [], "error": str(exc)}
+
+    @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
+    def set_capture_rule(
+        verdict: str,
+        type: str | None = None,
+        tag: str | None = None,
+        subject: str | None = None,
+        rationale: str = "",
+    ) -> dict:
+        """Record a standing capture rule as POLICY, not as a fact.
+
+        Use this when the user states a lasting preference about what the
+        knowledge base should or should not keep ("always remember my travel
+        preferences", "never keep anything tagged personal"). It changes the
+        relevance policy only; it does not save any content — use `remember`
+        for a fact. Applies to facts captured from now on; existing pages are
+        not changed.
+
+        You, the calling model, translate the user's words into a structured
+        rule. This tool does no language parsing. Give `verdict` plus at
+        least one of `type`, `tag`, `subject`:
+
+        - `verdict`: `always` (capture matching facts) or `never` (do not).
+        - `type`: an entity type from the deployment's type vocabulary.
+        - `tag`: a tag from its tag vocabulary; a tag also covers its
+          `/`-separated children (`personal` covers `personal/travel`).
+        - `subject`: an entity uid the rule is scoped to.
+
+        A rule naming several keys matches only when all of them match. The
+        new rule is added LAST and the last matching rule wins, so it
+        overrides any earlier rule it overlaps. Call `relevance_policy`
+        afterwards to read the effective rules back.
+
+        What happens depends on how this server is run. Over local stdio the
+        rule is written to the policy file at once and the change is
+        audit-logged (`mode: "applied"`). Over HTTP a remote client cannot
+        change policy: a proposal is filed for the operator to approve in the
+        decisions queue (`mode: "proposed"`) and nothing changes until then.
+
+        Args:
+            verdict: `always` or `never`.
+            type: Optional entity type the rule matches.
+            tag: Optional tag the rule matches.
+            subject: Optional entity uid the rule matches.
+            rationale: Optional one-line reason, shown to the operator when
+                the rule is proposed.
+
+        Returns:
+            A dict with `ok`, `mode` (`applied` | `proposed`), `changed`
+            (applied only; false when the rule was already the last rule),
+            `rule`, `message`, and `proposal_id` (proposed only). On failure
+            `ok` is false with `error_code` (`invalid_rule`, or `forbidden`
+            for a restricted caller) and `message` naming what was wrong;
+            nothing is written.
+        """
+        # Policy is an owner decision; a restricted (delegated) caller neither
+        # edits nor proposes.
+        if caller_audience is not None:
+            return _forbidden_result()
+
+        from athenaeum.relevance_policy import RelevancePolicyError
+        from athenaeum.relevance_policy_edit import (
+            apply_rule_edit,
+            file_rule_edit_proposal,
+        )
+
+        is_http = transport == "http"
+        try:
+            if is_http:
+                record, created = file_rule_edit_proposal(
+                    wiki_root, verdict, type, tag, subject, rationale=rationale.strip()
+                )
+                return {
+                    "ok": True,
+                    "mode": "proposed",
+                    "rule": record["rule"],
+                    "proposal_id": record["id"],
+                    "message": (
+                        "Proposal filed; the policy is unchanged until the "
+                        "operator approves it in the decisions queue."
+                        if created
+                        else "An identical proposal is already pending approval."
+                    ),
+                }
+            result = apply_rule_edit(wiki_root, verdict, type, tag, subject, transport="stdio")
+        except RelevancePolicyError as exc:
+            return {"ok": False, "error_code": "invalid_rule", "message": str(exc)}
+        return {
+            "ok": True,
+            "mode": "applied",
+            "changed": result.changed,
+            "rule": result.rule,
+            "message": (
+                "Capture rule added to the relevance policy."
+                if result.changed
+                else "That rule is already the last rule in the relevance policy."
+            ),
+        }
 
     def enumerate_entities(
         entity_type: str,

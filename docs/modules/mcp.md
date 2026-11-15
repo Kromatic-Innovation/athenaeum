@@ -6,9 +6,9 @@
 
 ## What it does
 
-`athenaeum serve` runs an MCP server exposing **16 tools** so agents can write to raw
+`athenaeum serve` runs an MCP server exposing **17 tools** so agents can write to raw
 intake, search the compiled wiki, and triage the human-decision queue.
-10 read-only, 6 that mutate human-decision state.
+10 read-only, 7 that mutate state (decision-queue adjudication, intake, and the relevance policy).
 No tool writes a wiki page directly — the librarian is the only writer.
 
 ```bash
@@ -21,7 +21,7 @@ athenaeum test-mcp          # smoke-test the round-trip without a live session
 |---|---|---|
 | `recall` | READ | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector, depending on the configured backend). |
 | `entity_schema` | READ | Reports the entity classes this deployment declares and observes, the fields each carries, and which fields `recall`/`enumerate_entities` can filter on. Call this before narrowing by `type`. |
-| `relevance_policy` | READ | What this deployment is set to remember: the operator's `always`/`never` relevance rules from `wiki/_schema/relevance-policy.md`, in evaluation order (last match wins). Read-only; the policy is edited in the file. |
+| `relevance_policy` | READ | What this deployment is set to remember: the operator's `always`/`never` relevance rules from `wiki/_schema/relevance-policy.md`, in evaluation order (last match wins). Read-only; edit it in the file or through `set_capture_rule`. |
 | `enumerate_entities` | READ | Unranked, criteria-based listing of every entity of a declared type — the counterpart to `recall` for "every entity matching X", where a ranked search returns an incomplete answer. |
 | `read_entity` | READ | One-call entity read by uid, for any entity class. One of the two sanctioned paths to a page's excluded fields. |
 | `list_pending_questions` | READ | Unanswered contradiction-detector questions. |
@@ -30,6 +30,7 @@ athenaeum test-mcp          # smoke-test the round-trip without a live session
 | `list_axiom_audit` | READ | Per-slug history of axiom promotions and demotions, so axiom status is auditable without a write tool. |
 | `scan_retraction_cascade` | WRITE | Flags completed merges that relied on a since-retracted source by appending a review item to the decision queue. Never auto-unmerges. |
 | `calibration_summary` | READ | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop. Reports "not enabled" when the opt-in is off. |
+| `set_capture_rule` | WRITE | Records a standing `always` / `never` capture rule in the relevance policy (not as a fact). Local stdio edits the policy file and audit-logs it; `--transport http` files a proposal for operator approval in the decisions queue. |
 | `remember` | WRITE | Appends a piece of knowledge to raw intake. Append-only; compiled into the wiki on the next run. |
 | `raise_decision` | WRITE | Files a new agent-raised question or confirmation into the pending-decisions queue, so a mid-session flag has somewhere durable to live. |
 | `resolve_question` | WRITE | Flips a pending question to answered and records the answer body. |
@@ -246,6 +247,7 @@ matched by name/value pairs elsewhere in this repo).
 | list_axiom_audit | true | | |
 | calibration_summary | true | | |
 | remember | false | false | |
+| set_capture_rule | false | false | |
 | raise_decision | false | false | |
 | scan_retraction_cascade | false | false | true |
 | resolve_question | false | true | true |

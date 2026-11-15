@@ -125,6 +125,9 @@ from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.policy_pack_edit_proposals import list_pending_policy_pack_edit_proposals
 from athenaeum.quarantine import list_pending_quarantine
+from athenaeum.relevance_policy_edit import (
+    list_pending_proposals as list_pending_relevance_policy_edits,
+)
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
 from athenaeum.schema_amendment_proposals import list_pending_schema_amendment_proposals
@@ -1091,6 +1094,42 @@ def policy_pack_edit_proposal_to_decision(rec: dict) -> dict:
     }
 
 
+def relevance_policy_edit_to_decision(rec: dict) -> dict:
+    """Convert a relevance-policy-edit proposal record to a unified decision
+    dict (issue athenaeum#2649).
+
+    A ``type: "relevance-policy-edit"`` item: a remote (``--transport http``)
+    client asked to add one ``always`` / ``never`` capture rule to the
+    relevance policy (:mod:`athenaeum.relevance_policy_edit`). Approving it
+    appends the rule to ``wiki/_schema/relevance-policy.md`` with an audit
+    record; rejecting it leaves the policy unchanged. ``confidence`` is
+    ``None`` -- a client request, not a detector score.
+    """
+    rule = dict(rec.get("rule") or {})
+    scope = ", ".join(
+        f"{k}={rule[k]}" for k in ("type", "tag", "subject") if rule.get(k)
+    )
+    verdict = rule.get("verdict", "")
+    effect = "always capture" if verdict == "always" else "never capture"
+    summary = (
+        f"A remote client asks to set the capture policy to {verdict} "
+        f"({effect} facts matching {scope or 'nothing'}) -- approve to add the "
+        f"rule to the relevance policy, or reject to leave the policy unchanged."
+    )
+    return {
+        "type": "relevance-policy-edit",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "rule": rule,
+            "rationale": rec.get("rationale"),
+            "transport": rec.get("transport"),
+        },
+    }
+
+
 def schema_amendment_proposal_to_decision(rec: dict) -> dict:
     """Convert a schema-amendment-proposal ledger record to a unified
     decision dict (issue athenaeum#2197).
@@ -1376,6 +1415,12 @@ def list_pending_decisions(
         decisions += [
             policy_pack_edit_proposal_to_decision(rec)
             for rec in list_pending_policy_pack_edit_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2649: capture-rule edits filed by a remote client,
+        # owner-only and answerable (approve applies the edit, audited).
+        decisions += [
+            relevance_policy_edit_to_decision(rec)
+            for rec in list_pending_relevance_policy_edits(wiki_root)
         ]
         # Issue athenaeum#2197: schema-amendment proposals -- a declared
         # single-valued field group that kept receiving a second, different

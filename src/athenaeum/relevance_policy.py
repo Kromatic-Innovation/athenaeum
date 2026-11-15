@@ -209,6 +209,20 @@ def parse_relevance_policy(
     return RelevancePolicy(rules=tuple(rules), present=True)
 
 
+def policy_vocabulary(wiki_root: Path) -> tuple[set[str], set[str]]:
+    """The ``(valid_types, valid_tags)`` a rule is validated against.
+
+    Read from ``<wiki_root>/_schema/types.md`` / ``tags.md`` with the same
+    fallbacks as :func:`load_relevance_policy`; exposed so a writer
+    (:mod:`athenaeum.relevance_policy_edit`) validates against exactly the
+    vocabulary the loader will.
+    """
+    schema_dir = wiki_root / "_schema"
+    valid_types = set(load_schema_list(schema_dir, "types.md") or KNOWN_TYPES)
+    valid_tags = set(load_schema_list(schema_dir, "tags.md") or _FALLBACK_TAGS)
+    return valid_types, valid_tags
+
+
 def load_relevance_policy(wiki_root: Path) -> RelevancePolicy:
     """Load ``<wiki_root>/_schema/relevance-policy.md``.
 
@@ -220,8 +234,7 @@ def load_relevance_policy(wiki_root: Path) -> RelevancePolicy:
     if not path.is_file():
         return RelevancePolicy()
     text = path.read_text(encoding="utf-8")
-    valid_types = set(load_schema_list(schema_dir, "types.md") or KNOWN_TYPES)
-    valid_tags = set(load_schema_list(schema_dir, "tags.md") or _FALLBACK_TAGS)
+    valid_types, valid_tags = policy_vocabulary(wiki_root)
     return parse_relevance_policy(text, valid_types, valid_tags)
 
 

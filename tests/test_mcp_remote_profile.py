@@ -145,6 +145,10 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
         "required": ["human_verdict", "id"],
     },
     "scan_retraction_cascade": {"properties": [], "required": []},
+    "set_capture_rule": {
+        "properties": ["rationale", "subject", "tag", "type", "verdict"],
+        "required": ["verdict"],
+    },
 }
 
 
