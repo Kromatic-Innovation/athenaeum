@@ -51,8 +51,8 @@ through the other.
 
 from __future__ import annotations
 
+import http.client
 import json
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -306,7 +306,7 @@ def fetch_discovery_document(url: str) -> dict[str, object] | None:
         if len(body) > _DISCOVERY_MAX_BYTES:
             return None
         document = json.loads(body)
-    except (OSError, ValueError, urllib.error.URLError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     return document if isinstance(document, dict) else None
 

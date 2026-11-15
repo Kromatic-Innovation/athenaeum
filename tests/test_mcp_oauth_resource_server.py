@@ -1944,6 +1944,30 @@ class TestJwksLocation:
             "derived",
         )
 
+    def test_real_fetcher_returns_none_on_a_malformed_http_response(self) -> None:
+        import socket
+        import threading
+
+        from athenaeum.serve_auth import fetch_discovery_document
+
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def _serve() -> None:
+            conn, _ = server.accept()
+            conn.recv(1024)
+            conn.sendall(b"not http at all\r\n\r\n")
+            conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.getsockname()[1]}/.well-known/x"
+            assert fetch_discovery_document(url) is None
+        finally:
+            server.close()
+
     def test_real_fetcher_returns_none_when_unreachable(self) -> None:
         from athenaeum.serve_auth import fetch_discovery_document
 
