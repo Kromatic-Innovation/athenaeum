@@ -166,6 +166,11 @@ from athenaeum.config import (
     resolve_page_size_threshold_chars,
     resolve_shared_content_page_type,
 )
+from athenaeum.declared_relationships import (
+    DECLARED_MERGE_REJECTION,
+    DeclaredRelationshipFacts,
+    declared_relationship,
+)
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
 from athenaeum.models import (
     EntityIndex,
@@ -183,6 +188,7 @@ from athenaeum.page_recompile import (
     segment_page,
 )
 from athenaeum.page_recompile_plan import (
+    ALIAS_MOVE_VERB,
     PAGE_ACTIONS,
     PAGE_RECOMPILE_LEDGER_VERSION,
     SCOPE_STRUCTURE_ONLY,
@@ -222,8 +228,10 @@ from athenaeum.page_relations import (
     apply_sub_pages_section,
     is_inactive_relation_target,
     read_relations,
+    resolve_page_meta_by_uid,
     set_relation,
 )
+from athenaeum.pending_merges import _add_merge_rejected_with_to_frontmatter
 from athenaeum.screening import more_restrictive
 from athenaeum.storage import open_store
 from athenaeum.store import now_iso
@@ -835,6 +843,77 @@ def _attachment_issues(
     return []
 
 
+def _declared_facts(meta: Mapping[str, Any]) -> DeclaredRelationshipFacts:
+    def _strs(key: str) -> list[str]:
+        raw = meta.get(key)
+        return [str(r) for r in raw if isinstance(r, str)] if isinstance(raw, list) else []
+
+    name = meta.get("name")
+    return DeclaredRelationshipFacts(
+        name=name if isinstance(name, str) else "",
+        merge_rejected_with=_strs("merge_rejected_with"),
+        aliases=_strs("aliases"),
+    )
+
+
+def find_never_merge_rulings(
+    plan: Any, wiki_root: Path, source_meta: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Cross-page targets of *plan* the source page is ruled never-merge with
+    (issue athenaeum#2651).
+
+    One row per distinct target uid named by a ``move:<uid>`` disposition or an
+    ``attach`` / ``attach-self-under`` / ``move-alias`` page action whose page
+    is linked to the source by ``merge_rejected_with`` (either direction,
+    alias-aware, via :func:`declared_relationship`). The result is a FLAG for
+    the ``page-recompile`` decision item -- it never blocks the plan. A target
+    that does not resolve on disk contributes nothing.
+    """
+    source_facts = _declared_facts(source_meta)
+    hits: dict[str, dict[str, Any]] = {}
+
+    def _note(uid: str, via: str, units: int) -> None:
+        if not uid:
+            return
+        row = hits.get(uid)
+        if row is None:
+            target_meta = resolve_page_meta_by_uid(wiki_root, uid)
+            if target_meta is None:
+                hits[uid] = {}
+                return
+            if (
+                declared_relationship(source_facts, _declared_facts(target_meta))
+                != DECLARED_MERGE_REJECTION
+            ):
+                hits[uid] = {}
+                return
+            row = {
+                "target_uid": uid,
+                "target_name": str(target_meta.get("name") or uid),
+                "via": [],
+                "units": 0,
+            }
+            hits[uid] = row
+        if row:
+            if via not in row["via"]:
+                row["via"].append(via)
+            row["units"] += units
+
+    for _unit_id, disposition in plan.dispositions:
+        verb, argument = split_disposition(disposition)
+        if verb == "move":
+            _note(argument, "move", 1)
+    for action in plan.page_actions:
+        verb, argument = split_disposition(action)
+        if verb == ALIAS_MOVE_VERB:
+            parsed = parse_alias_move(action)
+            if parsed is not None:
+                _note(parsed[0], verb, 0)
+        elif verb in PAGE_ACTIONS:
+            _note(argument, verb, 0)
+    return [row for row in hits.values() if row]
+
+
 # ---------------------------------------------------------------------------
 # The compute step (AC2-AC8): everything in memory, nothing written.
 # ---------------------------------------------------------------------------
@@ -1266,6 +1345,10 @@ def compute_apply(
     # access/tags/coordinates -- never wider access than the parent, which
     # holds by construction since access is copied, not derived.
     sub_pages: list[NewSubPage] = []
+    _rejected_raw = page_meta.get("merge_rejected_with")
+    parent_rejections = (
+        [str(r) for r in _rejected_raw] if isinstance(_rejected_raw, list) else []
+    )
     merge_accounting: list[MergeAccounting] = []
     for group_key in group_order:
         items = group_items[group_key]
@@ -1339,6 +1422,10 @@ def compute_apply(
         rendered = entity.render()
         sub_meta, sub_body = parse_frontmatter(rendered)
         sub_meta["parent"] = parent_uid
+        # Issue athenaeum#2651: a never-merge ruling is per claim, not per
+        # file, so every sub-page inherits each ``merge_rejected_with`` entry
+        # the parent holds -- via the same carry helper a fold uses.
+        sub_meta = _add_merge_rejected_with_to_frontmatter(sub_meta, parent_rejections)
         sub_text = render_frontmatter(sub_meta) + "\n" + sub_body
 
         sub_pages.append(
@@ -2627,6 +2714,7 @@ def write_apply(
 
 __all__ = [
     "APPLY_KIND",
+    "find_never_merge_rulings",
     "APPROVING_VERDICTS",
     "JOURNAL_FILENAME",
     "AliasMove",
