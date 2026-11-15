@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -24,14 +27,22 @@ from tests.integration import test_claude_entry_paths as harness
 from tests.integration.test_claude_entry_paths import (
     CLAUDE_AI_BRIDGE_LIVE_ENV,
     ENTRY_PATH_CASES,
+    HOST_CONFIG_DIR_ENV,
     EntryPathObservations,
+    HarnessAuthError,
+    assert_parent_turn_submitted,
     build_child_env,
     claude_ai_bridge_skip_reason,
     find_transcript_record,
     promptwitness_hook_settings,
     resolve_hook_command,
-    should_skip_claude_ai_bridge,
+    scrub_inherited_claude_env,
+    seed_isolated_config_dir,
+    spawn_claude_pty,
+    submit_into_pty,
+    transcript_has_prompt,
     transcript_record_fields,
+    wait_for_transcript_prompt,
     write_observations,
     write_settings_file,
 )
@@ -267,9 +278,7 @@ class TestWriteObservations:
 class TestFindTranscriptRecordAndFields:
     def _write_session(self, tmp_path: Path, records: list[dict]) -> Path:
         session_jsonl = tmp_path / "session.jsonl"
-        session_jsonl.write_text(
-            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
-        )
+        session_jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
         return session_jsonl
 
     def test_finds_record_by_prompt_id(self, tmp_path: Path) -> None:
@@ -296,9 +305,7 @@ class TestFindTranscriptRecordAndFields:
         assert record is not None
         assert record["promptId"] == "prompt-2"
 
-    def test_falls_back_to_last_human_record_when_prompt_id_is_none(
-        self, tmp_path: Path
-    ) -> None:
+    def test_falls_back_to_last_human_record_when_prompt_id_is_none(self, tmp_path: Path) -> None:
         records = [
             {
                 "type": "user",
@@ -363,20 +370,27 @@ class TestFindTranscriptRecordAndFields:
 # ---------------------------------------------------------------------------
 
 
-class TestClaudeAiBridgeSkipDecision:
-    def test_skips_by_default(self) -> None:
-        assert should_skip_claude_ai_bridge({}) is True
-
-    def test_does_not_skip_when_opted_in(self) -> None:
-        assert should_skip_claude_ai_bridge({CLAUDE_AI_BRIDGE_LIVE_ENV: "1"}) is False
-
-    def test_any_other_value_still_skips(self) -> None:
-        assert should_skip_claude_ai_bridge({CLAUDE_AI_BRIDGE_LIVE_ENV: "yes"}) is True
-
-    def test_reason_is_non_empty_and_names_the_opt_in_var(self) -> None:
+class TestClaudeAiBridgeSkipReason:
+    def test_reason_is_non_empty_and_says_there_is_no_driver(self) -> None:
         reason = claude_ai_bridge_skip_reason()
         assert reason
+        assert "cannot be driven" in reason
+
+    def test_opt_in_is_acknowledged_but_still_a_skip_not_a_failure(self) -> None:
+        reason = claude_ai_bridge_skip_reason({CLAUDE_AI_BRIDGE_LIVE_ENV: "1"})
         assert CLAUDE_AI_BRIDGE_LIVE_ENV in reason
+        assert "skipped, not failed" in reason
+
+    def test_row_skips_instead_of_failing_even_when_opted_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv(CLAUDE_AI_BRIDGE_LIVE_ENV, "1")
+        case = next(c for c in ENTRY_PATH_CASES if c.id == "claude-ai-bridge")
+        # Call the test function body directly (the module-level skipif only
+        # gates collection of the live module, not this call).
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            harness.test_entry_path(case, tmp_path)
+        assert "cannot be driven" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -410,3 +424,210 @@ class TestEntryPathCaseTable:
         # not a live assertion, just confirms the import is live code, not
         # a typo'd dead import.
         assert canon.digest("x") == canon.digest("x")
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2588: env scrub, credential hand-off, submit, transcript, teardown
+# ---------------------------------------------------------------------------
+
+
+class TestEnvScrub:
+    def test_scrub_removes_inherited_session_vars_and_keeps_the_rest(self) -> None:
+        base = {
+            "PATH": "/usr/bin",
+            "CLAUDECODE": "1",
+            "CLAUDE_PID": "7",
+            "CLAUDE_EFFORT": "high",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID": "abc",
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            "CLAUDE_CODE_SESSION_ATTENDED": "1",
+            "ANTHROPIC_API_KEY": "k",
+        }
+        scrubbed = scrub_inherited_claude_env(base)
+        assert scrubbed == {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "k"}
+        assert "CLAUDECODE" in base  # input untouched
+
+    def test_oauth_token_is_the_one_deliberate_survivor(self) -> None:
+        scrubbed = scrub_inherited_claude_env(
+            {"CLAUDE_CODE_OAUTH_TOKEN": "t", "CLAUDE_CODE_X": "1"}
+        )
+        assert scrubbed == {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+
+    def test_build_child_env_never_forwards_the_bridge_session_id(self, tmp_path: Path) -> None:
+        child = build_child_env(
+            {"CLAUDE_CODE_BRIDGE_SESSION_ID": "abc", "CLAUDECODE": "1"},
+            promptwitness_dir=tmp_path / "pw",
+        )
+        assert not [k for k in child if k.startswith("CLAUDE_CODE_") or k == "CLAUDECODE"]
+        assert child["TERM"] == "xterm-256color"
+
+
+class TestSeedIsolatedConfigDir:
+    def test_oauth_token_route_writes_only_dot_claude_json(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "cfg"
+        method = seed_isolated_config_dir(
+            cfg, workdir=tmp_path, env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+        )
+        assert method == "oauth-token-env"
+        assert [p.name for p in cfg.iterdir()] == [".claude.json"]
+        state = json.loads((cfg / ".claude.json").read_text())
+        assert state["hasCompletedOnboarding"] is True
+        assert state["projects"][str(tmp_path)]["hasTrustDialogAccepted"] is True
+
+    def test_api_key_route_preapproves_the_key_suffix(self, tmp_path: Path) -> None:
+        key = "sk-ant-" + "x" * 30 + "ABCDEFGHIJ0123456789"
+        cfg = tmp_path / "cfg"
+        method = seed_isolated_config_dir(cfg, workdir=tmp_path, env={"ANTHROPIC_API_KEY": key})
+        assert method == "api-key-env"
+        state = json.loads((cfg / ".claude.json").read_text())
+        assert state["customApiKeyResponses"]["approved"] == [key[-20:]]
+        assert key not in (cfg / ".claude.json").read_text()
+
+    def test_credentials_file_route_copies_only_the_credentials(self, tmp_path: Path) -> None:
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / ".credentials.json").write_text('{"token": "t"}')
+        (host / "settings.json").write_text('{"hooks": {"UserPromptSubmit": []}}')
+        cfg = tmp_path / "cfg"
+        method = seed_isolated_config_dir(
+            cfg, workdir=tmp_path, env={HOST_CONFIG_DIR_ENV: str(host)}
+        )
+        assert method == "credentials-file"
+        assert sorted(p.name for p in cfg.iterdir()) == [".claude.json", ".credentials.json"]
+        assert (cfg / ".credentials.json").read_text() == '{"token": "t"}'
+        assert (cfg / ".credentials.json").stat().st_mode & 0o777 == 0o600
+
+    def test_no_credential_raises_with_the_three_routes(self, tmp_path: Path) -> None:
+        with pytest.raises(HarnessAuthError) as excinfo:
+            seed_isolated_config_dir(
+                tmp_path / "cfg",
+                workdir=tmp_path,
+                env={HOST_CONFIG_DIR_ENV: str(tmp_path / "none")},
+            )
+        message = str(excinfo.value)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" in message
+        assert "ANTHROPIC_API_KEY" in message
+        assert HOST_CONFIG_DIR_ENV in message
+
+
+def _write_session(config_dir: Path, records: list[dict[str, object]]) -> None:
+    session = config_dir / "projects" / "scope" / "s1.jsonl"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+
+class TestTranscriptPromptConfirmation:
+    def test_finds_a_submitted_user_prompt(self, tmp_path: Path) -> None:
+        _write_session(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": "please say ack now"}}],
+        )
+        assert transcript_has_prompt(tmp_path, "say ack")
+        assert wait_for_transcript_prompt(tmp_path, "say ack", timeout=0.1)
+        assert_parent_turn_submitted(tmp_path, "say ack")
+
+    def test_a_dead_session_is_not_a_submission(self, tmp_path: Path) -> None:
+        assert not transcript_has_prompt(tmp_path, "say ack")
+        assert not wait_for_transcript_prompt(tmp_path, "say ack", timeout=0.1, poll=0.05)
+        with pytest.raises(AssertionError, match="never submitted a turn"):
+            assert_parent_turn_submitted(tmp_path, "say ack")
+
+    def test_text_only_in_an_assistant_or_tool_result_record_does_not_count(
+        self, tmp_path: Path
+    ) -> None:
+        _write_session(
+            tmp_path,
+            [
+                {"type": "assistant", "message": {"role": "assistant", "content": "say ack"}},
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "content": "say ack"}],
+                    },
+                },
+            ],
+        )
+        assert not transcript_has_prompt(tmp_path, "say ack")
+
+
+_RAW_READER = textwrap.dedent(
+    """
+    import os, sys, tty
+    out = sys.argv[1]
+    tty.setraw(0)
+    open(out + ".ready", "w").close()
+    chunks = []
+    while True:
+        data = os.read(0, 4096)
+        chunks.append(repr(data))
+        if b"\\r" in data:
+            break
+    open(out, "w").write("\\n".join(chunks))
+    """
+)
+
+
+def _spawn_python(tmp_path: Path, code: str, *args: str):  # type: ignore[no-untyped-def]
+    return spawn_claude_pty(
+        [sys.executable, "-c", code, *args],
+        env={"PATH": os.environ.get("PATH", "")},
+        cwd=tmp_path,
+    )
+
+
+class TestPtyDriver:
+    def test_enter_arrives_as_its_own_read_after_the_text(self, tmp_path: Path) -> None:
+        out = tmp_path / "chunks.txt"
+        session = _spawn_python(tmp_path, _RAW_READER, str(out))
+        try:
+            deadline = time.monotonic() + 20
+            while not (tmp_path / "chunks.txt.ready").exists():
+                assert time.monotonic() < deadline, "reader never became ready"
+                time.sleep(0.05)
+            submit_into_pty(session.master_fd, "hello there", settle=0.3)
+            session.process.wait(timeout=20)
+        finally:
+            session.close()
+        assert out.read_text().split("\n") == ["b'hello there'", "b'\\r'"]
+
+    def test_pty_has_a_real_window_size(self, tmp_path: Path) -> None:
+        out = tmp_path / "size.txt"
+        code = (
+            "import os, sys; s = os.get_terminal_size(0); "
+            "open(sys.argv[1], 'w').write(f'{s.lines}x{s.columns}')"
+        )
+        session = _spawn_python(tmp_path, code, str(out))
+        try:
+            session.process.wait(timeout=20)
+        finally:
+            session.close()
+        assert out.read_text() == "50x200"
+
+    def test_close_after_the_child_already_exited_does_not_raise(self, tmp_path: Path) -> None:
+        session = _spawn_python(tmp_path, "pass")
+        session.process.wait(timeout=20)
+        session.close()
+        session.close()  # idempotent
+
+    def test_close_absorbs_permission_error_from_killpg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _spawn_python(tmp_path, "import time; time.sleep(60)")
+        real_killpg = os.killpg
+        calls: list[int] = []
+
+        def flaky(pgid: int, sig: int) -> None:
+            calls.append(sig)
+            if len(calls) == 1:
+                raise PermissionError(1, "EPERM on a zombie group leader")
+            real_killpg(pgid, sig)
+
+        monkeypatch.setattr(os, "killpg", flaky)
+        try:
+            session.close(timeout=0.3)  # SIGTERM raises EPERM, then SIGKILL lands
+        finally:
+            monkeypatch.undo()
+            if session.process.poll() is None:
+                session.process.kill()
+        assert session.process.poll() is not None

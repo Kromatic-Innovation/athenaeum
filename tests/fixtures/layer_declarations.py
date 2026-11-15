@@ -236,6 +236,9 @@ MODULE_LAYER: dict[str, int] = {
     "note_corrections": 4,
     "decision_answers": 4,
     "decision_framing": 4,
+    # Issue athenaeum#2528: persisted presentation sidecar; L4 sibling of
+    # decision_framing, imports only atomic_io (L0).
+    "decision_presentations": 4,
     # Issue athenaeum#1990: the five athenaeum#717 budget figures + the answer-event
     # ledger. Imports athenaeum.metrics (L3) and athenaeum.store (L0/L1
     # upper bound), deliberately NOT athenaeum.decisions -- see that

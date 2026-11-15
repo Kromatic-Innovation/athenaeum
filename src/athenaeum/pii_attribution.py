@@ -3809,6 +3809,7 @@ def _escalate_suspect_inner(
                 config=config,
                 applied=placement.outcome == pii.PLACEMENT_FILED,
                 question_class=question_class,
+                uids=[target_uid, placement.placed_uid or ""],
             )
 
     queue_items: tuple[EscalationItem, ...] = ()

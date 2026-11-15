@@ -30,7 +30,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum import reasoning_screens as screens_mod
-from athenaeum.calibration import calibration_summary
+from athenaeum.calibration import (
+    AUDIT_KIND,
+    calibration_summary,
+    read_calibration_ledger,
+)
 from athenaeum.models import TokenUsage
 from athenaeum.reasoning_screens import t1_screen_rejects_merge_proposal
 from athenaeum.t1_census import (
@@ -170,6 +174,12 @@ class TestT1ScreenDecision:
         assert usage.api_calls == 1
         # ...and surfaced for the human-audit calibration loop.
         assert calibration_summary(wiki)["T1"]["sampled"] == 1
+        # Issue athenaeum#2520: the audit record names the pages it decided
+        # over, so the audit item can show them by title.
+        (audit,) = [
+            r for r in read_calibration_ledger(wiki) if r.get("kind") == AUDIT_KIND
+        ]
+        assert audit["sources"] == _cross_class_paths(tmp_path)
         # Issue athenaeum#1620 AC3: a reject is still the screen RUNNING —
         # counts as screened, not unscreened.
         assert get_t1_census().screened == 1

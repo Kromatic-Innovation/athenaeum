@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit way to reverse a rejection. `athenaeum doctor` reports a
   `merge_rejected_with:` entry that resolves to no existing page.
 
+- **Every decision-queue item now carries the host-agnostic item contract (`contract_version: 1`)**
+  (athenaeum#2528, slice S1 of athenaeum#2489). `list_pending_decisions` (and the
+  MCP tool and `athenaeum decisions` CLI built on it) adds `state` / `hold_reason`,
+  `answerable` (true exactly when the type has an answer applier), a `presentation`
+  (`context`, `job`, `options` with pros/cons derived from the response schema,
+  `recommendation` or null, `framed_by`), a `fingerprint` and a `priority`, alongside
+  every existing field. `presentation` extends `frame_decision` with deterministic
+  templates for every item type (no LLM call) and is persisted to
+  `wiki/_decision_presentations.jsonl`, keyed by item id and a digest of the item's
+  decision-relevant fields; a change to one re-frames the item and changes its
+  fingerprint.
+
 - **Remote mode now writes a per-call audit log of remote tool calls**
   (athenaeum#2603): one append-only JSON line per scope-gated tool
   dispatch under `--transport http` with `serve.auth.*` configured —
@@ -354,6 +366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later mention forever); no match still escalates exactly as before; two
   or more matches still escalate, now naming every candidate page
   (athenaeum#2527).
+- Decision-queue items now name the pages they concern by title plus path, not only by hash, uid prefix or slug (athenaeum#2520). Calibration `audit` items (T1 rejects, T2 approvals, attribution placements) carry the page pair and the tier's reason; new audit ledger records store the `sources` / `uids` the tier decided over, and older records recover their pages from the pending merge their `proposal_id` names when it is still on disk. Fold-widen questions name the canonical and the folded pages, `retraction` and `page-recompile` items name the page behind their slug/uid, and each framed item gains a top-level `subjects` list (`title`, `path`, `ref`, `resolved`) that the context cap never shrinks. An id that cannot be resolved keeps its raw form; no existing payload field changes.
 - `athenaeum import-memory --path <root>` now compiles the root it staged
   files into, not the default knowledge base. `_default_compile_batch`
   called `librarian.run(knowledge_root=...)` without `raw_root`/`wiki_root`,
@@ -370,6 +383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.claude` config directory, so a correct install reported `FAIL`
   with a fix that was the command the user had just run; a genuinely
   unregistered install still reports `FAIL` (athenaeum#2594).
+- The `two_surnames_former_name` attribution eval cases no longer use the target's own surname as the "former name" in 22 of 44 cases (athenaeum#2542). The generator now draws a distinct former surname; no gold label changed, and the audit under `docs/measurements/` records the written alias / same-entity / own rule used. The shipped calibration record still pins the previous dataset sha.
 - `athenaeum reindex` and `athenaeum session-end` no longer error with
   "Vector backend requires chromadb" under the shipped default
   (`search_backend: vector`) when the `[vector]` extra is not installed —
@@ -390,6 +404,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal's source pages on the archived block, and the archive binds every
   proposer until one of those pages actually changes (athenaeum#2514).
 
+- `athenaeum schedule install` now schedules the `athenaeum` that is running
+  `install`, not whichever one is first on `PATH`. The binary is resolved from
+  the running environment first (the entry point in `sys.argv[0]`, then the
+  console script beside the interpreter) and falls back to `PATH` only when
+  neither exists; `install` prints the resolved binary path so a mismatch is
+  visible (athenaeum#2583).
+
 - A human-approved fold into a canonical page that has no frontmatter — or
   an empty `{}` block — now backfills that page's separator coordinates from
   the folded sources in the fold preflight, so it applies instead of raising
@@ -402,6 +423,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on disk. An older answer file used to win, because every conformant file
   was dispatched in turn and the first one to land settled the decision
   (athenaeum#2514).
+
+- `athenaeum schedule install --cache-dir <dir>` (or `ATHENAEUM_CACHE_DIR`)
+  now carries that cache directory into the generated launchd, systemd and cron
+  unit as `ATHENAEUM_CACHE_DIR`. Previously the flag only chose where the key was
+  read from, so the scheduled `athenaeum run` wrote its state to the default
+  cache directory and could clobber another deployment's cache; the docs now
+  state which cache directory the scheduled run uses (athenaeum#2584).
 
 - `split-oversize` and the `librarian.oversize_page_action: split`
   disposition no longer split a compiled page at its lone top-level `#
@@ -420,6 +448,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A question raised before this change (no stored copy) keeps the prior
   behaviour (athenaeum#2519).
 
+- The live Claude Code entry-path harness (`tests/integration/test_claude_entry_paths.py`)
+  can now drive the interactive rows on a real host (athenaeum#2588, follow-up to
+  athenaeum#2235 for the athenaeum#2161 live run). Each row runs under an isolated
+  `CLAUDE_CONFIG_DIR` that carries a login through a documented hand-off
+  (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a copied `.credentials.json`; never the
+  host's settings or hooks); Enter is delivered as its own pty write after a settle delay on a
+  pty with a real window size, and every row confirms its prompt in the session transcript
+  rather than inferring submission from a missing ledger line, with "no line" rows also
+  asserting the parent session submitted a turn; inherited `CLAUDE_CODE_*` / `CLAUDECODE`
+  variables are scrubbed before spawning; the launch-argument teardown no longer errors; and
+  the claude.ai bridge row is skipped with a recorded reason instead of failing. Offline
+  helpers are unit-tested; the live run itself remains athenaeum#2161's.
 - `decisions answer --type coordinate` (and every writer that calls
   `write_decision_answer`, e.g. the triage lane) now runs the applier's own
   deep checks — JSON decoding, payload schema, pair/page/dimension
@@ -443,6 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--apply` to write) repairs pre-existing dangling tombstones whose bare
   slug resolves to exactly one live page (athenaeum#2545).
 
+- `push-metrics follow-through` now fills `channel_bucket` from the transcript `entrypoint` field (`cli`/`claude-desktop` -> interactive, `sdk-cli` -> headless; absent, unrecognised or conflicting -> unknown) through one documented `ENTRYPOINT_CHANNEL_MAP`, and labels the split a launch-surface proxy; length buckets now count user turns instead of all records, with cutoffs overridable via `--short-max-user-turns` / `--medium-max-user-turns` (athenaeum#2608).
 - `_detect_field_group_misfits` no longer refuses an ordinary same-record
   update (e.g. a deal's stage advancing while its name/amount stay put) as
   a field-group misfit: a misfit now requires that NO other field in the
