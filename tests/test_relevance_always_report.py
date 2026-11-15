@@ -116,7 +116,8 @@ def test_report_without_policy_or_matches(tmp_path, capsys):
 
 
 def test_report_exits_1_on_invalid_policy(tmp_path, capsys):
-    root = _seed(tmp_path, "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n| maybe | | x | |\n")
+    bad = "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n| maybe | | x | |\n"
+    root = _seed(tmp_path, bad)
     assert main(["relevance-policy", "report", "--path", str(root)]) == 1
     assert "error" in capsys.readouterr().err
 
