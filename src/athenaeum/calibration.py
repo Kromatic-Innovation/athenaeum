@@ -59,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,8 @@ def sample_tier_decision(
     applied: bool = False,
     question_class: str | None = None,
     cluster_id: str | None = None,
+    sources: Sequence[str] | None = None,
+    uids: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Sample one finalized tier decision for human audit, if selected.
 
@@ -314,6 +317,13 @@ def sample_tier_decision(
     even when ``should_sample`` says yes — the per-item draw stays exactly
     as deterministic/reproducible as before, this only adds a ceiling on
     top of it. Omitted from the stored record when ``None``.
+
+    ``sources`` / ``uids`` (issue athenaeum#2520): the page paths and/or
+    entity uids the decision was made over. ``proposal_id`` is only a hash of
+    them, so without these a later reviewer of the audit item cannot tell
+    WHICH pages it concerns short of recomputing the hash. Stored verbatim
+    (omitted when empty) and resolved to titles by
+    :func:`athenaeum.decisions.audit_to_decision`.
     """
     from athenaeum.config import (
         resolve_audit_max_per_cluster,
@@ -368,6 +378,10 @@ def sample_tier_decision(
         record["question_class"] = question_class
     if cluster_id is not None:
         record["cluster_id"] = cluster_id
+    if sources:
+        record["sources"] = [str(p) for p in sources]
+    if uids:
+        record["uids"] = [str(u) for u in uids if u]
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
     )
