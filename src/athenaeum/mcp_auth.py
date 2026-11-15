@@ -102,17 +102,54 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         self._audit_log_path = audit_log_path
 
     def _record_refusal(self, *, reason: str, claims: Mapping[str, Any] | None) -> None:
+        """Append one ``refused`` audit record, swallowing an OSError.
+
+        Issue athenaeum#2603 review finding (PR athenaeum#2637, MEDIUM): this
+        site sits one layer further out than ``mcp_server._guarded``'s own
+        write -- the caller here is Starlette's ``AuthenticationMiddleware``,
+        which catches only ``AuthenticationError``, not a bare ``OSError``.
+        Letting a write failure (full disk, a read-only cache directory)
+        propagate from here does not fail one request the way it does in
+        ``_guarded``; it tears down the whole ASGI session-manager task
+        group (verified empirically: an unhandled ``OSError`` here raises
+        as an ``ExceptionGroup`` out of the streamable-HTTP lifespan).
+
+        Swallowing it here is NOT the "fail-open" this issue's review
+        explicitly rules out: fail-open would mean an UNAUDITED call is
+        allowed to SUCCEED. This call was ALREADY going to be refused --
+        both callers below return ``None`` (deny) immediately after this
+        method returns, regardless of whether the write succeeded. There is
+        no tool to run and no data to disclose either way, so there is
+        nothing a dropped record here could let through. The audit
+        COMPLETENESS guarantee narrows by exactly one case (a refusal that
+        could not be written is not retried or escalated), which is the
+        deliberate, documented, loud-logged trade-off against the
+        alternative -- a process-visible crash -- for a line that would
+        have recorded a denial, not a disclosure.
+        """
         if self._audit_log_path is None:
             return
         from athenaeum.audit_log import record_tool_call
 
-        record_tool_call(
-            self._audit_log_path,
-            tool_name=None,
-            outcome="refused",
-            claims=claims,
-            reason=reason,
-        )
+        try:
+            record_tool_call(
+                self._audit_log_path,
+                tool_name=None,
+                outcome="refused",
+                claims=claims,
+                reason=reason,
+            )
+        except OSError:
+            logger.error(
+                "Failed to append a remote-audit-log refusal record to %s "
+                "(reason=%r): the audit log is unwritable (full disk, "
+                "permissions, or a read-only path). The request is still "
+                "refused -- this only means the refusal itself went "
+                "unrecorded.",
+                self._audit_log_path,
+                reason,
+                exc_info=True,
+            )
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Verify *token*, then require that its identity is allowlisted.

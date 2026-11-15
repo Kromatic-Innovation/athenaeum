@@ -492,6 +492,36 @@ for the duration of each append and never for the life of the process, so a rena
 rotation (the non-`copytruncate` default) is equally safe: the next append reopens
 whatever path `serve.audit_log` still names.
 
+**If the audit log cannot be written — a full disk, a permissions change, the cache
+directory remounted read-only — remote mode fails CLOSED, deliberately.** A tool
+call that could not be audited is reported to the caller as a FAILED call, not a
+successful one with a gap in the log. The reasoning: this is a security control
+whose whole premise is being able to answer "what did a remote caller read" after
+the fact, so an audit log that can be silently turned off by exhausting disk space
+is worse than no audit log at all — it is a trail you keep trusting after it has
+already gone blind. Concretely:
+
+- **Every call fails until the audit path is writable again.** This is a real
+  availability cost: a full disk takes remote mode down, not just the write. Watch
+  disk space on whatever volume `serve.audit_log` resolves to the same way you would
+  watch it for any other append-only store.
+- **A write failure is also logged, loudly, to stderr** (`error` level, naming the
+  path and the underlying OS error) — independent of whatever the MCP client does
+  with its own failed call, so the cause is visible in `journalctl -u athenaeum-serve`
+  even before you go looking at a client-side error.
+- **For a tool that WRITES (`remember`, a decision-queue resolution), the write may
+  already be durable by the time the failure is reported.** The audit record for a
+  successful call is appended AFTER the tool's own work completes, so a disk that
+  fills at exactly that moment can make the caller see "failed" for work the server
+  already did. Treat that the same way you would already have to treat a response
+  lost to a dropped connection — no MCP transport here promises exactly-once
+  delivery — and check whether the write actually landed before retrying it, rather
+  than assuming it did not.
+- **A REFUSED call (bad token, insufficient scope, a non-allowlisted identity) never
+  has this ambiguity.** Its audit line is written BEFORE anything is read or
+  written, so a write failure there still blocks the call with nothing to double-
+  check — it was already being refused.
+
 ## Rotation and revocation
 
 athenaeum holds no credential, which makes most of this short: there is nothing of

@@ -536,3 +536,158 @@ class TestStdioIsUnaffectedByDefault:
         assert error is None, error
         assert text is not None
         assert not audit_log_path.exists(), "a file was written with no serve_auth configured"
+
+
+# ---------------------------------------------------------------------------
+# Review finding (PR athenaeum#2637, Seer, MEDIUM): a write failure in
+# `record_tool_call`/`append_audit_record` is UNHANDLED by design. This is a
+# DELIBERATE fail-closed decision, not an oversight — see the reasoning in
+# `audit_log.py`'s module docstring and in `mcp_server._scope_guarded`'s own
+# docstring. These tests drive a GENUINE write failure (a real read-only
+# directory — `chmod 0o500`, not a mocked raise) through the real dispatch
+# wrapper and the real identity verifier, and pin the two consequences the
+# review asked to have verified rather than assumed:
+#
+# 1. the failure propagates out to the caller as a real tool-call error
+#    (never silently swallowed, never a false "ok");
+# 2. for a WRITE tool, the tool's own side effect may ALREADY be durable by
+#    the time that error is reported (the `ok`/`error` audit write happens
+#    AFTER `fn()` runs) — the known, documented, bounded cost of fail-closed
+#    at its current position; a REFUSED (insufficient-scope) call carries no
+#    such risk, because its audit write happens BEFORE `fn()` is ever
+#    called, so a write failure there blocks the call with zero side effect.
+# ---------------------------------------------------------------------------
+
+
+def _unwritable_dir(tmp_path: Path) -> Path:
+    """A directory that is really not writable by this process (0500).
+
+    Not a mock: `os.open(..., O_CREAT)` for a new file inside it genuinely
+    raises `PermissionError` (an `OSError` subclass) — the same exception
+    family a full disk (`OSError: [Errno 28] No space left on device`) or a
+    read-only filesystem mount raises, which is what the review finding
+    named. The test's own teardown restores write permission so pytest can
+    clean up `tmp_path` afterward.
+    """
+    d = tmp_path / "unwritable-audit-dir"
+    d.mkdir()
+    d.chmod(0o500)
+    return d
+
+
+class TestAuditWriteFailureIsFailClosed:
+    def test_a_successful_write_tool_call_still_errors_the_client(
+        self, tmp_path: Path, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The dispatch-level consequence: `remember`'s own work succeeds
+        and is durable, but the caller is told the call FAILED, because the
+        audit write that follows it raises and is never caught."""
+        unwritable = _unwritable_dir(tmp_path)
+        audit_log_path = unwritable / "audit.jsonl"
+        token = issuer.mint(scope=f"{DEFAULT_READ_SCOPE} {DEFAULT_WRITE_SCOPE}")
+        try:
+            text, error = _call_tool(
+                corpus,
+                issuer,
+                _serve_auth(),
+                audit_log_path,
+                token,
+                WRITE_TOOL,
+                {"content": "A fact written right before the audit log breaks."},
+            )
+            assert text is None, "the client was not told the call failed"
+            assert error is not None
+            # The side effect already happened and is durable -- this is the
+            # materially worse half of the ordering question, confirmed
+            # rather than assumed: the client is told "failed" for work the
+            # server already did and will not redo.
+            written = list((corpus / "raw").rglob("*.md"))
+            assert written, (
+                "remember's own write did not happen -- if this assertion "
+                "fails, the ordering claim above is false and should be "
+                "re-examined, not this test loosened"
+            )
+            assert not audit_log_path.exists(), "the audit write never actually landed"
+        finally:
+            unwritable.chmod(0o700)
+
+    def test_a_refused_scope_call_errors_with_no_side_effect(
+        self, tmp_path: Path, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The refused-outcome audit write happens BEFORE `fn()` -- a write
+        failure there blocks the call cleanly, with nothing to undo."""
+        unwritable = _unwritable_dir(tmp_path)
+        audit_log_path = unwritable / "audit.jsonl"
+        token = issuer.mint(scope=DEFAULT_READ_SCOPE)  # no write scope
+        try:
+            text, error = _call_tool(
+                corpus,
+                issuer,
+                _serve_auth(),
+                audit_log_path,
+                token,
+                WRITE_TOOL,
+                {"content": "This must never be written."},
+            )
+            assert text is None
+            assert error is not None
+            assert not list((corpus / "raw").rglob("*.md")), (
+                "remember ran despite the audit write failing before it -- "
+                "the refused path's fail-closed ordering is broken"
+            )
+        finally:
+            unwritable.chmod(0o700)
+
+    def test_a_successful_read_call_also_errors_rather_than_silently_losing_audit(
+        self, tmp_path: Path, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The negative control for "fail-open": a read-only tool call
+        (nothing to retry-and-duplicate) still surfaces the failure to the
+        caller rather than quietly returning data with no audit line -- the
+        one outcome explicitly ruled out as worse than no audit log at all.
+        """
+        unwritable = _unwritable_dir(tmp_path)
+        audit_log_path = unwritable / "audit.jsonl"
+        token = issuer.mint(scope=DEFAULT_READ_SCOPE)
+        try:
+            text, error = _call_tool(
+                corpus, issuer, _serve_auth(), audit_log_path, token, READ_TOOL, {"query": "widget"}
+            )
+            assert text is None, "recall data was returned with no audit record of it"
+            assert error is not None
+        finally:
+            unwritable.chmod(0o700)
+
+    def test_an_identity_refusal_still_gets_a_clean_401_when_the_write_fails(
+        self, tmp_path: Path, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """`_IdentityAllowlistVerifier._record_refusal` swallows the write
+        failure (logging it loudly) rather than letting it propagate.
+
+        A FIRST version of this test caught a real regression: letting the
+        `OSError` propagate from here did NOT degrade to a request-scoped
+        500 the way `_guarded`'s own write failures do -- it raised as an
+        `ExceptionGroup` out of the streamable-HTTP session manager's
+        lifespan, because `AuthenticationMiddleware` (the caller one frame
+        up) only catches `AuthenticationError`, never a bare `OSError`.
+        Swallowing it here is not "fail-open": the identity was ALREADY
+        going to be refused either way (both call sites return `None`
+        immediately afterward, regardless of whether the write succeeded),
+        so there is no unaudited SUCCESS this could let through -- only a
+        denial that goes unrecorded, which is the documented, narrower
+        trade-off against a process-visible crash.
+        """
+        unwritable = _unwritable_dir(tmp_path)
+        audit_log_path = unwritable / "audit.jsonl"
+        try:
+            status, challenge = _post_initialize_with_audit(
+                corpus,
+                issuer,
+                _serve_auth(),
+                issuer.mint(sub=STRANGER_SUBJECT),
+                audit_log_path,
+            )
+            assert status == 401
+            assert challenge.startswith("Bearer")
+        finally:
+            unwritable.chmod(0o700)
