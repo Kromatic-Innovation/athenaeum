@@ -153,3 +153,19 @@ class TestCmdServeWiring:
     def test_helper_arms(self) -> None:
         assert http_host_origin_kwargs(authenticated=False) == {"host_origin_protection": True}
         assert http_host_origin_kwargs(authenticated=True) == {"host_origin_protection": False}
+
+    def test_an_old_fastmcp_without_the_guard_fails_closed(
+        self, corpus: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import athenaeum._cmd_serve as serve_mod
+        import athenaeum.mcp_server as mcp_mod
+
+        monkeypatch.setattr(serve_mod, "_fastmcp_supports_host_origin_guard", lambda: False)
+        monkeypatch.setattr(mcp_mod, "create_server", lambda **_kw: object())
+        assert main(["serve", "--path", str(corpus), "--transport", "http"]) == 1
+        assert "no Host/Origin guard" in capsys.readouterr().err
+
+    def test_the_installed_fastmcp_supports_the_guard(self) -> None:
+        from athenaeum._cmd_serve import _fastmcp_supports_host_origin_guard
+
+        assert _fastmcp_supports_host_origin_guard() is True

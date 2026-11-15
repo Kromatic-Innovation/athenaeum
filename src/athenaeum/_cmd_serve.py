@@ -327,6 +327,19 @@ def http_host_origin_kwargs(*, authenticated: bool) -> dict[str, bool]:
     return {"host_origin_protection": not authenticated}
 
 
+def _fastmcp_supports_host_origin_guard() -> bool:
+    """Whether the installed FastMCP accepts ``host_origin_protection``.
+
+    The package floor admits FastMCP releases that predate the guard; passing
+    the keyword to one of those would raise ``TypeError`` at startup.
+    """
+    import inspect
+
+    from fastmcp import FastMCP
+
+    return "host_origin_protection" in inspect.signature(FastMCP.run_http_async).parameters
+
+
 def _non_loopback_bind_refusal(host: str, *, authenticated: bool = False) -> str | None:
     """The refusal message for binding *host*, or ``None`` if it may be bound.
 
@@ -614,11 +627,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             http_guard = http_host_origin_kwargs(authenticated=serve_auth is not None)
+            if not _fastmcp_supports_host_origin_guard():
+                if http_guard["host_origin_protection"]:
+                    # Fail closed: serving unauthenticated HTTP with no
+                    # DNS-rebinding guard is the hole athenaeum#2605 closes.
+                    print(
+                        "[transport] this FastMCP has no Host/Origin guard; "
+                        "upgrade fastmcp or configure serve.auth to use "
+                        "--transport http",
+                        file=sys.stderr,
+                    )
+                    return 1
+                http_guard = {}
             print(
                 "[transport] Host/Origin guard: "
                 + (
                     "on (loopback names only; DNS-rebinding protection)"
-                    if http_guard["host_origin_protection"]
+                    if http_guard.get("host_origin_protection")
                     else "off (bearer-token auth configured)"
                 ),
                 file=sys.stderr,
