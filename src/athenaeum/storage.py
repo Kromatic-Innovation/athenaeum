@@ -62,7 +62,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -540,6 +540,12 @@ class IndexedSurface:
 
     prefix: str
     root: Path
+    #: True for a raw-intake root (a bare ``recall.extra_intake_roots`` entry),
+    #: False for a configured storage surface of compiled pages. Only intake
+    #: roots are subject to the relevance-policy ``never`` filter at index time
+    #: (athenaeum#2648).
+    #: (Excluded from equality: it is a scan hint, not part of a surface's identity.)
+    intake: bool = field(default=False, compare=False)
 
 
 #: What the index scan and the hit-path resolvers accept per extra root: a
@@ -555,7 +561,7 @@ def as_indexed_surface(item: IndexedRoot) -> IndexedSurface:
     # isinstance check would then turn a surface into a bad Path (athenaeum#2616).
     if isinstance(item, (str, os.PathLike)):
         path = Path(item)
-        return IndexedSurface(prefix=path.name, root=path)
+        return IndexedSurface(prefix=path.name, root=path, intake=True)
     return item
 
 
@@ -664,7 +670,7 @@ def resolve_indexed_surfaces(
         extra_roots = resolve_extra_intake_roots(knowledge_root, config)
     already = {s_.root for s_ in indexed}
     indexed.extend(
-        IndexedSurface(prefix=r.name, root=r)
+        IndexedSurface(prefix=r.name, root=r, intake=True)
         for r in extra_roots
         if r.resolve() not in already  # a surface also listed as an extra root
     )
