@@ -258,6 +258,103 @@ def source_info(source: str) -> dict:
     return {"path": source, "title": title, "gist": gist}
 
 
+# ---------------------------------------------------------------------------
+# Subject naming (issue athenaeum#2520): every item says WHICH pages it is
+# about, by title plus path, never only by a hash / uid prefix / slug.
+# ---------------------------------------------------------------------------
+
+#: The ``(proposal <id>)`` marker a fold-widen question carries in its
+#: description (:mod:`athenaeum.pending_merges` writes it) -- the only link
+#: from that question back to the merge proposal, and so to the pages folded.
+_PROPOSAL_REF_RE = re.compile(r"\(proposal (?P<id>[0-9a-f]{6,})\)")
+
+
+class SubjectResolver:
+    """Resolves the raw identifiers a queue item carries (a page path, a uid
+    or uid prefix, a slug, a proposal id) to ``{title, path, ref, resolved}``
+    subject dicts a human can read.
+
+    Read-only and best-effort: an identifier that cannot be resolved (page
+    deleted, ledger row older than the data it needs) yields a subject that
+    keeps the RAW id as its ``title`` with ``resolved: False`` rather than
+    raising or dropping it -- the item stays answerable, exactly as
+    :func:`source_info` degrades for a missing file. Constructed once per
+    queue build so the pending-merge lookup is parsed at most once.
+    """
+
+    def __init__(self, wiki_root: Path | None) -> None:
+        self.wiki_root = wiki_root
+        self._merges: dict[str, list[str]] | None = None
+
+    def page(self, source: str) -> dict:
+        """Subject for a page path (title from frontmatter ``name:``)."""
+        info = source_info(source)
+        return {
+            "title": info["title"],
+            "path": info["path"],
+            "ref": source,
+            "resolved": Path(source).expanduser().is_file(),
+        }
+
+    def _find(self, patterns: list[str]) -> Path | None:
+        if self.wiki_root is None or not self.wiki_root.is_dir():
+            return None
+        for pattern in patterns:
+            try:
+                hits = sorted(
+                    p for p in self.wiki_root.glob(pattern) if p.is_file()
+                )
+            except OSError:
+                continue
+            if hits:
+                return hits[0]
+        return None
+
+    def uid(self, uid: str) -> dict:
+        """Subject for an entity uid (full or prefix): the page whose filename
+        is ``<uid>.md`` or ``<uid>*-<slug>.md``."""
+        uid = str(uid).strip()
+        found = self._find([f"{uid}*.md"]) if uid else None
+        if found is None:
+            return {"title": uid, "path": "", "ref": uid, "resolved": False}
+        subject = self.page(str(found))
+        subject["ref"] = uid
+        return subject
+
+    def slug(self, slug: str) -> dict:
+        """Subject for a page slug: ``<slug>.md`` or ``<uid>-<slug>.md``."""
+        slug = str(slug).strip()
+        found = self._find([f"{slug}.md", f"*-{slug}.md"]) if slug else None
+        if found is None:
+            return {"title": slug, "path": "", "ref": slug, "resolved": False}
+        subject = self.page(str(found))
+        subject["ref"] = slug
+        return subject
+
+    def proposal_sources(self, proposal_id: str) -> list[str]:
+        """Source paths of the merge proposal ``proposal_id`` (live or
+        archived), ``[]`` when no such proposal is on disk."""
+        if self._merges is None:
+            self._merges = {}
+            if self.wiki_root is not None:
+                for name in ("_pending_merges.md", "_pending_merges_archive.md"):
+                    try:
+                        for pm in parse_pending_merges(self.wiki_root / name):
+                            self._merges.setdefault(pm.id, list(pm.sources))
+                    except (OSError, UnicodeDecodeError, ValueError):
+                        continue
+        return self._merges.get(proposal_id, [])
+
+
+def _subjects_text(subjects: list[dict]) -> str:
+    """``"Title" (path); "Title" (path)`` -- the path is omitted for a subject
+    that did not resolve to one."""
+    return "; ".join(
+        f'"{s["title"]}" ({s["path"]})' if s.get("path") else f'"{s["title"]}"'
+        for s in subjects
+    )
+
+
 def _merge_question(target_name: str, source_infos: list[dict]) -> str:
     """Phrase a merge proposal as a plain, answerable question.
 
@@ -445,7 +542,12 @@ def coordinate_to_decision(pq: PendingQuestion) -> dict:
     }
 
 
-def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) -> dict:
+def question_to_decision(
+    pq: PendingQuestion,
+    *,
+    with_proposal: bool = False,
+    resolver: SubjectResolver | None = None,
+) -> dict:
     """Convert a :class:`PendingQuestion` to a unified decision dict.
 
     ``payload["raised_by"]`` (issue athenaeum#912) is ``""`` for a detector-raised
@@ -479,17 +581,53 @@ def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) ->
     }
     if with_proposal:
         payload["proposal"] = _extract_proposal_block(pq.raw_block)
+    subjects = _question_subjects(pq, resolver or SubjectResolver(None))
+    if subjects:
+        payload["subjects"] = subjects
     return {
         "type": "question",
         "id": pq.id,
         "created_at": pq.created_at,
-        "summary": pq.question,
+        "summary": _with_subjects(pq.question, subjects),
         "confidence": None,
         "payload": payload,
     }
 
 
-def retraction_to_decision(rec: dict) -> dict:
+def _with_subjects(question: str, subjects: list[dict]) -> str:
+    """``question`` followed by the pages it concerns, when there are any and
+    the question does not already name every one by title."""
+    missing = [s for s in subjects if s["title"] not in question]
+    if not missing:
+        return question
+    return f"{question} — pages: {_subjects_text(missing)}"
+
+
+def _question_subjects(pq: PendingQuestion, resolver: SubjectResolver) -> list[dict]:
+    """The pages a plain question concerns, by title plus path.
+
+    The page its ``source`` points at, when that is a real file; and, for a
+    fold-widen question (which names the canonical by slug and carries only a
+    ``(proposal <id>)`` back-reference to what was folded), the folded
+    pages recovered from that proposal.
+    """
+    subjects: list[dict] = []
+    if pq.source and Path(pq.source).expanduser().is_file():
+        subjects.append(resolver.page(pq.source))
+    elif pq.entity:
+        slug_subject = resolver.slug(pq.entity)
+        if slug_subject["resolved"]:
+            subjects.append(slug_subject)
+    ref = _PROPOSAL_REF_RE.search(pq.description or "")
+    if ref:
+        known = {s["path"] for s in subjects}
+        for src in resolver.proposal_sources(ref.group("id")):
+            if src not in known:
+                subjects.append(resolver.page(src))
+    return subjects
+
+
+def retraction_to_decision(rec: dict, *, resolver: SubjectResolver | None = None) -> dict:
     """Convert a retraction-cascade review record to a unified decision dict.
 
     A ``type: "retraction"`` item (issue athenaeum#435): a supporting source of a
@@ -502,8 +640,20 @@ def retraction_to_decision(rec: dict) -> dict:
     ref = rec.get("retracted_ref", "")
     reason = rec.get("reason", "")
     reason_tail = f" (retraction reason: {_one_line(reason)})" if reason else ""
+    payload: dict = {
+        "merge_id": rec.get("merge_id"),
+        "canonical_slug": rec.get("canonical_slug"),
+        "retracted_ref": ref,
+        "reason": reason,
+    }
+    page_tail = ""
+    if rec.get("canonical_slug"):
+        subject = (resolver or SubjectResolver(None)).slug(str(rec["canonical_slug"]))
+        if subject["resolved"]:
+            payload["subjects"] = [subject]
+            page_tail = f" (page: {_subjects_text([subject])})"
     summary = (
-        f'A retracted source "{ref}" supported the merge into "{slug}" — '
+        f'A retracted source "{ref}" supported the merge into "{slug}"{page_tail} — '
         f"review whether that merge still holds.{reason_tail}"
     )
     return {
@@ -512,16 +662,11 @@ def retraction_to_decision(rec: dict) -> dict:
         "created_at": rec.get("created_at"),
         "summary": summary,
         "confidence": None,
-        "payload": {
-            "merge_id": rec.get("merge_id"),
-            "canonical_slug": rec.get("canonical_slug"),
-            "retracted_ref": ref,
-            "reason": reason,
-        },
+        "payload": payload,
     }
 
 
-def audit_to_decision(rec: dict) -> dict:
+def audit_to_decision(rec: dict, *, resolver: SubjectResolver | None = None) -> dict:
     """Convert a sampled tier-audit item to a unified decision dict (issue athenaeum#438).
 
     A ``type: "audit"`` item — distinguishable from an ordinary escalation —
@@ -548,25 +693,50 @@ def audit_to_decision(rec: dict) -> dict:
     question_class = rec.get("question_class")
     reason_tail = f" (tier reason: {_one_line(reason)})" if reason else ""
     class_tail = f" [{question_class}]" if question_class else ""
+    subjects = _audit_subjects(rec, resolver or SubjectResolver(None))
+    about = f" about {_subjects_text(subjects)}" if subjects else ""
     summary = (
         f"Calibration audit: tier {tier}{class_tail} returned {verdict!r} on "
-        f"proposal {proposal_id} — confirm the verdict or overturn it.{reason_tail}"
+        f"proposal {proposal_id}{about} — confirm the verdict or overturn "
+        f"it.{reason_tail}"
     )
+    payload: dict = {
+        "tier": tier,
+        "verdict": verdict,
+        "proposal_id": proposal_id,
+        "reason": reason,
+        "sample_rate": rec.get("sample_rate"),
+        "question_class": question_class,
+    }
+    if subjects:
+        payload["subjects"] = subjects
     return {
         "type": "audit",
         "id": rec.get("id"),
         "created_at": rec.get("created_at"),
         "summary": summary,
         "confidence": None,
-        "payload": {
-            "tier": tier,
-            "verdict": verdict,
-            "proposal_id": proposal_id,
-            "reason": reason,
-            "sample_rate": rec.get("sample_rate"),
-            "question_class": question_class,
-        },
+        "payload": payload,
     }
+
+
+def _audit_subjects(rec: dict, resolver: SubjectResolver) -> list[dict]:
+    """The pages a calibration audit record is about.
+
+    Records written since athenaeum#2520 carry the page paths (``sources``)
+    and/or entity uids (``uids``) the tier decided over. An older record
+    carries only ``proposal_id`` -- for a merge-proposal screen or a
+    default-acceptance sample that is the pending merge's id, so the pages
+    are recovered from the proposal itself when it is still on disk. Nothing
+    resolvable -> ``[]`` (the item keeps its raw ``proposal_id`` wording).
+    """
+    subjects = [resolver.page(str(p)) for p in rec.get("sources") or []]
+    subjects += [resolver.uid(str(u)) for u in rec.get("uids") or []]
+    if not subjects:
+        subjects = [
+            resolver.page(p) for p in resolver.proposal_sources(str(rec.get("proposal_id", "")))
+        ]
+    return subjects
 
 
 def _fmt_bound_value(bound: str, value: object) -> str:
@@ -958,7 +1128,7 @@ def schema_amendment_proposal_to_decision(rec: dict) -> dict:
     }
 
 
-def page_recompile_plan_to_decision(rec: dict) -> dict:
+def page_recompile_plan_to_decision(rec: dict, *, resolver: SubjectResolver | None = None) -> dict:
     """Convert a queued page-recompile plan record to a unified decision
     dict (issue athenaeum#2547 AC7).
 
@@ -982,6 +1152,14 @@ def page_recompile_plan_to_decision(rec: dict) -> dict:
     outline = dict(outline) if isinstance(outline, dict) else {}
     uid = str(rec.get("uid") or outline.get("uid") or "")
     page_name = str(outline.get("page_name") or uid or "(unknown page)")
+    subjects: list[dict] = []
+    if uid:
+        subject = (resolver or SubjectResolver(None)).uid(uid)
+        if subject["resolved"]:
+            subjects.append(subject)
+            if page_name == uid:  # the outline had no name; use the page's own title
+                page_name = subject["title"]
+            page_name = f"{page_name} ({subject['path']})"
     group_count = outline.get("group_count")
     page_chars = outline.get("page_chars")
     scope = str(rec.get("scope") or outline.get("scope") or "")
@@ -1004,6 +1182,7 @@ def page_recompile_plan_to_decision(rec: dict) -> dict:
             "content_hash": rec.get("content_hash"),
             "scope": scope,
             "outline": outline,
+            **({"subjects": subjects} if subjects else {}),
         },
     }
 
@@ -1082,6 +1261,7 @@ def list_pending_decisions(
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
     knowledge_root = wiki_root.parent
+    resolver = SubjectResolver(wiki_root)
 
     # Issue athenaeum#1992: sync the unified store to the CURRENT legacy-file
     # / calibration-ledger state (this call's own with_proposal /
@@ -1152,7 +1332,8 @@ def list_pending_decisions(
         # named migration scope ("pending merges, pending questions, audit
         # items"), so they stay pure read-time projections, unchanged.
         decisions += [
-            retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
+            retraction_to_decision(rec, resolver=resolver)
+            for rec in read_retraction_reviews(wiki_root)
         ]
         # Issue athenaeum#898: quarantined raw-intake files awaiting an operator's
         # release/leave-quarantined decision (AC 4/5).
@@ -1210,7 +1391,7 @@ def list_pending_decisions(
         # (`decision_answers._apply_page_recompile_answer`) lands in the
         # same slice.
         decisions += [
-            page_recompile_plan_to_decision(rec)
+            page_recompile_plan_to_decision(rec, resolver=resolver)
             for rec in list_pending_page_recompile_plans(wiki_root)
         ]
     # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
@@ -1458,6 +1639,7 @@ def migrate_legacy_queues(
     """
     merges_path = wiki_root / "_pending_merges.md"
     questions_path = wiki_root / "_pending_questions.md"
+    resolver = SubjectResolver(wiki_root)
 
     by_id: dict[str, str] = {}
     records: list[dict] = []
@@ -1518,7 +1700,7 @@ def migrate_legacy_queues(
         elif kind == "coordinate":
             item = coordinate_to_decision(pq)
         else:
-            item = question_to_decision(pq, with_proposal=with_proposal)
+            item = question_to_decision(pq, with_proposal=with_proposal, resolver=resolver)
         records.append(
             {
                 "id": pq.id,
@@ -1553,7 +1735,7 @@ def migrate_legacy_queues(
                 "decision": "",
                 "created_at": rec.get("created_at"),
                 "answered_at": (review or {}).get("answered_at", ""),
-                "item": audit_to_decision(rec),
+                "item": audit_to_decision(rec, resolver=resolver),
             }
         )
     audit_count = len(audit_records)

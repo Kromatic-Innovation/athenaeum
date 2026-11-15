@@ -1097,6 +1097,24 @@ def escalation_rationale_for(item: dict[str, Any]) -> str:
     return rationale
 
 
+def subjects_for(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pages/entities ``item`` concerns, by human-readable name.
+
+    Issue athenaeum#2520: each entry is ``{title, path, ref, resolved}`` --
+    what a person reads to know WHAT they are deciding about, where the
+    ``id``/``proposal_id``/uid in the payload is only a handle. Lifted to a
+    top-level framing field (outside ``context_bundle``) so the context cap's
+    decomposition can never shrink the naming away; it is a few short
+    strings per page. The item's builder resolves them (this module reads no
+    file); an item with none yields ``[]``.
+    """
+    payload = item.get("payload")
+    raw = payload.get("subjects") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [dict(s) for s in raw if isinstance(s, dict) and s.get("title")]
+
+
 def build_context_bundle(item: dict[str, Any]) -> dict[str, Any]:
     """The minimal structured context needed to answer ``item``.
 
@@ -1205,6 +1223,9 @@ def frame_decision(
     framed["proposed_default"] = proposed_default_for(decision_type)
     framed["response_schema"] = response_schema_for_item(item)
     framed["escalation_rationale"] = escalation_rationale_for(item)
+    subjects = subjects_for(item)
+    if subjects:
+        framed["subjects"] = subjects
     return framed
 
 
