@@ -70,6 +70,9 @@ def _with_remote(repo: Path, tmp_path: Path, name: str) -> Path:
 
 def _config(read_only: Any = True, root: str = "recipes") -> dict[str, Any]:
     return {
+        # Pinned: the shipped default is the vector backend, which differs between
+        # an environment with chromadb and one without.
+        "search_backend": "fts5",
         "storage": {
             "adapters": {
                 "recipes": {
@@ -87,6 +90,11 @@ def _config(read_only: Any = True, root: str = "recipes") -> dict[str, Any]:
             }
         },
     }
+
+
+def _reindex_args(kr: Path, cache: Path) -> list[str]:
+    # --backend is pinned: the shipped default (vector) depends on chromadb being installed.
+    return ["reindex", "--path", str(kr), "--cache-dir", str(cache), "--backend", "fts5"]
 
 
 def _fillers(root: Path, n: int = 5) -> None:
@@ -491,12 +499,12 @@ class TestPullAndPush:
         (kr / "athenaeum.yaml").write_text(json.dumps(cfg), encoding="utf-8")
         cache = tmp_path / "cache"
         self._advance_remote(tmp_path, bare, "quokka", "quokkabread")
-        assert main(["reindex", "--path", str(kr), "--cache-dir", str(cache)]) == 0
+        assert main(_reindex_args(kr, cache)) == 0
         assert (repo / "quokka.md").exists()
         # The remote disappears: the pull fails, is reported, and the last good copy is served.
         _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
         capsys.readouterr()
-        assert main(["reindex", "--path", str(kr), "--cache-dir", str(cache), "--full"]) == 0
+        assert main([*_reindex_args(kr, cache), "--full"]) == 0
         err = capsys.readouterr().err
         assert "pull of read-only surface 'recipes' failed" in err
         hits = get_backend("fts5").query(
@@ -635,7 +643,8 @@ class TestRoutedCreateRefusesAReadOnlySurface:
 
         root = tbm._seed_root(tmp_path, "ro", ["Standalone fact about WidgetAlpha gadget.\n"])
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  adapters:\n    notes:\n      backing_store: markdown\n"
+            "search_backend: fts5\nstorage:\n  adapters:\n    notes:\n"
+            "      backing_store: markdown\n"
             "      surface_root: notes\n      read_only: true\n"
             "      corpus_policy:\n        embedded: true\n"
             "  mapping:\n    concept: notes\n",
@@ -711,7 +720,8 @@ class TestCrossSurfaceWritePathsRespectReadOnly:
 
     def _yaml(self, kb: Path) -> None:
         (kb / "athenaeum.yaml").write_text(
-            "storage:\n  adapters:\n    recipes:\n      backing_store: markdown\n"
+            "search_backend: fts5\nstorage:\n  adapters:\n    recipes:\n"
+            "      backing_store: markdown\n"
             "      surface_root: recipes\n      read_only: true\n"
             "      corpus_policy:\n        embedded: true\n",
             encoding="utf-8",
