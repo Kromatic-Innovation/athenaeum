@@ -737,6 +737,14 @@ yours to rotate. What there is:
   a tunnel, an SSH forward, a stdio-to-HTTP shim or a container port mapping either.
   Any of those publishes an unauthenticated server with full read and write access to
   your entire knowledge store to whoever finds the URL, and URLs are found.
+- **Do not expect an unauthenticated loopback server to answer under another name.**
+  With no issuer configured, `serve --transport http` turns on a Host/Origin guard
+  (DNS-rebinding protection): a request whose `Host` is not `localhost`, `127.0.0.1`
+  or `::1` gets `421`, and a foreign `Origin` gets `403`, so a web page in your
+  browser cannot reach the server by rebinding a hostname to loopback. The startup
+  log says `[transport] Host/Origin guard: on` or `off`. With an issuer configured
+  the guard is off, because the proxy or tunnel forwards the public hostname and
+  every request already needs a verified token.
 - **Do not serve the owner audience by default.** Leaving `serve.audience` unset means
   owner, which means every page in the store — untagged, `confidential` and
   `personal` included — is in scope for a remote host. Pin the narrowest audience

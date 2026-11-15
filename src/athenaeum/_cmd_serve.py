@@ -313,6 +313,20 @@ def _normalized_bind_host(host: str) -> str:
     return str(address) if address is not None else host.strip()
 
 
+def http_host_origin_kwargs(*, authenticated: bool) -> dict[str, bool]:
+    """FastMCP's Host/Origin guard setting for the HTTP transport (athenaeum#2605).
+
+    Without auth the server can only bind loopback, so the guard is forced on
+    (strict): a browser page that rebinds a hostname to 127.0.0.1 arrives with
+    a foreign ``Host`` and is refused before it reaches any tool. With auth the
+    guard is off, because tunnel / proxy ingress arrives with the public
+    hostname and strict mode would answer 421 to all of it; there every request
+    must carry a verified bearer token, which a rebinding page cannot supply.
+    Passed explicitly so an ambient FastMCP setting cannot change either arm.
+    """
+    return {"host_origin_protection": not authenticated}
+
+
 def _non_loopback_bind_refusal(host: str, *, authenticated: bool = False) -> str | None:
     """The refusal message for binding *host*, or ``None`` if it may be bound.
 
@@ -595,11 +609,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 f"http://{authority}:{serve_port}{path_prefix}",
                 file=sys.stderr,
             )
+            http_guard = http_host_origin_kwargs(authenticated=serve_auth is not None)
+            print(
+                "[transport] Host/Origin guard: "
+                + (
+                    "on (loopback names only; DNS-rebinding protection)"
+                    if http_guard["host_origin_protection"]
+                    else "off (bearer-token auth configured)"
+                ),
+                file=sys.stderr,
+            )
             server.run(
                 transport="http",
                 host=serve_host,
                 port=serve_port,
                 path=path_prefix,
+                **http_guard,
             )
         else:
             # stdio stays byte-identical to the pre-athenaeum#2382 call: no
