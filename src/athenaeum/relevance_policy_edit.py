@@ -189,6 +189,23 @@ class EditResult:
     policy: RelevancePolicy
 
 
+def rule_edit_is_noop(
+    wiki_root: Path,
+    verdict: str,
+    type_: str | None = None,
+    tag: str | None = None,
+    subject: str | None = None,
+) -> bool:
+    """True when the rule is identical to the policy file's current last rule.
+
+    Such an edit changes nothing, so the remote path must not queue a proposal
+    for it (an approval would be a no-op). Raises :class:`RelevancePolicyError`
+    for an invalid rule, exactly as :func:`validate_rule` does.
+    """
+    key = normalize_rule(verdict, type_, tag, subject)
+    return _plan_edit(Path(wiki_root), key)[1] is None
+
+
 def apply_rule_edit(
     wiki_root: Path,
     verdict: str,

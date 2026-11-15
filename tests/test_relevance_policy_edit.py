@@ -184,6 +184,19 @@ class TestRemoteProposal:
         assert created_a and not created_b and a["id"] == b["id"]
         assert len(list_pending_proposals(kb / "wiki")) == 1
 
+    def test_noop_rule_files_no_proposal(self, kb: Path) -> None:
+        # Seer review on PR athenaeum#2675: a rule identical to the policy's
+        # current last rule changes nothing, so no approval is queued for it.
+        apply_rule_edit(kb / "wiki", "always", tag="personal/travel", transport="stdio")
+        out = _call(
+            _server(kb, transport="http"),
+            "set_capture_rule",
+            verdict="always",
+            tag="personal/travel",
+        )
+        assert out["ok"] is True and out["mode"] == "unchanged"
+        assert list_pending_proposals(kb / "wiki") == []
+
     def test_invalid_proposal_is_never_queued(self, kb: Path) -> None:
         out = _call(
             _server(kb, transport="http"), "set_capture_rule", verdict="always", tag="nope"

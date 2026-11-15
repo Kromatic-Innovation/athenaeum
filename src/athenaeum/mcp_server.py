@@ -4287,11 +4287,22 @@ def create_server(
         from athenaeum.relevance_policy_edit import (
             apply_rule_edit,
             file_rule_edit_proposal,
+            rule_edit_is_noop,
         )
 
         is_http = transport == "http"
         try:
             if is_http:
+                if rule_edit_is_noop(wiki_root, verdict, type, tag, subject_uid):
+                    # Nothing to approve: the policy already ends with this rule.
+                    return {
+                        "ok": True,
+                        "mode": "unchanged",
+                        "message": (
+                            "The policy already ends with this rule; no proposal "
+                            "was filed."
+                        ),
+                    }
                 record, created = file_rule_edit_proposal(
                     wiki_root, verdict, type, tag, subject_uid, rationale=rationale.strip()
                 )
