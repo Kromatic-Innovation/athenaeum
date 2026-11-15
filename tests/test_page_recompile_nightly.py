@@ -944,9 +944,17 @@ class TestAC7DecisionType:
         for paragraph in [p.strip() for p in _BODY.split("\n\n") if p.strip()]:
             if len(paragraph) > EXCERPT_MAX_CHARS:
                 assert paragraph not in blob
-        # And the structural guarantee behind that: no string anywhere in
-        # the payload is longer than one capped excerpt.
+        # No substantial line of the body travels either, whatever its length.
+        for line in [ln.strip() for ln in _BODY.splitlines() if len(ln.strip()) > 40]:
+            assert line not in blob
+        # And the structural guarantee behind that: no prose string anywhere
+        # in the payload is longer than one capped excerpt. A filesystem path
+        # (the page's own location) is identification, not body text, and its
+        # length depends on where the test runs (a macOS tmp dir is 150+
+        # characters), so absolute paths are excluded from the length check.
         for value in _strings_in(payload):
+            if Path(value).is_absolute() and "\n" not in value:
+                continue
             assert len(value) <= EXCERPT_MAX_CHARS, value
 
     def test_the_outline_drops_a_merged_sections_model_written_text(
