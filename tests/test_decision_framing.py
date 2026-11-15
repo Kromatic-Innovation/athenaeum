@@ -24,6 +24,7 @@ from athenaeum.decision_framing import (
     ROUTING_CLASSES,
     ROUTING_COMPETENCE,
     ROUTING_SCHEDULED_REVIEW,
+    SHORT_NAME_ESCALATED_CONFLICT_TYPE,
     answerable_as,
     build_context_bundle,
     bundle_tokens,
@@ -33,6 +34,7 @@ from athenaeum.decision_framing import (
     is_default_acceptance,
     proposed_default_for,
     response_schema_for,
+    response_schema_for_item,
     reversibility_for,
     routing_for,
     shape_errors_only,
@@ -408,6 +410,77 @@ class TestResponseSchemaValidation:
         response_schema_for("merge")["properties"].clear()
 
         assert response_schema_for("merge")["properties"]
+
+
+class TestShortNameEscalatedFraming:
+    """Issue athenaeum#2526 AC1: a ``short_name_escalated`` item declares an
+    answer shape (target uid + optional new name), and reports it via its
+    published ``response_schema`` -- the same "item reports itself
+    answerable" bar :data:`athenaeum.decision_framing.ANSWERABLE_AS` already
+    sets for ``answerable_as``, now also carried in the item's OWN schema
+    rather than only the type-level default."""
+
+    def test_the_question_type_declares_an_optional_name_property(self) -> None:
+        """At the type level (issue athenaeum#2526): the CLI/triage inbound
+        validators only know ``decision_type == "question"`` at the point
+        they validate, never the item's own conflict_type -- see
+        :func:`athenaeum.decision_framing._question_schema`'s docstring."""
+        schema = response_schema_for("question")
+        assert schema["required"] == ["verdict"]
+        assert schema["additionalProperties"] is False
+        assert "name" in schema["properties"]
+        # An ordinary free-text question answer is unaffected.
+        assert validate_answer("question", {"verdict": "The 2026 figure holds."}) == []
+        assert validate_answer("question", {"verdict": "page0001", "name": "New Name"}) == []
+
+    def test_the_per_item_schema_narrows_verdict_to_a_uid_and_keeps_name_optional(
+        self,
+    ) -> None:
+        item = _item("question", conflict_type=SHORT_NAME_ESCALATED_CONFLICT_TYPE)
+        schema = response_schema_for_item(item)
+
+        assert schema["required"] == ["verdict"]
+        assert schema["additionalProperties"] is False
+        assert "uid" in schema["properties"]["verdict"]["description"]
+        assert "name" in schema["properties"]
+        assert "rename" in schema["properties"]["name"]["description"]
+
+    def test_an_ordinary_question_item_keeps_the_generic_schema(self) -> None:
+        """A contradiction (the common case) must not be narrowed just
+        because it shares the ``question`` type."""
+        item = _item("question", conflict_type="principled")
+        schema = response_schema_for_item(item)
+
+        assert schema == response_schema_for("question")
+        assert "operator's own words" in schema["properties"]["verdict"]["description"]
+
+    def test_framed_through_the_real_read_path(self, tmp_path: Path) -> None:
+        """End to end: a real escalated block, framed through
+        ``question_to_decision`` + ``frame_decision``, publishes the uid+name
+        schema -- not just the hand-built ``_item`` fixture above."""
+        from athenaeum.answers import parse_pending_questions, render_observation_field
+        from athenaeum.decisions import question_to_decision
+
+        pending_path = tmp_path / "_pending_questions.md"
+        block = (
+            '## [2026-04-20] Entity: "cwc" (from sessions/a.md)\n'
+            "- [ ] create suppressed for a short, generic name?\n"
+            "**Conflict type**: short_name_escalated\n"
+            "**Description**: Tier-3 create for 'cwc' was suppressed.\n"
+            f"{render_observation_field('cwc tracks the short-name policy.')}\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block, encoding="utf-8")
+        (pq,) = parse_pending_questions(pending_path)
+        decision = question_to_decision(pq)
+        framed = frame_decision(decision, max_context_tokens=4000)
+
+        schema = framed["response_schema"]
+        assert "uid" in schema["properties"]["verdict"]["description"]
+        assert "name" in schema["properties"]
+        assert framed["type"] == "question"
+        # answerable_as("question") == "question" -- the item reaches a real
+        # applier (athenaeum#2526's) rather than being a declared-only type.
+        assert answerable_as(framed["type"]) == "question"
 
 
 class TestShapeVersusValueDivisionOfLabour:
