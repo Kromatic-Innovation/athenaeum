@@ -80,7 +80,8 @@ repository again:
 
 ```bash
 cd ~/shared-recipes
-git commit --allow-empty -m "push test" && git push origin HEAD
+git -c user.name=Reader -c user.email=reader@example.com commit --allow-empty -m "push test"
+git push origin HEAD
 git reset --hard @{upstream}
 ```
 
