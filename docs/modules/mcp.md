@@ -144,9 +144,12 @@ athenaeum serve --path ~/knowledge --transport http --host 0.0.0.0 \
 | `--auth-resource` | `serve.auth.resource` | `ATHENAEUM_SERVE_AUTH_RESOURCE` | This server's canonical public URL — the one audience this process serves. |
 | `--auth-allowed-identities` | `serve.auth.allowed_identities` | `ATHENAEUM_SERVE_AUTH_ALLOWED_IDENTITIES` | Comma-separated `sub` values, or emails the issuer marked verified. |
 | `--auth-scopes` | `serve.auth.scopes` | `ATHENAEUM_SERVE_AUTH_SCOPES` | `read=<name>,write=<name>`. Defaults to `athenaeum:read` / `athenaeum:write`. |
+| — | `serve.auth.max_token_lifetime` | `ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME` | Optional ceiling, in seconds, on a token's validity window. Unset by default. |
+| — | `serve.auth.clock_leeway` | `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY` | Seconds of clock skew tolerated on `nbf` / `iat`. Defaults to `60`. |
 
 Each resolves **CLI flag > environment variable > `athenaeum.yaml`**, the same order every
-other knob uses. The first three are a set: configure all of them or none of them. Under
+other knob uses (the two time-claim settings have no flag: environment variable or yaml). The
+first three are a set: configure all of them or none of them. Under
 `stdio` the block is inert and says so on startup — stdio binds no socket and carries no
 bearer token, so there is nothing to verify.
 
@@ -183,6 +186,26 @@ at `/.well-known/oauth-protected-resource/mcp`.
 Every rejected request answers **401** with a `WWW-Authenticate: Bearer` challenge naming
 that metadata URL and the scopes to request, so a client can discover where to authenticate
 without being told anything else.
+
+### What is verified on a token
+
+After the key set verifies the signature, and `iss` and `aud` match the pins, athenaeum
+itself checks the time claims (FastMCP only checks `exp` when it is present and never checks
+`nbf`). A token is refused with the same 401 as any other invalid token when:
+
+- it has **no `exp`** (a token that never expires turns one leak into permanent access), or
+  its `exp` is not in the future (no leeway is applied to expiry);
+- its **`nbf` or `iat` is later than now plus `serve.auth.clock_leeway`** (default 60
+  seconds; `0` tolerates no skew). A value within the leeway is accepted;
+- **`serve.auth.max_token_lifetime` is set** and `exp - iat` is greater than it, or `iat` is
+  absent and `exp - now` is greater than it. The cap is exact, with no leeway. When it is
+  unset there is no ceiling beyond the mandatory `exp`;
+- `exp`, `nbf` or `iat` is present but is not a number.
+
+Each refusal is logged as a warning naming the `sub` and a short reason (`missing_exp`,
+`expired`, `not_yet_valid`, `issued_in_future`, `lifetime_exceeds_max`) and, when
+`serve.audit_log` is set, recorded as a `refused` audit line. The token itself is never
+logged.
 
 ### Refusals, and the reasons for them
 

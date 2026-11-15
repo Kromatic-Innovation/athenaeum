@@ -5375,6 +5375,26 @@ Raises `athenaeum.serve_auth.ServeAuthError` on a yaml value that
 is neither a list nor a string, and on a list entry that is not a string.
 No seed in ``_DEFAULTS``.
 
+### `resolve_serve_auth_clock_leeway`
+
+- **YAML path:** `serve.auth.clock_leeway`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY`
+- **CLI flag:** —
+- **Default:** `60`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the ``nbf`` / ``iat`` clock-skew leeway in seconds.
+
+A token whose ``nbf`` or ``iat`` is later than now plus this is refused.
+Non-negative; ``0`` means no tolerance. Default
+`athenaeum.serve_auth.DEFAULT_CLOCK_LEEWAY` (60). It does not widen
+``exp``: an expired token is refused regardless.
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY``, ``serve.auth.clock_leeway``.
+Raises `athenaeum.serve_auth.ServeAuthError` on a negative or
+non-integer value. No seed in ``_DEFAULTS``.
+
 ### `resolve_serve_auth_issuer`
 
 - **YAML path:** `serve.auth.issuer`
@@ -5409,6 +5429,25 @@ LIFTS nothing and keeps the loopback-only refusal, but a half-read issuer
 next to a configured resource would make the whole block look unset. The
 URL itself is validated once, with the resource, by
 `athenaeum.serve_auth.build_serve_auth`. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_auth_max_token_lifetime`
+
+- **YAML path:** `serve.auth.max_token_lifetime`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the optional access-token lifetime ceiling.
+
+Seconds, positive. When set, a token whose ``exp - iat`` exceeds it is
+refused, and so is one with no ``iat`` whose ``exp`` is further than this
+from now. ``None`` (the default) sets no ceiling.
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME``, ``serve.auth.max_token_lifetime``.
+Raises `athenaeum.serve_auth.ServeAuthError` on a non-positive or
+non-integer value rather than ignoring it. No seed in ``_DEFAULTS``.
 
 ### `resolve_serve_auth_resource`
 
