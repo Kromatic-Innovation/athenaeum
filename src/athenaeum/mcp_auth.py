@@ -50,6 +50,7 @@ dependency stays optional for every non-serve code path.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -195,13 +196,83 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
     makes those three agree with the audience the verifier enforces.
     """
 
-    def __init__(self, resource: str, **kwargs: Any) -> None:
+    def __init__(self, resource: str, issuer: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._pinned_resource = AnyHttpUrl(resource)
+        self._issuer = issuer
 
     def _get_resource_url(self, path: str | None = None) -> AnyHttpUrl:
         """The pinned resource URL, whatever endpoint path is mounted."""
         return self._pinned_resource
+
+    def get_routes(self, mcp_path: str | None = None) -> list[Any]:
+        """FastMCP's routes, with the metadata body carrying the raw issuer.
+
+        The SDK's metadata model types ``authorization_servers`` as
+        ``AnyHttpUrl``, which renders a path-less issuer with a trailing slash
+        (``https://id.example.net`` -> ``https://id.example.net/``). RFC 8414
+        and RFC 9207 compare the issuer as an exact string, and verification
+        here already uses it verbatim, so the advertised value must be the
+        configured string byte for byte. Each metadata route's response is
+        re-rendered with that one field replaced; the status, headers (CORS,
+        cache) and every other field are exactly what FastMCP serves.
+        """
+        routes: list[Any] = super().get_routes(mcp_path)
+        for route in routes:
+            if str(getattr(route, "path", "")).startswith(
+                "/.well-known/oauth-protected-resource"
+            ):
+                # ``Route.app`` is the ASGI callable Starlette dispatches to
+                # (CORS wrapper included); swapping it keeps path, methods and
+                # every header the route already carries.
+                route.app = self._with_raw_issuer(route.app)
+        return routes
+
+    def _with_raw_issuer(self, app: Any) -> Any:
+        """Wrap the route's ASGI app, rewriting only its 200 JSON body."""
+
+        async def wrapped(scope: Any, receive: Any, send: Any) -> None:
+            start: dict[str, Any] | None = None
+            chunks: list[bytes] = []
+
+            async def intercept(message: dict[str, Any]) -> None:
+                nonlocal start
+                if message["type"] == "http.response.start":
+                    start = message
+                    return
+                if message["type"] != "http.response.body" or start is None:
+                    await send(message)
+                    return
+                # Buffer a (possibly multi-chunk) body so the start message is
+                # sent exactly once, with a Content-Length matching what is
+                # actually sent.
+                chunks.append(message.get("body", b""))
+                if message.get("more_body"):
+                    return
+                body = b"".join(chunks)
+                if start["status"] == 200 and body:
+                    document = json.loads(body)
+                    document["authorization_servers"] = [self._issuer]
+                    # Same compact, non-ASCII-escaping form pydantic emits, so
+                    # no byte other than the issuer's differs from the SDK's.
+                    body = json.dumps(
+                        document, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")
+                start = {
+                    **start,
+                    "headers": [
+                        (k, str(len(body)).encode() if k.lower() == b"content-length" else v)
+                        for k, v in start.get("headers", [])
+                    ],
+                }
+                await send(start)
+                await send({"type": "http.response.body", "body": body, "more_body": False})
+
+            # Only the GET document is JSON; a CORS preflight answers 200 with
+            # a plain-text body that must pass through untouched.
+            await app(scope, receive, intercept if scope.get("method") == "GET" else send)
+
+        return wrapped
 
 
 def build_auth_provider(
@@ -263,6 +334,7 @@ def build_auth_provider(
     )
     return _PinnedResourceAuthProvider(
         serve_auth.resource,
+        serve_auth.issuer,
         token_verifier=verifier,
         authorization_servers=[AnyHttpUrl(serve_auth.issuer)],
         base_url=AnyHttpUrl(serve_auth.resource),
