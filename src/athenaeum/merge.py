@@ -122,6 +122,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.progress import PhaseHeartbeat
+from athenaeum.storage import require_writable_paths
 
 log = logging.getLogger(__name__)
 
@@ -1390,6 +1391,8 @@ def _route_merged_entry_write(
         )
 
     page_path = wiki_root / entry.filename
+    # Issue athenaeum#2621: a compiled entry never lands on a read-only surface.
+    require_writable_paths([page_path], knowledge_root, config, op="merge")
     atomic_write_text(page_path, text)
     return page_path
 

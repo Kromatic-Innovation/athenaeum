@@ -234,9 +234,11 @@ from athenaeum.page_relations import (
 from athenaeum.pending_merges import _add_merge_rejected_with_to_frontmatter
 from athenaeum.screening import more_restrictive
 from athenaeum.storage import (
+    ReadOnlySurfaceError,
     SurfaceNotIndexedError,
     open_store,
     page_write_root_for_class,
+    refuse_read_only_write,
     resolve_locator_surfaces,
 )
 from athenaeum.store import now_iso
@@ -1126,6 +1128,9 @@ def compute_apply(
             return page_write_root_for_class(entity_type, config, wiki_root.parent)
         except SurfaceNotIndexedError as exc:
             issues.append(PlanIssue("surface-not-indexed", str(exc)))
+            return None
+        except ReadOnlySurfaceError as exc:
+            issues.append(PlanIssue("read-only-surface", str(exc)))
             return None
 
     units_by_id = {unit.unit_id: unit for unit in segment.units}
@@ -2464,6 +2469,25 @@ def write_apply(
     # The Plan's write order, in one place: NEW pages first (sub-pages then
     # standalone pages -- a pure addition either way), then every existing
     # move target, then the parent LAST.
+    # athenaeum#2621: refuse the whole apply, before anything is written, if any
+    # page it would write (or rewrite) lives on a read-only surface.
+    for _path in (
+        [sp.path for sp in computed.sub_pages]
+        + [sp.path for sp in computed.standalone_pages]
+        + [t.path for t in computed.targets]
+        + [computed.parent_path]
+    ):
+        _ro_refusal = refuse_read_only_write(
+            _path, wiki_root.parent, config, op="page recompile"
+        )
+        if _ro_refusal is not None:
+            return ApplyOutcome(
+                ok=False,
+                reason=f"{_ro_refusal}; nothing was written",
+                plan_id=resolved_plan_id,
+                uid=plan.uid,
+            )
+
     # athenaeum#2619: refuse the whole apply, before anything is written, if any
     # page it would write links to a page on a more private store.
     for _path, _text in (

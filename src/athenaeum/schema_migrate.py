@@ -228,7 +228,7 @@ def insert_schema_fields(text: str, to_version: int, fields: dict[str, Any]) -> 
     return f"{text[:end]}{newline}{newline.join(lines)}{text[end:]}"
 
 
-def apply_migrations(report: MigrateReport) -> int:
+def apply_migrations(report: MigrateReport, knowledge_root: Path | None = None) -> int:
     """Write every migration outcome in *report*. Returns files-changed count.
 
     Re-reads each page and re-checks its CURRENT ``schema_version`` at write
@@ -238,6 +238,19 @@ def apply_migrations(report: MigrateReport) -> int:
     ``audit.apply_audit_report``'s same re-check-before-write discipline.
     """
     from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.storage import require_writable_paths
+
+    # Issue athenaeum#2621: refuse whole, before the first write, when any page
+    # to be migrated lives on a read-only surface. *knowledge_root* defaults to
+    # the parent of the ``wiki`` directory the page sits under.
+    if report.migrations:
+        first = report.migrations[0].path
+        root = knowledge_root
+        if root is None:
+            root = next((a.parent for a in first.parents if a.name == "wiki"), first.parent)
+        require_writable_paths(
+            [o.path for o in report.migrations], root, op="schema migration"
+        )
 
     changed = 0
     for outcome in report.migrations:

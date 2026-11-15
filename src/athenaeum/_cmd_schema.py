@@ -60,7 +60,7 @@ def cmd_schema(args: argparse.Namespace) -> int:
             return lock
 
     try:
-        changed = apply_migrations(report) if should_write else 0
+        changed = apply_migrations(report, knowledge_root) if should_write else 0
 
         if args.json:
             payload = report.to_dict()

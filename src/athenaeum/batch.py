@@ -123,7 +123,8 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.storage import page_write_root_for_class
+from athenaeum.storage import page_write_root_for_class, refuse_read_only_write
+from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED,
@@ -972,6 +973,9 @@ class BatchRunResult:
     #: the synchronous transport, and is excluded from ``updated`` for the
     #: same reason: a refused write never reached disk.
     misrouted_prevented: int = 0
+    #: Writes refused because the page lives on a ``read_only`` surface
+    #: (athenaeum#2621); the raw file is retained, never deleted.
+    read_only_refused: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     #: Issue athenaeum#1144: files whose batch was still in flight when the run's
@@ -2510,11 +2514,19 @@ def process_batch_run(
             # write; the raw is then retained, never deleted.
             _link_refused = False
             _prevented_uids: list[str] = []
+            _ro_refused = 0
             for _update_idx, (path, content) in enumerate(pending_updates):
                 if _update_idx in _route.prevented:
                     result.misrouted_prevented += 1
                     if _update_idx < len(updated_uids):
                         _prevented_uids.append(str(updated_uids[_update_idx]).strip())
+                    continue
+                _ro_refusal = refuse_read_only_write(
+                    path, wiki_root.parent, resolved_config, op="compile update"
+                )
+                if _ro_refusal is not None:
+                    log.warning("  Refused (read-only surface): %s", _ro_refusal)
+                    _ro_refused += 1
                     continue
                 if not admit_page_write(
                     wiki_root, path, content, index=index, config=resolved_config,
@@ -2539,11 +2551,21 @@ def process_batch_run(
             written_entities: list[WikiEntity] = []
             # Per-type target surface (athenaeum#2618), resolved up front so a
             # class mapped to a non-indexed surface raises before any write.
-            _create_roots = [
-                page_write_root_for_class(e.type, resolved_config, wiki_root.parent)
-                for e in new_entities
-            ]
+            # A class mapped to a READ-ONLY surface (athenaeum#2621) is refused
+            # per entity: nothing is written, the raw is retained (see below).
+            _create_roots: list[Path | None] = []
+            for _e in new_entities:
+                try:
+                    _create_roots.append(
+                        page_write_root_for_class(_e.type, resolved_config, wiki_root.parent)
+                    )
+                except ReadOnlySurfaceError as _exc:
+                    log.warning("  Refused (read-only surface): %s", _exc)
+                    _ro_refused += 1
+                    _create_roots.append(None)
             for entity, _create_root in zip(new_entities, _create_roots):
+                if _create_root is None:
+                    continue
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
@@ -2561,6 +2583,16 @@ def process_batch_run(
                     source="batch",
                 ):
                     result.type_rejected += 1
+                    continue
+                _ro_refusal = refuse_read_only_write(
+                    _create_root / entity.filename,
+                    wiki_root.parent,
+                    resolved_config,
+                    op="compile create",
+                )
+                if _ro_refusal is not None:
+                    log.warning("  Refused (read-only surface): %s", _ro_refusal)
+                    _ro_refused += 1
                     continue
                 if not admit_page_write(
                     wiki_root, _create_root / entity.filename, rendered, index=index,
@@ -2601,7 +2633,11 @@ def process_batch_run(
             # ledger row the synchronous transport used to write here too
             # (issue athenaeum#1949's `compile_routing.record_compile_route`)
             # -- nothing outside its own tests ever read it.
-            if _link_refused:
+            if _ro_refused:
+                # Issue athenaeum#2621: a read-only refusal never consumes the raw.
+                result.read_only_refused += _ro_refused
+                log.warning("  Retained (not deleted): %s", st.raw.path)
+            elif _link_refused:
                 log.warning("  Retained (store-boundary link refused): %s", st.raw.path)
             else:
                 st.raw.path.unlink()

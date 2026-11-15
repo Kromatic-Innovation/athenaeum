@@ -97,7 +97,7 @@ from athenaeum.merge import (
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.session_recovery import SessionRecoverer
-from athenaeum.storage import open_store
+from athenaeum.storage import open_store, require_writable_paths
 from athenaeum.store import Store
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 from athenaeum.verdicts import get_verdict_status, make_pair_key, page_id_for_path
@@ -931,6 +931,15 @@ def run_retire_pass(
         # Holds only (or empty) — nothing to commit. No-op run.
         _log_report(report)
         return report
+
+    # Issue athenaeum#2621: refuse whole, before any commit or write, when a
+    # wiki page this pass would rewrite lives on a read-only surface.
+    require_writable_paths(
+        [wiki_root / entry.filename for entry, _members in retiring],
+        knowledge_root,
+        resolved_config,
+        op="retire",
+    )
 
     # Commit A — provenance snapshot. Commits the raw intake about to be
     # retired (scoped add, Quine C2) so every file we are about to git rm is

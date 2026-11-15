@@ -59,6 +59,7 @@ from athenaeum.models import (
 )
 from athenaeum.pending_merges import find_identity_pages
 from athenaeum.provenance import default_merge_provenance_path
+from athenaeum.storage import require_writable_paths
 
 
 @dataclass
@@ -191,6 +192,8 @@ def repair_dangling_fold_targets(
             continue
         report.changes.append((path, folded_into, new_value))
         if apply:
+            # Issue athenaeum#2621: never rewrite a tombstone on a read-only surface.
+            require_writable_paths([path], wiki_root.parent, op="fold-target repair")
             new_meta = dict(meta) if isinstance(meta, dict) else {}
             new_meta[FOLDED_INTO_FIELD] = new_value
             try:

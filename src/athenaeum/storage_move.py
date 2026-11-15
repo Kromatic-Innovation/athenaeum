@@ -57,7 +57,13 @@ from athenaeum.storage import (
     open_store,
     resolve_locator_surfaces,
 )
-from athenaeum.store import commit_repo, repo_head, repo_is_clean, restore_repo
+from athenaeum.store import (
+    ReadOnlySurfaceError,
+    commit_repo,
+    repo_head,
+    repo_is_clean,
+    restore_repo,
+)
 from athenaeum.store_links import LinkViolation, scan_links_after_move
 
 #: Where move records live under the cache directory.
@@ -142,6 +148,21 @@ class MoveRecord:
         )
 
 
+class ReadOnlyMoveRefused(MoveRefused, ReadOnlySurfaceError):
+    """A move whose target surface is declared ``read_only`` (athenaeum#2621):
+    both the move-type refusal and the named read-only error."""
+
+
+def _refuse_read_only_target(config: dict[str, Any] | None, target_name: str) -> None:
+    adapter = available_adapters(config).get(target_name)
+    if adapter is not None and adapter.read_only:
+        raise ReadOnlyMoveRefused(
+            f"surface {target_name!r} is declared read_only (a shared mount this "
+            "install never writes); move-type cannot move pages into it or undo a "
+            "move that touched it"
+        )
+
+
 def validate_move_target(
     config: dict[str, Any] | None, knowledge_root: Path, target_name: str
 ) -> MoveTarget:
@@ -153,6 +174,7 @@ def validate_move_target(
     repository (not the wiki's); the wiki must itself be in a git repository.
     Every rule about where pages may be moved belongs here.
     """
+    _refuse_read_only_target(config, target_name)
     adapters = available_adapters(config)
     adapter = adapters.get(target_name)
     if adapter is None or target_name == DEFAULT_ADAPTER_NAME:
@@ -251,6 +273,9 @@ def apply_move(
     commit to restore to. If moving fails part-way both repositories are
     restored to their snapshots before the error propagates.
     """
+    # Re-checked against the CURRENT config, before any repository is touched
+    # (a plan may be applied after the surface became read-only).
+    _refuse_read_only_target(config, plan.target_name)
     if plan.violations:
         raise MoveRefused(
             f"{len(plan.violations)} link(s) would break the store-link rule; "
@@ -317,13 +342,24 @@ def load_record(ref: str, cache_dir: Path | None = None) -> MoveRecord:
         raise MoveRefused(f"cannot read move record {ref!r} ({path}): {exc}") from exc
 
 
-def undo_move(record: MoveRecord, *, force: bool = False) -> None:
+def undo_move(
+    record: MoveRecord,
+    *,
+    force: bool = False,
+    config: dict[str, Any] | None = None,
+) -> None:
     """Restore both repositories to the snapshots *record* took before the move.
 
     Refuses (nothing is changed) unless each repository is still at the commit
     the apply left and has a clean tree -- later work would otherwise be
     discarded. ``force=True`` skips that check and resets regardless.
+
+    With *config*, an undo of a move into a surface that is NOW declared
+    ``read_only`` is refused (even under ``force``): the reset would rewrite a
+    mount this install never writes (athenaeum#2621).
     """
+    if config is not None:
+        _refuse_read_only_target(config, record.target_name)
     repos = {role: (Path(info["repo"]), info) for role, info in record.repos.items()}
     if not force:
         for role, (repo, info) in repos.items():

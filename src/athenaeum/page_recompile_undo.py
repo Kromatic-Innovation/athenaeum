@@ -187,7 +187,7 @@ from athenaeum.page_relations import (
     read_relations,
     remove_relation,
 )
-from athenaeum.storage import open_store
+from athenaeum.storage import open_store, require_writable_paths
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
@@ -1074,6 +1074,13 @@ def write_undo(
                 exc,
             )
 
+    # Issue athenaeum#2621: never restore or delete a page on a read-only surface.
+    require_writable_paths(
+        [*(r.path for r in computed.restores), *(d.path for d in computed.deletions)],
+        wiki_root.parent,
+        config,
+        op="recompile undo",
+    )
     # Parents first, created pages last -- see the module docstring.
     for restore in computed.restores:
         atomic_write_text(restore.path, restore.text)

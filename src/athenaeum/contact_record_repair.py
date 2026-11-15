@@ -66,6 +66,7 @@ from athenaeum.models import (
 )
 from athenaeum.pending_merges import resolve_target_page
 from athenaeum.provenance import read_merge_provenance
+from athenaeum.storage import require_writable_paths
 
 #: How far :func:`_live_ends` follows a chain of absorbed uids. Folds are
 #: acyclic by construction; this only bounds a hand-edited loop.
@@ -404,6 +405,8 @@ def apply_contact_record_repair(
     """
     result = ContactRepairResult()
     root = Path(contacts_root)
+    # Issue athenaeum#2621: a read-only contacts surface is never repaired.
+    require_writable_paths([root], root.parent, op="contact-record repair")
     for uid, copy, keep in plan.duplicate_retire:
         try:
             pii.retire_contact_record(

@@ -49,6 +49,7 @@ from athenaeum.frontmatter_edit import (
     witnessed_source_fields,
     yaml_scalar_literal,
 )
+from athenaeum.storage import require_writable_paths
 
 
 @dataclass
@@ -102,6 +103,9 @@ def _atomic_write(path: Path, content: str) -> None:
     mid-write — readers see either the old content or the complete new
     content, never a truncated mix.
     """
+    # Issue athenaeum#2621: every repair pass walks ``wiki/*.md``, so the
+    # knowledge root is two levels above the page; refuse a read-only surface.
+    require_writable_paths([path], path.parent.parent, op="repair")
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
