@@ -353,6 +353,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later mention forever); no match still escalates exactly as before; two
   or more matches still escalate, now naming every candidate page
   (athenaeum#2527).
+- Decision-queue items now name the pages they concern by title plus path, not only by hash, uid prefix or slug (athenaeum#2520). Calibration `audit` items (T1 rejects, T2 approvals, attribution placements) carry the page pair and the tier's reason; new audit ledger records store the `sources` / `uids` the tier decided over, and older records recover their pages from the pending merge their `proposal_id` names when it is still on disk. Fold-widen questions name the canonical and the folded pages, `retraction` and `page-recompile` items name the page behind their slug/uid, and each framed item gains a top-level `subjects` list (`title`, `path`, `ref`, `resolved`) that the context cap never shrinks. An id that cannot be resolved keeps its raw form; no existing payload field changes.
 - `athenaeum import-memory --path <root>` now compiles the root it staged
   files into, not the default knowledge base. `_default_compile_batch`
   called `librarian.run(knowledge_root=...)` without `raw_root`/`wiki_root`,

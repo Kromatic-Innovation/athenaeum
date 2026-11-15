@@ -29,7 +29,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum import reasoning_screens as screens_mod
-from athenaeum.calibration import calibration_summary, record_audit_review
+from athenaeum.calibration import (
+    AUDIT_KIND,
+    calibration_summary,
+    read_calibration_ledger,
+    record_audit_review,
+)
 from athenaeum.models import TokenUsage
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.provenance import read_merge_provenance
@@ -204,6 +209,11 @@ class TestHappyPathAutoFinalize:
         summary = calibration_summary(wiki)
         assert summary["T2"]["sampled"] == 1
         assert summary["T2"]["applied"] == 1
+        # Issue athenaeum#2520: the audit record names the merged pages.
+        (audit,) = [
+            r for r in read_calibration_ledger(wiki) if r.get("kind") == AUDIT_KIND
+        ]
+        assert audit["sources"] == _safe_pair(tmp_path)
 
 
 # ---------------------------------------------------------------------------
