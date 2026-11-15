@@ -41,7 +41,9 @@ fixture-proven counter-example AC6 requires.
 
 **Resumable, not duplicating (AC3/AC8).** :func:`load_state`/:func:`save_state`
 persist a ``<cache_dir>/import_memory_state.json`` map of
-``"<scope>/<filename>" -> {size_bytes, mtime, imported_at}``. A file is
+``"<scope>/<filename>" -> {size_bytes, mtime, imported_at[, refused]}`` (``refused``
+holds the relevance-policy reason when the gate refused the file,
+athenaeum#2645). A file is
 PENDING only when no recorded entry matches its CURRENT source size+mtime
 (:func:`_pending_files`) — so a changed source file is treated as new again,
 and an already-imported, unchanged one is skipped on every later run, cap or
@@ -326,13 +328,39 @@ def _is_imported(state: dict[str, Any], scope: str, file: MemoryFile) -> bool:
 
 
 def _mark_imported(
-    state: dict[str, Any], scope: str, file: MemoryFile, *, imported_at: str
+    state: dict[str, Any],
+    scope: str,
+    file: MemoryFile,
+    *,
+    imported_at: str,
+    refused_reason: str | None = None,
 ) -> None:
-    state["imported"][_record_key(scope, file.path.name)] = {
+    record: dict[str, Any] = {
         "size_bytes": file.size_bytes,
         "mtime": file.mtime,
         "imported_at": imported_at,
     }
+    if refused_reason is not None:
+        # athenaeum#2645: handled because the relevance gate refused it, not
+        # because it compiled. The reason names the deciding rule.
+        record["refused"] = refused_reason
+    state["imported"][_record_key(scope, file.path.name)] = record
+
+
+def _relevance_refusal(staged: Path, policy: Any) -> str | None:
+    """The relevance gate's refusal reason for a staged copy, or ``None``.
+
+    Same decision the compile pipeline makes (``filter_relevance_never``):
+    refused only when EVERY declared item is covered by a ``never`` rule.
+    Unreadable staged files are not refused.
+    """
+    from athenaeum.relevance_policy import filter_relevance_never
+
+    class _Staged:
+        path = staged
+
+    _kept, refused = filter_relevance_never([_Staged], policy)
+    return refused[0][1].reason if refused else None
 
 
 def _pending_files(
@@ -587,11 +615,36 @@ def run_import(
         # This can only ever UNDER-approximate what was processed, same as
         # the precedent it follows — never the wrong direction.
         imported_at = now_iso(None)
+        # athenaeum#2645: the relevance gate leaves a refused file on disk
+        # (never deleted), so by presence alone it looks "not compiled" and
+        # would be restaged -- and re-refused -- every run, consuming the cap.
+        # Consult the same gate on the staged copy: a refusal is HANDLED,
+        # recorded with its reason, and never restaged until the source changes.
+        relevance_policy: Any = None
+        try:
+            from athenaeum.relevance_policy import load_relevance_policy
+
+            relevance_policy = load_relevance_policy(knowledge_root / "wiki")
+        except Exception:  # noqa: BLE001 — malformed policy: treat as not refused
+            relevance_policy = None
         skipped: list[tuple[ProjectMemory, MemoryFile]] = []
+        refused_count = 0
         processed_count = 0
         for project, file in batch:
-            if _staged_path(knowledge_root, project, file).exists():
-                skipped.append((project, file))
+            staged = _staged_path(knowledge_root, project, file)
+            if staged.exists():
+                reason = _relevance_refusal(staged, relevance_policy)
+                if reason is None:
+                    skipped.append((project, file))
+                    continue
+                _mark_imported(
+                    state,
+                    project.scope,
+                    file,
+                    imported_at=imported_at,
+                    refused_reason=reason,
+                )
+                refused_count += 1
                 continue
             _mark_imported(state, project.scope, file, imported_at=imported_at)
             processed_count += 1
@@ -599,6 +652,12 @@ def run_import(
 
         remaining = left_after_cap
         print(f"Imported {processed_count} file(s).", file=out)
+        if refused_count:
+            print(
+                f"{refused_count} file(s) refused by the relevance policy; "
+                "recorded as handled and not restaged.",
+                file=out,
+            )
         if skipped:
             print(
                 f"{len(skipped)} file(s) were staged but not compiled (dropped "
