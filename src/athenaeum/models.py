@@ -3585,11 +3585,114 @@ class PageIndexRecord(NamedTuple):
         return meta
 
 
-class EntityIndex:
-    """In-memory index of all wiki entities for name/alias lookup."""
+class AmbiguousPageUidError(ValueError):
+    """One uid names pages on two different surfaces (athenaeum#2617).
 
-    def __init__(self, wiki_root: Path) -> None:
+    Loud and named on purpose: a read or an upsert that silently took the first
+    match could update or return the wrong surface's page. ``uid`` is the
+    colliding uid; ``locations`` maps each surface name to the page path found
+    there.
+    """
+
+    def __init__(self, uid: str, locations: "dict[str, Path]") -> None:
+        self.uid = uid
+        self.locations = dict(locations)
+        where = ", ".join(f"{surface}: {path}" for surface, path in self.locations.items())
+        super().__init__(
+            f"uid {uid!r} resolves to pages on more than one indexed surface ({where}); "
+            "a uid must live on exactly one surface -- remove or re-uid one of them"
+        )
+
+
+class PageLocator:
+    """The ONE way the read path finds a page by uid or name across indexed surfaces.
+
+    Built from the default ``wiki/`` directory plus the extra indexed surfaces
+    the search index builder includes
+    (:func:`athenaeum.storage.resolve_indexed_surfaces`, via
+    :func:`athenaeum.storage.resolve_locator_surfaces`). *surfaces* is any
+    sequence of objects with ``prefix`` and ``root`` attributes; a surface that
+    is not in that list is never visited, so a non-indexed surface's pages can
+    never be returned. With no surfaces it is exactly the historical wiki-only
+    walk (``wiki/*.md``, ``_``-prefixed names skipped).
+
+    Wiki pages are keyed by their bare filename; a surface page by
+    ``<prefix>/<relative path>``, mirroring the search index's naming, so a
+    surface cannot collide with the wiki or another surface.
+    """
+
+    WIKI_SURFACE = "wiki"
+
+    def __init__(self, wiki_root: Path, surfaces: "Iterable[Any]" = ()) -> None:
+        self.wiki_root = Path(wiki_root)
+        self._specs = tuple(surfaces)
+        self.surfaces: tuple[tuple[str, Path], ...] = tuple(
+            (str(s.prefix), Path(s.root)) for s in self._specs
+        )
+
+    def iter_pages(self) -> "Iterator[tuple[str, Path]]":
+        """Yield ``(key, path)`` for every candidate page: wiki first, then each surface."""
+        for fpath in sorted(self.wiki_root.glob("*.md")):
+            if fpath.name.startswith("_"):
+                continue
+            yield fpath.name, fpath
+        yield from self.iter_surface_pages()
+
+    def iter_surface_pages(self) -> "Iterator[tuple[str, Path]]":
+        """Yield ``(key, path)`` for the pages on the extra surfaces only."""
+        for prefix, root in self.surfaces:
+            if not root.is_dir():
+                continue
+            for fpath in sorted(root.rglob("*.md")):
+                rel = fpath.relative_to(root)
+                if fpath.name.startswith("_") or any(p.startswith(".") for p in rel.parts):
+                    continue
+                yield f"{prefix}/{rel.as_posix()}", fpath
+
+    def surface_of(self, path: Path) -> str:
+        """The surface name *path* lives on (``wiki`` unless under a surface root)."""
+        for prefix, root in self.surfaces:
+            if root in path.parents:
+                return prefix
+        return self.WIKI_SURFACE
+
+    def check_uid_unique(self, uid: str, existing: Path | None, new: Path) -> None:
+        """Raise :class:`AmbiguousPageUidError` when *uid* is already held on ANOTHER surface.
+
+        Two pages with one uid inside a single surface keep the historical
+        last-write-wins behaviour; only a cross-surface collision is an error.
+        """
+        if existing is None or existing == new:
+            return
+        a, b = self.surface_of(existing), self.surface_of(new)
+        if a != b:
+            raise AmbiguousPageUidError(uid, {a: existing, b: new})
+
+    def index(self) -> "EntityIndex":
+        """A full :class:`EntityIndex` over this locator's pages."""
+        return EntityIndex(self.wiki_root, surfaces=self._specs)
+
+    def locate_uid(self, uid: str) -> Path | None:
+        """The page whose frontmatter ``uid`` is *uid* on any indexed surface, else ``None``."""
+        return self.index().get_by_uid(uid)
+
+    def locate_name(self, name: str) -> Path | None:
+        """The page carrying *name* (or an alias) on any indexed surface, else ``None``."""
+        hit = self.index().lookup(name)
+        return hit.path if hit is not None else None
+
+
+class EntityIndex:
+    """In-memory index of all wiki entities for name/alias lookup.
+
+    By default it covers ``wiki/`` only. Given *surfaces* (the extra indexed
+    surfaces, see :class:`PageLocator`) it also registers their pages, and a
+    uid held on two different surfaces raises :class:`AmbiguousPageUidError`.
+    """
+
+    def __init__(self, wiki_root: Path, surfaces: "Iterable[Any]" = ()) -> None:
         self.wiki_root = wiki_root
+        self.locator = PageLocator(wiki_root, surfaces)
         self._by_name: dict[str, IndexEntry] = {}
         self._entities: dict[str, dict] = {}
         self._by_uid: dict[str, Path] = {}
@@ -3597,9 +3700,7 @@ class EntityIndex:
         self._load()
 
     def _load(self) -> None:
-        for fpath in sorted(self.wiki_root.glob("*.md")):
-            if fpath.name.startswith("_"):
-                continue
+        for _key, fpath in self.locator.iter_pages():
             parsed = self.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
             if parsed is None:
                 continue
@@ -3702,18 +3803,42 @@ class EntityIndex:
         name = record.name
         entry_type = record.type if record.type else None
 
-        self._by_name[name.lower()] = IndexEntry(uid or name, fpath, entry_type)
+        entry = IndexEntry(uid or name, fpath, entry_type)
+        self._set_name_key(name.lower(), entry)
         if uid:
+            self.locator.check_uid_unique(uid, self._by_uid.get(uid), fpath)
             self._entities[uid] = meta
             self._by_uid[uid] = fpath
             self._entity_format_paths.add(fpath)
 
         for alias in record.aliases:
-            self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
+            self._set_name_key(alias.lower(), entry)
+
+    def _set_name_key(self, key: str, entry: "IndexEntry") -> None:
+        """Register a name/alias key, last write wins -- except across surfaces.
+
+        athenaeum#2617: a page on an extra indexed surface never displaces a
+        ``wiki/`` page that already holds the same name or alias, so adding a
+        surface cannot silently re-route an existing name lookup (or a
+        structured upsert's target) away from the wiki. With no surfaces this
+        is exactly the historical last-write-wins assignment.
+        """
+        if self.locator.surfaces:
+            existing = self._by_name.get(key)
+            if (
+                existing is not None
+                and self.locator.surface_of(existing.path) == PageLocator.WIKI_SURFACE
+                and self.locator.surface_of(entry.path) != PageLocator.WIKI_SURFACE
+            ):
+                return
+        self._by_name[key] = entry
 
     @classmethod
     def from_page_records(
-        cls, wiki_root: Path, records: "Iterable[tuple[Path, PageIndexRecord]]"
+        cls,
+        wiki_root: Path,
+        records: "Iterable[tuple[Path, PageIndexRecord]]",
+        surfaces: "Iterable[Any]" = (),
     ) -> "EntityIndex":
         """Build an index from already-extracted page records, without a scan.
 
@@ -3726,6 +3851,7 @@ class EntityIndex:
         """
         index = cls.__new__(cls)
         index.wiki_root = wiki_root
+        index.locator = PageLocator(wiki_root, surfaces)
         index._by_name = {}
         index._entities = {}
         index._by_uid = {}
