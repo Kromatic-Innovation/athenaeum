@@ -3545,6 +3545,40 @@ mirroring `resolve_corrections_runtime_share`'s mechanism exactly
 (own env var, own yaml key, same coercion rules: only ``0 < share < 1``
 reserves anything).
 
+### `resolve_shared_content_page_type`
+
+- **YAML path:** `librarian.shared_content_page_type`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `''`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.shared_content_page_type`` -- the ONE page type,
+if any, a fold or recompile plan may mint a shared-content page as
+(AC2).
+
+**Mechanism, not policy.** This resolver does not decide WHEN content is
+shared by two or more distinct subjects -- that judgement is made in
+code, elsewhere (`athenaeum.page_recompile_apply`'s handling of a
+``shared:<group>`` disposition); this resolver only answers WHICH page
+type, if any, a deployment has opted a shared page into. **With nothing
+declared, the value is the empty string, and every caller treats that
+as "the mechanism is off": no shared page is ever minted, and a
+``shared:<group>`` disposition downgrades to a plain ``child:<group>``
+instead** -- the same "re-planned without it" downgrade
+``librarian.page_recompile.merge_near_duplicates`` already gives a
+``merge:<group>`` disposition when IT is off. Example:
+```
+librarian:
+  shared_content_page_type: relationship
+```
+
+Validation never raises: a non-dict ``librarian`` section, a non-dict
+value nested there, or a non-string / empty
+``shared_content_page_type``, all resolve to ``""`` rather than
+half-applying a malformed value -- the same fail-to-off posture every
+other knob in this module takes.
+
 ### `resolve_sibling_widening_budget`
 
 - **YAML path:** `librarian.sibling_widening_budget`

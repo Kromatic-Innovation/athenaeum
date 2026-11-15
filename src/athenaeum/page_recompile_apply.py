@@ -164,6 +164,7 @@ from athenaeum.config import (
     resolve_page_recompile_merge_near_duplicates,
     resolve_page_recompile_min_parent_chars,
     resolve_page_size_threshold_chars,
+    resolve_shared_content_page_type,
 )
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
 from athenaeum.models import (
@@ -185,6 +186,7 @@ from athenaeum.page_recompile_plan import (
     PAGE_ACTIONS,
     PAGE_RECOMPILE_LEDGER_VERSION,
     SCOPE_STRUCTURE_ONLY,
+    SHARED_VERB,
     MergedSection,
     PlanGroup,
     PlanIssue,
@@ -195,6 +197,7 @@ from athenaeum.page_recompile_plan import (
     normalise_unit_text,
     page_content_hash,
     parse_alias_move,
+    parse_shared_subject,
     read_page_recompile_ledger,
     split_disposition,
     split_summary_sentences,
@@ -1042,13 +1045,23 @@ def compute_apply(
         downgraded: list[tuple[str, str]] = []
         for unit_id, disposition in plan.dispositions:
             verb, _argument = split_disposition(disposition)
-            if verb in ("move", "standalone"):
+            # `shared` routes off the page onto a NEW page exactly as `move`
+            # and `standalone` do (issue athenaeum#2589 AC1), so it is
+            # downgraded alongside them.
+            if verb in ("move", "standalone", SHARED_VERB):
                 downgraded.append((unit_id, "parent"))
             else:
                 downgraded.append((unit_id, disposition))
         plan = dataclasses_replace(plan, dispositions=tuple(downgraded), page_actions=())
 
     merge_near_duplicates = resolve_page_recompile_merge_near_duplicates(config)
+    # Issue athenaeum#2589 AC2: the page-type schema config declares which
+    # page type, if any, holds shared content. Empty (nothing declared) is
+    # the mechanism being OFF -- every `shared:<group>` disposition is
+    # downgraded to `child:<group>` below, exactly as `merge:<group>`
+    # already downgrades when `merge_near_duplicates` is off, so behaviour
+    # is unchanged from before this feature existed.
+    shared_content_page_type = resolve_shared_content_page_type(config)
 
     # AC11: with merging off, every `merge:<g>` disposition is treated as
     # `child:<g>` instead -- the plan is "re-planned without" its merge
@@ -1057,6 +1070,11 @@ def compute_apply(
     for unit_id, disposition in plan.dispositions:
         verb, argument = split_disposition(disposition)
         if verb == "merge" and not merge_near_duplicates:
+            effective.append((unit_id, f"child:{argument}"))
+        elif verb == SHARED_VERB and not shared_content_page_type:
+            # AC2: nothing declared -- treated as `child:<g>`, the same
+            # "re-planned without it" downgrade `merge` gets above. The
+            # unit stays on the recompiled page; nothing is lost.
             effective.append((unit_id, f"child:{argument}"))
         else:
             effective.append((unit_id, disposition))
@@ -1069,6 +1087,8 @@ def compute_apply(
     move_items: dict[str, list[str]] = {}
     standalone_order: list[str] = []
     standalone_items: dict[str, list[str]] = {}
+    shared_order: list[str] = []
+    shared_items: dict[str, list[str]] = {}
     for unit_id, disposition in effective:
         verb, argument = split_disposition(disposition)
         if unit_id not in units_by_id:
@@ -1082,6 +1102,12 @@ def compute_apply(
             group_items.setdefault(argument, []).append((verb, unit_id))
         elif verb == "duplicate":
             duplicate_units[unit_id] = argument
+        elif verb == SHARED_VERB:
+            # Issue athenaeum#2589 AC1. Only reachable when
+            # `shared_content_page_type` is set -- see the downgrade above.
+            if argument not in shared_order:
+                shared_order.append(argument)
+            shared_items.setdefault(argument, []).append(unit_id)
         elif verb == "move":
             # Issue athenaeum#2548 AC1. Ordered by FIRST appearance, so the
             # write order over targets is page order and therefore
@@ -1125,6 +1151,9 @@ def compute_apply(
         assigned[f"move:{target_uid}"] = list(moved_ids)
     for group_key, standalone_ids in standalone_items.items():
         assigned[f"standalone:{group_key}"] = list(standalone_ids)
+    # Issue athenaeum#2589 AC1: a shared-content group is its own bucket too.
+    for group_key, shared_ids in shared_items.items():
+        assigned[f"shared:{group_key}"] = list(shared_ids)
 
     conservation = check_conservation([u.unit_id for u in segment.units], assigned)
     for unit_id in conservation.missing:
@@ -1512,6 +1541,12 @@ def compute_apply(
                 continue
             alias_moves.append(AliasMove(alias=alias_text, target_uid=alias_target_uid))
             continue
+        if parse_shared_subject(action) is not None:
+            # Issue athenaeum#2589 AC1: consumed by the shared-content
+            # block below, which re-reads `plan.page_actions` itself for
+            # each shared group -- never a page-level action
+            # `_attachment_issues` (or `PAGE_ACTIONS`) understands.
+            continue
         verb, argument = split_disposition(action)
         if verb not in PAGE_ACTIONS or not argument:
             issues.append(PlanIssue("unknown-page-action", action))
@@ -1532,6 +1567,146 @@ def compute_apply(
         attachments.append(
             Attachment(child_uid=child_uid, parent_uid=attach_parent_uid, action=action)
         )
+    if issues:
+        return ComputedApply(issues=tuple(issues))
+
+    # -----------------------------------------------------------------
+    # Issue athenaeum#2589 AC1/AC2/AC4: shared-content pages. `shared_order`
+    # is non-empty ONLY when `shared_content_page_type` is set -- the
+    # `effective` loop above downgrades every `shared:<group>` disposition
+    # to `child:<group>` otherwise, so there is nothing to reach here (AC2).
+    # -----------------------------------------------------------------
+    if shared_order:
+        shared_declared_types = _declared_types(wiki_root)
+        for group_key in shared_order:
+            group = groups_by_key.get(group_key)
+            name = (group.name if group is not None else "").strip()
+            if not name:
+                issues.append(PlanIssue("shared-missing-name", group_key))
+                continue
+            if index is not None and index.lookup(name) is not None:
+                issues.append(PlanIssue("shared-name-already-exists", name))
+                continue
+            if shared_content_page_type not in shared_declared_types:
+                issues.append(
+                    PlanIssue("shared-type-not-declared", shared_content_page_type)
+                )
+                continue
+
+            # AC1: who the page concerns -- named by one `shared-subject:
+            # <group>:<uid>` page action per subject, never inferred.
+            subject_uids: list[str] = []
+            for action in plan.page_actions:
+                pair = parse_shared_subject(action)
+                if pair is None:
+                    continue
+                action_group, subject_uid = pair
+                if action_group == group_key and subject_uid not in subject_uids:
+                    subject_uids.append(subject_uid)
+            # AC4: content concerning only ONE subject never reaches a
+            # shared page -- refused here, not silently routed. A plan
+            # author names a lone subject with `move:<uid>` instead, which
+            # stays on that subject's own page exactly as it always has.
+            if len(subject_uids) < 2:
+                issues.append(PlanIssue("shared-group-too-few-subjects", group_key))
+                continue
+
+            # Every reason `page_relations.set_relation` would refuse a
+            # link, pre-checked -- the same discipline `_attachment_issues`
+            # applies to `attach`/`attach-self-under` above. The new shared
+            # page itself can never be the refusal: it does not exist on
+            # disk yet, so it has no parent of its own and forms no cycle.
+            subject_issue: PlanIssue | None = None
+            for subject_uid in subject_uids:
+                subject_path = index_map.get(subject_uid)
+                if subject_path is None:
+                    subject_issue = PlanIssue("shared-subject-missing", subject_uid)
+                    break
+                subject_meta = _read_meta(subject_path)
+                if is_inactive_relation_target(subject_meta):
+                    subject_issue = PlanIssue("shared-subject-inactive", subject_uid)
+                    break
+                subject_rel = read_relations(subject_meta)
+                if subject_rel.parent is not None:
+                    subject_issue = PlanIssue(
+                        "shared-subject-already-has-a-parent", subject_uid
+                    )
+                    break
+                if subject_rel.children:
+                    subject_issue = PlanIssue(
+                        "shared-subject-would-nest-three-levels", subject_uid
+                    )
+                    break
+            if subject_issue is not None:
+                issues.append(subject_issue)
+                continue
+
+            built = _build_relocated_body(
+                unit_ids=shared_items[group_key],
+                units_by_id=units_by_id,
+                source_definitions=original_definitions,
+                destination_body="",
+                source_name=parent_name,
+                source_uid=parent_uid,
+                plan_id=plan_id,
+            )
+            entity = WikiEntity(
+                uid=generate_uid(),
+                type=shared_content_page_type,
+                name=name,
+                access=parent_access,
+                tags=list(parent_tags),
+                related=[],
+                created=today,
+                updated=today,
+                # No relation written here -- `related`/`parent:` land
+                # through `page_relations.set_relation` below, via the
+                # `attachments` list, AFTER this page is on disk.
+                body=_insert_relocated("", built.section, built.definitions).lstrip("\n"),
+                source=f"page-recompile-shared:{parent_uid}:{today}",
+                provenance_scope=_str_field(page_meta, "provenance_scope"),
+                claimed_scope=_str_field(page_meta, "claimed_scope"),
+                subject=_str_field(page_meta, "subject"),
+            )
+            rendered = entity.render()
+            schema_issue = _schema_validation_issue(rendered, shared_declared_types, name)
+            if schema_issue is not None:
+                issues.append(schema_issue)
+                continue
+            # Reusing `NewStandalonePage`/`standalone_pages` as the write
+            # vehicle rather than a dedicated dataclass: the two shapes are
+            # identical (a brand-new, fully-rendered page with no relation
+            # of its own baked into its body), and `write_apply` already
+            # writes every entry in this list generically.
+            standalone_pages.append(
+                NewStandalonePage(
+                    uid=entity.uid,
+                    name=name,
+                    description=group.description if group is not None else "",
+                    group_key=group_key,
+                    path=wiki_root / entity.filename,
+                    text=rendered,
+                    unit_ids=tuple(shared_items[group_key]),
+                    inserted_texts=built.inserted_texts,
+                )
+            )
+            # AC1/AC3: each subject LINKS to the shared page, through the
+            # parent/child relation issue athenaeum#2535 shipped --
+            # `via="fold"`, one of `page_relations.VALID_VIA`'s four
+            # origins. `write_apply` calls `page_relations.set_relation`
+            # for every entry in `computed.attachments` generically,
+            # honouring each one's own `via`; recall and listings then show
+            # the link through the SAME surface issue athenaeum#2538 built
+            # for the relation generally (AC3) -- no second rendering path.
+            for subject_uid in subject_uids:
+                attachments.append(
+                    Attachment(
+                        child_uid=subject_uid,
+                        parent_uid=entity.uid,
+                        action=f"shared-subject:{group_key}:{subject_uid}",
+                        via="fold",
+                    )
+                )
     if issues:
         return ComputedApply(issues=tuple(issues))
 
@@ -2307,10 +2482,20 @@ def write_apply(
 
     # Issue athenaeum#2548: the same three post-write checks over every
     # standalone page and every move target, against the RE-READ bytes.
+    #
+    # Issue athenaeum#2589: a shared-content page (minted as one of THIS
+    # module's own `standalone_pages` entries) is the PARENT side of a
+    # `via="fold"` relation set below, in the SAME apply -- `set_relation`
+    # legitimately rewrites its Sub-pages block on top of the bytes this
+    # function wrote, mirroring the parent page's own `not
+    # computed.attachments` exemption above (around `reread_parent`). The
+    # unit-presence and marker-resolution checks below still run
+    # unconditionally -- they are the ones that would catch content loss.
+    shared_page_uids = {a.parent_uid for a in computed.attachments if a.via == "fold"}
     for standalone in computed.standalone_pages:
         reread_text = standalone.path.read_text(encoding="utf-8")
         _, reread_body = parse_frontmatter(reread_text)
-        if reread_text != standalone.text:
+        if reread_text != standalone.text and standalone.uid not in shared_page_uids:
             post_issues.append(PlanIssue("post-write-byte-mismatch", standalone.uid))
         for section in standalone.inserted_texts:
             if section not in reread_body:
