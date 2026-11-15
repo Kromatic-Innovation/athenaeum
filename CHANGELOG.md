@@ -370,6 +370,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum init` no longer fails on a machine with no git identity, and a failed init leaves nothing behind (athenaeum#2593).** When git has no `user.name`/`user.email`, `init` now sets a repo-local identity on the new knowledge repo only (never `--global`), prints a notice with the commands to change it, and completes. Any other init failure rolls back exactly the files and directories that run created, so a retry starts clean; a pre-existing directory's content is never touched. Reversible: set your own identity with `git -C <knowledge-dir> config user.name/user.email`.
+
 - The `short_name_escalated` guard (athenaeum#1173) now resolves a short
   single-token create against existing pages' `name:`/`aliases:` before
   escalating: exactly one match attaches the observation to that page and

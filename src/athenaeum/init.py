@@ -21,10 +21,11 @@ Imports stdlib plus a lazy, function-local import of
 :mod:`athenaeum.config` (L2) to avoid a module-level L1→L2 cycle at import
 time.
 
-Non-obvious invariant: git-init failure due to missing ``user.name``/
-``user.email`` is deliberately turned into a clear ``SystemExit`` with the fix
-command, not a raw ``CalledProcessError`` traceback — a first-run UX
-concern, not a git wrapper bug.
+Non-obvious invariants: a missing git identity is handled by setting a
+repo-local ``user.name``/``user.email`` on the new knowledge repo (never
+global) and saying so; any other failure becomes a clear ``SystemExit`` rather
+than a raw ``CalledProcessError``. A failed init rolls back exactly what it
+created, never pre-existing content — a first-run UX concern.
 """
 
 from __future__ import annotations
@@ -104,19 +105,61 @@ title: Master Index
 """
 
 
+def _is_identity_error(exc: subprocess.CalledProcessError) -> bool:
+    stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    return "user.name" in stderr or "user.email" in stderr or exc.returncode == 128
+
+
+def _rollback(root: Path, created: list[Path]) -> None:
+    """Remove only what this call created, newest first; never pre-existing content."""
+    import shutil
+
+    for p in reversed(created):
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def init_knowledge_dir(path: Path) -> Path:
     """Create and initialize a knowledge directory at *path*.
 
     The function is **idempotent**: calling it twice on the same directory
     will not overwrite existing files or lose data.
 
+    If git has no identity, a repo-local ``user.name``/``user.email`` is set on
+    the new knowledge repo only (never ``--global``) and a notice is printed to
+    stderr. If init fails for any reason, everything this call created is
+    removed (a pre-existing directory's content is never touched), so a retry
+    starts clean.
+
     Returns the resolved *path* for convenience.
     """
     path = path.expanduser().resolve()
+    created: list[Path] = []
+    try:
+        _scaffold(path, created)
+    except BaseException:
+        _rollback(path, created)
+        raise
+    return path
 
-    # 1. Create directory tree
+
+def _scaffold(path: Path, created: list[Path]) -> None:
+    """Do the init work, appending every path this call creates to *created*."""
+    # 1. Create directory tree (record each missing ancestor we create)
     for subdir in _SUBDIRS:
-        (path / subdir).mkdir(parents=True, exist_ok=True)
+        target = path / subdir
+        missing = []
+        probe = target
+        while not probe.exists():
+            missing.append(probe)
+            probe = probe.parent
+        target.mkdir(parents=True, exist_ok=True)
+        created.extend(reversed(missing))
 
     # 2. Copy bundled schema files (skip if already present)
     schema_dest = path / "wiki" / "_schema"
@@ -127,45 +170,60 @@ def init_knowledge_dir(path: Path) -> Path:
             continue
         source = schema_pkg / fname
         dest.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        created.append(dest)
 
     # 3. Create master index (skip if already present)
     index_file = path / "wiki" / "_index.md"
     if not index_file.exists():
         index_file.write_text(_INDEX_CONTENT, encoding="utf-8")
+        created.append(index_file)
 
     # 4. Create default config (skip if already present)
     from athenaeum.config import write_default_config
 
+    before = {p for p in path.iterdir()}
     write_default_config(path)
+    created.extend(p for p in path.iterdir() if p not in before)
 
     # 5. Initialize git repo and create initial commit
     git_dir = path / ".git"
     if not git_dir.exists():
+        created.append(git_dir)
         subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
         subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+        commit = ["git", "commit", "-m", "Initialize knowledge directory"]
         try:
-            subprocess.run(
-                ["git", "commit", "-m", "Initialize knowledge directory"],
-                cwd=path,
-                check=True,
-                capture_output=True,
-            )
+            subprocess.run(commit, cwd=path, check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:
-            stderr = (
-                exc.stderr.decode()
-                if isinstance(exc.stderr, bytes)
-                else (exc.stderr or "")
-            )
-            if "user.name" in stderr or "user.email" in stderr or exc.returncode == 128:
-                raise SystemExit(
-                    "Git identity not configured. Please run:\n"
-                    "  git config --global user.name 'Your Name'\n"
-                    "  git config --global user.email 'you@example.com'\n"
-                    "Then retry: athenaeum init"
-                ) from exc
-            raise
+            if not _is_identity_error(exc):
+                raise
+            # No git identity anywhere: set a REPO-LOCAL one on this new repo
+            # only, so a fresh machine needs no unlisted prerequisite.
+            import sys
 
-    return path
+            name, email = "Athenaeum", "athenaeum@localhost"
+            try:
+                for key, val in (("user.name", name), ("user.email", email)):
+                    subprocess.run(
+                        ["git", "config", "--local", key, val],
+                        cwd=path,
+                        check=True,
+                        capture_output=True,
+                    )
+                subprocess.run(commit, cwd=path, check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc2:
+                raise SystemExit(
+                    "Git could not create the initial commit even after setting "
+                    "a repo-local identity. Nothing was left behind; fix git "
+                    "and retry: athenaeum init"
+                ) from exc2
+            print(
+                "No git identity is configured, so a repo-local one was set on "
+                f"the knowledge repo only ({name} <{email}>). Change it with:\n"
+                f"  git -C {path} config user.name 'Your Name'\n"
+                f"  git -C {path} config user.email 'you@example.com'",
+                file=sys.stderr,
+            )
 
 
 def copy_templates(dest: Path, *, force: bool = False) -> tuple[list[str], list[str]]:
