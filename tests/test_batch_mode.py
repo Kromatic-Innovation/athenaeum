@@ -2654,6 +2654,69 @@ class TestCollectPendingBatches:
         assert batch_state.load(cache_dir) == {}
         assert out.retired_handles and out.kept_handles == []
 
+    def test_collect_forwards_the_person_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2653: a collected batch parses with the same person hints.
+
+        Seer review on PR athenaeum#2682: without the registry a resumed batch
+        rebuilds its hint set with no literal person candidates, so a valid
+        hint claim from the submitting run would be refused at parse time.
+        """
+        from athenaeum.person_registry import PersonRegistry
+
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "c-reg", ["Standalone fact about WidgetRegistry gadget.\n"]
+        )
+        registry = PersonRegistry(root / "wiki")
+        seen: dict[str, Any] = {}
+        real = process_batch_run
+
+        def _spy(*args: Any, **kwargs: Any) -> BatchRunResult:
+            seen["person_registry"] = kwargs.get("person_registry")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("athenaeum.batch.process_batch_run", _spy)
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+            person_registry=registry,
+        )
+        assert seen["person_registry"] is registry
+
+    def test_hint_flag_survives_a_spilled_work_document(self) -> None:
+        """athenaeum#2653 (Seer review on PR athenaeum#2682): ``from_person_hint``
+        round-trips, so tier-3 verify guards still apply after a spill."""
+        from athenaeum.batch import _action_from_json, _action_to_json
+        from athenaeum.models import EntityAction
+
+        action = EntityAction(
+            kind="update",
+            name="Robin Example",
+            entity_type="",
+            tags=[],
+            access="",
+            existing_uid="u1",
+            observations="Robin prefers tea.",
+            from_person_hint=True,
+        )
+        back = _action_from_json(_action_to_json(action))
+        assert back is not None and back.from_person_hint is True
+        legacy = _action_to_json(action)
+        del legacy["from_person_hint"]  # a work document written before the fix
+        old = _action_from_json(legacy)
+        assert old is not None and old.from_person_hint is False
+
     def test_collect_books_usage_with_the_handles_knob_and_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

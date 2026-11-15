@@ -1030,6 +1030,9 @@ def _action_to_json(action: EntityAction) -> dict[str, Any]:
         "access": action.access,
         "existing_uid": action.existing_uid,
         "observations": action.observations,
+        # Issue athenaeum#2653: a hint-derived action keeps its verify guards
+        # (tier-3 presence_only / verify note) across a spilled work document.
+        "from_person_hint": action.from_person_hint,
     }
 
 
@@ -1050,6 +1053,8 @@ def _action_from_json(raw: Any) -> EntityAction | None:
         access=str(raw.get("access") or ""),
         existing_uid=uid if isinstance(uid, str) else None,
         observations=str(raw.get("observations") or ""),
+        # Absent on a work document written before athenaeum#2653: not a hint.
+        from_person_hint=raw.get("from_person_hint") is True,
     )
 
 
@@ -3018,6 +3023,7 @@ def collect_pending_batches(
     now: "datetime | None" = None,
     batch_classify: bool = True,
     batch_write: bool = True,
+    person_registry: "PersonRegistry | None" = None,
 ) -> BatchCollectResult:
     """Collect every outstanding athenaeum#1143 handle, oldest first.
 
@@ -3254,6 +3260,9 @@ def collect_pending_batches(
             # selection the submitting run happened to have.
             batch_classify=batch_classify,
             batch_write=batch_write,
+            # Issue athenaeum#2653: a collected classify result is parsed
+            # against the same person-hint candidates the submit run offered.
+            person_registry=person_registry,
         )
 
         out.created += applied.created

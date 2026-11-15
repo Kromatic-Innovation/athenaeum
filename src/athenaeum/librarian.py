@@ -8863,6 +8863,11 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
         write_client=ctx.write_client,
         batch_classify=ctx.batch_classify,
         batch_write=ctx.batch_write,
+        # Issue athenaeum#2653: literal person-hint candidates need the registry
+        # on the collect path too, or a resumed batch drops valid hint claims.
+        person_registry=PersonRegistry(
+            resolve_person_registry_root(ctx.knowledge_root, ctx.config)
+        ),
         # Issue athenaeum#1144: a collect that pipelines into a new tier-3 batch
         # is bounded by the same wall-clock budget the submit path is.
         deadline=(
