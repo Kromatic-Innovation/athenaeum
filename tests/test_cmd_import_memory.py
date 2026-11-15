@@ -561,6 +561,68 @@ class TestRunImport:
         assert lock_calls == []
 
 
+class TestRelevanceRefusalHandled:
+    """athenaeum#2645: a relevance-gate refusal is recorded as handled."""
+
+    def test_never_rule_file_is_staged_once_and_cap_not_consumed(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "claude-projects"
+        _write(
+            root / "proj-a" / "memory" / "refused.md",
+            "---\nname: r\ntype: preference\ntags: [active]\n---\nbody\n",
+        )
+        _write(root / "proj-a" / "memory" / "zlater.md", "content of zlater")
+        knowledge_root = tmp_path / "kb"
+        schema = knowledge_root / "wiki" / "_schema"
+        _write(
+            schema / "relevance-policy.md",
+            "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n"
+            "| never | | active | |\n",
+        )
+        cache_dir = tmp_path / "cache"
+        compiles: list[dict[str, object]] = []
+
+        def _compile(kr: Path, **kw: object) -> int:
+            compiles.append(kw)
+            # real pipeline: compiles+retires everything except the refused file
+            for p in (kr / "raw" / "auto-memory").rglob("*.md"):
+                if p.name != "refused.md":
+                    p.unlink()
+            return 0
+
+        def _run(max_files: int, out: io.StringIO) -> int:
+            return run_import(
+                knowledge_root=knowledge_root,
+                cache_dir=cache_dir,
+                provider="claude-cli",
+                discovered=discover_project_memories(root),
+                cli_projects=["proj-a"],
+                auto_yes=True,
+                max_files=max_files,
+                max_calls=100,
+                compile_fn=_compile,
+                out=out,
+            )
+
+        out1 = io.StringIO()
+        assert _run(1, out1) == 0  # cap of 1: the refused file takes it
+        rec = load_state(cache_dir)["imported"]["proj-a/refused.md"]
+        assert rec["refused"].startswith("relevance-policy:")
+        assert "refused by the relevance policy" in out1.getvalue()
+        staged = knowledge_root / "raw" / "auto-memory" / "proj-a" / "refused.md"
+        assert staged.exists()  # never deleted
+
+        # Second run: the refused file is not restaged and does not use the cap.
+        staged.unlink()
+        assert _run(1, io.StringIO()) == 0
+        assert not staged.exists()  # not restaged
+        assert compiles[1]["max_files"] == 1  # the cap went to the other file
+        state = load_state(cache_dir)["imported"]
+        assert set(state) == {"proj-a/refused.md", "proj-a/zlater.md"}
+        assert "refused" not in state["proj-a/zlater.md"]
+
+
 class TestDefaultCompileBatch:
     """Real calls to :func:`_default_compile_batch` (issue athenaeum#2582).
 
