@@ -5360,6 +5360,39 @@ An empty string at any tier means "use the default", matching
 `resolve_serve_profile`'s empty-means-unset convention, rather than
 resolving to a literal empty path.
 
+### `resolve_serve_auth_allowed_clients`
+
+- **YAML path:** `serve.auth.allowed_clients`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the optional client allowlist.
+
+Returns the raw ``serve.auth.allowed_clients`` entries, or ``None`` when
+the key is absent. ``None`` means the client is not consulted at all --
+the behaviour before this setting existed. When it is set, a verified
+token must name a listed client in its ``azp`` or ``client_id`` claim or
+it is refused with the same 401 an invalid token gets; a token naming
+neither (or two different ones) is refused too, so the allowlist fails
+closed. Client ids are matched exactly, without case folding.
+
+Each entry is a client id string, or a mapping
+``{id: <client id>, read_only: true}``. A ``read_only`` client has the
+write scope withheld even when its token carries it, so it can call read
+tools only, and the write tools are left out of its ``tools/list``. The
+cap only narrows: it never grants a scope the token lacks.
+
+yaml only: a list of entries, or a comma-separated string of ids (all
+with full access). There is no environment variable and no flag, because
+neither has a shape for the per-client ``read_only`` cap.
+
+Entries are validated, and an empty list refused, by
+`athenaeum.serve_auth.build_serve_auth`. Raises
+`athenaeum.serve_auth.ServeAuthError` here on a value that is
+neither a list nor a string. No seed in ``_DEFAULTS``.
+
 ### `resolve_serve_auth_allowed_identities`
 
 - **YAML path:** `serve.auth.allowed_identities`
@@ -5396,6 +5429,26 @@ Raises `athenaeum.serve_auth.ServeAuthError` on a yaml value that
 is neither a list nor a string, and on a list entry that is not a string.
 No seed in ``_DEFAULTS``.
 
+### `resolve_serve_auth_clock_leeway`
+
+- **YAML path:** `serve.auth.clock_leeway`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY`
+- **CLI flag:** —
+- **Default:** `60`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the ``nbf`` / ``iat`` clock-skew leeway in seconds.
+
+A token whose ``nbf`` or ``iat`` is later than now plus this is refused.
+Non-negative; ``0`` means no tolerance. Default
+`athenaeum.serve_auth.DEFAULT_CLOCK_LEEWAY` (60). It does not widen
+``exp``: an expired token is refused regardless.
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY``, ``serve.auth.clock_leeway``.
+Raises `athenaeum.serve_auth.ServeAuthError` on a negative or
+non-integer value. No seed in ``_DEFAULTS``.
+
 ### `resolve_serve_auth_issuer`
 
 - **YAML path:** `serve.auth.issuer`
@@ -5430,6 +5483,25 @@ LIFTS nothing and keeps the loopback-only refusal, but a half-read issuer
 next to a configured resource would make the whole block look unset. The
 URL itself is validated once, with the resource, by
 `athenaeum.serve_auth.build_serve_auth`. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_auth_max_token_lifetime`
+
+- **YAML path:** `serve.auth.max_token_lifetime`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the optional access-token lifetime ceiling.
+
+Seconds, positive. When set, a token whose ``exp - iat`` exceeds it is
+refused, and so is one with no ``iat`` whose ``exp`` is further than this
+from now. ``None`` (the default) sets no ceiling.
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME``, ``serve.auth.max_token_lifetime``.
+Raises `athenaeum.serve_auth.ServeAuthError` on a non-positive or
+non-integer value rather than ignoring it. No seed in ``_DEFAULTS``.
 
 ### `resolve_serve_auth_resource`
 
@@ -6217,9 +6289,9 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_REASONING_T1_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_MODEL` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_THINKING` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py` |
+| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_KEYWORD` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |

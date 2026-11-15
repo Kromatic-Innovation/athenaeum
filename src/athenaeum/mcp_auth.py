@@ -24,7 +24,7 @@ Two FastMCP behaviours are overridden here, each for one acceptance criterion:
    three settings agreeing.
 2. **The identity allowlist runs after, and only after, the token verifies.**
    :class:`_IdentityAllowlistVerifier` subclasses FastMCP's ``JWTVerifier``
-   rather than wrapping it, so signature / ``iss`` / ``aud`` / ``exp`` are all
+   rather than wrapping it, so signature / ``iss`` / ``aud`` are all
    decided by the library's own code path and the allowlist is a strictly
    ADDITIONAL narrowing on top. A non-allowlisted identity returns ``None``
    exactly as a bad signature does, which is what makes it a 401 carrying the
@@ -52,12 +52,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.middleware import Middleware
 from pydantic import AnyHttpUrl
 
 from athenaeum.serve_auth import SIGNING_ALGORITHM, ServeAuth
@@ -153,7 +155,11 @@ class _IdentityAllowlistVerifier(JWTVerifier):
             )
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        """Verify *token*, then require that its identity is allowlisted.
+        """Verify *token*, then require sound time claims and an allowlisted identity.
+
+        Time claims (athenaeum#2599): ``exp`` is required, ``nbf`` / ``iat``
+        may not be later than now plus ``serve.auth.clock_leeway``, and an
+        optional ``serve.auth.max_token_lifetime`` caps the validity window.
 
         Returns ``None`` — indistinguishable from an invalid token, by design
         — when the verified claims present no allowlisted ``sub`` or verified
@@ -169,6 +175,19 @@ class _IdentityAllowlistVerifier(JWTVerifier):
             # refusal to beyond the fact that it happened.
             self._record_refusal(reason="invalid_token", claims=None)
             return None
+        # FastMCP checks `exp` only when present and never `nbf`; the time
+        # claims are enforced here so the guarantee does not depend on the
+        # library (athenaeum#2599). Signature/iss/aud are already verified.
+        time_refusal = self._serve_auth.time_claim_refusal(access.claims, time.time())
+        if time_refusal is not None:
+            self._record_refusal(reason=time_refusal, claims=access.claims)
+            logger.warning(
+                "Bearer token rejected: subject %r failed the time-claim "
+                "check (%s)",
+                access.claims.get("sub"),
+                time_refusal,
+            )
+            return None
         identity = self._serve_auth.identity_of(access.claims)
         if identity is None:
             self._record_refusal(reason="identity_not_allowlisted", claims=access.claims)
@@ -181,6 +200,29 @@ class _IdentityAllowlistVerifier(JWTVerifier):
                 access.claims.get("sub"),
             )
             return None
+        # Issue athenaeum#2602: the client allowlist. Checked AFTER the
+        # identity so a stranger's token is still refused as an identity
+        # first, and answered with the same bare 401 for the same oracle
+        # reason. The log line names the client id the token presented
+        # (both claims, since a disagreement between them is itself the
+        # refusal), never the token.
+        client_refusal = self._serve_auth.client_refusal(access.claims)
+        if client_refusal is not None:
+            self._record_refusal(reason=client_refusal, claims=access.claims)
+            logger.warning(
+                "Bearer token rejected: client azp=%r client_id=%r is not in "
+                "serve.auth.allowed_clients (%s)",
+                access.claims.get("azp"),
+                access.claims.get("client_id"),
+                client_refusal,
+            )
+            return None
+        # The per-client read-only cap narrows the token's scopes here, at
+        # the one place every request passes, so no downstream check can see
+        # the write scope for a capped client. `capped_scopes` only removes.
+        capped = self._serve_auth.capped_scopes(access.claims, access.scopes)
+        if capped != list(access.scopes):
+            access = access.model_copy(update={"scopes": capped})
         return access
 
 
@@ -275,6 +317,36 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
         return wrapped
 
 
+class ReadOnlyClientToolFilter(Middleware):
+    """Hide write tools from ``tools/list`` for a read-only-capped client.
+
+    Issue athenaeum#2602. Installed by ``create_server`` only when some
+    ``serve.auth.allowed_clients`` entry sets ``read_only: true``, so every
+    other server's ``tools/list`` stays identical for every token. For a
+    capped client, a tool whose ``readOnlyHint`` is not literally ``True``
+    is dropped from the listing -- the same fail-closed reading
+    :meth:`ServeAuth.required_scope` uses. Listing is a convenience only:
+    the call itself is still refused by the scope check whether or not the
+    tool was listed.
+    """
+
+    def __init__(self, serve_auth: ServeAuth) -> None:
+        self._serve_auth = serve_auth
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+        from fastmcp.server.dependencies import get_access_token
+
+        tools = await call_next(context)
+        access = get_access_token()
+        if access is None or not self._serve_auth.client_is_read_only(access.claims):
+            return tools
+        return [
+            tool
+            for tool in tools
+            if tool.annotations is not None and tool.annotations.read_only_hint is True
+        ]
+
+
 def build_auth_provider(
     serve_auth: ServeAuth,
     *,
@@ -285,7 +357,8 @@ def build_auth_provider(
 
     The returned provider does three things when ``FastMCP`` is constructed
     with it: it verifies every bearer token (JWKS signature, ``iss``, ``aud``
-    against the process pin, ``exp``/``nbf``) and narrows to the identity
+    against the process pin; ``exp`` required, ``nbf``/``iat`` within the clock
+    leeway, optional lifetime cap) and narrows to the identity
     allowlist; it serves the RFC 9728 protected resource metadata route; and
     it makes FastMCP answer 401 with a ``WWW-Authenticate`` challenge naming
     that route.

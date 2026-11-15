@@ -195,6 +195,19 @@ def _insufficient_scope_message(tool_name: str, required_scope: str) -> str:
     )
 
 
+def _read_only_client_message(tool_name: str) -> str:
+    """The refusal text for a write tool called by a read-only-capped client.
+
+    Issue athenaeum#2602. Like :func:`_insufficient_scope_message` it names
+    the tool and nothing about the token or the caller's identity.
+    """
+    return (
+        f"athenaeum: `{tool_name}` is a write tool, and this server's operator "
+        "has made this client read-only (serve.auth.allowed_clients). "
+        "Re-authorizing will not change that."
+    )
+
+
 def _forbidden_result() -> dict:
     """Structured fail-closed refusal for the ``resolve_*`` tools (dict shape)."""
     return {
@@ -3895,6 +3908,14 @@ def create_server(
         ),
     )
 
+    # Issue athenaeum#2602: a read-only-capped client is not shown the write
+    # tools it cannot call. Only installed when some allowed client carries
+    # the cap, so every other server keeps one `tools/list` for every token.
+    if serve_auth is not None and serve_auth.read_only_clients:
+        from athenaeum.mcp_auth import ReadOnlyClientToolFilter
+
+        mcp.add_middleware(ReadOnlyClientToolFilter(serve_auth))
+
     # Issue athenaeum#2383: every tool below registers through this wrapper
     # instead of calling ``mcp.tool()`` directly, so the serve-time allowlist
     # is applied at REGISTRATION -- a disabled tool is absent from
@@ -4032,16 +4053,30 @@ def create_server(
             granted = set(access.scopes) if access is not None else set()
             claims = access.claims if access is not None else None
             if required_scope not in granted:
+                # Issue athenaeum#2602: a read-only-capped client lost the
+                # write scope in the verifier, so it lands here too. It is
+                # told so plainly -- re-authorizing with the write scope
+                # cannot help it, and a step-up prompt would only loop.
+                capped = (
+                    serve_auth is not None
+                    and claims is not None
+                    and required_scope == serve_auth.write_scope
+                    and serve_auth.client_is_read_only(claims)
+                )
                 if audit_log_path is not None:
                     _record_or_raise(
                         tool_name=fn.__name__,
                         outcome="refused",
                         claims=claims,
-                        reason="insufficient_scope",
+                        reason="client_read_only" if capped else "insufficient_scope",
                     )
                 raise InsufficientScopeError(
                     [required_scope],
-                    message=_insufficient_scope_message(fn.__name__, required_scope),
+                    message=(
+                        _read_only_client_message(fn.__name__)
+                        if capped
+                        else _insufficient_scope_message(fn.__name__, required_scope)
+                    ),
                 )
             try:
                 result = fn(*args, **kwargs)

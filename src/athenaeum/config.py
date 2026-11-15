@@ -280,6 +280,55 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
 }
 
 
+def find_removed_config_keys(config: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(dotted_key, reason)`` for each removed key set in *config*.
+
+    Single source of truth for "which removed keys did the operator still
+    set": :func:`load_config` (log warning), ``athenaeum run`` (stderr
+    notice) and ``athenaeum doctor`` (WARN row) all read it, so the three
+    surfaces cannot disagree. A key counts as set when it is present at all,
+    whatever its value -- an explicit ``enabled: true`` is as stale as
+    ``enabled: false``. Reads nothing and logs nothing.
+    """
+    found: list[tuple[str, str]] = []
+    for removed_key, reason in _REMOVED_CONFIG_KEYS.items():
+        section, _, rest = removed_key.partition(".")
+        section_cfg = config.get(section)
+        if not isinstance(section_cfg, dict):
+            continue
+        if "." in rest:
+            subsection, _, subkey = rest.partition(".")
+            nested_cfg = section_cfg.get(subsection)
+            present = isinstance(nested_cfg, dict) and subkey in nested_cfg
+        else:
+            present = rest in section_cfg
+        if present:
+            found.append((removed_key, reason))
+    return found
+
+
+def removed_config_keys_in_file(knowledge_root: Path | None = None) -> list[tuple[str, str]]:
+    """:func:`find_removed_config_keys` over *knowledge_root*'s ``athenaeum.yaml``.
+
+    Same file resolution as :func:`load_config`; a missing or unreadable file
+    yields ``[]``. Logs nothing (``load_config`` already logs).
+    """
+    root = knowledge_root if knowledge_root is not None else Path.home() / "knowledge"
+    try:
+        raw = yaml.safe_load((root / "athenaeum.yaml").read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return []
+    return find_removed_config_keys(raw) if isinstance(raw, dict) else []
+
+
+def format_removed_key_notice(key: str, reason: str) -> str:
+    """One plain-English line naming a removed key and what replaced it."""
+    return (
+        f"config key `{key}` is set but no longer has any effect: {reason}. "
+        "Delete it from athenaeum.yaml."
+    )
+
+
 def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     """Load athenaeum config from *knowledge_root*/athenaeum.yaml.
 
@@ -315,24 +364,13 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
         else:
             result[key] = user_val
 
-    for removed_key, reason in _REMOVED_CONFIG_KEYS.items():
-        section, _, rest = removed_key.partition(".")
-        section_cfg = result.get(section)
-        if not isinstance(section_cfg, dict):
-            continue
-        if "." in rest:
-            subsection, _, subkey = rest.partition(".")
-            nested_cfg = section_cfg.get(subsection)
-            present = isinstance(nested_cfg, dict) and subkey in nested_cfg
-        else:
-            present = rest in section_cfg
-        if present:
-            logger.warning(
-                "Ignoring removed config key %s in %s: %s.",
-                removed_key,
-                config_path,
-                reason,
-            )
+    for removed_key, reason in find_removed_config_keys(result):
+        logger.warning(
+            "Ignoring removed config key %s in %s: %s.",
+            removed_key,
+            config_path,
+            reason,
+        )
 
     # Issue athenaeum#2550: `librarian.oversize_page_action: split` is
     # deprecated, not removed outright like `_REMOVED_CONFIG_KEYS` above --
@@ -4618,6 +4656,13 @@ def resolve_audit_nightly_spend_share(config: dict[str, Any] | None) -> float:
 #: ``{answers, contradictions, resolutions, tiers}`` residual import SCC (athenaeum#545
 #: audit M8). ``config`` is a low leaf every reader can depend on acyclically.
 DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
+
+#: Code default for the ``reasoning_t2`` model knob (athenaeum#2647). Lives here, not
+#: in ``reasoning_tiers``, so :mod:`athenaeum.relevance_classify` (reached from
+#: ``batch``) can resolve the reasoning tier's model without importing the
+#: module whose import graph would close a cycle through ``batch``.
+#: ``reasoning_tiers.DEFAULT_T2_MODEL`` is this same value.
+DEFAULT_REASONING_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; athenaeum#633)
 
 #: Code default for the verify-model knob (issue athenaeum#1717's proposer/
 #: verifier split): a stronger model re-checks a sample of the cheap
@@ -10315,6 +10360,55 @@ def resolve_serve_auth_allowed_identities(
     return None
 
 
+def resolve_serve_auth_allowed_clients(
+    config: dict[str, Any] | None,
+) -> list[object] | None:
+    """Resolve the optional client allowlist (issue athenaeum#2602).
+
+    Returns the raw ``serve.auth.allowed_clients`` entries, or ``None`` when
+    the key is absent. ``None`` means the client is not consulted at all --
+    the behaviour before this setting existed. When it is set, a verified
+    token must name a listed client in its ``azp`` or ``client_id`` claim or
+    it is refused with the same 401 an invalid token gets; a token naming
+    neither (or two different ones) is refused too, so the allowlist fails
+    closed. Client ids are matched exactly, without case folding.
+
+    Each entry is a client id string, or a mapping
+    ``{id: <client id>, read_only: true}``. A ``read_only`` client has the
+    write scope withheld even when its token carries it, so it can call read
+    tools only, and the write tools are left out of its ``tools/list``. The
+    cap only narrows: it never grants a scope the token lacks.
+
+    yaml only: a list of entries, or a comma-separated string of ids (all
+    with full access). There is no environment variable and no flag, because
+    neither has a shape for the per-client ``read_only`` cap.
+
+    Entries are validated, and an empty list refused, by
+    :func:`athenaeum.serve_auth.build_serve_auth`. Raises
+    :class:`athenaeum.serve_auth.ServeAuthError` here on a value that is
+    neither a list nor a string. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import ServeAuthError
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("allowed_clients")
+                if isinstance(raw, str):
+                    return [part.strip() for part in raw.split(",") if part.strip()]
+                if isinstance(raw, (list, tuple)):
+                    return list(raw)
+                if raw is not None:
+                    raise ServeAuthError(
+                        f"serve.auth.allowed_clients={raw!r} must be a list of "
+                        "client ids (or `{id: ..., read_only: true}` mappings), "
+                        "or a comma-separated string."
+                    )
+    return None
+
+
 def resolve_serve_auth_scopes(
     config: dict[str, Any] | None,
     cli_value: str | None = None,
@@ -10368,6 +10462,77 @@ def resolve_serve_auth_scopes(
                 if raw is not None:
                     return parse_scope_pair(raw, "serve.auth.scopes")
     return None
+
+
+def resolve_serve_auth_max_token_lifetime(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int | None:
+    """Resolve the optional access-token lifetime ceiling (issue athenaeum#2599).
+
+    Seconds, positive. When set, a token whose ``exp - iat`` exceeds it is
+    refused, and so is one with no ``iat`` whose ``exp`` is further than this
+    from now. ``None`` (the default) sets no ceiling.
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME``, ``serve.auth.max_token_lifetime``.
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a non-positive or
+    non-integer value rather than ignoring it. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import parse_seconds
+
+    if cli_value is not None:
+        return parse_seconds(cli_value, "--auth-max-token-lifetime", minimum=1)
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME")
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", minimum=1)
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("max_token_lifetime")
+                if raw is not None:
+                    return parse_seconds(raw, "serve.auth.max_token_lifetime", minimum=1)
+    return None
+
+
+def resolve_serve_auth_clock_leeway(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int:
+    """Resolve the ``nbf`` / ``iat`` clock-skew leeway in seconds (issue athenaeum#2599).
+
+    A token whose ``nbf`` or ``iat`` is later than now plus this is refused.
+    Non-negative; ``0`` means no tolerance. Default
+    :data:`athenaeum.serve_auth.DEFAULT_CLOCK_LEEWAY` (60). It does not widen
+    ``exp``: an expired token is refused regardless.
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY``, ``serve.auth.clock_leeway``.
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a negative or
+    non-integer value. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import DEFAULT_CLOCK_LEEWAY, parse_seconds
+
+    if cli_value is not None:
+        return parse_seconds(cli_value, "--auth-clock-leeway", minimum=0)
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY")
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY", minimum=0)
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("clock_leeway")
+                if raw is not None:
+                    return parse_seconds(raw, "serve.auth.clock_leeway", minimum=0)
+    return DEFAULT_CLOCK_LEEWAY
 
 
 # ---------------------------------------------------------------------------

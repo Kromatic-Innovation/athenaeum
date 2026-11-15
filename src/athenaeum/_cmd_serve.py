@@ -370,8 +370,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_screening,
         resolve_search_backend,
         resolve_serve_audit_log,
+        resolve_serve_auth_allowed_clients,
         resolve_serve_auth_allowed_identities,
+        resolve_serve_auth_clock_leeway,
         resolve_serve_auth_issuer,
+        resolve_serve_auth_max_token_lifetime,
         resolve_serve_auth_resource,
         resolve_serve_auth_scopes,
         resolve_serve_excluded_fields,
@@ -427,6 +430,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 cfg, getattr(args, "auth_allowed_identities", None)
             ),
             scopes=resolve_serve_auth_scopes(cfg, getattr(args, "auth_scopes", None)),
+            clock_leeway=resolve_serve_auth_clock_leeway(cfg),
+            max_token_lifetime=resolve_serve_auth_max_token_lifetime(cfg),
+            allowed_clients=resolve_serve_auth_allowed_clients(cfg),
         )
     except ServeAuthError as exc:
         print(f"[auth] invalid configuration: {exc}", file=sys.stderr)
@@ -450,6 +456,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 f"scopes {' '.join(serve_auth.scopes_supported)}",
                 file=sys.stderr,
             )
+            if serve_auth.allowed_clients is not None:
+                # Issue athenaeum#2602. Counts only: client ids are the
+                # operator's own configuration, but the line stays the same
+                # shape as the one above it.
+                print(
+                    f"[auth] client allowlist: {len(serve_auth.allowed_clients)} "
+                    f"client{'' if len(serve_auth.allowed_clients) == 1 else 's'}, "
+                    f"{len(serve_auth.read_only_clients)} read-only",
+                    file=sys.stderr,
+                )
     elif serve_auth is not None:
         # An auth block under stdio is inert and must SAY so rather than look
         # applied: stdio binds no socket and carries no bearer token, so there

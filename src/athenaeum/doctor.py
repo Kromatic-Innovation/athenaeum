@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 #: One check's outcome state (issue athenaeum#2298 AC2/AC5).
-Status = Literal["ok", "fail", "skip"]
+Status = Literal["ok", "warn", "fail", "skip"]
 
 #: Injectable PyPI-JSON fetch: (url, timeout_seconds) -> raw response bytes.
 #: Tests substitute this so no real network call is ever made (mirrors
@@ -775,6 +775,28 @@ def check_merge_rejected_with_targets(wiki_root: Path) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
+def check_removed_config_keys(config: dict) -> CheckResult:
+    """WARN when ``athenaeum.yaml`` still sets a key a release removed.
+
+    Never "fail": the key is ignored, so nothing is broken, but the operator
+    may believe a switch still does something (issue athenaeum#2686). Same
+    source of truth as the ``load_config`` log warning and the ``athenaeum
+    run`` stderr notice: :func:`athenaeum.config.find_removed_config_keys`.
+    """
+    from athenaeum.config import find_removed_config_keys, format_removed_key_notice
+
+    found = find_removed_config_keys(config)
+    if not found:
+        return CheckResult("removed_config_keys", "ok", "no removed config keys set")
+    detail = " | ".join(format_removed_key_notice(k, r) for k, r in found)
+    return CheckResult(
+        "removed_config_keys",
+        "warn",
+        detail,
+        fix="delete the listed key(s) from athenaeum.yaml",
+    )
+
+
 def run_checks(
     knowledge_root: Path,
     *,
@@ -813,10 +835,16 @@ def run_checks(
         check_schedule_state(home=home),
         check_page_relations(knowledge_root / "wiki"),
         check_merge_rejected_with_targets(knowledge_root / "wiki"),
+        check_removed_config_keys(config),
     ]
 
 
-_STATUS_LABEL: dict[Status, str] = {"ok": "OK", "fail": "FAIL", "skip": "SKIP"}
+_STATUS_LABEL: dict[Status, str] = {
+    "ok": "OK",
+    "warn": "WARN",
+    "fail": "FAIL",
+    "skip": "SKIP",
+}
 
 
 #: Appended (issue athenaeum#2450) only when at least one check is "fail" --
@@ -845,13 +873,17 @@ def format_report(results: list[CheckResult]) -> str:
     for result in results:
         label = _STATUS_LABEL.get(result.status, result.status.upper())
         lines.append(f"[{label}] {result.name}: {result.detail}")
-        if result.status == "fail" and result.fix:
+        if result.status in ("fail", "warn") and result.fix:
             lines.append(f"    fix: {result.fix}")
     failed = [r for r in results if r.status == "fail"]
     lines.append("")
-    lines.append(
-        f"{len(failed)} check(s) failed." if failed else "All checks passed."
-    )
+    warned = [r for r in results if r.status == "warn"]
+    if failed:
+        lines.append(f"{len(failed)} check(s) failed.")
+    elif warned:
+        lines.append(f"All checks passed, with {len(warned)} warning(s).")
+    else:
+        lines.append("All checks passed.")
     if failed:
         lines.append(_FRESH_INSTALL_NOTE)
     return "\n".join(lines)

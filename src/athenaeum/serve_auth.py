@@ -39,6 +39,14 @@ allowlist is a startup error rather than "anybody the issuer vouches for",
 and an unrecognized tool class requires the WRITE scope rather than the
 weaker read one.
 
+**Clients, too, are an allowlist when the operator pins them** (issue
+athenaeum#2602). :attr:`ServeAuth.allowed_clients` is ``None`` unless
+``serve.auth.allowed_clients`` is set, and then a token must name a listed
+client in ``azp`` or ``client_id`` -- a token naming neither fails closed.
+An entry may carry ``read_only: true``, which withholds the WRITE scope from
+that client even when its token carries it. The cap only ever NARROWS: it
+removes a scope, and nothing here can add one a token lacks.
+
 **Tokens are not loggable.** No function here accepts, formats or returns a
 raw token. The identity-rejection path logs the ``sub`` it rejected, never the
 credential that carried it.
@@ -99,6 +107,12 @@ JWKS_PATH = "/.well-known/jwks.json"
 #: is not something a resource server can hold.
 SIGNING_ALGORITHM = "RS256"
 
+#: Default clock-skew allowance, in seconds, applied to ``nbf`` / ``iat`` (a
+#: token minted by an issuer whose clock runs slightly ahead of this host's
+#: must not be refused for it). Configurable via ``serve.auth.clock_leeway``;
+#: 60 s is the conventional JWT-library default.
+DEFAULT_CLOCK_LEEWAY = 60
+
 
 class ServeAuthError(ValueError):
     """Raised when the ``serve.auth.*`` configuration is invalid or incomplete.
@@ -130,6 +144,16 @@ class ServeAuth:
             :func:`build_serve_auth`.
         read_scope: Scope name a READ tool call requires.
         write_scope: Scope name a WRITE tool call requires.
+        clock_leeway: Seconds of clock skew tolerated on ``nbf`` / ``iat``.
+        max_token_lifetime: Optional ceiling, in seconds, on how long a token
+            may be valid; ``None`` means no ceiling beyond the mandatory
+            ``exp``. See :func:`check_time_claims`.
+        allowed_clients: Client ids (a token's ``azp`` or ``client_id``)
+            permitted to use this server, or ``None`` when no client
+            allowlist is configured -- in which case the client is not
+            consulted at all. Never empty when set. See :meth:`client_of`.
+        read_only_clients: The subset of *allowed_clients* capped to the
+            read scope. Empty unless some entry sets ``read_only: true``.
     """
 
     issuer: str
@@ -137,6 +161,10 @@ class ServeAuth:
     allowed_identities: frozenset[str]
     read_scope: str
     write_scope: str
+    clock_leeway: int = DEFAULT_CLOCK_LEEWAY
+    max_token_lifetime: int | None = None
+    allowed_clients: frozenset[str] | None = None
+    read_only_clients: frozenset[str] = frozenset()
 
     @property
     def jwks_uri(self) -> str:
@@ -190,9 +218,80 @@ class ServeAuth:
                 return email.casefold()
         return None
 
+    def time_claim_refusal(self, claims: Mapping[str, object], now: float) -> str | None:
+        """:func:`check_time_claims` under this configuration's pins."""
+        return check_time_claims(
+            claims,
+            now,
+            leeway=self.clock_leeway,
+            max_lifetime=self.max_token_lifetime,
+        )
+
     def identity_allowed(self, claims: Mapping[str, object]) -> bool:
         """Whether *claims* presents an allowlisted identity."""
         return self.identity_of(claims) is not None
+
+    def client_of(self, claims: Mapping[str, object]) -> str | None:
+        """The client id *claims* names, or ``None`` when it names none usably.
+
+        Two claims are read: ``azp`` (the OpenID Connect authorized party)
+        and ``client_id`` (RFC 9068's access-token claim). Different
+        authorization servers emit one or the other. When BOTH are present
+        and disagree the token names no single client, so the answer is
+        ``None`` -- which, under a configured allowlist, refuses it. A
+        non-string or blank value counts as absent.
+
+        Matching is exact. Client ids are opaque and case-sensitive, and a
+        Client ID Metadata Document id is a URL whose path is
+        case-sensitive, so nothing is folded.
+        """
+        named: set[str] = set()
+        for claim in ("azp", "client_id"):
+            value = claims.get(claim)
+            if isinstance(value, str) and value.strip():
+                named.add(value.strip())
+        if len(named) != 1:
+            return None
+        return next(iter(named))
+
+    def client_refusal(self, claims: Mapping[str, object]) -> str | None:
+        """Why *claims* fails the client allowlist, or ``None`` if it passes.
+
+        Always ``None`` when :attr:`allowed_clients` is unset: no allowlist
+        means the client is not consulted, which is the pre-athenaeum#2602
+        behaviour. Otherwise ``"client_not_identified"`` for a token that
+        names no single client (fail closed) and ``"client_not_allowlisted"``
+        for one naming a client that is not listed.
+        """
+        if self.allowed_clients is None:
+            return None
+        client = self.client_of(claims)
+        if client is None:
+            return "client_not_identified"
+        if client not in self.allowed_clients:
+            return "client_not_allowlisted"
+        return None
+
+    def client_is_read_only(self, claims: Mapping[str, object]) -> bool:
+        """Whether *claims* names a client capped to the read scope."""
+        if not self.read_only_clients:
+            return False
+        client = self.client_of(claims)
+        return client is not None and client in self.read_only_clients
+
+    def capped_scopes(
+        self, claims: Mapping[str, object], scopes: Iterable[str]
+    ) -> list[str]:
+        """*scopes* with the write scope removed when the client is read-only.
+
+        Strictly narrowing: the result is always a subset of *scopes*, so the
+        cap can withhold a scope the token carries but never grant one it
+        lacks. Order is preserved, so an uncapped token's scopes come back
+        unchanged.
+        """
+        if not self.client_is_read_only(claims):
+            return list(scopes)
+        return [scope for scope in scopes if scope != self.write_scope]
 
     def required_scope(self, *, read_only: object) -> str:
         """The scope a tool whose ``readOnlyHint`` is *read_only* requires.
@@ -209,6 +308,90 @@ class ServeAuth:
         tool whose class this cannot establish is treated as a mutator.
         """
         return self.read_scope if read_only is True else self.write_scope
+
+
+def _numeric_claim(claims: Mapping[str, object], name: str) -> float | None | bool:
+    """A NumericDate claim as a float, ``None`` if absent, ``False`` if malformed.
+
+    RFC 7519 NumericDate is a JSON number. A bool is not one (``True`` would
+    otherwise pass as ``1``), and a string is not coerced.
+    """
+    if name not in claims or claims[name] is None:
+        return None
+    value = claims[name]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return float(value)
+
+
+def check_time_claims(
+    claims: Mapping[str, object],
+    now: float,
+    *,
+    leeway: int = DEFAULT_CLOCK_LEEWAY,
+    max_lifetime: int | None = None,
+) -> str | None:
+    """Why a signature-verified token's time claims are unacceptable, or ``None``.
+
+    Run AFTER the library has verified signature / ``iss`` / ``aud``, because
+    FastMCP's own check only looks at ``exp`` when it is present and never
+    looks at ``nbf``. Fails closed; the returned reason is a short stable
+    identifier (never a claim value, never the token) for the audit log:
+
+    - ``missing_exp`` / ``malformed_exp`` -- a token that never expires turns
+      one leak into permanent access, so ``exp`` is required;
+    - ``expired`` -- ``exp`` is not after *now* (no leeway on the expiry side:
+      leeway only forgives an issuer clock running AHEAD);
+    - ``not_yet_valid`` -- ``nbf`` later than *now* + *leeway*;
+    - ``issued_in_future`` -- ``iat`` later than *now* + *leeway*;
+    - ``lifetime_exceeds_max`` -- only when *max_lifetime* is set: ``exp - iat``
+      over the cap, or, when ``iat`` is absent, ``exp - now`` over the cap.
+      The lifetime cap is compared exactly, without leeway.
+
+    A malformed ``nbf`` / ``iat`` (present but not a number) is refused too.
+    """
+    exp = _numeric_claim(claims, "exp")
+    if exp is None:
+        return "missing_exp"
+    if exp is False:
+        return "malformed_exp"
+    nbf = _numeric_claim(claims, "nbf")
+    iat = _numeric_claim(claims, "iat")
+    if nbf is False or iat is False:
+        return "malformed_time_claim"
+    assert isinstance(exp, float)
+    if exp <= now:
+        return "expired"
+    horizon = now + leeway
+    if nbf is not None and nbf > horizon:
+        return "not_yet_valid"
+    if iat is not None and iat > horizon:
+        return "issued_in_future"
+    if max_lifetime is not None:
+        lifetime = exp - (iat if iat is not None else now)
+        if lifetime > max_lifetime:
+            return "lifetime_exceeds_max"
+    return None
+
+
+def parse_seconds(raw: object, source: str, *, minimum: int) -> int:
+    """Validate a whole-number seconds setting, raising :class:`ServeAuthError`.
+
+    Accepts an int or a base-10 integer string (env var spelling); refuses a
+    bool (``true`` would otherwise read as ``1``), a float and anything below
+    *minimum*.
+    """
+    value: object = raw
+    if isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = raw
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ServeAuthError(
+            f"{source}={raw!r} must be a whole number of seconds >= {minimum}."
+        )
+    return value
 
 
 def _require_absolute_url(value: str, setting: str) -> str:
@@ -303,12 +486,64 @@ def normalize_identities(values: Iterable[object]) -> frozenset[str]:
     return frozenset(out)
 
 
+def normalize_clients(values: Iterable[object]) -> tuple[frozenset[str], frozenset[str]]:
+    """Parse a client allowlist into ``(allowed, read_only)`` id sets.
+
+    Each entry is either a client id string (full access) or a mapping
+    ``{"id": <client id>, "read_only": <bool>}``. Ids are trimmed but NOT
+    case-folded -- see :meth:`ServeAuth.client_of`. A client listed twice
+    is read-only if ANY of its entries says so: the narrower reading wins
+    rather than whichever entry happens to come last.
+
+    Raises :class:`ServeAuthError` on an entry of any other shape, a mapping
+    with an unknown key, a missing or blank id, or a ``read_only`` that is
+    not a bool. A typo in a security setting is an error, never ignored.
+    """
+    allowed: set[str] = set()
+    read_only: set[str] = set()
+    for value in values:
+        client_id: object
+        capped: object
+        if isinstance(value, str):
+            client_id, capped = value, False
+        elif isinstance(value, Mapping):
+            unknown = sorted(str(key) for key in value if key not in ("id", "read_only"))
+            if unknown:
+                raise ServeAuthError(
+                    f"serve.auth.allowed_clients entry {dict(value)!r} has unknown "
+                    f"key(s) {unknown}; expected `id` and optionally `read_only`."
+                )
+            client_id = value.get("id")
+            capped = value.get("read_only", False)
+            if not isinstance(capped, bool):
+                raise ServeAuthError(
+                    f"serve.auth.allowed_clients entry {dict(value)!r}: `read_only` "
+                    "must be true or false."
+                )
+        else:
+            raise ServeAuthError(
+                f"serve.auth.allowed_clients entry {value!r} is neither a client "
+                "id string nor a mapping with an `id` key."
+            )
+        if not isinstance(client_id, str) or not client_id.strip():
+            raise ServeAuthError(
+                f"serve.auth.allowed_clients entry {value!r} names no client id."
+            )
+        allowed.add(client_id.strip())
+        if capped:
+            read_only.add(client_id.strip())
+    return frozenset(allowed), frozenset(read_only)
+
+
 def build_serve_auth(
     *,
     issuer: str | None = None,
     resource: str | None = None,
     allowed_identities: frozenset[str] | None = None,
     scopes: Mapping[str, str] | None = None,
+    clock_leeway: int | None = None,
+    max_token_lifetime: int | None = None,
+    allowed_clients: Iterable[object] | None = None,
 ) -> ServeAuth | None:
     """Compose the four resolved pins into a :class:`ServeAuth`, or ``None``.
 
@@ -345,8 +580,18 @@ def build_serve_auth(
             normalized by the resolver.
         scopes: ``{"read": ..., "write": ...}``, or ``None`` for the
             :data:`DEFAULT_READ_SCOPE` / :data:`DEFAULT_WRITE_SCOPE` pair.
+        clock_leeway: Seconds of ``nbf`` / ``iat`` skew tolerated; ``None``
+            takes :data:`DEFAULT_CLOCK_LEEWAY`. Non-negative.
+        max_token_lifetime: Optional token-lifetime ceiling in seconds;
+            positive. Neither knob counts as "auth configured" on its own.
+        allowed_clients: Optional client allowlist (issue athenaeum#2602),
+            entries as :func:`normalize_clients` accepts. ``None`` leaves the
+            client unconsulted. Setting it DOES count as "auth configured",
+            so it cannot be given without the issuer and resource, and an
+            empty list is a :class:`ServeAuthError` -- it would refuse every
+            token, locking the operator out of their own server.
     """
-    configured = (issuer, resource, allowed_identities, scopes)
+    configured = (issuer, resource, allowed_identities, scopes, allowed_clients)
     if all(pin is None for pin in configured):
         return None
 
@@ -399,12 +644,38 @@ def build_serve_auth(
             "tool."
         )
 
+    leeway = (
+        DEFAULT_CLOCK_LEEWAY
+        if clock_leeway is None
+        else parse_seconds(clock_leeway, "serve.auth.clock_leeway", minimum=0)
+    )
+    lifetime_cap = (
+        None
+        if max_token_lifetime is None
+        else parse_seconds(max_token_lifetime, "serve.auth.max_token_lifetime", minimum=1)
+    )
+
+    clients: frozenset[str] | None = None
+    read_only_clients: frozenset[str] = frozenset()
+    if allowed_clients is not None:
+        clients, read_only_clients = normalize_clients(allowed_clients)
+        if not clients:
+            raise ServeAuthError(
+                "serve.auth.allowed_clients is set but empty, which would refuse "
+                "every token. List at least one client id, or remove the key to "
+                "accept any client."
+            )
+
     return ServeAuth(
         issuer=issuer_url,
         resource=resource_url,
         allowed_identities=identities,
         read_scope=read_scope,
         write_scope=write_scope,
+        clock_leeway=leeway,
+        max_token_lifetime=lifetime_cap,
+        allowed_clients=clients,
+        read_only_clients=read_only_clients,
     )
 
 

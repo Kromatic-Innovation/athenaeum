@@ -166,6 +166,7 @@ from athenaeum.authority import (
 )
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
+    DEFAULT_REASONING_T2_MODEL,
     resolve_model,
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
@@ -1028,7 +1029,7 @@ T2_TIER_NAME = "T2"
 #: T2 is the opus-class deep-reasoning tier. Overridable via
 #: ``ATHENAEUM_REASONING_T2_MODEL`` env or ``models.reasoning_t2`` yaml —
 #: same env/yaml/default precedence as :func:`get_t1_model` (issue athenaeum#232).
-DEFAULT_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; athenaeum#633)
+DEFAULT_T2_MODEL = DEFAULT_REASONING_T2_MODEL
 
 
 def get_t2_model(config: dict[str, Any] | None = None) -> str:
