@@ -419,6 +419,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A question raised before this change (no stored copy) keeps the prior
   behaviour (athenaeum#2519).
 
+- The live Claude Code entry-path harness (`tests/integration/test_claude_entry_paths.py`)
+  can now drive the interactive rows on a real host (athenaeum#2588, follow-up to
+  athenaeum#2235 for the athenaeum#2161 live run). Each row runs under an isolated
+  `CLAUDE_CONFIG_DIR` that carries a login through a documented hand-off
+  (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a copied `.credentials.json`; never the
+  host's settings or hooks); Enter is delivered as its own pty write after a settle delay on a
+  pty with a real window size, and every row confirms its prompt in the session transcript
+  rather than inferring submission from a missing ledger line, with "no line" rows also
+  asserting the parent session submitted a turn; inherited `CLAUDE_CODE_*` / `CLAUDECODE`
+  variables are scrubbed before spawning; the launch-argument teardown no longer errors; and
+  the claude.ai bridge row is skipped with a recorded reason instead of failing. Offline
+  helpers are unit-tested; the live run itself remains athenaeum#2161's.
 - `decisions answer --type coordinate` (and every writer that calls
   `write_decision_answer`, e.g. the triage lane) now runs the applier's own
   deep checks — JSON decoding, payload schema, pair/page/dimension
