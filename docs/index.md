@@ -64,7 +64,7 @@ integrating anything.
 - [Retention](modules/retention.md) — decay, the `preserve` disposition, preserved logs.
 - [Recall](modules/recall.md) — the query path, FTS5 and vector backends, enumerate vs recall.
 - [Sensitivity](modules/sensitivity.md) — access levels, fail-closed audience scoping, PII exclusion.
-- [MCP surface](modules/mcp.md) — the 15 tools.
+- [MCP surface](modules/mcp.md) — the 16 tools.
 - [Provider](modules/provider.md) — the `api` and `claude-cli` backends.
 
 ## Reference

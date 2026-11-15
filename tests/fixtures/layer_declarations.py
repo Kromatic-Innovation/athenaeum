@@ -160,6 +160,7 @@ MODULE_LAYER: dict[str, int] = {
     # excerpt-masking detectors), both at or below; imported by librarian.py
     # (L4) and _cmd_drops.py (L5), both strictly above.
     "drops": 3,
+    "relevance_policy": 2,  # issue athenaeum#2643
     "erasure": 3,
     "fingerprint": 3,
     "inference_blocks": 3,
@@ -378,6 +379,7 @@ MODULE_LAYER: dict[str, int] = {
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_attribution": 5,  # issue athenaeum#2212
+    "_cmd_relevance_policy": 5,  # issue athenaeum#2643
     "_cmd_audit": 5,
     "_cmd_contact_surface_lint": 5,  # issue athenaeum#2218
     "_cmd_decompose_page": 5,

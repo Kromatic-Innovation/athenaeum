@@ -5278,6 +5278,7 @@ def _render_run_summary(
     *,
     schema_fragments: "dict[str, tuple[str, bool]] | None" = None,
     prompt_manifest_hash: "str | None" = None,
+    relevance_policy_hash: "str | None" = None,
     zero_yield_consecutive: "int | None" = None,
     starved_streaks: "dict[str, int] | None" = None,
     stall_streaks: "dict[str, int] | None" = None,
@@ -5316,7 +5317,8 @@ def _render_run_summary(
     ``schema_fragments=`` attributes the operator-tunable fragment bytes and
     ``prompt_manifest=`` the shipped-prompt bytes this run used. Both are
     omitted when their argument is ``None`` (the pure formatting default), so
-    the pre-athenaeum#567 head and the direct unit-test callers are byte-unchanged. No
+    the pre-athenaeum#567 head and the direct unit-test callers are byte-unchanged.
+    ``relevance_policy=`` (athenaeum#2643) follows the same omit-on-``None`` rule. No
     phase logic, ordering, or exit code is affected.
 
     ``zero_yield_consecutive`` (issue athenaeum#899) is the run's zero-yield counter:
@@ -5359,6 +5361,10 @@ def _render_run_summary(
         head += (
             f" schema_fragments={_render_schema_fragment_attribution(schema_fragments)}"
         )
+    # Issue athenaeum#2643: the relevance-policy hash rides next to
+    # ``schema_fragments=``; omitted when no policy file exists.
+    if relevance_policy_hash is not None:
+        head += f" relevance_policy={relevance_policy_hash}"
     if prompt_manifest_hash is not None:
         head += f" prompt_manifest={prompt_manifest_hash}"
     if zero_yield_consecutive is not None:
@@ -6168,6 +6174,13 @@ class RunContext:
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
         try:
+            from athenaeum.relevance_policy import policy_hash_token
+
+            relevance_hash: "str | None" = policy_hash_token(self.wiki_root)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: relevance policy hash skipped: %s", exc)
+            relevance_hash = None
+        try:
             from athenaeum.prompt_registry import prompt_manifest_hash
 
             manifest_hash: "str | None" = prompt_manifest_hash()
@@ -6199,6 +6212,7 @@ class RunContext:
             _render_run_summary(
                 self.run_profile,
                 schema_fragments=frag_state,
+                relevance_policy_hash=relevance_hash,
                 prompt_manifest_hash=manifest_hash,
                 zero_yield_consecutive=self.zero_yield_consecutive,
                 starved_streaks=starved_streaks,

@@ -4187,6 +4187,38 @@ def create_server(
             "queryable_fields": list(QUERYABLE_FIELDS),
         }
 
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
+    def relevance_policy() -> dict:
+        """Report what this deployment is set to remember.
+
+        Issue athenaeum#2643: answers "what are you set to remember?" by
+        listing the operator's relevance-policy rules (`always` / `never`,
+        keyed on type, tag and optional subject uid) in evaluation order.
+        Read-only: the policy lives in `wiki/_schema/relevance-policy.md` and
+        is edited there, never through this tool.
+
+        Rules are evaluated top to bottom and the LAST matching rule wins, so
+        a later rule is an exception to an earlier one. A fact no rule
+        matches has no policy (default behaviour).
+
+        Returns:
+            A dict with `present` (false when no policy file exists — nothing
+            is constrained), `hash` (8-hex digest of the effective rules, the
+            same value the librarian run summary reports, or null),
+            `semantics`, and `rules` — each with `rule`, `line`, `verdict`,
+            `type`, `tag` and `subject`. An invalid file returns `error`
+            naming each bad rule instead.
+        """
+        from athenaeum.relevance_policy import (
+            RelevancePolicyError,
+            load_relevance_policy,
+        )
+
+        try:
+            return load_relevance_policy(wiki_root).to_dict()
+        except RelevancePolicyError as exc:
+            return {"present": True, "hash": None, "rules": [], "error": str(exc)}
+
     def enumerate_entities(
         entity_type: str,
         predicates: list[dict] | None = None,

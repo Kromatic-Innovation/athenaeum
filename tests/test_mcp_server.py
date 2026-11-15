@@ -2258,6 +2258,7 @@ class TestAllMcpToolWrappers:
         "resolve_merge": lambda fn: fn("no-such-id", "reject"),
         "read_entity": lambda fn: fn("no-such-uid", "person"),
         "entity_schema": lambda fn: fn(),
+        "relevance_policy": lambda fn: fn(),
         "enumerate_entities": lambda fn: fn("no-such-type"),
     }
     _EXPECTED_TYPE = {
@@ -2277,6 +2278,7 @@ class TestAllMcpToolWrappers:
         "calibration_summary": dict,
         "read_entity": str,
         "entity_schema": dict,
+        "relevance_policy": dict,
         "enumerate_entities": dict,
     }
 
@@ -2324,8 +2326,9 @@ class TestAllMcpToolWrappers:
         # `recall` — no query text, never routed through ranking). Issue
         # athenaeum#888 removes one: the person-shaped `read_person` tool, once
         # every known consumer had migrated to `read_entity`. Bumping this
-        # number is exactly the tripwire this test exists for.
-        assert len(registered) == 15
+        # number is exactly the tripwire this test exists for. Issue
+        # athenaeum#2643 adds `relevance_policy` (read-only policy read-back).
+        assert len(registered) == 16
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
@@ -2454,6 +2457,7 @@ class TestToolAnnotations:
     _EXPECTED_READ_ONLY = {
         "recall": True,
         "entity_schema": True,
+        "relevance_policy": True,
         "enumerate_entities": True,
         "read_entity": True,
         "list_pending_questions": True,

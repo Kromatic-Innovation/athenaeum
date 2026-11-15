@@ -6,9 +6,9 @@
 
 ## What it does
 
-`athenaeum serve` runs an MCP server exposing **15 tools** so agents can write to raw
+`athenaeum serve` runs an MCP server exposing **16 tools** so agents can write to raw
 intake, search the compiled wiki, and triage the human-decision queue.
-9 read-only, 6 that mutate human-decision state.
+10 read-only, 6 that mutate human-decision state.
 No tool writes a wiki page directly — the librarian is the only writer.
 
 ```bash
@@ -21,6 +21,7 @@ athenaeum test-mcp          # smoke-test the round-trip without a live session
 |---|---|---|
 | `recall` | READ | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector, depending on the configured backend). |
 | `entity_schema` | READ | Reports the entity classes this deployment declares and observes, the fields each carries, and which fields `recall`/`enumerate_entities` can filter on. Call this before narrowing by `type`. |
+| `relevance_policy` | READ | What this deployment is set to remember: the operator's `always`/`never` relevance rules from `wiki/_schema/relevance-policy.md`, in evaluation order (last match wins). Read-only; the policy is edited in the file. |
 | `enumerate_entities` | READ | Unranked, criteria-based listing of every entity of a declared type — the counterpart to `recall` for "every entity matching X", where a ranked search returns an incomplete answer. |
 | `read_entity` | READ | One-call entity read by uid, for any entity class. One of the two sanctioned paths to a page's excluded fields. |
 | `list_pending_questions` | READ | Unanswered contradiction-detector questions. |
@@ -236,6 +237,7 @@ matched by name/value pairs elsewhere in this repo).
 |---|---|---|---|
 | recall | true | | |
 | entity_schema | true | | |
+| relevance_policy | true | | |
 | enumerate_entities | true | | |
 | read_entity | true | | |
 | list_pending_questions | true | | |
