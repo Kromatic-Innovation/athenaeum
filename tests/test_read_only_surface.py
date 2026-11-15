@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -200,6 +201,95 @@ class TestEveryWritePathRefuses:
         assert ro_page.read_bytes() == before
         assert "ReadOnlySurfaceError" in caplog.text
         assert result.updated == []
+        # The refusal is counted and the raw is KEPT (never consumed).
+        assert result.retain_raw is True
+        assert result.read_only_refused == 1
+        assert result.skipped == ["read-only-surface"]
+
+    def test_compile_create_keeps_the_raw(self, kb: Path) -> None:
+        from athenaeum.models import WikiEntity
+
+        cfg = _config(root="wiki")  # the whole wiki/ is declared read-only
+        raw_path = kb / "raw" / "r.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text("a fact worth keeping\n", encoding="utf-8")
+        result = ProcessingResult(
+            raw_file=RawFile(path=raw_path, source="r", timestamp="", uuid8="")
+        )
+        entity = WikiEntity(
+            uid="concept-new", type="concept", name="New Loaf", aliases=[], access="open",
+            tags=[], body="# New Loaf\n\nbody\n",
+        )
+        librarian._apply_tier3_results(
+            result,
+            new_entities=[entity],
+            pending_updates=[],
+            updated_uids=[],
+            escalations=[],
+            wiki_root=kb / "wiki",
+            index=EntityIndex(kb / "wiki"),
+            config=cfg,
+        )
+        assert not (kb / "wiki" / entity.filename).exists()
+        assert result.created == [] and result.retain_raw is True
+        assert result.read_only_refused == 1
+        assert raw_path.exists()
+
+    def test_tier0_upsert_keeps_the_raw(self, kb: Path) -> None:
+        cfg = _config()
+        cfg.pop("librarian")  # the structured-upsert step would claim the raw first
+        page = _page(kb / "recipes" / "loaf.md", "recipe-loaf", "Pistachio Loaf")
+        before = page.read_bytes()
+        raw_path = kb / "raw" / "seed.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text(
+            "---\nuid: recipe-loaf\ntype: recipe\nname: Pistachio Loaf\n"
+            "domains:\n  - loaf.example\nhandles_verified: '2026-07-27'\n---\n\n# Loaf\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="seed", timestamp="", uuid8="")
+        result = librarian.process_one(
+            raw,
+            EntityIndex(kb / "wiki", resolve_locator_surfaces(kb, cfg)),
+            kb / "wiki",
+            MagicMock(),
+            valid_types=["recipe"],
+            valid_tags=[],
+            valid_access=["open"],
+            config=cfg,
+        )
+        assert page.read_bytes() == before
+        assert result.retain_raw is True and result.read_only_refused == 1
+        assert result.handled_no_op is False
+        assert result.updated == []
+        assert raw_path.exists()
+
+    def test_run_never_deletes_a_raw_refused_by_a_read_only_surface(
+        self, kb: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        cfg = _config()
+        cfg.pop("librarian")
+        (kb / "athenaeum.yaml").write_text(json.dumps(cfg), encoding="utf-8")
+        page = _page(kb / "recipes" / "loaf.md", "recipe-loaf", "Pistachio Loaf")
+        before = page.read_bytes()
+        raw_path = kb / "raw" / "sessions" / "20260410T120000Z-aabbccdd.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text(
+            "---\nuid: recipe-loaf\ntype: recipe\nname: Pistachio Loaf\n"
+            "domains:\n  - loaf.example\nhandles_verified: '2026-07-27'\n---\n\n# Loaf\n",
+            encoding="utf-8",
+        )
+        _init_repo(kb)
+        _git(kb, "add", "-A")
+        _git(kb, "commit", "-q", "-m", "seed")
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: MagicMock())
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(kb / "cache"))
+        librarian.run(raw_root=kb / "raw", wiki_root=kb / "wiki", knowledge_root=kb)
+        assert raw_path.exists(), "a read-only refusal must never consume the raw"
+        assert page.read_bytes() == before
 
     def test_structured_upsert(self, kb: Path, ro_page: Path) -> None:
         cfg = _config()

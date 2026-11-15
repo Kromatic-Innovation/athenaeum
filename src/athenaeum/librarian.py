@@ -287,8 +287,10 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.storage import (
+    ReadOnlySurfaceError,
     open_store,
     refuse_read_only_write,
+    require_writable_path,
     resolve_indexed_surfaces,
     resolve_locator_surfaces,
 )
@@ -1117,6 +1119,21 @@ def git_pull(
     return True
 
 
+def _retain_raw_on_read_only(result: ProcessingResult, exc: Exception) -> ProcessingResult:
+    """Record a read-only-surface refusal so the raw is KEPT, never consumed (athenaeum#2621).
+
+    The entity loop deletes (or quarantines) a raw whose ``process_one``
+    returned without ``retain_raw``; a refusal must not lose the user's input.
+    The refusal is counted on ``result.read_only_refused`` and named in
+    ``result.skipped``.
+    """
+    log.warning("  Refused (read-only surface): %s: %s", type(exc).__name__, exc)
+    result.read_only_refused += 1
+    result.skipped.append("read-only-surface")
+    result.retain_raw = True
+    return result
+
+
 def tier0_handle_upsert(
     raw: RawFile,
     index: EntityIndex,
@@ -1125,6 +1142,7 @@ def tier0_handle_upsert(
     dry_run: bool = False,
     *,
     person_registry: "PersonRegistry | None" = None,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically merge a pre-structured seed's source-handle keys onto
     an EXISTING entity page, LLM-free (issue athenaeum#486).
@@ -1349,12 +1367,11 @@ def tier0_handle_upsert(
         return entity, True
 
     # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
-    _ro_refusal = refuse_read_only_write(
-        existing_path, wiki_root.parent, op="tier-0 page update"
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
     )
-    if _ro_refusal is not None:
-        log.warning("  Refused (read-only surface): %s", _ro_refusal)
-        return entity, False
 
     atomic_write_text(
         existing_path,
@@ -1448,6 +1465,8 @@ def tier0_bounce_verdict_mark(
     index: EntityIndex,
     wiki_root: Path,
     dry_run: bool = False,
+    *,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically stamp a verified-undeliverable, non-RFC bounce
     verdict onto an EXISTING wiki page's ``bounced:`` frontmatter field
@@ -1625,12 +1644,11 @@ def tier0_bounce_verdict_mark(
         return entity, True
 
     # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
-    _ro_refusal = refuse_read_only_write(
-        existing_path, wiki_root.parent, op="tier-0 page update"
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
     )
-    if _ro_refusal is not None:
-        log.warning("  Refused (read-only surface): %s", _ro_refusal)
-        return entity, False
 
     atomic_write_text(
         existing_path,
@@ -1644,6 +1662,8 @@ def tier0_do_not_email_mark(
     index: EntityIndex,
     wiki_root: Path,
     dry_run: bool = False,
+    *,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically stamp ``do_not_email: true`` onto an EXISTING wiki
     page's frontmatter from a free-text opt-out statement, LLM-free (issue
@@ -1802,12 +1822,11 @@ def tier0_do_not_email_mark(
         return entity, True
 
     # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
-    _ro_refusal = refuse_read_only_write(
-        existing_path, wiki_root.parent, op="tier-0 page update"
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
     )
-    if _ro_refusal is not None:
-        log.warning("  Refused (read-only surface): %s", _ro_refusal)
-        return entity, False
 
     atomic_write_text(
         existing_path,
@@ -2409,6 +2428,7 @@ def _apply_tier3_results(
         )
         if _ro_refusal is not None:
             log.warning("  Refused (read-only surface): %s", _ro_refusal)
+            _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
             continue
         atomic_write_text(_update_path, _update_content)
         if _update_idx < len(updated_uids):
@@ -2498,7 +2518,7 @@ def _apply_tier3_results(
             page_path, wiki_root.parent, config, op="compile create"
         )
         if _ro_refusal is not None:
-            log.warning("  Refused (read-only surface): %s", _ro_refusal)
+            _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
             continue
         atomic_write_text(page_path, rendered)
         index.register(entity)
@@ -2838,14 +2858,18 @@ def process_one(
     # keys for a uid already in the wiki merges those keys onto the page's
     # frontmatter directly, instead of falling through to the LLM tiers (which
     # would flatten the handle block into prose and lose the structured schema).
-    upsert = tier0_handle_upsert(
-        raw,
-        index,
-        wiki_root,
-        valid_types,
-        dry_run=dry_run,
-        person_registry=person_registry,
-    )
+    try:
+        upsert = tier0_handle_upsert(
+            raw,
+            index,
+            wiki_root,
+            valid_types,
+            dry_run=dry_run,
+            person_registry=person_registry,
+            config=config,
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if upsert is not None:
         entity, changed = upsert
         if changed:
@@ -2900,7 +2924,12 @@ def process_one(
     # anything else that does not conform (ambiguous identifier, no verdict
     # signal, no matching existing page) falls through to Tier 1/2/3
     # completely unchanged.
-    verdict_upsert = tier0_bounce_verdict_mark(raw, index, wiki_root, dry_run=dry_run)
+    try:
+        verdict_upsert = tier0_bounce_verdict_mark(
+            raw, index, wiki_root, dry_run=dry_run, config=config
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if verdict_upsert is not None:
         verdict_entity, verdict_changed = verdict_upsert
         if verdict_changed:
@@ -2929,7 +2958,12 @@ def process_one(
     # tier0_do_not_email_mark's docstring. Anything that does not conform
     # (zero/multiple addresses, no recognized phrase, a hard-bounce report,
     # no matching existing page) falls through to Tier 1/2/3 unchanged.
-    dne_upsert = tier0_do_not_email_mark(raw, index, wiki_root, dry_run=dry_run)
+    try:
+        dne_upsert = tier0_do_not_email_mark(
+            raw, index, wiki_root, dry_run=dry_run, config=config
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if dne_upsert is not None:
         dne_entity, dne_changed = dne_upsert
         if dne_changed:

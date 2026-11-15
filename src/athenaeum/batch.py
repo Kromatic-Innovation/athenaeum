@@ -971,6 +971,9 @@ class BatchRunResult:
     #: the synchronous transport, and is excluded from ``updated`` for the
     #: same reason: a refused write never reached disk.
     misrouted_prevented: int = 0
+    #: Writes refused because the page lives on a ``read_only`` surface
+    #: (athenaeum#2621); the raw file is retained, never deleted.
+    read_only_refused: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     #: Issue athenaeum#1144: files whose batch was still in flight when the run's
@@ -2506,6 +2509,7 @@ def process_batch_run(
             # first, then creates, matching the synchronous order).
             _applied_updated_uids: list[str] = []
             _prevented_uids: list[str] = []
+            _ro_refused = 0
             for _update_idx, (path, content) in enumerate(pending_updates):
                 if _update_idx in _route.prevented:
                     result.misrouted_prevented += 1
@@ -2517,6 +2521,7 @@ def process_batch_run(
                 )
                 if _ro_refusal is not None:
                     log.warning("  Refused (read-only surface): %s", _ro_refusal)
+                    _ro_refused += 1
                     continue
                 atomic_write_text(path, content)
                 if _update_idx < len(updated_uids):
@@ -2560,6 +2565,7 @@ def process_batch_run(
                 )
                 if _ro_refusal is not None:
                     log.warning("  Refused (read-only surface): %s", _ro_refusal)
+                    _ro_refused += 1
                     continue
                 atomic_write_text(wiki_root / entity.filename, rendered)
                 index.register(entity)
@@ -2594,6 +2600,11 @@ def process_batch_run(
             # ledger row the synchronous transport used to write here too
             # (issue athenaeum#1949's `compile_routing.record_compile_route`)
             # -- nothing outside its own tests ever read it.
+            if _ro_refused:
+                # Issue athenaeum#2621: a read-only refusal never consumes the raw.
+                result.read_only_refused += _ro_refused
+                log.warning("  Retained (not deleted): %s", st.raw.path)
+                continue
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
         except _BatchItemError as exc:

@@ -3410,6 +3410,10 @@ class ProcessingResult:
     #: ``field_constraint_rejected`` above. Surfaced as
     #: ``misrouted_prevented=N`` in the run summary.
     misrouted_updates_prevented: int = 0
+    #: Writes refused because the target page lives on a ``read_only`` storage
+    #: surface (athenaeum#2621). Each one also sets ``retain_raw`` so the raw
+    #: intake file is kept, never consumed.
+    read_only_refused: int = 0
     #: One decision per tier-0 person-registry hint candidate this file's
     #: consult surfaced (issue athenaeum#1866): ``(uid, tier, verdict)``.
     #: ``tier`` is ``"classify"`` when tier 2 never proposed a claim for the
