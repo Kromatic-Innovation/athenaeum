@@ -119,6 +119,16 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
         4096,
         False,
     ),
+    # Issue athenaeum#2654: the same category pair on the `candidate_uid`
+    # person-hint answer shape; rendered with the person-hints section only
+    # when the category block above is rendered.
+    (
+        "tiers.relevance_category_hint_prompt",
+        "RELEVANCE_CATEGORY_HINT_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
     # Issue athenaeum#2647: the reasoning-tier call that settles an unsure
     # category (resolves through the existing `reasoning_t2` knob).
     (

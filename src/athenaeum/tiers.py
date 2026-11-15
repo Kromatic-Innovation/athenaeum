@@ -2723,6 +2723,25 @@ def _load_relevance_category_prompt() -> str:
 RELEVANCE_CATEGORY_PROMPT = _load_relevance_category_prompt()
 
 
+def _load_relevance_category_hint_prompt() -> str:
+    """Read the relevance-category block for ``candidate_uid`` answers (athenaeum#2654).
+
+    Same module-import-time load as :func:`_load_relevance_category_prompt`;
+    the text lives in ``src/athenaeum/prompts/relevance_category_hint.md``.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "relevance_category_hint.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: Extends the relevance-category block to the ``candidate_uid`` person-hint
+#: answer shape. Rendered inside the person-hints section only when the
+#: category block itself is rendered. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.relevance_category_hint_prompt``.
+RELEVANCE_CATEGORY_HINT_PROMPT = _load_relevance_category_hint_prompt()
+
+
 def render_relevance_category_section(policy: "RelevancePolicy | None") -> str:
     """Render the classify prompt's relevance-category block (athenaeum#2647).
 
@@ -2742,6 +2761,7 @@ def render_relevance_category_section(policy: "RelevancePolicy | None") -> str:
 
 def _render_person_candidates_section(
     person_candidates: "list[dict[str, str]] | None",
+    relevance_policy: "RelevancePolicy | None" = None,
 ) -> str:
     """Render the tier-2 prompt's ``{person_candidates_section}`` slot.
 
@@ -2770,6 +2790,11 @@ def _render_person_candidates_section(
         blocks += f"{PERSON_HINT_OWNER_CLASSIFY_PROMPT}\n"
     if has_literal or not has_owner:
         blocks += f"{PERSON_HINT_CLASSIFY_PROMPT}\n"
+    # athenaeum#2654: a hint answer carries the relevance category too, so a
+    # `never` rule can drop a hint-derived fact (owner facts included). Only
+    # when the category block itself is rendered: no policy, no bytes.
+    if render_relevance_category_section(relevance_policy):
+        blocks += f"{RELEVANCE_CATEGORY_HINT_PROMPT}\n"
     return (
         "\n## Person hints (existing people this file may be about)\n"
         f"{blocks}"
@@ -2836,7 +2861,9 @@ def tier2_request_params(
         # stays byte-identical.
         observation_filter_section=obs_filter
         + render_relevance_category_section(relevance_policy),
-        person_candidates_section=_render_person_candidates_section(person_candidates),
+        person_candidates_section=_render_person_candidates_section(
+            person_candidates, relevance_policy
+        ),
     )
     return {
         "model": _get_classify_model(config),
@@ -3340,6 +3367,9 @@ def parse_tier2_entities(
                 if stats is not None:
                     stats.hint_drops[_hint_uid] = "dropped"
                 continue
+            # athenaeum#2654: the hint answer carries the same category and
+            # confidence pair as an ordinary item.
+            _hint_category, _hint_confidence = _parse_relevance_category(item, valid_tags)
             results.append(
                 ClassifiedEntity(
                     name=_candidate["name"],
@@ -3350,6 +3380,8 @@ def parse_tier2_entities(
                     existing_uid=_hint_uid,
                     observations=_claim,
                     from_person_hint=True,
+                    category=_hint_category,
+                    category_confidence=_hint_confidence,
                 )
             )
             continue
