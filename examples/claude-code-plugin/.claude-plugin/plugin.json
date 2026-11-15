@@ -1,6 +1,6 @@
 {
   "name": "athenaeum",
-  "version": "0.23.5",
+  "version": "0.24.0",
   "description": "Append-only knowledge sidecar for Claude Code: remember/recall via the athenaeum MCP server, plus the passive SessionStart/UserPromptSubmit recall hooks, all run through a pinned athenaeum release via uv -- no system-wide pip install required.",
   "author": {
     "name": "Kromatic Innovation",
