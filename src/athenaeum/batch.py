@@ -123,7 +123,8 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.storage import refuse_read_only_write
+from athenaeum.storage import page_write_root_for_class, refuse_read_only_write
+from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.structured_upsert import (
     STATUS_APPLIED,
     STATUS_REFUSED,
@@ -2538,7 +2539,23 @@ def process_batch_run(
                 new_entities, relatedness_run_index(wiki_root)
             )
             written_entities: list[WikiEntity] = []
-            for entity in new_entities:
+            # Per-type target surface (athenaeum#2618), resolved up front so a
+            # class mapped to a non-indexed surface raises before any write.
+            # A class mapped to a READ-ONLY surface (athenaeum#2621) is refused
+            # per entity: nothing is written, the raw is retained (see below).
+            _create_roots: list[Path | None] = []
+            for _e in new_entities:
+                try:
+                    _create_roots.append(
+                        page_write_root_for_class(_e.type, resolved_config, wiki_root.parent)
+                    )
+                except ReadOnlySurfaceError as _exc:
+                    log.warning("  Refused (read-only surface): %s", _exc)
+                    _ro_refused += 1
+                    _create_roots.append(None)
+            for entity, _create_root in zip(new_entities, _create_roots):
+                if _create_root is None:
+                    continue
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
@@ -2558,7 +2575,7 @@ def process_batch_run(
                     result.type_rejected += 1
                     continue
                 _ro_refusal = refuse_read_only_write(
-                    wiki_root / entity.filename,
+                    _create_root / entity.filename,
                     wiki_root.parent,
                     resolved_config,
                     op="compile create",
@@ -2567,8 +2584,8 @@ def process_batch_run(
                     log.warning("  Refused (read-only surface): %s", _ro_refusal)
                     _ro_refused += 1
                     continue
-                atomic_write_text(wiki_root / entity.filename, rendered)
-                index.register(entity)
+                atomic_write_text(_create_root / entity.filename, rendered)
+                index.register(entity, root=_create_root)
                 written_entities.append(entity)
                 log.info("  Created: %s → %s", entity.name, entity.filename)
 

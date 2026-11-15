@@ -571,3 +571,125 @@ class TestReadOnlyMountIsServed:
         assert "Pistachio Loaf" in typed
         out = json.loads(entity_read(kb, "recipe-loaf", page_class="recipe", config=cfg))
         assert out.get("ok") is not False, out
+
+
+class TestRoutedCreateRefusesAReadOnlySurface:
+    """A type MAPPED to a read-only surface is refused on every routed create path
+    (athenaeum#2618 routing + athenaeum#2621): nothing is written, the raw is kept."""
+
+    def test_page_write_root_names_the_error(self, kb: Path) -> None:
+        from athenaeum.storage import page_write_root_for_class
+
+        with pytest.raises(ReadOnlySurfaceError, match="read_only"):
+            page_write_root_for_class("recipe", _config(), kb)
+        assert page_write_root_for_class("concept", _config(), kb) == kb / "wiki"
+        assert page_write_root_for_class("recipe", _config(read_only=False), kb) == kb / "recipes"
+
+    def test_librarian_create_is_refused_and_the_raw_is_kept(self, kb: Path) -> None:
+        from athenaeum.models import WikiEntity
+
+        raw_path = kb / "raw" / "r.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text("a fact worth keeping\n", encoding="utf-8")
+        result = ProcessingResult(
+            raw_file=RawFile(path=raw_path, source="r", timestamp="", uuid8="")
+        )
+        mapped = WikiEntity(
+            uid="recipe-new", type="recipe", name="New Loaf", access="open",
+            body="# New Loaf\n\nbody\n",
+        )
+        plain = WikiEntity(
+            uid="concept-new", type="concept", name="Plain Idea", access="open",
+            body="# Plain Idea\n\nbody\n",
+        )
+        librarian._apply_tier3_results(
+            result,
+            new_entities=[mapped, plain],
+            pending_updates=[],
+            updated_uids=[],
+            escalations=[],
+            wiki_root=kb / "wiki",
+            index=EntityIndex(kb / "wiki"),
+            config=_config(),
+        )
+        assert not (kb / "recipes").exists()
+        assert [e.uid for e in result.created] == ["concept-new"]  # the rest still compiles
+        assert result.retain_raw is True and result.read_only_refused == 1
+        assert raw_path.exists()
+
+    def test_batch_create_is_refused_and_the_raw_is_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from tests import test_batch_mode as tbm
+
+        root = tbm._seed_root(tmp_path, "ro", ["Standalone fact about WidgetAlpha gadget.\n"])
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  adapters:\n    notes:\n      backing_store: markdown\n"
+            "      surface_root: notes\n      read_only: true\n"
+            "      corpus_policy:\n        embedded: true\n"
+            "  mapping:\n    concept: notes\n",
+            encoding="utf-8",
+        )
+        raws = sorted((root / "raw").rglob("*.md"))
+        assert raws
+        tbm._clean_env(monkeypatch)
+        tbm._freeze_recorded_at(monkeypatch)
+        client = tbm._FakeClient(tbm._scripted_responder, allow_sync=False)
+        monkeypatch.setattr(tbm.anthropic_mod, "Anthropic", lambda **kw: client)
+        tbm._patch_uids(monkeypatch)
+        tbm.run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert not (root / "notes").exists()
+        assert not [p for p in (root / "wiki").glob("*.md") if "widget" in p.name.lower()]
+        assert all(p.exists() for p in raws), "a read-only refusal must never consume the raw"
+
+    def test_page_recompile_reports_a_refusal(self, tmp_path: Path) -> None:
+        from athenaeum.page_recompile_apply import write_apply
+        from tests.test_page_recompile_apply import _BODY, _simple_plan, _write_page
+
+        wiki = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki, uid="page0001", name="Acme", body=_BODY, type="reference")
+        _simple_plan(wiki, body=_BODY)
+        cfg = _config()
+        cfg["storage"]["mapping"] = {"reference": "recipes"}
+        before = sorted(p.name for p in wiki.iterdir())
+        outcome = write_apply(wiki, uid="page0001", client=None, config=cfg)
+        assert not outcome.ok
+        assert any(i.code == "read-only-surface" for i in outcome.issues)
+        assert sorted(p.name for p in wiki.iterdir()) == before
+        assert not (wiki.parent / "recipes").exists()
+
+
+class TestRelationsRefuseAReadOnlySurface:
+    def test_set_and_remove_relation(self, kb: Path, ro_page: Path) -> None:
+        from athenaeum.page_relations import remove_relation, set_relation
+
+        cfg = _config()
+        wiki_page = _page(kb / "wiki" / "p.md", "concept-p", "Parent", typ="concept")
+        before = (ro_page.read_bytes(), wiki_page.read_bytes())
+        with pytest.raises(ReadOnlySurfaceError):
+            set_relation(
+                kb / "wiki", child_uid="recipe-loaf", parent_uid="concept-p", via="manual", config=cfg
+            )
+        with pytest.raises(ReadOnlySurfaceError):
+            set_relation(
+                kb / "wiki", child_uid="concept-p", parent_uid="recipe-loaf", via="manual", config=cfg
+            )
+        # a child already attached to a read-only parent cannot be detached either
+        wiki_page.write_text(
+            wiki_page.read_text(encoding="utf-8").replace(
+                "tags:", "parent: recipe-loaf\ntags:", 1
+            ),
+            encoding="utf-8",
+        )
+        before = (ro_page.read_bytes(), wiki_page.read_bytes())
+        with pytest.raises(ReadOnlySurfaceError):
+            remove_relation(kb / "wiki", child_uid="concept-p", config=cfg)
+        assert (ro_page.read_bytes(), wiki_page.read_bytes()) == before

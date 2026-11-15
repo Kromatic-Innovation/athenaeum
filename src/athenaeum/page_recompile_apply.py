@@ -233,7 +233,13 @@ from athenaeum.page_relations import (
 )
 from athenaeum.pending_merges import _add_merge_rejected_with_to_frontmatter
 from athenaeum.screening import more_restrictive
-from athenaeum.storage import open_store
+from athenaeum.storage import (
+    ReadOnlySurfaceError,
+    SurfaceNotIndexedError,
+    open_store,
+    page_write_root_for_class,
+    resolve_locator_surfaces,
+)
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
@@ -1112,6 +1118,19 @@ def compute_apply(
     plan says.
     """
     issues: list[PlanIssue] = []
+
+    def _new_page_root(entity_type: str) -> Path | None:
+        """Surface a new page of *entity_type* is written to (athenaeum#2618);
+        a non-indexed surface is refused as a plan issue."""
+        try:
+            return page_write_root_for_class(entity_type, config, wiki_root.parent)
+        except SurfaceNotIndexedError as exc:
+            issues.append(PlanIssue("surface-not-indexed", str(exc)))
+            return None
+        except ReadOnlySurfaceError as exc:
+            issues.append(PlanIssue("read-only-surface", str(exc)))
+            return None
+
     units_by_id = {unit.unit_id: unit for unit in segment.units}
     groups_by_key = {group.key: group for group in plan.groups}
     merges_by_group = {merge.group: merge for merge in plan.merges}
@@ -1428,13 +1447,16 @@ def compute_apply(
         sub_meta = _add_merge_rejected_with_to_frontmatter(sub_meta, parent_rejections)
         sub_text = render_frontmatter(sub_meta) + "\n" + sub_body
 
+        sub_root = _new_page_root(entity.type)
+        if sub_root is None:
+            continue
         sub_pages.append(
             NewSubPage(
                 uid=sub_uid,
                 name=sub_name,
                 description=description,
                 group_key=group_key,
-                path=wiki_root / entity.filename,
+                path=sub_root / entity.filename,
                 text=sub_text,
                 unit_ids=tuple(unit_ids),
                 child_unit_ids=tuple(child_unit_ids),
@@ -1516,13 +1538,16 @@ def compute_apply(
             if schema_issue is not None:
                 issues.append(schema_issue)
                 continue
+            standalone_root = _new_page_root(entity.type)
+            if standalone_root is None:
+                continue
             standalone_pages.append(
                 NewStandalonePage(
                     uid=entity.uid,
                     name=name,
                     description=group.description if group is not None else "",
                     group_key=group_key,
-                    path=wiki_root / entity.filename,
+                    path=standalone_root / entity.filename,
                     text=rendered,
                     unit_ids=tuple(standalone_items[group_key]),
                     inserted_texts=built.inserted_texts,
@@ -1592,7 +1617,7 @@ def compute_apply(
         return ComputedApply(issues=tuple(issues))
 
     # AC6/AC7/AC12: page-level actions.
-    index_map = _index_pages_by_uid(wiki_root)
+    index_map = _index_pages_by_uid(wiki_root, config)
     prospective_children = {
         parent_uid: [c.uid for c in existing_relations.children] + [sp.uid for sp in sub_pages]
     }
@@ -1796,13 +1821,16 @@ def compute_apply(
             # identical (a brand-new, fully-rendered page with no relation
             # of its own baked into its body), and `write_apply` already
             # writes every entry in this list generically.
+            standalone_root = _new_page_root(entity.type)
+            if standalone_root is None:
+                continue
             standalone_pages.append(
                 NewStandalonePage(
                     uid=entity.uid,
                     name=name,
                     description=group.description if group is not None else "",
                     group_key=group_key,
-                    path=wiki_root / entity.filename,
+                    path=standalone_root / entity.filename,
                     text=rendered,
                     unit_ids=tuple(shared_items[group_key]),
                     inserted_texts=built.inserted_texts,
@@ -1885,7 +1913,7 @@ def compute_apply(
 
     new_by_uid = {sp.uid: sp for sp in sub_pages}
     if existing_relations.children:
-        index_map = _index_pages_by_uid(wiki_root)
+        index_map = _index_pages_by_uid(wiki_root, config)
         existing_rows = {
             uid: (name, desc)
             for uid, name, desc in _children_display_rows(
@@ -2376,7 +2404,7 @@ def write_apply(
                 uid=plan.uid,
             )
 
-    index = EntityIndex(wiki_root)
+    index = EntityIndex(wiki_root, resolve_locator_surfaces(wiki_root.parent, config))
     page_path = index.get_by_uid(plan.uid)
     if page_path is None:
         return ApplyOutcome(
@@ -2519,6 +2547,7 @@ def write_apply(
                 child_uid=attachment.child_uid,
                 parent_uid=attachment.parent_uid,
                 via=attachment.via,
+                config=config,
             )
         except (RelationError, ValueError) as exc:
             attach_issues.append(
