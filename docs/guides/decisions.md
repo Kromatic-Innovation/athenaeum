@@ -127,6 +127,23 @@ file itself, most visibly `sources_omitted` — don't assume a field you
 saw in that view is present in the markdown or in `athenaeum decisions`
 JSON output.
 
+## Reading an old fold answer about shared content
+
+Some pending-merge and fold decisions carry free-text reasoning that
+predates a shared-content page existing as an option at all. If an old
+answer's own text says content "belongs on each page" — because, at the
+time, copying it onto every page it concerned was the only way to keep it
+visible everywhere — read that as "link it from each page," not as
+licence to keep stamping fresh copies. A shared page now exists for
+exactly this case: content that genuinely concerns two or more distinct
+pages gets ONE page of its own, and every page it concerns links to it,
+so there is one place to update instead of several that can drift apart.
+
+No existing duplicate is rewritten on the strength of this reading —
+re-filing what is already in a live corpus is separate, deployment-scoped
+work. The rule only changes what a NEW fold or recompile decision does
+going forward: it links, it does not copy.
+
 ## I want a resolved answer to actually reach the wiki
 
 Answering a question (either way, above) only flips the checkbox. Run:

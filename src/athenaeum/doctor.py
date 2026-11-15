@@ -238,17 +238,48 @@ def check_interpreter_version(
 _MCP_FIX = "claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge"
 
 
-def check_mcp_registered(claude_config_dir: Path) -> CheckResult:
-    """Whether ``athenaeum`` is registered under ``.claude.json``'s
-    ``mcpServers`` (issue athenaeum#2298 AC1), per the registration the README's
-    Quick start and ``examples/claude-code/README.md`` both document.
+def _mcp_candidate_paths(claude_config_dir: Path, home: Path | None) -> list[Path]:
+    """Ordered, de-duplicated candidate ``.claude.json`` locations (issue
+    athenaeum#2594).
+
+    Real Claude Code installs write the user-scope MCP registration to
+    EITHER of two places depending on version: inside the (possibly
+    ``CLAUDE_CONFIG_DIR``-relocated) config directory this module already
+    checked (``<claude_config_dir>/.claude.json``), or -- measured on
+    Claude Code 2.1.325 with no ``CLAUDE_CONFIG_DIR`` set -- at the plain
+    home-level path (``<home>/.claude.json``, a sibling of ``.claude/``,
+    not a child of it). Checking only the first location means a correct
+    ``claude mcp add --scope user`` run on the second kind of install
+    reports FAIL with a fix that is the exact command the user just ran.
+    The first candidate that exists wins; neither existing is the genuine
+    "not registered" case (AC2).
     """
-    claude_json_path = claude_config_dir / ".claude.json"
-    if not claude_json_path.is_file():
+    resolved_home = (home if home is not None else Path.home()).expanduser()
+    candidates = [claude_config_dir / ".claude.json", resolved_home / ".claude.json"]
+    deduped: list[Path] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def check_mcp_registered(claude_config_dir: Path, *, home: Path | None = None) -> CheckResult:
+    """Whether ``athenaeum`` is registered under ``.claude.json``'s
+    ``mcpServers`` (issue athenaeum#2298 AC1, extended by athenaeum#2594 to
+    search both locations real Claude Code versions write it to), per the
+    registration the README's Quick start and ``examples/claude-code/README.md``
+    both document. ``home`` mirrors :func:`check_schedule_state`'s own
+    injection -- the same real-home concept, defaulting to the real home
+    directory when not given.
+    """
+    candidates = _mcp_candidate_paths(claude_config_dir, home)
+    claude_json_path = next((p for p in candidates if p.is_file()), None)
+    if claude_json_path is None:
+        locations = " or ".join(str(p) for p in candidates)
         return CheckResult(
             name="mcp",
             status="fail",
-            detail=f"no {claude_json_path} found",
+            detail=f"no {locations} found",
             fix=_MCP_FIX,
         )
     try:
@@ -269,7 +300,9 @@ def check_mcp_registered(claude_config_dir: Path) -> CheckResult:
             fix=_MCP_FIX,
         )
     return CheckResult(
-        name="mcp", status="ok", detail="athenaeum MCP server registered"
+        name="mcp",
+        status="ok",
+        detail=f"athenaeum MCP server registered in {claude_json_path}",
     )
 
 
@@ -757,7 +790,9 @@ def run_checks(
     :func:`athenaeum.config.resolve_cache_dir`, :func:`default_claude_config_dir`),
     and no check below writes anything. ``home`` (issue athenaeum#2304) is the
     same injection :func:`athenaeum.schedule.status` takes, defaulting to the
-    real home directory.
+    real home directory; the MCP check (issue athenaeum#2594) reuses it to
+    also search the home-level ``.claude.json`` real Claude Code versions
+    write the user-scope registration to.
     """
     from athenaeum.config import load_config, resolve_cache_dir
 
@@ -770,7 +805,7 @@ def run_checks(
     return [
         check_package_version(fetch=fetch),
         check_interpreter_version(),
-        check_mcp_registered(resolved_claude_dir),
+        check_mcp_registered(resolved_claude_dir, home=home),
         check_hooks_present(resolved_claude_dir),
         check_key_mode(config, resolved_cache_dir),
         check_search_index(resolved_cache_dir, config),

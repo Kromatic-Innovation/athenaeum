@@ -79,20 +79,25 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.decision_framing import shape_errors_only, validate_answer
+from athenaeum.decision_framing import (
+    SHORT_NAME_ESCALATED_CONFLICT_TYPE,
+    shape_errors_only,
+    validate_answer,
+)
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.store import now_iso
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
 
+    from athenaeum.answers import PendingQuestion
     from athenaeum.models import TokenUsage
     from athenaeum.provider import LLMBackend
     from athenaeum.runlock import RunLock
@@ -876,10 +881,12 @@ def _apply_question_answer(pending_path: Path, answer: DecisionAnswer) -> Decisi
     # Issue athenaeum#2115: a widen question has a closed answer set; free
     # text is refused here rather than recorded, because the fold-apply path
     # will read the recorded answer back as a coordinate value.
+    matched_pq: "PendingQuestion | None" = None
     if pending_path.exists():
         for pq in parse_pending_questions(pending_path):
             if pq.id != answer.decision_id or pq.answered:
                 continue
+            matched_pq = pq
             candidates = widen_candidates(pq.description)
             if candidates and match_widen_candidate(answer.verdict, candidates) is None:
                 return DecisionAnswerOutcome(
@@ -895,6 +902,15 @@ def _apply_question_answer(pending_path: Path, answer: DecisionAnswer) -> Decisi
                 )
             break
 
+    # Issue athenaeum#2526: a short-name-collision notice is answered with a
+    # target page uid (+ optional rename), not free text -- dispatched to a
+    # dedicated applier that actually attaches the parked observation and
+    # (optionally) renames the target, BEFORE the checkbox is ever flipped,
+    # so a refusal (unknown uid, rename error) leaves the item genuinely
+    # open rather than half-resolved.
+    if matched_pq is not None and matched_pq.conflict_type == SHORT_NAME_ESCALATED_CONFLICT_TYPE:
+        return _apply_short_name_escalated_answer(pending_path, matched_pq, answer)
+
     result = resolve_by_id(pending_path, answer.decision_id, answer.verdict)
     if result["ok"]:
         return DecisionAnswerOutcome(
@@ -907,6 +923,134 @@ def _apply_question_answer(pending_path: Path, answer: DecisionAnswer) -> Decisi
                 "question marked answered; write-back to source + archival "
                 "completes on this same ingest-answers pass"
             ),
+        )
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=False,
+        error_code=result.get("error_code"),
+        message=result.get("message", ""),
+    )
+
+
+def _attach_short_name_observation(
+    page_path: Path, *, observation: str, decision_id: str
+) -> None:
+    """Append *observation* to *page_path*'s body as a dated, attributed note.
+
+    Issue athenaeum#2526 AC2: the parked observation a ``short_name_escalated``
+    notice carried (:attr:`athenaeum.answers.PendingQuestion.recovered_observation`)
+    "lands on" the chosen target page. There is no schema slot for an
+    arbitrary parked fact, so this mirrors :func:`athenaeum.corrections.
+    _record_as_prose`'s shape exactly: append as body prose, bump
+    ``updated``, re-validate the frontmatter before writing. Raises on an
+    unreadable/unparseable page or a frontmatter that fails
+    :func:`athenaeum.schemas.validate_wiki_meta` — the caller has already
+    resolved *page_path* to a real, indexed entity page by this point, so a
+    failure here means the page is corrupt, which must surface rather than
+    be silently swallowed (same posture as every other direct page mutation
+    in this module — see e.g. :func:`_apply_coordinate_answer`).
+    """
+    from athenaeum.schemas import validate_wiki_meta
+
+    text = page_path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    today = date.today().isoformat()
+    note = (
+        f"\n\n- {today}: parked observation attached (short-name collision "
+        f"resolution, decision {decision_id}, issue athenaeum#2526):\n\n"
+        f"{observation.strip()}\n"
+    )
+    new_body = body.rstrip("\n") + note
+    merged_meta = dict(meta)
+    merged_meta["updated"] = today
+    validate_wiki_meta(merged_meta)
+    atomic_write_text(page_path, render_frontmatter(merged_meta) + new_body)
+
+
+def _apply_short_name_escalated_answer(
+    pending_path: Path,
+    pq: "PendingQuestion",
+    answer: DecisionAnswer,
+) -> DecisionAnswerOutcome:
+    """Apply an answer to a ``short_name_escalated`` notice (issue athenaeum#2526).
+
+    ``answer.verdict`` names the uid of an EXISTING page; ``answer.name``,
+    when non-empty, is an additional qualified name to rename that page to
+    FIRST, through the athenaeum#2488 rename primitive
+    (:mod:`athenaeum.entity_rename` — never reimplemented here: the old
+    name lands in ``aliases:`` and provenance is recorded by
+    :func:`athenaeum.entity_rename.apply_rename` itself). The notice's
+    parked observation (:attr:`~athenaeum.answers.PendingQuestion.
+    recovered_observation`) is then attached to the (possibly renamed)
+    target page via :func:`_attach_short_name_observation`.
+
+    An unknown uid, or a rename the primitive itself refuses (e.g. an
+    unparseable target page), refuses the WHOLE answer with a clear error
+    and NEVER calls :func:`athenaeum.answers.resolve_by_id` — the item
+    stays open, exactly as AC4 requires, rather than the checkbox flipping
+    on a request that could not actually be carried out.
+    """
+    from athenaeum.answers import resolve_by_id
+    from athenaeum.entity_rename import apply_rename, build_rename_preview, resolve_rename_target
+
+    wiki_root = pending_path.parent
+    target_uid = answer.verdict.strip()
+    page_path = resolve_rename_target(wiki_root, target_uid)
+    if page_path is None:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="uid_not_found",
+            message=f"no page found for uid {target_uid!r}; item stays open",
+        )
+
+    new_name = answer.name.strip()
+    if new_name:
+        preview = build_rename_preview(wiki_root, target_uid, new_name)
+        if preview.error is not None:
+            return DecisionAnswerOutcome(
+                path=answer.path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                applied=False,
+                error_code="invalid_decision",
+                message=f"rename to {new_name!r} refused: {preview.error}",
+            )
+        if not preview.noop:
+            by = f"human:{answer.actor}" if answer.actor else "pipeline:short-name-escalated-answer"
+            apply_rename(
+                wiki_root,
+                preview,
+                by=by,
+                reason=(
+                    f"short-name collision resolution for decision "
+                    f"{answer.decision_id} (issue athenaeum#2526)"
+                ),
+            )
+            page_path = preview.new_page_path or preview.page_path
+
+    observation = pq.recovered_observation
+    if observation:
+        _attach_short_name_observation(
+            page_path, observation=observation, decision_id=answer.decision_id
+        )
+
+    note = f"attached to page uid={target_uid}"
+    if new_name:
+        note += f"; page renamed to {new_name!r}"
+    result = resolve_by_id(pending_path, answer.decision_id, note)
+    if result["ok"]:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=True,
+            error_code=None,
+            message=f"{note}; archival completes on this same ingest-answers pass",
         )
     return DecisionAnswerOutcome(
         path=answer.path,

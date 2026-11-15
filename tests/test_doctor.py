@@ -244,6 +244,62 @@ def test_claude_json_present_but_unparseable_fails_mcp(healthy_install: dict) ->
     assert doctor.exit_code(results) == 1
 
 
+# ---------------------------------------------------------------------------
+# athenaeum#2594: real Claude Code (measured on 2.1.325, no CLAUDE_CONFIG_DIR
+# set) writes the user-scope `claude mcp add --scope user` registration to
+# the HOME-LEVEL .claude.json (a sibling of .claude/, not a child of it),
+# not to <claude_config_dir>/.claude.json. The check must find it there too.
+# ---------------------------------------------------------------------------
+
+
+def test_home_level_claude_json_registration_is_ok(healthy_install: dict) -> None:
+    """AC1: a registration at the home-level `.claude.json` -- the exact
+    layout the README's `claude mcp add --scope user` step produces on
+    current Claude Code -- passes, even though `<claude_config_dir>/.claude.json`
+    does not exist at all.
+    """
+    (healthy_install["claude_dir"] / ".claude.json").unlink()
+    home_dir = healthy_install["home_dir"]
+    home_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        home_dir / ".claude.json",
+        {"mcpServers": {"athenaeum": {"command": "athenaeum", "args": ["serve"]}}},
+    )
+    results = _run_healthy(healthy_install)
+    mcp = next(r for r in results if r.name == "mcp")
+    assert mcp.status == "ok"
+    assert str(home_dir / ".claude.json") in mcp.detail
+    assert doctor.exit_code(results) == 0
+
+
+def test_neither_claude_json_location_still_fails_mcp(healthy_install: dict) -> None:
+    """AC2 counter-example: with NO registration at either real location
+    (`<claude_config_dir>/.claude.json` nor the home-level `.claude.json`),
+    the check must still FAIL -- this is the genuine "not registered" case
+    the home-level search must not paper over.
+    """
+    (healthy_install["claude_dir"] / ".claude.json").unlink()
+    assert not (healthy_install["home_dir"] / ".claude.json").exists()
+    results = _run_healthy(healthy_install)
+    mcp = next(r for r in results if r.name == "mcp")
+    assert mcp.status == "fail"
+    assert "claude mcp add" in mcp.fix
+    assert doctor.exit_code(results) == 1
+
+
+def test_claude_config_dir_location_still_wins_when_both_absent_of_home(
+    healthy_install: dict,
+) -> None:
+    """The pre-existing `<claude_config_dir>/.claude.json` location (older
+    Claude Code behavior) keeps working unchanged when the home-level file
+    does not exist -- no regression for users on that layout.
+    """
+    results = _run_healthy(healthy_install)
+    mcp = next(r for r in results if r.name == "mcp")
+    assert mcp.status == "ok"
+    assert str(healthy_install["claude_dir"] / ".claude.json") in mcp.detail
+
+
 def test_malformed_hooks_block_shapes_are_tolerated(healthy_install: dict) -> None:
     """Every malformed nesting level in ``hooks`` (issue athenaeum#2298) is
     tolerated (treated as "nothing registered"), never a crash."""
@@ -706,6 +762,11 @@ def test_doctor_cli_makes_no_writes_on_broken_install(
             str(healthy_install["cache_dir"]),
             "--claude-config-dir",
             str(healthy_install["claude_dir"]),
+            # issue athenaeum#2594: pin a fake, never-used home so the mcp
+            # check's home-level `.claude.json` search does not read the
+            # real runner's actual home directory.
+            "--home",
+            str(healthy_install["home_dir"]),
         ]
     )
     assert rc == 1

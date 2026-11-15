@@ -3545,6 +3545,40 @@ mirroring `resolve_corrections_runtime_share`'s mechanism exactly
 (own env var, own yaml key, same coercion rules: only ``0 < share < 1``
 reserves anything).
 
+### `resolve_shared_content_page_type`
+
+- **YAML path:** `librarian.shared_content_page_type`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `''`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.shared_content_page_type`` -- the ONE page type,
+if any, a fold or recompile plan may mint a shared-content page as
+(AC2).
+
+**Mechanism, not policy.** This resolver does not decide WHEN content is
+shared by two or more distinct subjects -- that judgement is made in
+code, elsewhere (`athenaeum.page_recompile_apply`'s handling of a
+``shared:<group>`` disposition); this resolver only answers WHICH page
+type, if any, a deployment has opted a shared page into. **With nothing
+declared, the value is the empty string, and every caller treats that
+as "the mechanism is off": no shared page is ever minted, and a
+``shared:<group>`` disposition downgrades to a plain ``child:<group>``
+instead** -- the same "re-planned without it" downgrade
+``librarian.page_recompile.merge_near_duplicates`` already gives a
+``merge:<group>`` disposition when IT is off. Example:
+```
+librarian:
+  shared_content_page_type: relationship
+```
+
+Validation never raises: a non-dict ``librarian`` section, a non-dict
+value nested there, or a non-string / empty
+``shared_content_page_type``, all resolve to ``""`` rather than
+half-applying a malformed value -- the same fail-to-off posture every
+other knob in this module takes.
+
 ### `resolve_sibling_widening_budget`
 
 - **YAML path:** `librarian.sibling_widening_budget`
@@ -3816,23 +3850,57 @@ untouched: every other path behaves exactly as before.
 Per type, all keys optional: ``sections`` (canonical H2 order),
 ``replace_sections`` (replaced when the raw's section is non-empty),
 ``append_sections`` (raw lines not already present are appended),
-``union_keys`` (list-valued frontmatter keys, set-unioned),
-``set_keys`` (scalar frontmatter keys, overwritten when the raw's value is
-non-empty), ``ordered_keys`` (key to a low-to-high value list; a value
-never moves down the list), and ``keep_keys`` (keys whose raw value is
-deliberately ignored: the page's value always wins, for example a
-first-seen date that must never be overwritten).
+``drop_sections`` (section replace/drop rules, below), ``union_keys``
+(list-valued frontmatter keys, set-unioned), ``set_keys`` (scalar
+frontmatter keys, overwritten when the raw's value is non-empty),
+``ordered_keys`` (key to a low-to-high value list; a value never moves
+down the list), and ``keep_keys`` (keys whose raw value is deliberately
+ignored: the page's value always wins, for example a first-seen date
+that must never be overwritten).
 
-A raw whose frontmatter carries a key outside the identity keys and these
-configured lists is refused rather than having the key silently dropped,
-so every key a producer writes must be named in one of the lists.
+``drop_sections`` is a list of ``{when_any: [...], drop: [...]}`` rules:
+when the raw carries non-empty content for any section named in
+``when_any`` (each must also be listed in ``sections`` -- it is a
+destination the new layout writes to), every section named in ``drop``
+is removed from the page outright, even one not listed in ``sections``
+at all (it is naming an OLD layout being retired, not a destination the
+new layout still writes to). This is what lets a page's section layout
+actually CHANGE shape on upsert, rather than only ever gain sections
+alongside whatever was already there.
+
+A raw whose frontmatter carries a key outside the identity keys, the
+provenance keys the ``remember`` MCP tool itself stamps (``model``,
+``originSessionId``, ``source`` -- accepted on every type, unconditionally,
+and never merged onto the page), and these configured lists is refused
+rather than having the key silently dropped, so every OTHER key a
+producer writes must be named in one of the lists.
 
 Validation never raises: a non-dict entry, a type name that is not a
-non-empty string, or a ``replace_sections``/``append_sections`` name absent
-from ``sections`` is dropped (logged at WARNING) rather than half-applied.
-The identity keys ``uid``, ``type``, ``created``, ``access`` and
-``updated`` are stripped from every key list, so no config can make the
-upsert rewrite them. Missing or malformed config returns an empty mapping.
+non-empty string, a ``replace_sections``/``append_sections`` name absent
+from ``sections``, or a malformed/empty ``drop_sections`` rule (not a
+dict, no ``when_any`` section actually listed in ``sections``, or no
+``drop`` section named) is dropped (logged at WARNING) rather than
+half-applied. The identity keys ``uid``, ``type``, ``created``, ``access``
+and ``updated`` are stripped from every key list, so no config can make
+the upsert rewrite them. Missing or malformed config returns an empty
+mapping.
+
+Worked example -- converting a recipe page from an ``Ingredients``/
+``Steps`` layout to a household ``Shopping``/``Prep``/``Cooking``/``Serve``
+layout, the deployment config an operator applies after this lands (the
+exact shape this repo's engine stays agnostic to; nothing here knows the
+word "recipe"):
+```
+librarian:
+  structured_upsert:
+    recipe:
+      sections: [Shopping, "Check pantry", Prep, Cooking, Serve, Notes, Source]
+      append_sections: [Notes, Source]
+      drop_sections:
+        - when_any: [Shopping, "Check pantry", Prep, Cooking, Serve]
+          drop: [Ingredients, Steps]
+      set_keys: [recipe_format]
+```
 
 ### `resolve_supersession_asserter_weekly_max`
 

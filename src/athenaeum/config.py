@@ -154,8 +154,11 @@ _DEFAULTS: dict[str, Any] = {
     # athenaeum#1736 -- see docs/design/native-memory-baseline.md Section 7 for
     # the measured basis. "fts5" is now the opt-out
     # (search_backend: fts5). A default install without the vector extra
-    # (chromadb) degrades to fts5 at query time with one logged warning --
-    # see VectorBackend.query in athenaeum.search.
+    # (chromadb) degrades to fts5 with one logged warning, both at query
+    # time (VectorBackend.query in athenaeum.search) and at build time
+    # (librarian.reindex / _cmd_index.py's cmd_rebuild_index, issue
+    # athenaeum#2592) -- reindex and session-end build a real fts5 index
+    # instead of erroring, so the query-time fallback has something to read.
     "search_backend": "vector",
     "vector": {
         "provider": "chromadb",
@@ -5634,8 +5637,9 @@ auto_recall: true
 # default) or "fts5" (keyword only, the opt-out).
 # vector: Chromadb with local embeddings, fused with FTS5 via reciprocal-rank
 #   fusion (recall.hybrid, default on). Requires: pip install athenaeum[vector]
-#   -- a default install without it degrades to fts5 at query time with one
-#   logged warning, no traceback.
+#   -- a default install without it degrades to fts5 (both for recall
+#   queries and for `reindex`/`session-end`) with one logged warning, no
+#   traceback.
 # fts5: SQLite FTS5 with BM25 ranking and porter stemming. No extra
 #   dependencies. Set search_backend: fts5 to opt out of vector.
 search_backend: vector
@@ -9306,6 +9310,21 @@ def resolve_source_trust_edges(config: dict[str, Any] | None) -> tuple[Any, ...]
 #: upsert stamps it itself, and only when something actually changed.
 STRUCTURED_UPSERT_PROTECTED_KEYS = frozenset({"uid", "type", "created", "access", "updated"})
 
+#: Provenance keys the ``remember`` MCP tool itself stamps onto a write's
+#: frontmatter when its caller omits ``sources`` (issue athenaeum#2587):
+#: ``source`` is the wiki-level scalar default
+#: (``mcp_server._DEFAULT_INFERRED_SOURCE`` / ``_REMOTE_INFERRED_SOURCE``),
+#: and ``model``/``originSessionId`` are the extras
+#: ``mcp_server._default_inferred_extras`` adds alongside it. A pre-structured
+#: raw that arrives this way (the common, caller-unchanged path) carries all
+#: three whether or not the type's own config declares them, so every
+#: structured-upsert type accepts them unconditionally rather than requiring
+#: every deployment config to repeat the same three-key boilerplate. They are
+#: never merged onto the page (the page's own ``created``/``access``/``uid``
+#: already carry the page's provenance) -- accepted and silently dropped,
+#: exactly like a declared ``keep_keys`` entry with no page value to keep.
+STRUCTURED_UPSERT_PROVENANCE_KEYS = frozenset({"model", "originSessionId", "source"})
+
 
 @dataclass(frozen=True)
 class StructuredUpsertSpec:
@@ -9314,7 +9333,13 @@ class StructuredUpsertSpec:
     Pure data, no behaviour: :mod:`athenaeum.structured_upsert` interprets it.
     ``sections`` is the canonical H2 order; ``replace_sections`` and
     ``append_sections`` hold casefolded names that are a subset of it (a
-    section in neither is only ever inserted when absent). ``ordered_keys``
+    section in neither is only ever inserted when absent). ``drop_sections``
+    pairs a casefolded trigger-section set with a casefolded drop-section set:
+    when the raw carries non-empty content for ANY trigger section, EVERY drop
+    section is removed from the page outright (not merely left stale) --
+    unlike ``replace_sections``/``append_sections``, a drop section need not
+    be listed in ``sections`` at all, since it is naming an OLD layout being
+    retired, not a destination the new layout still writes to. ``ordered_keys``
     pairs a frontmatter key with its rank-ordered value list (lowest to
     highest); a value never moves down.
     """
@@ -9322,6 +9347,7 @@ class StructuredUpsertSpec:
     sections: tuple[str, ...] = ()
     replace_sections: frozenset[str] = frozenset()
     append_sections: frozenset[str] = frozenset()
+    drop_sections: tuple[tuple[frozenset[str], frozenset[str]], ...] = ()
     union_keys: tuple[str, ...] = ()
     set_keys: tuple[str, ...] = ()
     ordered_keys: tuple[tuple[str, tuple[str, ...]], ...] = ()
@@ -9351,23 +9377,56 @@ def resolve_structured_upsert(
     Per type, all keys optional: ``sections`` (canonical H2 order),
     ``replace_sections`` (replaced when the raw's section is non-empty),
     ``append_sections`` (raw lines not already present are appended),
-    ``union_keys`` (list-valued frontmatter keys, set-unioned),
-    ``set_keys`` (scalar frontmatter keys, overwritten when the raw's value is
-    non-empty), ``ordered_keys`` (key to a low-to-high value list; a value
-    never moves down the list), and ``keep_keys`` (keys whose raw value is
-    deliberately ignored: the page's value always wins, for example a
-    first-seen date that must never be overwritten).
+    ``drop_sections`` (section replace/drop rules, below), ``union_keys``
+    (list-valued frontmatter keys, set-unioned), ``set_keys`` (scalar
+    frontmatter keys, overwritten when the raw's value is non-empty),
+    ``ordered_keys`` (key to a low-to-high value list; a value never moves
+    down the list), and ``keep_keys`` (keys whose raw value is deliberately
+    ignored: the page's value always wins, for example a first-seen date
+    that must never be overwritten).
 
-    A raw whose frontmatter carries a key outside the identity keys and these
-    configured lists is refused rather than having the key silently dropped,
-    so every key a producer writes must be named in one of the lists.
+    ``drop_sections`` is a list of ``{when_any: [...], drop: [...]}`` rules:
+    when the raw carries non-empty content for any section named in
+    ``when_any`` (each must also be listed in ``sections`` -- it is a
+    destination the new layout writes to), every section named in ``drop``
+    is removed from the page outright, even one not listed in ``sections``
+    at all (it is naming an OLD layout being retired, not a destination the
+    new layout still writes to). This is what lets a page's section layout
+    actually CHANGE shape on upsert, rather than only ever gain sections
+    alongside whatever was already there.
+
+    A raw whose frontmatter carries a key outside the identity keys, the
+    provenance keys the ``remember`` MCP tool itself stamps (``model``,
+    ``originSessionId``, ``source`` -- accepted on every type, unconditionally,
+    and never merged onto the page), and these configured lists is refused
+    rather than having the key silently dropped, so every OTHER key a
+    producer writes must be named in one of the lists.
 
     Validation never raises: a non-dict entry, a type name that is not a
-    non-empty string, or a ``replace_sections``/``append_sections`` name absent
-    from ``sections`` is dropped (logged at WARNING) rather than half-applied.
-    The identity keys ``uid``, ``type``, ``created``, ``access`` and
-    ``updated`` are stripped from every key list, so no config can make the
-    upsert rewrite them. Missing or malformed config returns an empty mapping.
+    non-empty string, a ``replace_sections``/``append_sections`` name absent
+    from ``sections``, or a malformed/empty ``drop_sections`` rule (not a
+    dict, no ``when_any`` section actually listed in ``sections``, or no
+    ``drop`` section named) is dropped (logged at WARNING) rather than
+    half-applied. The identity keys ``uid``, ``type``, ``created``, ``access``
+    and ``updated`` are stripped from every key list, so no config can make
+    the upsert rewrite them. Missing or malformed config returns an empty
+    mapping.
+
+    Worked example -- converting a recipe page from an ``Ingredients``/
+    ``Steps`` layout to a household ``Shopping``/``Prep``/``Cooking``/``Serve``
+    layout, the deployment config an operator applies after this lands (the
+    exact shape this repo's engine stays agnostic to; nothing here knows the
+    word "recipe")::
+
+        librarian:
+          structured_upsert:
+            recipe:
+              sections: [Shopping, "Check pantry", Prep, Cooking, Serve, Notes, Source]
+              append_sections: [Notes, Source]
+              drop_sections:
+                - when_any: [Shopping, "Check pantry", Prep, Cooking, Serve]
+                  drop: [Ingredients, Steps]
+              set_keys: [recipe_format]
     """
     out: dict[str, StructuredUpsertSpec] = {}
     if not isinstance(config, dict):
@@ -9398,6 +9457,44 @@ def resolve_structured_upsert(
                 etype.strip(),
                 stray,
             )
+        drop_rules: list[tuple[frozenset[str], frozenset[str]]] = []
+        raw_drop_rules = entry.get("drop_sections")
+        if isinstance(raw_drop_rules, list):
+            for rule in raw_drop_rules:
+                if not isinstance(rule, dict):
+                    logger.warning(
+                        "librarian.structured_upsert.%s: ignoring drop_sections "
+                        "entry %r (want a dict with `when_any` and `drop`)",
+                        etype.strip(),
+                        rule,
+                    )
+                    continue
+                when_any = _structured_upsert_str_list(rule.get("when_any"))
+                drop = _structured_upsert_str_list(rule.get("drop"))
+                stray_trigger = [s for s in when_any if s.casefold() not in folded]
+                if stray_trigger:
+                    logger.warning(
+                        "librarian.structured_upsert.%s: ignoring drop_sections "
+                        "`when_any` section(s) %s not listed in `sections`",
+                        etype.strip(),
+                        stray_trigger,
+                    )
+                trigger = frozenset(s.casefold() for s in when_any if s.casefold() in folded)
+                if not trigger or not drop:
+                    logger.warning(
+                        "librarian.structured_upsert.%s: ignoring drop_sections "
+                        "entry %r (needs at least one `when_any` section listed "
+                        "in `sections` and at least one `drop` section)",
+                        etype.strip(),
+                        rule,
+                    )
+                    continue
+                drop_rules.append((trigger, frozenset(s.casefold() for s in drop)))
+        elif raw_drop_rules is not None:
+            logger.warning(
+                "librarian.structured_upsert.%s: ignoring `drop_sections` (want a list)",
+                etype.strip(),
+            )
         ordered: list[tuple[str, tuple[str, ...]]] = []
         raw_ordered = entry.get("ordered_keys")
         if isinstance(raw_ordered, dict):
@@ -9422,6 +9519,7 @@ def resolve_structured_upsert(
             sections=sections,
             replace_sections=frozenset(s.casefold() for s in replace if s.casefold() in folded),
             append_sections=frozenset(s.casefold() for s in append if s.casefold() in folded),
+            drop_sections=tuple(drop_rules),
             union_keys=_keys("union_keys"),
             set_keys=_keys("set_keys"),
             ordered_keys=tuple(ordered),
@@ -10196,3 +10294,49 @@ def resolve_page_type_field_groups(
         if type_groups:
             out[page_type.strip()] = type_groups
     return out
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2589 -- `librarian.shared_content_page_type`. Appended
+# here, at the end of the file, per this module's own established
+# convention (see `resolve_page_type_field_groups` above) of giving a
+# concurrently-landing lane's resolver its own append point so two lanes'
+# diffs don't collide on the same hunk.
+# ---------------------------------------------------------------------------
+
+
+def resolve_shared_content_page_type(config: dict[str, Any] | None) -> str:
+    """Resolve ``librarian.shared_content_page_type`` -- the ONE page type,
+    if any, a fold or recompile plan may mint a shared-content page as
+    (issue athenaeum#2589 AC2).
+
+    **Mechanism, not policy.** This resolver does not decide WHEN content is
+    shared by two or more distinct subjects -- that judgement is made in
+    code, elsewhere (:mod:`athenaeum.page_recompile_apply`'s handling of a
+    ``shared:<group>`` disposition); this resolver only answers WHICH page
+    type, if any, a deployment has opted a shared page into. **With nothing
+    declared, the value is the empty string, and every caller treats that
+    as "the mechanism is off": no shared page is ever minted, and a
+    ``shared:<group>`` disposition downgrades to a plain ``child:<group>``
+    instead** -- the same "re-planned without it" downgrade
+    ``librarian.page_recompile.merge_near_duplicates`` already gives a
+    ``merge:<group>`` disposition when IT is off. Example::
+
+        librarian:
+          shared_content_page_type: relationship
+
+    Validation never raises: a non-dict ``librarian`` section, a non-dict
+    value nested there, or a non-string / empty
+    ``shared_content_page_type``, all resolve to ``""`` rather than
+    half-applying a malformed value -- the same fail-to-off posture every
+    other knob in this module takes.
+    """
+    if not isinstance(config, dict):
+        return ""
+    lib = config.get("librarian")
+    if not isinstance(lib, dict):
+        return ""
+    raw = lib.get("shared_content_page_type")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
