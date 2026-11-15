@@ -635,7 +635,15 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     summary += (
         f", {report.folds_applied} fold(s) applied, "
         f"{report.folds_rejected} fold(s) rejected, "
-        f"{report.folds_refused} fold(s) refused."
+        f"{report.folds_refused} fold(s) refused"
+    )
+    # Issue athenaeum#2705: classification_failed answers are applied by
+    # re-ingesting their retained statement; an answer with nothing left to
+    # apply is named here as unrecoverable, never silently held.
+    summary += (
+        f", {report.reingested} re-ingested, "
+        f"{report.reingest_dismissed} dismissed, "
+        f"{report.unrecoverable} unrecoverable."
     )
     print(summary)
     return 0
