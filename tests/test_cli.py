@@ -2319,3 +2319,48 @@ class TestRemovedCommandsPointToReplacements:
         assert "prune-dispositions" not in out
         assert "audit-h1-redaction" not in out
         assert "migrate-pii" in out
+
+
+class TestGroupedTopLevelHelp:
+    """athenaeum#2686: `athenaeum --help` groups subcommands."""
+
+    def test_every_subcommand_is_in_exactly_one_group(self) -> None:
+        from athenaeum.cli import _COMMAND_GROUPS, _SUBCOMMAND_LOADERS
+
+        grouped = [name for _, names in _COMMAND_GROUPS for name in names]
+        duplicates = sorted({n for n in grouped if grouped.count(n) > 1})
+        assert not duplicates, f"listed in more than one help group: {duplicates}"
+        ungrouped = sorted(set(_SUBCOMMAND_LOADERS) - set(grouped))
+        assert not ungrouped, (
+            f"subcommands missing from _COMMAND_GROUPS in cli.py: {ungrouped}"
+        )
+        unknown = sorted(set(grouped) - set(_SUBCOMMAND_LOADERS))
+        assert not unknown, f"groups name unregistered commands: {unknown}"
+
+    def test_top_level_help_lists_groups_and_every_command(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _COMMAND_GROUPS, _SUBCOMMAND_LOADERS
+
+        with pytest.raises(SystemExit) as exc:
+            main(["--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        for heading, _ in _COMMAND_GROUPS:
+            assert f"\n{heading}:\n" in out
+        listed = {
+            line.split()[0] for line in out.splitlines() if line.startswith("  ") and line.split()
+        }
+        assert set(_SUBCOMMAND_LOADERS) <= listed
+        # No flat `{a,b,c,...}` choice list.
+        assert "{init," not in out
+
+    def test_grouping_does_not_change_parsing(self) -> None:
+        from athenaeum.cli import build_parser
+
+        parser = build_parser()
+        assert parser.parse_args(["decisions", "count"]).command == "decisions"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["not-a-command"])
+
+

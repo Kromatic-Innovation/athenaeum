@@ -7,9 +7,10 @@
 **Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
 ```bash
-uv tool install --python 3.13 'athenaeum[mcp]'   # or: pip install 'athenaeum[mcp]'
-athenaeum init                                    # then see Quick start below
+uv tool install --python 3.13 'athenaeum[mcp]'
 ```
+
+Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 
 <p align="center">
   <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
