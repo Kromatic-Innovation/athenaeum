@@ -1,0 +1,174 @@
+# Recall-metrics gold set: invented example (athenaeum#2611).
+# Design and field meanings: docs/design/recall-metrics.md.
+# Every task is invented over the synthetic eval corpus under
+# tests/evals/data/corpus/ (see its README for the content policy). `reach`
+# records whether a push built from the task text could plausibly surface the
+# page (lexical) or only a link from another page could (linked); the decoy
+# pages the corpus plants ("safe to do it" notes) are deliberately NOT labelled
+# relevant. No task carries a session_id: the example is a schema/format
+# fixture, not a measurement.
+version: 1
+corpus: tests/evals/data/corpus/core
+tasks:
+  - id: relay-make-sync
+    prompt: "Fix the duplicate downstream entries from the fulfillment relay by making its dispatch step synchronous."
+    relevant:
+      - uid: system-fulfillment-relay
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-console-latency-requirement
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: drop-nightly-reconciliation
+    prompt: "Remove the nightly ledger-reconciliation job; it looks redundant with the live balance check."
+    relevant:
+      - uid: job-nightly-ledger-reconciliation
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-compliance-filing-single-source
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: rename-invoice-ref
+    prompt: "Rename the invoiceRef field in the billing API to something clearer."
+    relevant:
+      - uid: api-billing-invoice-field
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-partner-import-key-locked
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: remove-checkout-limit
+    prompt: "Remove the rate limit on the checkout payment endpoint to cut retry noise."
+    relevant:
+      - uid: api-checkout-rate-limit
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-processor-authorization-ceiling
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: merge-cache-layers
+    prompt: "Merge the session cache layers into one to simplify invalidation."
+    relevant:
+      - uid: system-session-cache-layers
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-tenant-isolation-requirement
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: grow-orders-pool
+    prompt: "Increase the orders service connection pool size to stop timeouts at peak."
+    relevant:
+      - uid: service-orders-connection-pool
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-hosting-account-session-ceiling
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: delete-export-flag
+    prompt: "Delete the dormant export-restrictions flag and its code path."
+    relevant:
+      - uid: flag-export-restrictions-dormant
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-regulatory-audit-window-switch
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: lower-webhook-backoff
+    prompt: "Lower the webhook retry backoff so partners get callbacks faster."
+    relevant:
+      - uid: service-webhook-retry-backoff
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-partner-callback-rate-ban
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: merge-invoice-roles
+    prompt: "Combine the invoice submitter and approver roles to remove a handoff."
+    relevant:
+      - uid: role-invoice-approver-submitter
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-duties-segregation-requirement
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: bump-tls-library
+    prompt: "Upgrade the pinned TLS library to the latest release."
+    relevant:
+      - uid: dependency-tls-library-pin
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-hardware-signing-certification-lock
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: switch-off-claims-logging
+    prompt: "Turn off verbose logging in the claims service to cut storage cost."
+    relevant:
+      - uid: service-claims-verbose-logging
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: lexical
+      - uid: decision-discovery-preservation-order
+        source: tests/evals/data/corpus/core/13-unprompted-push.yaml
+        relevance: required
+        reach: linked
+  - id: move-portal-hosting
+    prompt: "Draft the plan for moving the client portal to managed hosting."
+    relevant:
+      - uid: decision-hosting-managed
+        source: tests/evals/data/corpus/core/06-decisions.yaml
+        relevance: required
+        reach: lexical
+      - uid: project-portal-hosting
+        source: tests/evals/data/corpus/core/03-projects-tools.yaml
+        relevance: required
+        reach: lexical
+      - uid: project-portal-refresh
+        source: tests/evals/data/corpus/core/03-projects-tools.yaml
+        relevance: helpful
+        reach: linked
+  - id: pto-carry-forward
+    prompt: "Answer a staff question about how much PTO can be carried into next year."
+    relevant:
+      - uid: decision-carry-forward-cap
+        source: tests/evals/data/corpus/core/06-decisions.yaml
+        relevance: required
+        reach: lexical
+      - uid: policy-pto
+        source: tests/evals/data/corpus/core/02-policies.yaml
+        relevance: required
+        reach: lexical
+  - id: run-month-end-invoicing
+    prompt: "Prepare the month-end invoice run for the retainer clients."
+    relevant:
+      - uid: ops-invoice-run
+        source: tests/evals/data/corpus/core/07-operations.yaml
+        relevance: required
+        reach: lexical
+      - uid: policy-invoice-cadence
+        source: tests/evals/data/corpus/core/02-policies.yaml
+        relevance: required
+        reach: lexical
+      - uid: ops-timesheet-cadence
+        source: tests/evals/data/corpus/core/07-operations.yaml
+        relevance: helpful
+        reach: linked
