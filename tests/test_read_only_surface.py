@@ -676,11 +676,13 @@ class TestRelationsRefuseAReadOnlySurface:
         before = (ro_page.read_bytes(), wiki_page.read_bytes())
         with pytest.raises(ReadOnlySurfaceError):
             set_relation(
-                kb / "wiki", child_uid="recipe-loaf", parent_uid="concept-p", via="manual", config=cfg
+                kb / "wiki", child_uid="recipe-loaf", parent_uid="concept-p",
+                via="manual", config=cfg
             )
         with pytest.raises(ReadOnlySurfaceError):
             set_relation(
-                kb / "wiki", child_uid="concept-p", parent_uid="recipe-loaf", via="manual", config=cfg
+                kb / "wiki", child_uid="concept-p", parent_uid="recipe-loaf",
+                via="manual", config=cfg
             )
         # a child already attached to a read-only parent cannot be detached either
         wiki_page.write_text(
