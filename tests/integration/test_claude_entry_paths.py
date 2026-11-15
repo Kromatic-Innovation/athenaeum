@@ -35,27 +35,84 @@ live run found). A case failing for one of these reasons is an
 athenaeum#2161 finding about the DRIVER, not necessarily about the
 adapter -- read the assertion that failed before filing anything against
 ``claude_code_adapter.py`` or ``promptwitness.harness.claude_code``.
+
+**Authenticated, hook-isolated sessions (athenaeum#2588).** Every interactive
+row runs under an ISOLATED ``CLAUDE_CONFIG_DIR`` (so the host's own
+``settings.json`` hooks are never loaded next to the harness's ``--settings``
+hook, and exactly one hook fires per turn). An isolated dir starts logged out
+and at onboarding, so :func:`seed_isolated_config_dir` hands it a login
+through one documented route, tried in this order (the first present wins):
+
+1. ``CLAUDE_CODE_OAUTH_TOKEN`` in the environment -- a long-lived token from
+   ``claude setup-token``. **The route to use on macOS**, where the host login
+   lives in the Keychain, not in a file this harness could copy.
+2. ``ANTHROPIC_API_KEY`` in the environment (its last 20 characters are
+   pre-approved in the isolated ``.claude.json`` so no key-approval dialog
+   blocks the TUI).
+3. ``<host config dir>/.credentials.json`` copied byte-for-byte (the Linux
+   credential-file layout). The host dir is
+   :data:`HOST_CONFIG_DIR_ENV`, else ``CLAUDE_CONFIG_DIR``, else ``~/.claude``.
+
+ONLY that credential (token env var, key env var, or the one credentials file)
+crosses into the isolated dir -- never ``settings.json``, hooks, or any other
+host file; the seeded ``.claude.json`` carries just onboarding-complete and
+folder-trust flags. With none of the three present the live run fails loudly
+before spawning anything rather than producing a dead, logged-out session.
+Managed (system-wide) settings, if the host has them, still load; the harness
+cannot isolate those.
+
+**Prompt submission (athenaeum#2588).** The previous driver wrote the text and
+``\\r`` back to back; ``\\r``, ``\\n`` and CSI ``13u`` all failed to submit
+on a live host. The best-justified cause is that the TUI's input layer treats
+one stdin read carrying several characters including a carriage return as a
+PASTE (the CR becomes a newline inside the box), so Enter must arrive as its
+own read after a settle delay (:func:`submit_into_pty`); the pty also now has a
+real window size (:func:`spawn_claude_pty`) and ``TERM`` is set. None of that
+is provable offline, so submission is never assumed: :func:`submit_and_confirm`
+re-presses Enter until the session TRANSCRIPT contains a user record carrying
+the submitted prompt, and raises (with the tail of the screen) if it never
+does. Every row therefore asserts a transcript line for its own prompt, and a
+row that expects NO ledger line additionally asserts its parent session
+submitted a turn (:func:`assert_parent_turn_submitted`), so a dead session
+cannot pass. If Enter still does not submit on a live host, that is an
+athenaeum#2161 driver finding, now reported as such rather than as a pass.
+
+**Environment scrub (athenaeum#2588).** ``CLAUDE_CODE_*``, ``CLAUDECODE``,
+``CLAUDE_PID`` and ``CLAUDE_EFFORT`` inherited from an enclosing Claude Code
+session are removed from the child env (:func:`scrub_inherited_claude_env`),
+otherwise an inherited ``CLAUDE_CODE_BRIDGE_SESSION_ID`` classifies every row
+as ``bridge``. ``CLAUDE_CODE_OAUTH_TOKEN`` is the one deliberate survivor.
+
+**Bridge row.** Has no local driver; it is always SKIPPED with a recorded
+reason (visible under ``pytest -rs``), never a hard failure.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pty
 import select
 import shutil
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from athenaeum.transcript_verify import _parse_session_text, _user_authored_text
+from athenaeum.transcript_verify import (
+    _non_tool_result_text,
+    _parse_session_text,
+    _user_authored_text,
+)
 from athenaeum.witness_attestation import AttestationIndex, AttestationOutcome, attest
 from promptwitness import canon, ledger
 
@@ -71,6 +128,15 @@ __all__ = [
     "write_settings_file",
     "resolve_hook_command",
     "build_child_env",
+    "scrub_inherited_claude_env",
+    "seed_isolated_config_dir",
+    "HarnessAuthError",
+    "HOST_CONFIG_DIR_ENV",
+    "submit_into_pty",
+    "submit_and_confirm",
+    "transcript_has_prompt",
+    "wait_for_transcript_prompt",
+    "assert_parent_turn_submitted",
     "write_observations",
     "spawn_claude_pty",
     "type_into_pty",
@@ -78,7 +144,6 @@ __all__ = [
     "read_pty_until_idle",
     "find_transcript_record",
     "transcript_record_fields",
-    "should_skip_claude_ai_bridge",
     "claude_ai_bridge_skip_reason",
 ]
 
@@ -90,11 +155,10 @@ __all__ = [
 #: this lane, never set in CI -- the live run belongs to athenaeum#2161.
 PROMPTWITNESS_LIVE_CLAUDE_ENV = "PROMPTWITNESS_LIVE_CLAUDE"
 
-#: The claude.ai-bridge case cannot be driven from a local pty at all (no
-#: local process carries ``CLAUDE_CODE_BRIDGE_SESSION_ID`` on its own). This
-#: second, independent opt-in lets athenaeum#2161 run that ONE case from
-#: inside an actual claude.ai remote session without also needing a local
-#: TTY -- see ``test_claude_ai_bridge_case_skips_outside_remote_session``.
+#: The claude.ai-bridge row cannot be driven from a local pty at all (no
+#: local process carries ``CLAUDE_CODE_BRIDGE_SESSION_ID`` on its own), so it
+#: is always skipped with a recorded reason (athenaeum#2588). Setting this is
+#: acknowledged in that reason but does not change the outcome.
 CLAUDE_AI_BRIDGE_LIVE_ENV = "PROMPTWITNESS_LIVE_CLAUDE_AI_BRIDGE"
 
 pytestmark = [
@@ -200,6 +264,38 @@ def resolve_hook_command() -> str:
     return HOOK_COMMAND_NAME
 
 
+#: Env vars an enclosing Claude Code session exports (athenaeum#2588): any
+#: ``CLAUDE_CODE_*`` name plus these exact ones. Left in the child env they
+#: make it a *child session* of the enclosing one and, via
+#: ``CLAUDE_CODE_BRIDGE_SESSION_ID``, classify every row as ``bridge``.
+_INHERITED_CLAUDE_ENV_PREFIX = "CLAUDE_CODE_"
+_INHERITED_CLAUDE_ENV_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"})
+
+#: The credential hand-off env var that survives the scrub on purpose.
+_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+#: Env var naming the host config dir to copy ``.credentials.json`` from.
+HOST_CONFIG_DIR_ENV = "PROMPTWITNESS_LIVE_CLAUDE_HOST_CONFIG_DIR"
+_CREDENTIALS_FILENAME = ".credentials.json"
+
+
+def scrub_inherited_claude_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of *base_env* without the enclosing session's ``CLAUDE_CODE_*`` /
+    ``CLAUDECODE`` / ``CLAUDE_PID`` / ``CLAUDE_EFFORT`` variables.
+
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is kept: it is the documented credential
+    hand-off (see the module docstring), not session state. *base_env* is
+    never mutated.
+    """
+    return {
+        key: value
+        for key, value in base_env.items()
+        if key == _OAUTH_TOKEN_ENV
+        or not (key.startswith(_INHERITED_CLAUDE_ENV_PREFIX) or key in _INHERITED_CLAUDE_ENV_EXACT)
+    }
+
+
 def build_child_env(
     base_env: Mapping[str, str],
     *,
@@ -224,9 +320,15 @@ def build_child_env(
       athenaeum#723) lands inside the same tmp tree instead of the
       operator's real ``~/.claude``;
     - ``PROMPTWITNESS_LAUNCHER`` to *launcher* when given (athenaeum#2172,
-      a free-text label only -- never affects classification).
+      a free-text label only -- never affects classification);
+    - ``TERM=xterm-256color`` (a pty child otherwise inherits whatever the
+      test runner has, possibly ``dumb``).
+
+    Inherited ``CLAUDE_CODE_*`` / ``CLAUDECODE`` variables are scrubbed first
+    (:func:`scrub_inherited_claude_env`, athenaeum#2588).
     """
-    child_env = dict(base_env)
+    child_env = scrub_inherited_claude_env(base_env)
+    child_env["TERM"] = "xterm-256color"
     child_env["ATHENAEUM_WITNESS_LEDGER_ENABLED"] = "true"
     child_env["PROMPTWITNESS_DIR"] = str(promptwitness_dir)
     if claude_config_dir is not None:
@@ -234,6 +336,60 @@ def build_child_env(
     if launcher is not None:
         child_env["PROMPTWITNESS_LAUNCHER"] = launcher
     return child_env
+
+
+class HarnessAuthError(RuntimeError):
+    """No credential hand-off route is available for the isolated config dir."""
+
+
+def _host_config_dir(env: Mapping[str, str]) -> Path:
+    explicit = env.get(HOST_CONFIG_DIR_ENV) or env.get("CLAUDE_CONFIG_DIR")
+    return Path(explicit) if explicit else Path.home() / ".claude"
+
+
+def seed_isolated_config_dir(config_dir: Path, *, workdir: Path, env: Mapping[str, str]) -> str:
+    """Make *config_dir* an authenticated, onboarded, folder-trusting isolated
+    Claude config dir WITHOUT carrying any host settings or hooks (athenaeum#2588).
+
+    *env* is the UNSCRUBBED harness environment (normally ``os.environ``),
+    read only to find the credential. Returns the route used:
+    ``"oauth-token-env"``, ``"api-key-env"`` or ``"credentials-file"`` (the
+    order of precedence; see the module docstring). Raises
+    :class:`HarnessAuthError` when none is available.
+
+    Writes only ``<config_dir>/.claude.json`` (onboarding done, *workdir*
+    trusted, API key pre-approved when that route is used) and, for the file
+    route, ``<config_dir>/.credentials.json`` (mode 0600).
+    """
+    state: dict[str, Any] = {
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "projects": {
+            str(path): {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}
+            for path in {workdir, workdir.resolve()}
+        },
+    }
+    config_dir.mkdir(parents=True, exist_ok=True)
+    if env.get(_OAUTH_TOKEN_ENV):
+        method = "oauth-token-env"
+    elif env.get(_API_KEY_ENV):
+        method = "api-key-env"
+        state["customApiKeyResponses"] = {"approved": [env[_API_KEY_ENV][-20:]], "rejected": []}
+    else:
+        source = _host_config_dir(env) / _CREDENTIALS_FILENAME
+        if not source.is_file():
+            raise HarnessAuthError(
+                "no credential for the isolated claude config dir: set "
+                f"{_OAUTH_TOKEN_ENV} (from `claude setup-token`; the macOS route), "
+                f"or {_API_KEY_ENV}, or point {HOST_CONFIG_DIR_ENV} at a config dir "
+                f"holding {_CREDENTIALS_FILENAME}"
+            )
+        target = config_dir / _CREDENTIALS_FILENAME
+        target.write_bytes(source.read_bytes())
+        target.chmod(0o600)
+        method = "credentials-file"
+    (config_dir / ".claude.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return method
 
 
 # ---------------------------------------------------------------------------
@@ -268,25 +424,26 @@ class EntryPathObservations:
         }
 
 
-def should_skip_claude_ai_bridge(env: Mapping[str, str]) -> bool:
-    """``True`` unless *env* opts into the claude.ai bridge case
-    (:data:`CLAUDE_AI_BRIDGE_LIVE_ENV`). Factored out of
-    :func:`test_entry_path` so the decision itself -- not just its effect
-    inside a skipped pytest module -- is unit-testable."""
-    return env.get(CLAUDE_AI_BRIDGE_LIVE_ENV) != "1"
+def claude_ai_bridge_skip_reason(env: Mapping[str, str] | None = None) -> str:
+    """The explicit, non-empty skip reason for the claude.ai bridge row.
 
-
-def claude_ai_bridge_skip_reason() -> str:
-    """The explicit, non-empty skip reason for the claude.ai bridge case
-    (issue AC: "the bridge case skips with an explicit reason outside a
-    claude.ai remote session")."""
-    return (
+    The row is ALWAYS skipped (athenaeum#2588): it has no local driver, so a
+    hard failure carried no information. The reason is the recorded outcome
+    (``pytest -rs``); when *env* has :data:`CLAUDE_AI_BRIDGE_LIVE_ENV` set it
+    also says that opt-in is acknowledged but there is still no driver.
+    """
+    reason = (
         "the claude.ai bridge case cannot be driven from a local pty (no "
         "local process can set CLAUDE_CODE_BRIDGE_SESSION_ID the way the "
-        f"real bridge does) -- set {CLAUDE_AI_BRIDGE_LIVE_ENV}=1 from inside "
-        "an actual claude.ai remote session to run it (athenaeum#2161 runs "
-        "it there, not here)"
+        "real bridge does); observe it manually from inside an actual "
+        "claude.ai remote session (athenaeum#2161) and record the ledger line"
     )
+    if env is not None and env.get(CLAUDE_AI_BRIDGE_LIVE_ENV) == "1":
+        reason += (
+            f"; {CLAUDE_AI_BRIDGE_LIVE_ENV}=1 is set but this harness still has no "
+            "bridge driver, so the row is skipped, not failed"
+        )
+    return reason
 
 
 def write_observations(path: Path, observations: EntryPathObservations) -> Path:
@@ -294,9 +451,7 @@ def write_observations(path: Path, observations: EntryPathObservations) -> Path:
     run's output names exactly where athenaeum#2161 should look), returning
     *path* unchanged for chaining.
     """
-    path.write_text(
-        json.dumps(observations.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
-    )
+    path.write_text(json.dumps(observations.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     print(f"athenaeum#2235 entry-path observations written to: {path}")
     return path
 
@@ -314,6 +469,17 @@ class PtySession:
 
     master_fd: int
     process: subprocess.Popen[bytes]
+    #: Rolling tail of everything :meth:`drain` has read, for failure messages.
+    screen_tail: str = ""
+
+    def drain(self, *, idle_seconds: float = 0.3, overall_timeout: float = 2.0) -> str:
+        """Read pending pty output, keeping the last ~4000 chars in
+        :attr:`screen_tail`; returns what was read."""
+        text = read_pty_until_idle(
+            self.master_fd, idle_seconds=idle_seconds, overall_timeout=overall_timeout
+        )
+        self.screen_tail = (self.screen_tail + text)[-4000:]
+        return text
 
     def close(self, *, timeout: float = 5.0) -> None:
         """Best-effort teardown: SIGTERM the WHOLE process group, wait
@@ -336,14 +502,16 @@ class PtySession:
         change with it (see that function's own docstring).
         """
 
+        # athenaeum#2588: the launch-argument row errored here on a live
+        # host. A group whose leader already exited (or is a zombie) can
+        # make getpgid/killpg raise ProcessLookupError OR, on macOS,
+        # PermissionError (EPERM), and a SIGKILLed child can still miss the
+        # wait deadline; teardown must absorb all of those -- it is cleanup,
+        # never an assertion.
         def _killpg(sig: signal.Signals) -> None:
             try:
-                pgid = os.getpgid(self.process.pid)
-            except ProcessLookupError:
-                return
-            try:
-                os.killpg(pgid, sig)
-            except ProcessLookupError:
+                os.killpg(os.getpgid(self.process.pid), sig)
+            except (ProcessLookupError, PermissionError):
                 pass
 
         if self.process.poll() is None:
@@ -352,11 +520,18 @@ class PtySession:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 _killpg(signal.SIGKILL)
-                self.process.wait(timeout=timeout)
+                try:
+                    self.process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    pass
         try:
             os.close(self.master_fd)
         except OSError:
             pass
+
+
+_PTY_ROWS = 50
+_PTY_COLS = 200
 
 
 def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> PtySession:
@@ -374,6 +549,9 @@ def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> P
     see that method's own docstring.
     """
     master_fd, slave_fd = pty.openpty()
+    # A real window size (athenaeum#2588): a fresh pty reports 0x0, which a
+    # TUI may treat as "no terminal" / unrenderable.
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", _PTY_ROWS, _PTY_COLS, 0, 0))
     try:
         process = subprocess.Popen(
             argv,
@@ -389,13 +567,29 @@ def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> P
     return PtySession(master_fd=master_fd, process=process)
 
 
-def type_into_pty(master_fd: int, text: str, *, press_enter: bool = True) -> None:
-    """Write *text* to the pty as a human typing would, optionally followed
-    by Enter (``\\r`` -- what a terminal in cooked/raw mode sends, not
-    ``\\n``)."""
+#: Pause between the text and the Enter that submits it. The TUI's input layer
+#: appears to treat one stdin read carrying text plus a CR as a paste (the CR
+#: becomes a newline in the box), so Enter must land as a separate read
+#: (athenaeum#2588; a hypothesis only a live run can confirm).
+_SUBMIT_SETTLE_SECONDS = 0.6
+
+
+def submit_into_pty(
+    master_fd: int, text: str, *, settle: float = _SUBMIT_SETTLE_SECONDS, press_enter: bool = True
+) -> None:
+    """Write *text*, wait *settle* seconds, then write ``\\r`` as its OWN
+    write so the receiver sees Enter as a distinct keypress, not the tail of
+    a paste-shaped chunk."""
     os.write(master_fd, text.encode("utf-8"))
     if press_enter:
+        time.sleep(settle)
         os.write(master_fd, b"\r")
+
+
+def type_into_pty(master_fd: int, text: str, *, press_enter: bool = True) -> None:
+    """Write *text* to the pty as a human typing would, optionally followed
+    by a separately-delivered Enter (see :func:`submit_into_pty`)."""
+    submit_into_pty(master_fd, text, press_enter=press_enter)
 
 
 #: Bracketed-paste escape sequences (DEC private mode 2004) a terminal
@@ -504,6 +698,101 @@ def transcript_record_fields(record: Mapping[str, Any] | None) -> dict[str, Any]
     }
 
 
+def transcript_has_prompt(config_dir: Path, needle: str) -> bool:
+    """``True`` when any session transcript under ``<config_dir>/projects/``
+    holds a ``user`` record, other than a tool result, whose text contains
+    *needle* -- i.e. the prompt was really submitted (athenaeum#2588).
+
+    Scans every ``*.jsonl`` rather than one session id: a resumed session may
+    continue the same file or fork a new one, and either is a submission.
+    """
+    for session_jsonl in (config_dir / "projects").glob("*/*.jsonl"):
+        try:
+            text = session_jsonl.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for record in _parse_session_text(text):
+            if (
+                isinstance(record, dict)
+                and record.get("type") == "user"
+                and needle in _non_tool_result_text(record)
+            ):
+                return True
+    return False
+
+
+def wait_for_transcript_prompt(
+    config_dir: Path, needle: str, *, timeout: float = 15.0, poll: float = 0.5
+) -> bool:
+    """Poll :func:`transcript_has_prompt` until it holds or *timeout* lapses."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if transcript_has_prompt(config_dir, needle):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def assert_parent_turn_submitted(config_dir: Path, needle: str) -> None:
+    """Fail unless the parent session's transcript shows *needle* submitted.
+
+    A row that expects NO ledger line (sub-agent, ...) calls this so a dead,
+    logged-out or never-submitted session -- which also writes no line --
+    cannot pass as evidence (athenaeum#2588).
+    """
+    assert transcript_has_prompt(config_dir, needle), (
+        f"the parent session never submitted a turn containing {needle!r}; "
+        "a missing ledger line is not evidence about this row"
+    )
+
+
+#: One piece of a prompt: ``("type", text)`` is typed, ``("paste", text)`` is
+#: wrapped in bracketed-paste sequences.
+PromptPart = tuple[str, str]
+
+
+def submit_and_confirm(
+    session: PtySession,
+    config_dir: Path,
+    parts: Sequence[PromptPart] | str,
+    *,
+    needle: str,
+    attempts: int = 3,
+    timeout: float = 15.0,
+) -> None:
+    """Enter *parts* into *session*, press Enter, and CONFIRM via the
+    transcript that a user record containing *needle* now exists.
+
+    Enter is re-pressed up to *attempts* times (a stray Enter on an empty
+    box is a no-op), each followed by up to *timeout* seconds of waiting.
+    Raises :class:`AssertionError` carrying the screen tail when nothing is
+    submitted -- submission is never assumed (athenaeum#2588).
+    """
+    if isinstance(parts, str):
+        parts = [("type", parts)]
+    for kind, text in parts:
+        if kind == "paste":
+            send_bracketed_paste(session.master_fd, text)
+        else:
+            os.write(session.master_fd, text.encode("utf-8"))
+        time.sleep(_SUBMIT_SETTLE_SECONDS)
+    for _ in range(attempts):
+        if session.process.poll() is not None:
+            break
+        os.write(session.master_fd, b"\r")
+        if wait_for_transcript_prompt(config_dir, needle, timeout=timeout):
+            return
+        session.drain()
+    session.drain()
+    exited = session.process.poll()
+    raise AssertionError(
+        f"prompt containing {needle!r} was never submitted (no transcript record after "
+        f"{attempts} Enter presses; claude exit status: {exited}); screen tail:\n"
+        f"{session.screen_tail}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The ten entry-path rows (issue table, verbatim column order)
 # ---------------------------------------------------------------------------
@@ -558,6 +847,18 @@ _SUBAGENT_TRIGGER_PROMPT = (
 #: back via a task-notification. ASSUMED mechanism -- see the module
 #: docstring.
 _BACKGROUND_TASK_TRIGGER_PROMPT = "Run `sleep 2 && echo done` as a background task."
+
+# Substrings each row's submitted prompt must leave in the transcript
+# (athenaeum#2588) -- one per prompt text a driver submits.
+_ACK_PROMPT = "please reply with the single word 'ack'"
+_ACK_AGAIN_PROMPT = "please reply with the single word 'ack' again"
+_QUEUED_FIRST_PROMPT = "count slowly from 1 to 20, one number per line"
+_QUEUED_SECOND_PROMPT = "also tell me a short fact about lighthouses"
+_SLASH_NEEDLE = "keep the recent discussion about entry paths"
+_PASTE_BODY = "pasted block of reference text"
+_SUBAGENT_NEEDLE = "spawn a sub-agent that replies"
+_BACKGROUND_NEEDLE = "as a background task"
+_HEADLESS_PROMPT = "reply with the word 'ack'"
 
 ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
     EntryPathCase(
@@ -678,6 +979,7 @@ class _LiveHarnessPaths:
     claude_config_dir: Path
     settings_path: Path
     child_env: dict[str, str]
+    auth_method: str = ""
 
 
 def _build_live_harness_paths(tmp_path: Path) -> _LiveHarnessPaths:
@@ -690,6 +992,7 @@ def _build_live_harness_paths(tmp_path: Path) -> _LiveHarnessPaths:
     claude_config_dir.mkdir()
     hook_command = resolve_hook_command()
     settings_path = write_settings_file(tmp_path, hook_command)
+    auth_method = seed_isolated_config_dir(claude_config_dir, workdir=tmp_path, env=os.environ)
     child_env = build_child_env(
         os.environ,
         promptwitness_dir=promptwitness_dir,
@@ -701,6 +1004,7 @@ def _build_live_harness_paths(tmp_path: Path) -> _LiveHarnessPaths:
         claude_config_dir=claude_config_dir,
         settings_path=settings_path,
         child_env=child_env,
+        auth_method=auth_method,
     )
 
 
@@ -774,7 +1078,7 @@ def _drive_interactive_typed(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger
     try:
         read_pty_until_idle(session.master_fd)  # banner/startup
         before = _max_seq(paths.promptwitness_dir)
-        type_into_pty(session.master_fd, "please reply with the single word 'ack'")
+        submit_and_confirm(session, paths.claude_config_dir, _ACK_PROMPT, needle=_ACK_PROMPT)
         read_pty_until_idle(session.master_fd, idle_seconds=3.0)
     finally:
         session.close()
@@ -792,11 +1096,21 @@ def _drive_queued_while_turn_runs(paths: _LiveHarnessPaths, tmp_path: Path) -> l
     try:
         read_pty_until_idle(session.master_fd)
         before = _max_seq(paths.promptwitness_dir)
-        type_into_pty(session.master_fd, "count slowly from 1 to 20, one number per line")
+        submit_and_confirm(
+            session, paths.claude_config_dir, _QUEUED_FIRST_PROMPT, needle=_QUEUED_FIRST_PROMPT
+        )
         # Deliberately NOT waiting idle before the second turn: typing while
-        # the first is still running is the queued path the issue names.
-        time.sleep(0.5)
-        type_into_pty(session.master_fd, "also tell me a short fact about lighthouses")
+        # the first is still running is the queued path the issue names. The
+        # queued record is only written when the turn dequeues, so wait long
+        # and press Enter once.
+        submit_and_confirm(
+            session,
+            paths.claude_config_dir,
+            _QUEUED_SECOND_PROMPT,
+            needle=_QUEUED_SECOND_PROMPT,
+            attempts=1,
+            timeout=120.0,
+        )
         read_pty_until_idle(session.master_fd, idle_seconds=4.0, overall_timeout=90.0)
     finally:
         session.close()
@@ -807,9 +1121,7 @@ def _drive_queued_while_turn_runs(paths: _LiveHarnessPaths, tmp_path: Path) -> l
     return queued
 
 
-def _drive_slash_command_with_args(
-    paths: _LiveHarnessPaths, tmp_path: Path
-) -> ledger.WitnessLine:
+def _drive_slash_command_with_args(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.WitnessLine:
     session = spawn_claude_pty(
         ["claude", "--settings", str(paths.settings_path)],
         env=paths.child_env,
@@ -818,7 +1130,9 @@ def _drive_slash_command_with_args(
     try:
         read_pty_until_idle(session.master_fd)
         before = _max_seq(paths.promptwitness_dir)
-        type_into_pty(session.master_fd, _SLASH_COMMAND_LINE)
+        submit_and_confirm(
+            session, paths.claude_config_dir, _SLASH_COMMAND_LINE, needle=_SLASH_NEEDLE
+        )
         read_pty_until_idle(session.master_fd, idle_seconds=4.0, overall_timeout=90.0)
     finally:
         session.close()
@@ -836,9 +1150,16 @@ def _drive_pasted_content(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.Wi
     try:
         read_pty_until_idle(session.master_fd)
         before = _max_seq(paths.promptwitness_dir)
-        type_into_pty(session.master_fd, "here is some context: ", press_enter=False)
-        send_bracketed_paste(session.master_fd, "pasted block of reference text")
-        type_into_pty(session.master_fd, " -- please summarize it in one word")
+        submit_and_confirm(
+            session,
+            paths.claude_config_dir,
+            [
+                ("type", "here is some context: "),
+                ("paste", _PASTE_BODY),
+                ("type", " -- please summarize it in one word"),
+            ],
+            needle=_PASTE_BODY,
+        )
         read_pty_until_idle(session.master_fd, idle_seconds=4.0, overall_timeout=90.0)
     finally:
         session.close()
@@ -850,12 +1171,15 @@ def _drive_pasted_content(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.Wi
 def _drive_headless_claude_p(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.WitnessLine:
     before = _max_seq(paths.promptwitness_dir)
     subprocess.run(
-        ["claude", "--settings", str(paths.settings_path), "-p", "reply with the word 'ack'"],
+        ["claude", "--settings", str(paths.settings_path), "-p", _HEADLESS_PROMPT],
         env=paths.child_env,
         cwd=str(tmp_path),
         capture_output=True,
         timeout=90,
         check=False,
+    )
+    assert wait_for_transcript_prompt(paths.claude_config_dir, _HEADLESS_PROMPT, timeout=10.0), (
+        "the headless prompt left no transcript record"
     )
     lines = _ledger_lines_since(paths.promptwitness_dir, before)
     assert len(lines) == 1, f"expected exactly one new turn line, got {len(lines)}"
@@ -871,7 +1195,7 @@ def _drive_resumed_session(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.W
     try:
         read_pty_until_idle(first.master_fd)
         before_first = _max_seq(paths.promptwitness_dir)
-        type_into_pty(first.master_fd, "please reply with the single word 'ack'")
+        submit_and_confirm(first, paths.claude_config_dir, _ACK_PROMPT, needle=_ACK_PROMPT)
         read_pty_until_idle(first.master_fd, idle_seconds=3.0)
     finally:
         first.close()
@@ -887,7 +1211,9 @@ def _drive_resumed_session(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.W
     )
     try:
         read_pty_until_idle(second.master_fd)
-        type_into_pty(second.master_fd, "please reply with the single word 'ack' again")
+        submit_and_confirm(
+            second, paths.claude_config_dir, _ACK_AGAIN_PROMPT, needle=_ACK_AGAIN_PROMPT
+        )
         read_pty_until_idle(second.master_fd, idle_seconds=3.0)
     finally:
         second.close()
@@ -910,7 +1236,9 @@ def _drive_subagent_agent_tool(
     try:
         read_pty_until_idle(session.master_fd)
         before = _max_seq(paths.promptwitness_dir)
-        type_into_pty(session.master_fd, _SUBAGENT_TRIGGER_PROMPT)
+        submit_and_confirm(
+            session, paths.claude_config_dir, _SUBAGENT_TRIGGER_PROMPT, needle=_SUBAGENT_NEEDLE
+        )
         read_pty_until_idle(session.master_fd, idle_seconds=5.0, overall_timeout=120.0)
     finally:
         session.close()
@@ -931,7 +1259,12 @@ def _drive_background_task_notification(
     )
     try:
         read_pty_until_idle(session.master_fd)
-        type_into_pty(session.master_fd, _BACKGROUND_TASK_TRIGGER_PROMPT)
+        submit_and_confirm(
+            session,
+            paths.claude_config_dir,
+            _BACKGROUND_TASK_TRIGGER_PROMPT,
+            needle=_BACKGROUND_NEEDLE,
+        )
         read_pty_until_idle(session.master_fd, idle_seconds=3.0)
         before = _max_seq(paths.promptwitness_dir)
         # Give the background task time to finish and push its
@@ -951,13 +1284,17 @@ def _drive_launch_argument(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.W
             "claude",
             "--settings",
             str(paths.settings_path),
-            "please reply with the single word 'ack'",
+            _ACK_PROMPT,
         ],
         env=paths.child_env,
         cwd=tmp_path,
     )
     try:
         read_pty_until_idle(session.master_fd, idle_seconds=4.0, overall_timeout=60.0)
+        # The launch argument submits itself; the transcript still proves it.
+        assert wait_for_transcript_prompt(paths.claude_config_dir, _ACK_PROMPT, timeout=30.0), (
+            "the launch-argument prompt left no transcript record"
+        )
     finally:
         session.close()
     lines = _ledger_lines_since(paths.promptwitness_dir, before)
@@ -988,15 +1325,14 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     """One case per issue table row. Collected and (under the module gate)
     always skipped by default -- see the module docstring."""
     if case.id == "claude-ai-bridge":
-        if should_skip_claude_ai_bridge(os.environ):
-            pytest.skip(claude_ai_bridge_skip_reason())
-        pytest.fail(
-            "running the claude.ai bridge case requires driving it from inside "
-            "a real claude.ai remote session -- this harness has no local "
-            "driver for it by design (see the skip branch above)"
-        )
+        # No local driver exists: skipped with the reason recorded in the
+        # pytest report (-rs), never a hard failure (athenaeum#2588).
+        pytest.skip(claude_ai_bridge_skip_reason(os.environ))
 
-    paths = _build_live_harness_paths(tmp_path)
+    try:
+        paths = _build_live_harness_paths(tmp_path)
+    except HarnessAuthError as exc:
+        pytest.fail(str(exc), pytrace=False)
     driver = _DRIVERS[case.id]
     line = driver(paths, tmp_path)
 
@@ -1014,7 +1350,10 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
         if not fired:
             # No line at all is itself the documented alternative outcome
             # for this row -- confirm intake reports it as a clean miss
-            # (never a false "witnessed") and stop here.
+            # (never a false "witnessed") and stop here -- but only after
+            # proving the parent session really submitted a turn, so a dead
+            # session cannot pass on "no line" (athenaeum#2588).
+            assert_parent_turn_submitted(paths.claude_config_dir, _SUBAGENT_NEEDLE)
             index = AttestationIndex.load(paths.promptwitness_dir)
             outcome = attest(
                 index,

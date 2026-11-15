@@ -236,6 +236,9 @@ MODULE_LAYER: dict[str, int] = {
     "note_corrections": 4,
     "decision_answers": 4,
     "decision_framing": 4,
+    # Issue athenaeum#2528: persisted presentation sidecar; L4 sibling of
+    # decision_framing, imports only atomic_io (L0).
+    "decision_presentations": 4,
     # Issue athenaeum#1990: the five athenaeum#717 budget figures + the answer-event
     # ledger. Imports athenaeum.metrics (L3) and athenaeum.store (L0/L1
     # upper bound), deliberately NOT athenaeum.decisions -- see that
@@ -375,6 +378,10 @@ MODULE_LAYER: dict[str, int] = {
     # "Layering: L4 domain/pipeline". Imports push_metrics (L3) and
     # transcript_verify (L1), same-or-below.
     "follow_through": 4,
+    # issue athenaeum#2611: recall-metrics scorer -- own docstring states
+    # "Layering: L4 domain/pipeline". Imports follow_through, push_used_scoring
+    # (L4 siblings), push_metrics (L3), transcript_verify (L1).
+    "recall_metrics": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_attribution": 5,  # issue athenaeum#2212

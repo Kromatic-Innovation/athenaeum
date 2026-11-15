@@ -93,28 +93,28 @@ originating call — never counts as following itself; a genuinely later open
 
 **Segmentation.** Issue athenaeum#2301 asks for two axes:
 
-- *Session length*, bucketed by the OWN session transcript's record count
-  (:data:`LENGTH_SHORT`/:data:`LENGTH_MEDIUM`/:data:`LENGTH_LONG`, cutoffs
-  :data:`SHORT_SESSION_MAX_RECORDS`/:data:`MEDIUM_SESSION_MAX_RECORDS`) —
-  the one length signal already on hand from the same transcript read
-  everything else here uses, so bucketing it costs no second read.
-- *Interactive vs headless.* Searched for in both the push ledger
-  (``push_metrics.py``) and the raw session transcript this module reads
-  (``*.jsonl``, the same file ``determine_references`` reads) — neither
-  carries any such field. The only place this codebase computes that
-  distinction at all is ``promptwitness.harness.claude_code.detect_channel``,
-  which classifies a LIVE process (``CLAUDE_CODE_ENTRYPOINT``,
-  ``CLAUDE_CODE_SESSION_ATTENDED``, a ``/proc``/``ps`` TTY probe) at hook
-  time and persists the answer, when persisted at all, to a SEPARATE,
-  opt-in, off-by-default witness ledger — never into the transcript this
-  module reads. A finished transcript file therefore carries no
-  reconstructable signal. Every session's channel bucket is
-  :data:`CHANNEL_UNKNOWN` as a result — **this is a true "no such field
-  exists today", not a shortcut** — and is NEVER guessed from session
-  length or any other proxy (issue athenaeum#2301's explicit instruction).
-  :func:`_session_channel_bucket` takes the transcript records as its
-  argument specifically so a future transcript field can be wired in there
-  without changing any caller.
+- *Session length*, bucketed by the session's USER TURNS — user records
+  that carry authored content, not a bare ``tool_result`` return and not an
+  ``isMeta`` record (:func:`_count_user_turns`; cutoffs
+  :data:`SHORT_SESSION_MAX_USER_TURNS`/:data:`MEDIUM_SESSION_MAX_USER_TURNS`
+  by default). Total record count was the first basis and failed on real
+  data (athenaeum#2608): tool-heavy sessions never fall below dozens of
+  records, so nothing landed in "short". User turns separate sessions that
+  a human actually drove from one-shot ones. The cutoffs are DOCUMENTED
+  defaults and overridable per run — the ``build_follow_through_report``
+  arguments ``short_max_user_turns``/``medium_max_user_turns``, the CLI's
+  ``--short-max-user-turns``/``--medium-max-user-turns`` — and the report
+  echoes the thresholds it used under ``length_thresholds``.
+- *Interactive vs headless*, from the ``entrypoint`` field Claude Code
+  stamps on transcript records (athenaeum#2608), through the one documented
+  table :data:`ENTRYPOINT_CHANNEL_MAP`. This is a **launch-surface proxy**,
+  not a measurement of whether a human was attending: ``sdk-cli`` is
+  "headless" because that is how the SDK launches, not because the session
+  was observed unattended. A session with no ``entrypoint``, an
+  unrecognised value, or records that map to different buckets is
+  :data:`CHANNEL_UNKNOWN` — never guessed from session length or any other
+  signal (issue athenaeum#2301's explicit instruction).
+  :func:`_session_channel_bucket` takes the transcript records.
 
 **Privacy (issue athenaeum#2301 AC).** The report this module builds
 (:class:`FollowThroughReport`) carries ONLY counts and rates, bucketed by
@@ -161,22 +161,32 @@ PUSHED_PAGE_CLASSES: tuple[str, ...] = (
 #: is tallied and reported alongside, never folded into the three above.
 CLASS_OPENED_WITHOUT_PUSH = "opened_without_push"
 
-#: Session-length buckets (by TRANSCRIPT RECORD COUNT — the one length
-#: signal already read for everything else in this module; see module
-#: docstring "Segmentation"). Upper-exclusive: a session with exactly
-#: ``SHORT_SESSION_MAX_RECORDS`` records is ``medium``, not ``short``.
-SHORT_SESSION_MAX_RECORDS = 10
-MEDIUM_SESSION_MAX_RECORDS = 50
+#: Session-length buckets, by USER TURNS (see module docstring
+#: "Segmentation" and :func:`_count_user_turns`). Upper-exclusive: a session
+#: with exactly ``SHORT_SESSION_MAX_USER_TURNS`` user turns is ``medium``,
+#: not ``short``. These are the DEFAULTS; a run overrides them via
+#: :class:`LengthThresholds` (``build_follow_through_report`` args / CLI flags).
+SHORT_SESSION_MAX_USER_TURNS = 5
+MEDIUM_SESSION_MAX_USER_TURNS = 25
 LENGTH_SHORT = "short"
 LENGTH_MEDIUM = "medium"
 LENGTH_LONG = "long"
 LENGTH_BUCKETS: tuple[str, ...] = (LENGTH_SHORT, LENGTH_MEDIUM, LENGTH_LONG)
 
-#: The only channel bucket this module can populate today — see module
-#: docstring "Segmentation" for why. Kept as a one-item tuple (not a bare
-#: constant) so a future second bucket is a data change, not a shape change.
+CHANNEL_INTERACTIVE = "interactive"
+CHANNEL_HEADLESS = "headless"
 CHANNEL_UNKNOWN = "unknown"
-CHANNEL_BUCKETS: tuple[str, ...] = (CHANNEL_UNKNOWN,)
+CHANNEL_BUCKETS: tuple[str, ...] = (CHANNEL_INTERACTIVE, CHANNEL_HEADLESS, CHANNEL_UNKNOWN)
+
+#: ``entrypoint`` transcript value -> channel bucket. THE mapping table: a
+#: new entrypoint value is a one-line addition here. A LAUNCH-SURFACE PROXY —
+#: it records how the session was started, not whether anyone was watching.
+#: Any value absent from this table maps to :data:`CHANNEL_UNKNOWN`.
+ENTRYPOINT_CHANNEL_MAP: dict[str, str] = {
+    "cli": CHANNEL_INTERACTIVE,
+    "claude-desktop": CHANNEL_INTERACTIVE,
+    "sdk-cli": CHANNEL_HEADLESS,
+}
 
 #: MCP tool names (post `name.rsplit("__", 1)[-1]` un-namespacing — the same
 #: convention :mod:`athenaeum.session_recovery` already uses for the
@@ -190,28 +200,78 @@ _FILE_READ_TOOL_NAMES = frozenset({"Read"})
 _FILE_READ_PATH_KEYS: tuple[str, ...] = ("file_path", "path")
 
 
-def _session_length_bucket(record_count: int) -> str:
-    """Bucket one session's transcript record count into
-    :data:`LENGTH_BUCKETS`."""
-    if record_count < SHORT_SESSION_MAX_RECORDS:
+@dataclass(frozen=True)
+class LengthThresholds:
+    """Upper-exclusive user-turn cutoffs for the length buckets."""
+
+    short_max_user_turns: int = SHORT_SESSION_MAX_USER_TURNS
+    medium_max_user_turns: int = MEDIUM_SESSION_MAX_USER_TURNS
+
+    def __post_init__(self) -> None:
+        if not 0 < self.short_max_user_turns <= self.medium_max_user_turns:
+            raise ValueError(
+                "length thresholds must satisfy 0 < short_max_user_turns <= "
+                f"medium_max_user_turns (got {self.short_max_user_turns}, "
+                f"{self.medium_max_user_turns})"
+            )
+
+
+def _count_user_turns(records: Sequence[object]) -> int:
+    """Count a session's user turns: user records with authored content.
+
+    Excludes ``isMeta`` records and records whose content is only
+    ``tool_result`` blocks (the tool return Claude Code logs as a user
+    record), so tool-heavy sessions are not inflated.
+    """
+    n = 0
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get("isMeta"):
+            continue
+        message = rec.get("message")
+        role = message.get("role") if isinstance(message, dict) else None
+        if (role or rec.get("type")) != "user":
+            continue
+        content = message.get("content") if isinstance(message, dict) else rec.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                n += 1
+        elif isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") != "tool_result" for b in content
+        ):
+            n += 1
+    return n
+
+
+def _session_length_bucket(user_turns: int, thresholds: LengthThresholds | None = None) -> str:
+    """Bucket one session's user-turn count into :data:`LENGTH_BUCKETS`."""
+    t = thresholds or LengthThresholds()
+    if user_turns < t.short_max_user_turns:
         return LENGTH_SHORT
-    if record_count < MEDIUM_SESSION_MAX_RECORDS:
+    if user_turns < t.medium_max_user_turns:
         return LENGTH_MEDIUM
     return LENGTH_LONG
 
 
 def _session_channel_bucket(records: Sequence[object]) -> str:
-    """Interactive-vs-headless bucket for one session — always
-    :data:`CHANNEL_UNKNOWN` today. See module docstring "Segmentation" for
-    the full search (push ledger, raw transcript, and why
-    ``promptwitness``'s live-process channel detection does not count as a
-    transcript field). Accepts *records* — unused today — so wiring in a
-    future transcript field changes only this function's body, never its
-    call sites. **Never derives the bucket from session length or record
-    count** — see ``tests/test_follow_through.py``'s
-    ``test_channel_never_inferred_from_length``.
+    """Interactive/headless/unknown bucket for one session, from the
+    ``entrypoint`` field via :data:`ENTRYPOINT_CHANNEL_MAP` — a launch-surface
+    proxy (see module docstring "Segmentation").
+
+    :data:`CHANNEL_UNKNOWN` when no record carries a usable ``entrypoint``,
+    when any value is not in the table, or when the values map to different
+    buckets. **Never derives the bucket from session length or record
+    count.**
     """
-    del records  # no transcript field exists yet to read; see docstring.
+    buckets: set[str] = set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        value = rec.get("entrypoint")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        buckets.add(ENTRYPOINT_CHANNEL_MAP.get(value.strip().lower(), CHANNEL_UNKNOWN))
+    if len(buckets) == 1:
+        return next(iter(buckets))
     return CHANNEL_UNKNOWN
 
 
@@ -427,6 +487,23 @@ class FollowThroughReport:
     class_counts: dict[str, int]
     opened_without_push_count: int
     segments: list[dict[str, Any]] = field(default_factory=list)
+    unknown_channel_sessions: int = 0
+    length_thresholds: LengthThresholds = field(default_factory=LengthThresholds)
+
+    def _channel_note(self) -> str:
+        note = (
+            "channel_bucket is a launch-surface proxy: it maps the transcript "
+            "'entrypoint' field (cli, claude-desktop -> interactive; sdk-cli -> "
+            "headless), not observed human attendance"
+        )
+        if self.unknown_channel_sessions:
+            note += (
+                f"; {self.unknown_channel_sessions} session(s) are 'unknown' "
+                "(entrypoint absent, unrecognised, or conflicting)"
+            )
+        else:
+            note += "; no session is 'unknown'"
+        return note
 
     def to_dict(self) -> dict[str, Any]:
         """The documented JSON output (issue athenaeum#2301 AC: "the command
@@ -444,10 +521,12 @@ class FollowThroughReport:
                                 "neither": int},
               "class_rates": {<same 3 keys>: float|null},  # count / pushed_page_total
               "opened_without_push_count": int,
-              "channel_note": str,  # why every channel_bucket is "unknown" today
+              "channel_note": str,  # channel split is a launch-surface proxy
+              "length_thresholds": {"short_max_user_turns": int,
+                                     "medium_max_user_turns": int},
               "segments": [
                 {"length_bucket": "short"|"medium"|"long",
-                 "channel_bucket": "unknown",
+                 "channel_bucket": "interactive"|"headless"|"unknown",
                  "pushed_page_total": int,
                  "class_counts": {...},
                  "class_rates": {...},
@@ -469,11 +548,11 @@ class FollowThroughReport:
             "class_counts": dict(self.class_counts),
             "class_rates": _rates(self.class_counts, self.pushed_page_total),
             "opened_without_push_count": self.opened_without_push_count,
-            "channel_note": (
-                "every channel_bucket is 'unknown': neither the push ledger nor "
-                "the session transcript carries an interactive-vs-headless "
-                "field (see athenaeum.follow_through's module docstring)"
-            ),
+            "channel_note": self._channel_note(),
+            "length_thresholds": {
+                "short_max_user_turns": self.length_thresholds.short_max_user_turns,
+                "medium_max_user_turns": self.length_thresholds.medium_max_user_turns,
+            },
             "segments": list(self.segments),
         }
 
@@ -488,6 +567,8 @@ def build_follow_through_report(
     *,
     cache_dir: Path | None = None,
     projects_root: Path | None = None,
+    short_max_user_turns: int = SHORT_SESSION_MAX_USER_TURNS,
+    medium_max_user_turns: int = MEDIUM_SESSION_MAX_USER_TURNS,
 ) -> FollowThroughReport:
     """Build the follow-through report over the push ledger at *cache_dir*
     and the transcripts under *projects_root*.
@@ -505,7 +586,13 @@ def build_follow_through_report(
     default (via :func:`athenaeum.push_metrics.read_push_records`).
     *projects_root* defaults to
     :func:`athenaeum.transcript_verify.default_projects_root`.
+
+    *short_max_user_turns* / *medium_max_user_turns* override the
+    upper-exclusive user-turn cutoffs of the length buckets (see
+    :class:`LengthThresholds`); ``ValueError`` unless
+    ``0 < short <= medium``.
     """
+    thresholds = LengthThresholds(short_max_user_turns, medium_max_user_turns)
     root = (
         projects_root
         if projects_root is not None
@@ -519,6 +606,7 @@ def build_follow_through_report(
     pushed_page_total = 0
     sessions_considered = 0
     sessions_skipped_no_transcript = 0
+    unknown_channel_sessions = 0
 
     segment_counts: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     segment_opened_without_push: dict[tuple[str, str], int] = defaultdict(int)
@@ -549,8 +637,10 @@ def build_follow_through_report(
             records
         )
 
-        length_bucket = _session_length_bucket(len(records))
+        length_bucket = _session_length_bucket(_count_user_turns(records), thresholds)
         channel_bucket = _session_channel_bucket(records)
+        if channel_bucket == CHANNEL_UNKNOWN:
+            unknown_channel_sessions += 1
         seg_key = (length_bucket, channel_bucket)
 
         open_events = _collect_open_events(records, known_ids=pushed_at.keys())
@@ -604,4 +694,6 @@ def build_follow_through_report(
         class_counts=class_counts,
         opened_without_push_count=overall_opened_without_push,
         segments=segments,
+        unknown_channel_sessions=unknown_channel_sessions,
+        length_thresholds=thresholds,
     )

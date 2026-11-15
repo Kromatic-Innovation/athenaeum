@@ -1363,6 +1363,27 @@ def test_follow_through_empty_ledger_reports_zero_counts(tmp_path: Path) -> None
     assert all(rate is None for rate in payload["class_rates"].values())
 
 
+def test_follow_through_threshold_flags_and_invalid_combo(tmp_path: Path) -> None:
+    """athenaeum#2608: the length cutoffs are overridable per run."""
+    base = [
+        "push-metrics",
+        "follow-through",
+        "--json",
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--projects-root",
+        str(tmp_path / "projects"),
+    ]
+    rc, out = _run([*base, "--short-max-user-turns", "2", "--medium-max-user-turns", "4"])
+    assert rc == 0
+    assert json.loads(out)["length_thresholds"] == {
+        "short_max_user_turns": 2,
+        "medium_max_user_turns": 4,
+    }
+    rc, _ = _run([*base, "--short-max-user-turns", "9", "--medium-max-user-turns", "4"])
+    assert rc == 2
+
+
 def test_follow_through_joins_ledger_and_transcript(tmp_path: Path) -> None:
     """Dispatch-level wiring test: the CLI --cache-dir/--projects-root flags
     reach `follow_through.build_follow_through_report` and its result comes
