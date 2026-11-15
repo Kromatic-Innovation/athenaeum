@@ -705,3 +705,88 @@ class TestResolveAthenaeumBinary:
         plist = home / "Library" / "LaunchAgents" / f"{schedule.LAUNCHD_LABEL}.plist"
         assert f"<string>{mine.resolve()}</string>" in plist.read_text(encoding="utf-8")
         assert str(other.resolve()) not in plist.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The unit carries a non-default cache directory (athenaeum#2584).
+# ---------------------------------------------------------------------------
+
+
+class TestCacheDirCarriedIntoUnit:
+    @pytest.fixture(autouse=True)
+    def _isolate_cache_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.delenv("ATHENAEUM_CACHE_DIR", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+
+    def _unit_text(self, backend: str, home: Path, loader: FakeLoader) -> str:
+        if backend == "launchd":
+            path = home / "Library" / "LaunchAgents" / f"{schedule.LAUNCHD_LABEL}.plist"
+            return path.read_text(encoding="utf-8")
+        if backend == "systemd":
+            return _systemd_paths(home)[0].read_text(encoding="utf-8")
+        return loader.calls[-1][1] or ""
+
+    @pytest.mark.parametrize("backend", ["launchd", "systemd", "cron"])
+    def test_flag_sets_cache_dir_in_every_backend(
+        self, backend: str, tmp_path: Path, home: Path, knowledge_root: Path
+    ) -> None:
+        cache = tmp_path / "other cache"
+        loader = FakeLoader()
+        schedule.install(
+            knowledge_root,
+            cache_dir=cache,
+            home=home,
+            loader=loader,
+            platform_override=backend,  # type: ignore[arg-type]
+        )
+        text = self._unit_text(backend, home, loader)
+        value = str(cache.resolve())
+        if backend == "launchd":
+            assert "<key>ATHENAEUM_CACHE_DIR</key>" in text
+            assert f"<string>{value}</string>" in text
+            plistlib.loads(text.encode("utf-8"))
+        elif backend == "systemd":
+            assert f'Environment="ATHENAEUM_CACHE_DIR={value}"' in text
+        else:
+            assert f"ATHENAEUM_CACHE_DIR={shlex.quote(value)} " in text
+
+    @pytest.mark.parametrize("backend", ["launchd", "systemd", "cron"])
+    def test_env_var_sets_cache_dir_in_every_backend(
+        self,
+        backend: str,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = tmp_path / "envcache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        loader = FakeLoader()
+        schedule.install(
+            knowledge_root,
+            home=home,
+            loader=loader,
+            platform_override=backend,  # type: ignore[arg-type]
+        )
+        assert "ATHENAEUM_CACHE_DIR" in self._unit_text(backend, home, loader)
+        assert str(cache.resolve()) in self._unit_text(backend, home, loader)
+
+    @pytest.mark.parametrize("backend", ["launchd", "systemd", "cron"])
+    def test_default_cache_dir_adds_nothing(
+        self,
+        backend: str,
+        home: Path,
+        knowledge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from athenaeum.config import DEFAULT_CACHE_DIR
+
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(DEFAULT_CACHE_DIR.expanduser()))
+        loader = FakeLoader()
+        schedule.install(
+            knowledge_root,
+            home=home,
+            loader=loader,
+            platform_override=backend,  # type: ignore[arg-type]
+        )
+        assert "ATHENAEUM_CACHE_DIR" not in self._unit_text(backend, home, loader)

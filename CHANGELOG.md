@@ -409,6 +409,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was dispatched in turn and the first one to land settled the decision
   (athenaeum#2514).
 
+- `athenaeum schedule install --cache-dir <dir>` (or `ATHENAEUM_CACHE_DIR`)
+  now carries that cache directory into the generated launchd, systemd and cron
+  unit as `ATHENAEUM_CACHE_DIR`. Previously the flag only chose where the key was
+  read from, so the scheduled `athenaeum run` wrote its state to the default
+  cache directory and could clobber another deployment's cache; the docs now
+  state which cache directory the scheduled run uses (athenaeum#2584).
+
 - `split-oversize` and the `librarian.oversize_page_action: split`
   disposition no longer split a compiled page at its lone top-level `#
   <Name>` title heading (moving the whole body into one child renamed
