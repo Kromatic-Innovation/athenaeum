@@ -75,6 +75,8 @@ integrating anything.
 - [Environment variables](reference/environment.md) — the common knobs and the precedence chain.
 - [Data formats](reference/data-formats.md) — raw intake, wiki frontmatter, degraded-run artifacts.
 - [Exit codes](reference/exit-codes.md).
+- [0.24.0 build notes](changelog/0.24.0-build-notes.md) — the per-merge entries behind the
+  `[0.24.0]` changelog section.
 - [0.23.5 build notes](changelog/0.23.5-build-notes.md) — the release digest and per-merge entries behind the
   `[0.23.5]` changelog section.
 
