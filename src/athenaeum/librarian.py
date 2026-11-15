@@ -12988,7 +12988,16 @@ def _reindex_would_change(
     (``bool(count)``) therefore skips the rebuild. There is nothing to index,
     so the only loss is that the empty index file is recreated one tick later
     than it could have been.
+
+    Issue athenaeum#2592: mirrors :func:`reindex`'s own chromadb-missing
+    fallback (``vector`` → ``fts5``) via ``importlib.util.find_spec`` before
+    picking which manifest to diff against — without this, a chromadb-free
+    install diffs forever against a ``vector`` manifest that is never
+    written (``reindex`` writes ``fts5``'s instead), always reports a
+    pending change, and the athenaeum#1456 idle fast path never fires.
     """
+    import importlib.util
+
     from athenaeum.config import (
         resolve_embedding_model,
         resolve_index_globs,
@@ -13013,6 +13022,29 @@ def _reindex_would_change(
     # (yaml > shipped default) — the old inline `fts5` fallback fired for
     # every library caller that hand-built a config dict.
     backend_name = backend or resolve_search_backend(config)
+    # Issue athenaeum#2592: `reindex()` degrades a configured `vector`
+    # backend to `fts5` when chromadb is not installed (the same promise
+    # the generated `athenaeum.yaml`'s `search_backend` comment makes), and
+    # the manifest it writes afterward is the `fts5` one -- never the
+    # `vector` one, which never exists on that install. This preview MUST
+    # mirror that same fallback decision before picking which manifest to
+    # diff against, or it always diffs against a vector manifest that will
+    # never exist, always reports "changed", and `session_end` never takes
+    # the athenaeum#1456 idle fast path on a chromadb-free install: a
+    # silent, permanent "reindex on every tick" regression, not a crash,
+    # so no pre-existing test caught it (measured: three consecutive
+    # `session_end` calls against an unchanged corpus all redid the full
+    # reindex instead of short-circuiting).
+    #
+    # `importlib.util.find_spec` -- not `import chromadb` -- answers
+    # "would `VectorBackend._get_chromadb()` succeed" without this cheap
+    # preview paying the one cost its own docstring promises it never
+    # pays: it must not itself import chromadb or load an embedding model.
+    # `find_spec` only resolves the module's location; it does not execute
+    # chromadb's `__init__.py` (which is where the real cost -- and the
+    # real `ImportError` -- would come from).
+    if backend_name == "vector" and importlib.util.find_spec("chromadb") is None:
+        backend_name = "fts5"
     manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
     manifest_path = resolved_cache / manifest_name
     extra_roots = resolve_extra_intake_roots(knowledge_root, config)

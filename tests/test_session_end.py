@@ -613,6 +613,111 @@ class TestReindexGateOnStaleness:
         assert second.reindexed is False
         assert second.reindex_would_change == 0
 
+    def test_vector_backend_without_chromadb_idle_tick_also_stays_cheap(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#2592 (Seer review follow-up): on a chromadb-free
+        install, the FIRST ``session_end`` tick degrades ``vector`` to
+        ``fts5`` and writes an **fts5** manifest (the fix pinned in
+        ``TestSessionEndComposition``). ``_reindex_would_change`` used to
+        keep resolving the manifest from the CONFIGURED backend
+        (``resolve_search_backend`` → still ``"vector"``) regardless of
+        what the prior reindex actually wrote -- so on every later idle
+        tick it diffed against a ``vector`` manifest that will never exist
+        on this install shape, always reported the whole corpus as
+        pending, and ``session_end`` redid a full reindex on EVERY call
+        instead of taking the athenaeum#1456 idle fast path. Not a crash
+        (no test caught it) -- a silent, permanent performance regression
+        on exactly the install shape this issue is about.
+
+        Measured directly (not inferred) against the real CLI before this
+        fix: three consecutive ``session-end`` calls against an unchanged
+        corpus all reported ``"reindexed": true`` and
+        ``"reindex_would_change": 1``, never the idle fast path.
+
+        Simulates chromadb's absence twice, matching the two call sites
+        that each independently decide "is chromadb available":
+        ``VectorBackend._get_chromadb`` (the real build's seam, used by the
+        first tick's actual fallback reindex) and
+        ``importlib.util.find_spec`` (the preview's own cheap check, which
+        must never actually import chromadb per its own docstring
+        invariant) scoped to the ``"chromadb"`` name only, so other
+        ``find_spec`` callers in the same process are unaffected.
+        """
+        import importlib.util as _importlib_util
+
+        import athenaeum.librarian as lib
+        from athenaeum.search import VectorBackend
+
+        def _no_chromadb(self: VectorBackend) -> object:
+            raise ImportError("No module named 'chromadb'")
+
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _no_chromadb)
+
+        real_find_spec = _importlib_util.find_spec
+
+        def _find_spec_no_chromadb(name: str, *a: object, **k: object) -> object:
+            if name == "chromadb":
+                return None
+            return real_find_spec(name, *a, **k)
+
+        monkeypatch.setattr(_importlib_util, "find_spec", _find_spec_no_chromadb)
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True
+        assert first.backend == "fts5"  # degraded, per the athenaeum#2592 fix
+        assert (cache / "fts5-manifest.json").is_file()
+        assert not (cache / "vector-manifest.json").exists()
+
+        reindex_calls: list[bool] = []
+        real_reindex = lib.reindex
+        monkeypatch.setattr(
+            lib,
+            "reindex",
+            lambda *a, **k: (reindex_calls.append(True), real_reindex(*a, **k))[1],
+        )
+
+        second = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        # The fixed behaviour: nothing changed → the idle fast path, not
+        # another full reindex. Before the fix this was `reindexed is True`
+        # and `reindex_would_change == 1`, every single call.
+        assert second.ingest.noop is True
+        assert reindex_calls == [], "idle tick must not call reindex() at all"
+        assert second.reindexed is False
+        assert second.reindex_pages == 0
+        assert second.reindex_would_change == 0
+
+        # And it stays idle on a THIRD tick too -- not a one-time settle.
+        third = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.ingest.noop is True
+        assert third.reindexed is False
+        assert third.reindex_would_change == 0
+
     def test_unembedded_class_does_not_wedge_the_gate_open(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
