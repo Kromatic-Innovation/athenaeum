@@ -119,6 +119,15 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
         4096,
         False,
     ),
+    # Issue athenaeum#2650: `always`-rule hint block, rendered into the classify
+    # user message beside the observation filter when the policy has one.
+    (
+        "tiers.relevance_always_prompt",
+        "RELEVANCE_ALWAYS_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
     # Issue athenaeum#2647: the reasoning-tier call that settles an unsure
     # category (resolves through the existing `reasoning_t2` knob).
     (

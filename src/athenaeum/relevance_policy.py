@@ -563,3 +563,53 @@ def declared_facts(meta: dict[str, object]) -> tuple[str | None, list[str], str 
     judges a wiki page's own frontmatter (athenaeum#2647) reads it the same way.
     """
     return _declared(meta)
+
+
+@dataclass(frozen=True)
+class NeverMatch:
+    """One existing wiki page a ``never`` rule covers (athenaeum#2650)."""
+
+    path: str
+    rule: RelevanceRule
+    type: str | None
+    tags: tuple[str, ...]
+    uid: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "rule": self.rule.number,
+            "line": self.rule.line,
+            "describe": self.rule.describe(),
+            "type": self.type,
+            "tags": list(self.tags),
+            "uid": self.uid,
+        }
+
+
+def report_never_matches(policy: RelevancePolicy, wiki_root: Path) -> list[NeverMatch]:
+    """Existing wiki pages whose LAST matching rule is a ``never`` rule.
+
+    Read-only: reads each top-level ``wiki/*.md`` page's frontmatter (the
+    ``_``-prefixed queue, index and archive files are not pages) and matches
+    its declared ``type`` / ``tags`` / ``uid`` exactly as the deterministic
+    gate matches a raw's, via :func:`declared_facts` and
+    :meth:`RelevancePolicy.match`. A page an ``always`` exception rescues is
+    not listed. A ``never`` rule applies forward only, so this is the operator's
+    list of what it would have covered; nothing is changed.
+    """
+    if not policy.rules or not wiki_root.is_dir():
+        return []
+    out: list[NeverMatch] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        type_, tags, uid = declared_facts(meta)
+        rule = policy.match(type_, tags, uid)
+        if rule is not None and rule.verdict == "never":
+            out.append(NeverMatch(path.name, rule, type_, tuple(tags), uid))
+    return out
