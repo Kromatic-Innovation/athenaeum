@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pytest
@@ -173,8 +174,8 @@ class TestReindex:
     ) -> None:
         """Issue athenaeum#2459: the `rebuild-index` back-compat alias for
         `reindex` is removed with no deprecation period. argparse must treat
-        it exactly like any other unknown command — exit 2, "invalid
-        choice" on stderr — not dispatch to the `reindex` handler."""
+        it as removed — exit 2, one line on stderr naming `reindex` — and
+        not dispatch to the `reindex` handler."""
         parser = build_parser()
         top = next(
             action
@@ -184,12 +185,10 @@ class TestReindex:
         assert "rebuild-index" not in top.choices
         assert "reindex" in top.choices
 
-        with pytest.raises(SystemExit) as excinfo:
-            main(["rebuild-index", "--path", "/nonexistent"])
-        assert excinfo.value.code == 2
+        assert main(["rebuild-index", "--path", "/nonexistent"]) == 2
         err = capsys.readouterr().err
-        assert "invalid choice" in err
-        assert "rebuild-index" in err  # argparse echoes the bad token
+        assert "`athenaeum rebuild-index` was removed in 0.24.0" in err
+        assert "use `athenaeum reindex`" in err
 
 
 class TestServe:
@@ -1954,11 +1953,12 @@ class TestRemovedSurfaces:
     def test_invoking_a_removed_command_is_an_unknown_command_error(
         self, argv: list[str], capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            main(argv)
-        assert excinfo.value.code == 2
+        assert main(argv) == 2
         err = capsys.readouterr().err
-        assert f"invalid choice: '{argv[0]}'" in err
+        assert f"`athenaeum {argv[0]}` was removed in 0.24.0" in err
+        assert "use `athenaeum decisions ...`" in err
+        assert "docs/guides/upgrading.md" in err
+        assert "invalid choice" not in err
 
     @pytest.mark.parametrize(
         "verb",
@@ -2111,11 +2111,12 @@ class TestSevenOneShotRepairCommandsRemoved:
     def test_invoking_a_removed_top_level_command_is_an_unknown_choice_error(
         self, argv: list[str], token: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            main(argv)
-        assert excinfo.value.code == 2
+        assert main(argv) == 2
         err = capsys.readouterr().err
-        assert f"invalid choice: '{token}'" in err
+        assert " ".join(argv[:1]) in err
+        assert "was removed in 0.24.0" in err
+        assert "there is no replacement" in err
+        assert "invalid choice" not in err
 
     @pytest.mark.parametrize(
         "argv,token",
@@ -2125,11 +2126,11 @@ class TestSevenOneShotRepairCommandsRemoved:
     def test_invoking_a_removed_storage_subcommand_is_an_unknown_choice_error(
         self, argv: list[str], token: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            main(argv)
-        assert excinfo.value.code == 2
+        assert main(argv) == 2
         err = capsys.readouterr().err
-        assert f"invalid choice: '{token}'" in err
+        assert f"`athenaeum {' '.join(argv)}` was removed in 0.24.0" in err
+        assert "there is no replacement" in err
+        assert "invalid choice" not in err
 
     def test_the_handler_modules_are_deleted(self) -> None:
         import importlib.util
@@ -2205,3 +2206,80 @@ class TestSplitOversizeRemovedWithReplacementMessage:
         assert "athenaeum._cmd_split_oversize" not in _sys.modules
         main(["split-oversize"])
         assert "athenaeum._cmd_split_oversize" not in _sys.modules
+
+
+class TestRemovedCommandsPointToReplacements:
+    """Every command 0.24.0 removed prints one line naming its replacement (or
+    saying there is none), exits 2, and is absent from ``--help``."""
+
+    WITH_REPLACEMENT = [
+        (["merges", "list"], "use `athenaeum decisions ...`"),
+        (["questions", "count"], "use `athenaeum decisions ...`"),
+        (["rebuild-index"], "use `athenaeum reindex`"),
+        (["split-oversize"], "use `athenaeum recompile`"),
+    ]
+    NO_REPLACEMENT = [
+        ["paste-cleanup"],
+        ["dedup-oversize-escalations"],
+        ["auto-memory", "prune"],
+        ["auto-memory", "prune-index"],
+        ["auto-memory", "prune-code-entities"],
+        ["storage", "prune-dispositions"],
+        ["storage", "audit-h1-redaction"],
+    ]
+
+    @pytest.mark.parametrize(
+        "argv,hint",
+        WITH_REPLACEMENT,
+        ids=lambda v: v if isinstance(v, str) else " ".join(v),
+    )
+    def test_replacement_is_named_on_stderr(
+        self, argv: list[str], hint: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(argv) == 2
+        captured = capsys.readouterr()
+        assert hint in captured.err
+        assert "docs/guides/upgrading.md" in captured.err
+        assert captured.out == ""
+        assert captured.err.count("\n") == 1  # one line, not a subcommand list
+
+    @pytest.mark.parametrize("argv", NO_REPLACEMENT, ids=" ".join)
+    def test_no_replacement_is_stated(
+        self, argv: list[str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        assert "the defect it repaired is fixed, so there is no replacement" in err
+        assert err.count("\n") == 1
+
+    def test_none_of_them_appears_in_help(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        for name in (
+            "merges",
+            "questions",
+            "rebuild-index",
+            "split-oversize",
+            "paste-cleanup",
+            "dedup-oversize-escalations",
+            "auto-memory",
+        ):
+            assert not re.search(rf"^ {{2}}{re.escape(name)}\s", out, re.MULTILINE), name
+        # Positive controls: the live replacements are listed.
+        assert "decisions" in out
+        assert "reindex" in out
+
+    def test_storage_help_hides_the_removed_sub_verbs(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["storage", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "prune-dispositions" not in out
+        assert "audit-h1-redaction" not in out
+        assert "migrate-pii" in out

@@ -25,7 +25,7 @@ queue's name:
 
 On 0.23.x the left column still works and prints a one-line deprecation
 warning to stderr naming its own replacement from the table above; on 0.24.0
-each one is an unknown command. The switch that silenced those warnings
+each one prints the replacement and exits 2. The switch that silenced those warnings
 (`librarian.deprecated_cli_surfaces_enabled` and
 `ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`) is removed with them; a stale
 yaml key is ignored with a warning, like every other removed key. See
@@ -343,9 +343,10 @@ already carried real data, e.g. `answers.resolve_by_id`) are all unchanged.
 ## I want to know what replaced `split-oversize`
 
 `athenaeum split-oversize` is removed, along with the module behind it.
-Running it now prints which command replaces it and exits non-zero,
-rather than the generic "unrecognized command" error an older removal
-gets — there is no deprecation period, but the pointer is immediate: use
+Running it now prints which command replaces it and exits non-zero
+(every command removed in 0.24.0 does the same, instead of the generic
+"unrecognized command" error). There is no deprecation period, but the
+pointer is immediate: use
 `athenaeum recompile` (`candidates`, `plan`, `apply`) instead. It covers
 the same job (restructuring a page that has grown past the size
 invariant) through the maintained pipeline — a candidate scan, a

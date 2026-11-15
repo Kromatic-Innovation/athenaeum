@@ -23,12 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.24.0] - 2026-11-15
 
-**Summary.** 0.24.0 is a MINOR, breaking bump from 0.23.5 under the pre-1.0
-policy (a minor version may break). It is the clean-up release that 0.23.5
-announced: it removes the `athenaeum merges` and `athenaeum questions` commands
-and a set of other unused commands, switches and keys, and it adds page
-recompile, which runs every night by default. Read "Upgrading from 0.23.5"
-before installing.
+**Summary.** **Upgrading turns on a nightly page recompile.** Every night the
+librarian now makes model calls (up to 3 pages a night, 10 while any page is over
+the hard size ceiling) and rewrites oversized pages without asking: structure-only
+changes (a parent summary plus sub-pages), undoable with
+`athenaeum recompile undo <plan-id>`. To approve each write, set
+`librarian.page_recompile.mode: queue`; to turn it off, set `mode: off`.
+
+0.24.0 is also a MINOR, breaking bump from 0.23.5 under the pre-1.0 policy (a
+minor version may break). It is the clean-up release that 0.23.5 announced: it
+removes the `athenaeum merges` and `athenaeum questions` commands and a set of
+other unused commands, switches and keys. A removed command prints its
+replacement on stderr and exits 2 instead of a bare "invalid choice". Read
+"Upgrading from 0.23.5" before installing.
 
 **Removed, and what replaces each item** (a stale yaml key for any removed key
 is ignored with a warning; a removed environment variable simply has no effect)
@@ -69,6 +76,9 @@ is ignored with a warning; a removed environment variable simply has no effect)
   `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED`. Behaviour is unchanged; existing files
   are left in place and ignored. The one-time warnings about ledgers left at
   their pre-move location are gone.
+- **Breaking for a custom `pricing:` section** (it replaces the built-in table):
+  it must now price `claude-sonnet-5`, the default for the new page recompile
+  models, or `athenaeum run` refuses to start.
 
 **Behaviour changes** (an install that changes no configuration will notice these)
 
@@ -79,8 +89,6 @@ is ignored with a warning; a removed environment variable simply has no effect)
   pages are queued for your answer. Inspect with `athenaeum recompile list --applied`,
   reverse with `athenaeum recompile undo <plan-id>`, ask before every write with
   `librarian.page_recompile.mode: queue`, or turn it off with `mode: off`.
-- If you set a custom `pricing:` section (it replaces the built-in table), it must
-  now price `claude-sonnet-5`, or `athenaeum run` refuses to start.
 - `athenaeum context`, `codex-context` and the Codex adapter follow your
   configured `search_backend` and recall ceiling instead of fixed defaults. On a
   default install that is `vector`, so a Codex snapshot can change order. Set
@@ -142,9 +150,10 @@ import paths may change in any minor release without a deprecation cycle)
 3. Search your `athenaeum.yaml` and environment for the removed keys listed
    above. Nothing breaks (they are ignored), but a switch you relied on to turn
    a behaviour off no longer does.
-4. If the nightly page recompile is not wanted, set
-   `librarian.page_recompile.mode: off` (or `queue` to approve each write) before
-   the next run. If you use a custom `pricing:` table, add `claude-sonnet-5`.
+4. If you use a custom `pricing:` table, add `claude-sonnet-5` to it first, or
+   `athenaeum run` refuses to start. If the nightly page recompile is not wanted,
+   set `librarian.page_recompile.mode: off` (or `queue` to approve each write)
+   before the next run.
 5. Code that reads MCP `resolve_*` responses: use `message`, not `block`/`error`.
 
 ```bash
