@@ -170,6 +170,22 @@ run. With no policy file nothing changes. A policy file that fails validation
 stops the run before any raw is touched rather than silently ignoring a `never`
 rule. The policy applies forward only.
 
+**Facts that declare nothing.** Most facts carry no `type` or `tags`, so a `never`
+rule keyed on a tag is also enforced after Tier-2 classify. When the policy has
+a `never` rule that names a tag, the classify prompt lists the policy's tags as
+*categories* and asks for a `category` and a `confidence` (`high` / `low`) per
+entity. A `never` match the classifier is sure about is dropped. A match it is
+unsure about (a `low` or missing confidence) is sent to the existing reasoning
+tier (the `reasoning_t2` model knob; no new knob), which picks one category
+from the policy's list or none. If the reasoning tier is also unsure, the fact
+is **dropped, not held**, with drop-ledger reason `relevance-unsure: <verdict>
+<keys> (rule N, line L)`. A reasoning-tier call that fails outright is not
+"unsure": the raw stays on disk and the run retries it. A fact that would land
+on an existing page is judged by that page's own `type`, `tags` and `uid`
+before Tier-3 runs, so a covered fact is caught on an update as well as on a
+create. A raw carrying `explicit_remember: true` is exempt from all of this.
+The synchronous and Batch API transports share one decision for each step.
+
 ## Data lifecycle and upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw

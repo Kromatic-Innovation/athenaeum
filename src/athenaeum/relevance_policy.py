@@ -311,6 +311,17 @@ DROP_REASON_PREFIX = "relevance-policy"
 
 _EXCERPT_CHARS = 500
 
+#: Confidence value the classifier (and the reasoning tier) must emit for a
+#: category to be acted on without escalation (athenaeum#2647). Any other value,
+#: or none, is *unsure*.
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_LOW = "low"
+CONFIDENCES: frozenset[str] = frozenset({CONFIDENCE_HIGH, CONFIDENCE_LOW})
+
+#: Drop-reason prefix for a fact the reasoning tier could not place either
+#: (athenaeum#2647): fail closed, the fact is dropped and not kept.
+DROP_REASON_UNSURE = "relevance-unsure"
+
 #: Frontmatter key ``remember(explicit_request=True)`` stamps on the raw
 #: (athenaeum#2646). A fact carrying a truthy marker is a deliberate human
 #: "remember this": the gate never drops it, whatever ``never`` rule matches,
@@ -445,6 +456,38 @@ def _split_markdown(content: str) -> list[_Item]:
     return items
 
 
+def raw_is_explicit_remember(content: str, *, jsonl: bool = False) -> bool:
+    """True when the whole raw carries the explicit-remember marker (athenaeum#2646).
+
+    A markdown raw is flagged by its own top frontmatter (the block
+    ``remember(explicit_request=True)`` stamps), which covers every fact in
+    the note. A ``.jsonl`` raw is flagged only when every record carries the
+    marker, so one flagged record cannot shelter its unflagged neighbours.
+    Used by the post-classify and Tier-3 relevance gates
+    (:mod:`athenaeum.relevance_classify`), which judge facts the classifier
+    extracted from the raw rather than declared items.
+    """
+    if jsonl:
+        items = _split_jsonl(content)
+        return bool(items) and all(_is_explicit_remember(i.meta) for i in items)
+    return _is_explicit_remember(parse_frontmatter(content)[0])
+
+
+def policy_categories(policy: RelevancePolicy | None) -> list[str]:
+    """Distinct tag keys the policy's rules name, in file order.
+
+    These are the *categories* the classifier is asked to choose from: a
+    category is a tag from the ``tags.md`` vocabulary, possibly a
+    ``/``-separated descendant (``personal/travel``). Empty when no rule names
+    a tag, in which case classify is not asked for a category at all.
+    """
+    seen: list[str] = []
+    for rule in policy.rules if policy is not None else ():
+        if rule.tag is not None and rule.tag not in seen:
+            seen.append(rule.tag)
+    return seen
+
+
 def gate_raw_content(
     policy: RelevancePolicy | None, content: str, *, jsonl: bool = False
 ) -> RelevanceGateResult:
@@ -511,3 +554,12 @@ def filter_relevance_never(
         else:
             kept.append(am)
     return kept, refused
+
+
+def declared_facts(meta: dict[str, object]) -> tuple[str | None, list[str], str | None]:
+    """The ``(type, tags, uid)`` a rule is matched against, from a metadata mapping.
+
+    Public form of the reading :func:`gate_raw_content` uses, so a gate that
+    judges a wiki page's own frontmatter (athenaeum#2647) reads it the same way.
+    """
+    return _declared(meta)

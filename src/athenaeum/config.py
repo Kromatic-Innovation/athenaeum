@@ -4584,6 +4584,13 @@ def resolve_audit_nightly_spend_share(config: dict[str, Any] | None) -> float:
 #: audit M8). ``config`` is a low leaf every reader can depend on acyclically.
 DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 
+#: Code default for the ``reasoning_t2`` model knob (athenaeum#2647). Lives here, not
+#: in ``reasoning_tiers``, so :mod:`athenaeum.relevance_classify` (reached from
+#: ``batch``) can resolve the reasoning tier's model without importing the
+#: module whose import graph would close a cycle through ``batch``.
+#: ``reasoning_tiers.DEFAULT_T2_MODEL`` is this same value.
+DEFAULT_REASONING_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; athenaeum#633)
+
 #: Code default for the verify-model knob (issue athenaeum#1717's proposer/
 #: verifier split): a stronger model re-checks a sample of the cheap
 #: classify-knob model's proposals. Same env>yaml>literal resolution via

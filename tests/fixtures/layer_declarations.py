@@ -328,6 +328,7 @@ MODULE_LAYER: dict[str, int] = {
     # proposal drafters, same deterministic L4 peer shape as dimension_proposals.py.
     "tier_movement_proposals": 4,
     "policy_pack_edit_proposals": 4,
+    "relevance_classify": 4,  # issue athenaeum#2647
     "relevance_policy_edit": 4,  # issue athenaeum#2649
     # Issue athenaeum#2197: schema-amendment proposal ledger -- same
     # deterministic L4 peer shape as tier_movement_proposals.py (imports

@@ -6235,9 +6235,9 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_REASONING_T1_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_MODEL` | `src/athenaeum/reasoning_tiers.py` |
 | `ATHENAEUM_REASONING_T1_THINKING` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py` |
-| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py` |
+| `ATHENAEUM_REASONING_T2_MAX_TOKENS` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_MODEL` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
+| `ATHENAEUM_REASONING_T2_THINKING` | `src/athenaeum/reasoning_tiers.py`, `src/athenaeum/relevance_classify.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_MIN_SCORE_KEYWORD` | `src/athenaeum/config.py` |
 | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` | `src/athenaeum/config.py` |

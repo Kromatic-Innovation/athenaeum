@@ -110,6 +110,9 @@ src/athenaeum/tiers.py::MERGE_TEMPLATE
 src/athenaeum/tiers.py::MERGE_TEMPLATE_FULL
 src/athenaeum/tiers.py::PERSON_HINT_CLASSIFY_PROMPT
 src/athenaeum/tiers.py::PERSON_HINT_OWNER_CLASSIFY_PROMPT
+src/athenaeum/tiers.py::RELEVANCE_CATEGORY_PROMPT
+src/athenaeum/relevance_classify.py::RELEVANCE_ESCALATE_SYSTEM
+src/athenaeum/relevance_classify.py::escalate_category
 src/athenaeum/tiers.py::PERSON_HINT_OWNER_VERIFY_NOTE
 src/athenaeum/tiers.py::PERSON_HINT_VERIFY_NOTE
 
@@ -118,6 +121,7 @@ src/athenaeum/tiers.py::PERSON_HINT_VERIFY_NOTE
 # thinking resolvers, and the prompt registry's own knob table ---
 src/athenaeum/claim_kind.py::_get_classify_model
 src/athenaeum/config.py::DEFAULT_CLASSIFY_MODEL
+src/athenaeum/config.py::DEFAULT_REASONING_T2_MODEL
 src/athenaeum/config.py::DEFAULT_VERIFY_MODEL
 src/athenaeum/config.py::resolve_model
 src/athenaeum/contradictions.py::DEFAULT_CONTRADICTION_MODEL

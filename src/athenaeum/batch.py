@@ -119,6 +119,7 @@ from athenaeum.provider import (
 )
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.relevance_classify import gate_classified_entities, gate_update_actions
 from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_relevance_policy
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
@@ -1527,6 +1528,7 @@ def process_batch_run(
                         config=config,
                         stats=sync_stats,
                         person_candidates=st.hint_set.candidates or None,
+                        relevance_policy=relevance_policy,
                     )
                     result.degraded += sync_stats.degraded
                     result.truncated += sync_stats.truncated
@@ -1548,6 +1550,7 @@ def process_batch_run(
                                 wiki_root=wiki_root,
                                 config=config,
                                 person_candidates=st.hint_set.candidates or None,
+                                relevance_policy=relevance_policy,
                             ),
                         )
                     )
@@ -1718,6 +1721,7 @@ def process_batch_run(
                     config=config,
                     owner=owner,
                     person_candidates=_hint_candidates,
+                    relevance_policy=relevance_policy,
                 )
                 if not retry_stats.degraded and not retry_stats.truncated:
                     log.info(
@@ -1831,6 +1835,25 @@ def process_batch_run(
         )
         classified = name_gate_outcome.kept
         st.address_escalations.extend(name_gate_outcome.escalations)
+        # Issue athenaeum#2647: the relevance policy's post-classify gate -- the
+        # SAME ``gate_classified_entities`` call ``librarian.process_one``
+        # makes. The escalation (reasoning tier) is a live call, through the
+        # same batch-wrapped client the name gate above uses.
+        _rel_jsonl = st.raw.path.suffix.lower() == ".jsonl"
+        _rel_drops: list[Any] = []
+        if relevance_policy is not None and relevance_policy.rules:
+            _rel_outcome = gate_classified_entities(
+                classified,
+                relevance_policy,
+                raw_ref=st.raw.ref,
+                raw_content=st.raw.content,
+                jsonl=_rel_jsonl,
+                client=AnthropicBatchClientBackend(client),
+                usage=usage,
+                config=config,
+            )
+            classified = _rel_outcome.kept
+            _rel_drops.extend(_rel_outcome.drops)
         # Issue athenaeum#2653: hint-derived claims are capped and built by the
         # same helpers the sync transport uses (the owner is exempt from the cap).
         classified, _ = cap_hint_claims(classified, st.hint_set.owner_uid, st.raw.ref)
@@ -1861,6 +1884,35 @@ def process_batch_run(
                         existing_uid=uid_or_name,
                         observations=st.raw.content[:2000],
                     )
+                )
+        # Issue athenaeum#2647: the Tier-3 relevance gate (updates onto a covered
+        # page), shared with ``librarian.process_one``.
+        if relevance_policy is not None and relevance_policy.rules:
+            st.actions, _rel_update_drops = gate_update_actions(
+                st.actions,
+                relevance_policy,
+                index=index,
+                raw_content=st.raw.content,
+                jsonl=_rel_jsonl,
+                raw_ref=st.raw.ref,
+            )
+            _rel_drops.extend(_rel_update_drops)
+        if _rel_drops and resolve_drop_log(config):
+            # No per-file drop loop on this transport: record here. Everything
+            # removed -> one whole-raw row (as the sync transport's ``_is_drop``
+            # row); otherwise one row per dropped fact.
+            if not st.actions:
+                _rel_rows = [(_rel_drops[-1].reason, st.raw.content)]
+            else:
+                _rel_rows = [(d.reason, d.excerpt) for d in _rel_drops]
+            for _rel_reason, _rel_text in _rel_rows:
+                drops_mod.record_drop(
+                    effective_cache_dir,
+                    raw_ref=st.raw.ref,
+                    content=_rel_text,
+                    stage=drops_mod.DROP_STAGE_OTHER,
+                    reason=_rel_reason,
+                    run_id=run_id_var.get(),
                 )
         if not st.actions:
             log.info("  No actions needed for %s", st.raw.ref)
@@ -3325,6 +3377,7 @@ def collect_pending_batches(
             # Issue athenaeum#2653: a collected classify result is parsed
             # against the same person-hint candidates the submit run offered.
             person_registry=person_registry,
+            relevance_policy=relevance_policy,
         )
 
         out.created += applied.created
