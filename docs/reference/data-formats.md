@@ -156,6 +156,20 @@ list the effective rules in order. When the file exists the librarian run
 summary reports `relevance_policy=<8-hex hash>` next to `schema_fragments=`
 (`invalid` if the file fails validation).
 
+**Enforcement of `never`.** Before any tier runs (including the deterministic
+passthrough and structured-upsert paths), the librarian, the batch transport
+and the auto-memory phase check each fact's *declared* `type`, `tags` and
+`uid` frontmatter against the policy. A fact whose last matching rule is
+`never` is not compiled; it is recorded in the drop ledger (`athenaeum drops
+list`, stage `other`, reason `relevance-policy: <verdict> <keys> (rule N, line
+L)`), and the raw note is deleted on processing like any other consumed raw.
+A raw that mixes items (a `.jsonl` file's records, or several concatenated
+`---` frontmatter documents) is judged per item: only the covered items are
+dropped. Auto-memory files are never deleted: a covered one is skipped each
+run. With no policy file nothing changes. A policy file that fails validation
+stops the run before any raw is touched rather than silently ignoring a `never`
+rule. The policy applies forward only.
+
 ## Data lifecycle and upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw

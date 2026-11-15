@@ -3300,6 +3300,13 @@ class ProcessingResult:
     #: file would inevitably cross the stuck threshold purely by being what
     #: it is. Ignored when ``retain_raw`` is False.
     retain_raw_by_design: bool = False
+    #: Items of a MIXED raw the relevance policy dropped while the rest of the
+    #: raw compiled (issue athenaeum#2644): :class:`athenaeum.relevance_policy.
+    #: RelevanceDrop` records the entity loop turns into drop-ledger rows. Empty
+    #: for a raw the policy dropped WHOLE (that rides ``skipped`` and the
+    #: ordinary "created/updated nothing" drop path) and for every raw when no
+    #: policy file exists.
+    relevance_drops: list[Any] = field(default_factory=list)
     #: Count of Tier-2 classification responses that dropped ALL entities
     #: because no parseable JSON array could be recovered (issue athenaeum#472). Almost
     #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.

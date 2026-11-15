@@ -59,6 +59,7 @@ corpus policy for a specific entity beyond what ``storage.mapping`` says.
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -549,9 +550,13 @@ IndexedRoot = Path | IndexedSurface
 
 def as_indexed_surface(item: IndexedRoot) -> IndexedSurface:
     """Normalize a bare :class:`~pathlib.Path` to its :class:`IndexedSurface`."""
-    if isinstance(item, IndexedSurface):
-        return item
-    return IndexedSurface(prefix=item.name, root=item)
+    # Duck-typed on purpose (not ``isinstance(item, IndexedSurface)``): a test
+    # that reloads this module mints a second IndexedSurface class, and an
+    # isinstance check would then turn a surface into a bad Path (athenaeum#2616).
+    if isinstance(item, (str, os.PathLike)):
+        path = Path(item)
+        return IndexedSurface(prefix=path.name, root=path)
+    return item
 
 
 def _is_within(inner: Path, outer: Path) -> bool:

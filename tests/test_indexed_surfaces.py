@@ -249,3 +249,44 @@ class TestByteIdenticalManifestWithoutSurfaces:
             resolved / manifest
         )
         assert _names(resolved, manifest) == {"alpha.md", "auto-memory/note.md"}
+
+
+class TestReloadedClassIsStillASurface:
+    """A test that reloads ``athenaeum.storage`` mints a second
+    ``IndexedSurface`` class; the normalizers must not turn an instance of it
+    into a bad ``Path`` (seen as an order-dependent full-suite failure)."""
+
+    def test_lookalike_surface_passes_through_as_indexed_surface(self, tmp_path: Path) -> None:
+        from dataclasses import dataclass
+
+        from athenaeum.storage import as_indexed_surface
+
+        @dataclass(frozen=True)
+        class OtherIndexedSurface:  # stands in for the reloaded class
+            prefix: str
+            root: Path
+
+        item = OtherIndexedSurface(prefix="recipes", root=tmp_path)
+        assert as_indexed_surface(item) is item  # type: ignore[arg-type]
+        assert as_indexed_surface(tmp_path) == IndexedSurface(prefix=tmp_path.name, root=tmp_path)
+        assert as_indexed_surface(str(tmp_path)).root == tmp_path  # type: ignore[arg-type]
+
+    def test_build_fts5_index_accepts_a_lookalike_surface(self, kb: Path) -> None:
+        from dataclasses import dataclass
+
+        from athenaeum.search import build_fts5_index
+
+        @dataclass(frozen=True)
+        class OtherIndexedSurface:
+            prefix: str
+            root: Path
+
+        root = kb / "notes-store"
+        _page(root, "n1.md", "zebrafinch")
+        cache = kb / "cache"
+        build_fts5_index(
+            kb / "wiki",
+            cache,
+            extra_roots=[OtherIndexedSurface(prefix="notes", root=root)],  # type: ignore[list-item]
+        )
+        assert "notes/n1.md" in _names(cache)
