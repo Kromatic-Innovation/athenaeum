@@ -99,6 +99,12 @@ JWKS_PATH = "/.well-known/jwks.json"
 #: is not something a resource server can hold.
 SIGNING_ALGORITHM = "RS256"
 
+#: Default clock-skew allowance, in seconds, applied to ``nbf`` / ``iat`` (a
+#: token minted by an issuer whose clock runs slightly ahead of this host's
+#: must not be refused for it). Configurable via ``serve.auth.clock_leeway``;
+#: 60 s is the conventional JWT-library default.
+DEFAULT_CLOCK_LEEWAY = 60
+
 
 class ServeAuthError(ValueError):
     """Raised when the ``serve.auth.*`` configuration is invalid or incomplete.
@@ -130,6 +136,10 @@ class ServeAuth:
             :func:`build_serve_auth`.
         read_scope: Scope name a READ tool call requires.
         write_scope: Scope name a WRITE tool call requires.
+        clock_leeway: Seconds of clock skew tolerated on ``nbf`` / ``iat``.
+        max_token_lifetime: Optional ceiling, in seconds, on how long a token
+            may be valid; ``None`` means no ceiling beyond the mandatory
+            ``exp``. See :func:`check_time_claims`.
     """
 
     issuer: str
@@ -137,6 +147,8 @@ class ServeAuth:
     allowed_identities: frozenset[str]
     read_scope: str
     write_scope: str
+    clock_leeway: int = DEFAULT_CLOCK_LEEWAY
+    max_token_lifetime: int | None = None
 
     @property
     def jwks_uri(self) -> str:
@@ -190,6 +202,15 @@ class ServeAuth:
                 return email.casefold()
         return None
 
+    def time_claim_refusal(self, claims: Mapping[str, object], now: float) -> str | None:
+        """:func:`check_time_claims` under this configuration's pins."""
+        return check_time_claims(
+            claims,
+            now,
+            leeway=self.clock_leeway,
+            max_lifetime=self.max_token_lifetime,
+        )
+
     def identity_allowed(self, claims: Mapping[str, object]) -> bool:
         """Whether *claims* presents an allowlisted identity."""
         return self.identity_of(claims) is not None
@@ -209,6 +230,90 @@ class ServeAuth:
         tool whose class this cannot establish is treated as a mutator.
         """
         return self.read_scope if read_only is True else self.write_scope
+
+
+def _numeric_claim(claims: Mapping[str, object], name: str) -> float | None | bool:
+    """A NumericDate claim as a float, ``None`` if absent, ``False`` if malformed.
+
+    RFC 7519 NumericDate is a JSON number. A bool is not one (``True`` would
+    otherwise pass as ``1``), and a string is not coerced.
+    """
+    if name not in claims or claims[name] is None:
+        return None
+    value = claims[name]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return float(value)
+
+
+def check_time_claims(
+    claims: Mapping[str, object],
+    now: float,
+    *,
+    leeway: int = DEFAULT_CLOCK_LEEWAY,
+    max_lifetime: int | None = None,
+) -> str | None:
+    """Why a signature-verified token's time claims are unacceptable, or ``None``.
+
+    Run AFTER the library has verified signature / ``iss`` / ``aud``, because
+    FastMCP's own check only looks at ``exp`` when it is present and never
+    looks at ``nbf``. Fails closed; the returned reason is a short stable
+    identifier (never a claim value, never the token) for the audit log:
+
+    - ``missing_exp`` / ``malformed_exp`` -- a token that never expires turns
+      one leak into permanent access, so ``exp`` is required;
+    - ``expired`` -- ``exp`` is not after *now* (no leeway on the expiry side:
+      leeway only forgives an issuer clock running AHEAD);
+    - ``not_yet_valid`` -- ``nbf`` later than *now* + *leeway*;
+    - ``issued_in_future`` -- ``iat`` later than *now* + *leeway*;
+    - ``lifetime_exceeds_max`` -- only when *max_lifetime* is set: ``exp - iat``
+      over the cap, or, when ``iat`` is absent, ``exp - now`` over the cap.
+      The lifetime cap is compared exactly, without leeway.
+
+    A malformed ``nbf`` / ``iat`` (present but not a number) is refused too.
+    """
+    exp = _numeric_claim(claims, "exp")
+    if exp is None:
+        return "missing_exp"
+    if exp is False:
+        return "malformed_exp"
+    nbf = _numeric_claim(claims, "nbf")
+    iat = _numeric_claim(claims, "iat")
+    if nbf is False or iat is False:
+        return "malformed_time_claim"
+    assert isinstance(exp, float)
+    if exp <= now:
+        return "expired"
+    horizon = now + leeway
+    if nbf is not None and nbf > horizon:
+        return "not_yet_valid"
+    if iat is not None and iat > horizon:
+        return "issued_in_future"
+    if max_lifetime is not None:
+        lifetime = exp - (iat if iat is not None else now)
+        if lifetime > max_lifetime:
+            return "lifetime_exceeds_max"
+    return None
+
+
+def parse_seconds(raw: object, source: str, *, minimum: int) -> int:
+    """Validate a whole-number seconds setting, raising :class:`ServeAuthError`.
+
+    Accepts an int or a base-10 integer string (env var spelling); refuses a
+    bool (``true`` would otherwise read as ``1``), a float and anything below
+    *minimum*.
+    """
+    value: object = raw
+    if isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = raw
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ServeAuthError(
+            f"{source}={raw!r} must be a whole number of seconds >= {minimum}."
+        )
+    return value
 
 
 def _require_absolute_url(value: str, setting: str) -> str:
@@ -309,6 +414,8 @@ def build_serve_auth(
     resource: str | None = None,
     allowed_identities: frozenset[str] | None = None,
     scopes: Mapping[str, str] | None = None,
+    clock_leeway: int | None = None,
+    max_token_lifetime: int | None = None,
 ) -> ServeAuth | None:
     """Compose the four resolved pins into a :class:`ServeAuth`, or ``None``.
 
@@ -345,6 +452,10 @@ def build_serve_auth(
             normalized by the resolver.
         scopes: ``{"read": ..., "write": ...}``, or ``None`` for the
             :data:`DEFAULT_READ_SCOPE` / :data:`DEFAULT_WRITE_SCOPE` pair.
+        clock_leeway: Seconds of ``nbf`` / ``iat`` skew tolerated; ``None``
+            takes :data:`DEFAULT_CLOCK_LEEWAY`. Non-negative.
+        max_token_lifetime: Optional token-lifetime ceiling in seconds;
+            positive. Neither knob counts as "auth configured" on its own.
     """
     configured = (issuer, resource, allowed_identities, scopes)
     if all(pin is None for pin in configured):
@@ -399,12 +510,25 @@ def build_serve_auth(
             "tool."
         )
 
+    leeway = (
+        DEFAULT_CLOCK_LEEWAY
+        if clock_leeway is None
+        else parse_seconds(clock_leeway, "serve.auth.clock_leeway", minimum=0)
+    )
+    lifetime_cap = (
+        None
+        if max_token_lifetime is None
+        else parse_seconds(max_token_lifetime, "serve.auth.max_token_lifetime", minimum=1)
+    )
+
     return ServeAuth(
         issuer=issuer_url,
         resource=resource_url,
         allowed_identities=identities,
         read_scope=read_scope,
         write_scope=write_scope,
+        clock_leeway=leeway,
+        max_token_lifetime=lifetime_cap,
     )
 
 

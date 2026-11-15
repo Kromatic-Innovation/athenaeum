@@ -10335,6 +10335,77 @@ def resolve_serve_auth_scopes(
     return None
 
 
+def resolve_serve_auth_max_token_lifetime(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int | None:
+    """Resolve the optional access-token lifetime ceiling (issue athenaeum#2599).
+
+    Seconds, positive. When set, a token whose ``exp - iat`` exceeds it is
+    refused, and so is one with no ``iat`` whose ``exp`` is further than this
+    from now. ``None`` (the default) sets no ceiling.
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME``, ``serve.auth.max_token_lifetime``.
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a non-positive or
+    non-integer value rather than ignoring it. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import parse_seconds
+
+    if cli_value is not None:
+        return parse_seconds(cli_value, "--auth-max-token-lifetime", minimum=1)
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME")
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", minimum=1)
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("max_token_lifetime")
+                if raw is not None:
+                    return parse_seconds(raw, "serve.auth.max_token_lifetime", minimum=1)
+    return None
+
+
+def resolve_serve_auth_clock_leeway(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int:
+    """Resolve the ``nbf`` / ``iat`` clock-skew leeway in seconds (issue athenaeum#2599).
+
+    A token whose ``nbf`` or ``iat`` is later than now plus this is refused.
+    Non-negative; ``0`` means no tolerance. Default
+    :data:`athenaeum.serve_auth.DEFAULT_CLOCK_LEEWAY` (60). It does not widen
+    ``exp``: an expired token is refused regardless.
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY``, ``serve.auth.clock_leeway``.
+    Raises :class:`athenaeum.serve_auth.ServeAuthError` on a negative or
+    non-integer value. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import DEFAULT_CLOCK_LEEWAY, parse_seconds
+
+    if cli_value is not None:
+        return parse_seconds(cli_value, "--auth-clock-leeway", minimum=0)
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY")
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY", minimum=0)
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("clock_leeway")
+                if raw is not None:
+                    return parse_seconds(raw, "serve.auth.clock_leeway", minimum=0)
+    return DEFAULT_CLOCK_LEEWAY
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2472 -- `dedupe.strong_identifier_keys`. Appended here, at
 # the end of the file, per this module's own established convention (see

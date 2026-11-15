@@ -384,7 +384,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_search_backend,
         resolve_serve_audit_log,
         resolve_serve_auth_allowed_identities,
+        resolve_serve_auth_clock_leeway,
         resolve_serve_auth_issuer,
+        resolve_serve_auth_max_token_lifetime,
         resolve_serve_auth_resource,
         resolve_serve_auth_scopes,
         resolve_serve_excluded_fields,
@@ -440,6 +442,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 cfg, getattr(args, "auth_allowed_identities", None)
             ),
             scopes=resolve_serve_auth_scopes(cfg, getattr(args, "auth_scopes", None)),
+            clock_leeway=resolve_serve_auth_clock_leeway(cfg),
+            max_token_lifetime=resolve_serve_auth_max_token_lifetime(cfg),
         )
     except ServeAuthError as exc:
         print(f"[auth] invalid configuration: {exc}", file=sys.stderr)

@@ -772,6 +772,95 @@ class TestProtectedResourceMetadata:
         # the operator knows which form their authorization server mints.
         assert [s.rstrip("/") for s in document["authorization_servers"]] == [ISSUER]
 
+    @pytest.mark.parametrize("configured", [ISSUER, ISSUER + "/"])
+    def test_the_issuer_is_advertised_byte_for_byte(
+        self, corpus: Path, issuer: _FakeIssuer, configured: str
+    ) -> None:
+        """athenaeum#2600: no trailing slash is added to, or taken from, the
+        configured issuer. Compared on the raw response bytes, not URL objects,
+        because RFC 8414 / RFC 9207 match the issuer as an exact string."""
+
+        async def _body(app: Any) -> tuple[int, bytes, dict[str, str]]:
+            async with _raw_client(app) as client:
+                response = await client.get("/.well-known/oauth-protected-resource")
+                return response.status_code, response.content, dict(response.headers)
+
+        status, raw, headers = _drive(
+            corpus, issuer, _serve_auth(issuer=configured), _body
+        )
+        assert status == 200
+        assert f'"authorization_servers":["{configured}"]'.encode() in raw
+        assert json.loads(raw)["authorization_servers"][0].encode() == configured.encode()
+        assert headers["content-length"] == str(len(raw))
+        assert headers["cache-control"] == "public, max-age=3600"
+
+    def test_a_cors_preflight_is_not_rewritten(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        """The OPTIONS answer is not JSON and must reach the client intact."""
+
+        async def _body(app: Any) -> tuple[int, bytes]:
+            async with _raw_client(app) as client:
+                response = await client.options(
+                    "/.well-known/oauth-protected-resource",
+                    headers={
+                        "Origin": "https://client.example.invalid",
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+                return response.status_code, response.content
+
+        status, raw = _drive(corpus, issuer, _serve_auth(), _body)
+        assert status == 200
+        assert b"authorization_servers" not in raw
+
+    def test_a_multi_chunk_body_is_rewritten_with_one_start_message(self) -> None:
+        """A body streamed in several chunks is buffered, rewritten once, and
+        sent behind exactly one ``http.response.start`` whose Content-Length
+        matches the bytes actually sent."""
+        from athenaeum.mcp_auth import build_auth_provider
+
+        provider = build_auth_provider(_serve_auth())
+        document = b'{"resource":"x","authorization_servers":["https://normalized.invalid/"]}'
+
+        async def inner(scope: Any, receive: Any, send: Any) -> None:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-length", str(len(document)).encode())],
+                }
+            )
+            await send({"type": "http.response.body", "body": document[:10], "more_body": True})
+            await send({"type": "http.response.body", "body": document[10:], "more_body": False})
+
+        sent: list[dict[str, Any]] = []
+
+        async def collect(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        wrapped = provider._with_raw_issuer(inner)  # type: ignore[attr-defined]
+        asyncio.run(wrapped({"type": "http", "method": "GET"}, None, collect))
+
+        starts = [m for m in sent if m["type"] == "http.response.start"]
+        bodies = [m for m in sent if m["type"] == "http.response.body"]
+        assert len(starts) == 1
+        body = b"".join(m["body"] for m in bodies)
+        assert json.loads(body)["authorization_servers"] == [ISSUER]
+        assert dict(starts[0]["headers"])[b"content-length"] == str(len(body)).encode()
+
+    @pytest.mark.parametrize("resource", [RESOURCE, RESOURCE + "/mcp"])
+    def test_the_resource_field_is_unchanged_by_the_issuer_fix(
+        self, corpus: Path, issuer: _FakeIssuer, resource: str
+    ) -> None:
+        """The pinned resource is still served as FastMCP rendered it: the
+        canonical form of the configured pin, which for a path-less origin
+        carries the slash a pydantic URL renders."""
+        status, document = self._metadata(corpus, issuer, resource)
+        assert status == 200
+        assert document["resource"] == _serve_auth(resource=resource).resource
+        assert document["resource"] == (resource + "/" if resource == RESOURCE else resource)
+
     def test_a_path_scoped_resource_answers_at_its_rfc_9728_path(
         self, corpus: Path, issuer: _FakeIssuer
     ) -> None:
@@ -1509,3 +1598,236 @@ class TestDocsDocumentTheResourceServer:
         text = self.PAGE.read_text(encoding="utf-8").lower()
         assert "one process" in text
         assert "never" in text and "token claim" in text
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2599 — exp is required, nbf/iat are enforced, lifetime is capped.
+# ---------------------------------------------------------------------------
+
+
+def _without_exp(issuer: _FakeIssuer) -> str:
+    """A token minted with the ``exp`` claim absent (not merely ``None``)."""
+    from joserfc import jwt
+    from joserfc.jws import JWSRegistry
+
+    now = int(time.time())
+    payload = {
+        "iss": ISSUER,
+        "aud": RESOURCE + "/",
+        "sub": ALLOWED_SUBJECT,
+        "iat": now,
+        "nbf": now,
+    }
+    return jwt.encode(
+        {"alg": SIGNING_ALGORITHM, "kid": SIGNING_KID},
+        payload,
+        issuer.signer,
+        registry=JWSRegistry(algorithms=[SIGNING_ALGORITHM]),
+    )
+
+
+def _without_iat(issuer: _FakeIssuer, *, exp_in: int) -> str:
+    from joserfc import jwt
+    from joserfc.jws import JWSRegistry
+
+    payload = {
+        "iss": ISSUER,
+        "aud": RESOURCE + "/",
+        "sub": ALLOWED_SUBJECT,
+        "exp": int(time.time()) + exp_in,
+    }
+    return jwt.encode(
+        {"alg": SIGNING_ALGORITHM, "kid": SIGNING_KID},
+        payload,
+        issuer.signer,
+        registry=JWSRegistry(algorithms=[SIGNING_ALGORITHM]),
+    )
+
+
+class TestTimeClaimsAreEnforced:
+    """End to end through the ASGI app: each refusal is a 401 with a challenge."""
+
+    def _status(self, corpus: Path, issuer: _FakeIssuer, token: str, **auth: Any) -> int:
+        status, challenge = _post_initialize(corpus, issuer, _serve_auth(**auth), token)
+        if status == 401:
+            assert challenge.startswith("Bearer")
+        return status
+
+    def test_missing_exp_is_refused(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        assert self._status(corpus, issuer, _without_exp(issuer)) == 401
+
+    def test_future_nbf_is_refused(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        token = issuer.mint(nbf=int(time.time()) + 3600, exp=int(time.time()) + 7200)
+        assert self._status(corpus, issuer, token) == 401
+
+    def test_future_iat_is_refused(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        token = issuer.mint(iat=int(time.time()) + 3600, nbf=int(time.time()) - 1)
+        assert self._status(corpus, issuer, token) == 401
+
+    def test_nbf_within_leeway_is_accepted(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        token = issuer.mint(nbf=int(time.time()) + 30, iat=int(time.time()) + 30)
+        assert self._status(corpus, issuer, token) == 200
+
+    def test_nbf_beyond_a_configured_smaller_leeway_is_refused(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        token = issuer.mint(nbf=int(time.time()) + 30)
+        assert self._status(corpus, issuer, token, clock_leeway=5) == 401
+
+    def test_lifetime_over_the_cap_is_refused(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        now = int(time.time())
+        token = issuer.mint(iat=now, nbf=now, exp=now + 3600)
+        assert self._status(corpus, issuer, token, max_token_lifetime=600) == 401
+
+    def test_lifetime_under_the_cap_is_accepted(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        now = int(time.time())
+        token = issuer.mint(iat=now, nbf=now, exp=now + 300)
+        assert self._status(corpus, issuer, token, max_token_lifetime=600) == 200
+
+    def test_no_iat_with_distant_exp_is_refused_under_a_cap(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        token = _without_iat(issuer, exp_in=3600)
+        assert self._status(corpus, issuer, token, max_token_lifetime=600) == 401
+
+    def test_no_iat_with_near_exp_is_accepted_under_a_cap(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        token = _without_iat(issuer, exp_in=300)
+        assert self._status(corpus, issuer, token, max_token_lifetime=600) == 200
+
+    def test_a_long_lifetime_is_accepted_when_no_cap_is_set(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        now = int(time.time())
+        token = issuer.mint(iat=now, nbf=now, exp=now + 10 * 365 * 86400)
+        assert self._status(corpus, issuer, token) == 200
+
+    def test_expired_is_still_refused(self, corpus: Path, issuer: _FakeIssuer) -> None:
+        now = int(time.time())
+        token = issuer.mint(exp=now - 60, iat=now - 600, nbf=now - 600)
+        assert self._status(corpus, issuer, token) == 401
+
+    def test_refusal_is_logged_with_the_reason_and_never_the_token(
+        self, corpus: Path, issuer: _FakeIssuer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        token = _without_exp(issuer)
+        with caplog.at_level("WARNING", logger="athenaeum.mcp_auth"):
+            assert self._status(corpus, issuer, token) == 401
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "missing_exp" in text
+        assert token not in text
+        assert token.split(".")[1] not in text
+
+
+class TestCheckTimeClaims:
+    """The pure function, with an explicit clock."""
+
+    NOW = 1_000_000.0
+
+    def _check(self, claims: dict[str, Any], **kw: Any) -> str | None:
+        from athenaeum.serve_auth import check_time_claims
+
+        return check_time_claims(claims, self.NOW, **kw)
+
+    def test_valid_token_passes(self) -> None:
+        assert self._check({"exp": self.NOW + 60, "iat": self.NOW, "nbf": self.NOW}) is None
+
+    @pytest.mark.parametrize(
+        ("claims", "expected"),
+        [
+            ({}, "missing_exp"),
+            ({"exp": None}, "missing_exp"),
+            ({"exp": "9999999999"}, "malformed_exp"),
+            ({"exp": True}, "malformed_exp"),
+            ({"exp": NOW - 1}, "expired"),
+            ({"exp": NOW}, "expired"),
+            ({"exp": NOW + 99, "nbf": NOW + 61}, "not_yet_valid"),
+            ({"exp": NOW + 99, "iat": NOW + 61}, "issued_in_future"),
+            ({"exp": NOW + 99, "nbf": "soon"}, "malformed_time_claim"),
+        ],
+    )
+    def test_refusals(self, claims: dict[str, Any], expected: str) -> None:
+        assert self._check(claims) == expected
+
+    def test_leeway_boundary_is_inclusive(self) -> None:
+        assert self._check({"exp": self.NOW + 99, "nbf": self.NOW + 60}) is None
+        assert self._check({"exp": self.NOW + 99, "nbf": self.NOW + 60}, leeway=0) == (
+            "not_yet_valid"
+        )
+
+    def test_lifetime_cap_uses_iat_when_present_else_now(self) -> None:
+        over = {"exp": self.NOW + 700, "iat": self.NOW}
+        assert self._check(over, max_lifetime=600) == "lifetime_exceeds_max"
+        assert self._check({"exp": self.NOW + 600, "iat": self.NOW}, max_lifetime=600) is None
+        # iat old, exp near: lifetime measured exp - iat, not exp - now.
+        assert (
+            self._check({"exp": self.NOW + 10, "iat": self.NOW - 1000}, max_lifetime=600)
+            == "lifetime_exceeds_max"
+        )
+        assert self._check({"exp": self.NOW + 700}, max_lifetime=600) == "lifetime_exceeds_max"
+        assert self._check({"exp": self.NOW + 500}, max_lifetime=600) is None
+
+
+class TestTimeClaimSettings:
+    YAML = {"serve": {"auth": {"max_token_lifetime": 900, "clock_leeway": 5}}}
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY", raising=False)
+
+    def test_defaults(self) -> None:
+        from athenaeum.config import (
+            resolve_serve_auth_clock_leeway,
+            resolve_serve_auth_max_token_lifetime,
+        )
+
+        assert resolve_serve_auth_max_token_lifetime(None) is None
+        assert resolve_serve_auth_clock_leeway(None) == 60
+
+    def test_yaml_env_cli_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import (
+            resolve_serve_auth_clock_leeway,
+            resolve_serve_auth_max_token_lifetime,
+        )
+
+        assert resolve_serve_auth_max_token_lifetime(self.YAML) == 900
+        assert resolve_serve_auth_clock_leeway(self.YAML) == 5
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", "120")
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY", "0")
+        assert resolve_serve_auth_max_token_lifetime(self.YAML) == 120
+        assert resolve_serve_auth_clock_leeway(self.YAML) == 0
+        assert resolve_serve_auth_max_token_lifetime(self.YAML, 30) == 30
+        assert resolve_serve_auth_clock_leeway(self.YAML, 7) == 7
+
+    def test_blank_env_falls_through_to_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_serve_auth_max_token_lifetime
+
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", "  ")
+        assert resolve_serve_auth_max_token_lifetime(self.YAML) == 900
+
+    @pytest.mark.parametrize("bad", [0, -5, True, 1.5, "abc"])
+    def test_invalid_lifetime_is_refused(self, bad: Any) -> None:
+        from athenaeum.config import resolve_serve_auth_max_token_lifetime
+        from athenaeum.serve_auth import ServeAuthError
+
+        with pytest.raises(ServeAuthError):
+            resolve_serve_auth_max_token_lifetime({"serve": {"auth": {"max_token_lifetime": bad}}})
+
+    @pytest.mark.parametrize("bad", [-1, True, 1.5, "abc"])
+    def test_invalid_leeway_is_refused(self, bad: Any) -> None:
+        from athenaeum.config import resolve_serve_auth_clock_leeway
+        from athenaeum.serve_auth import ServeAuthError
+
+        with pytest.raises(ServeAuthError):
+            resolve_serve_auth_clock_leeway({"serve": {"auth": {"clock_leeway": bad}}})
+
+    def test_build_serve_auth_carries_and_validates(self) -> None:
+        from athenaeum.serve_auth import ServeAuthError
+
+        built = _serve_auth(clock_leeway=3, max_token_lifetime=77)
+        assert (built.clock_leeway, built.max_token_lifetime) == (3, 77)
+        assert _serve_auth().clock_leeway == 60
+        with pytest.raises(ServeAuthError):
+            _serve_auth(max_token_lifetime=0)
