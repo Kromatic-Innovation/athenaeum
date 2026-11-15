@@ -47,6 +47,7 @@ import yaml
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.store_boundary import assert_same_surface, locator_for, same_surface
+from athenaeum.store_links import admit_page_write
 
 # Honorifics + suffixes to drop before name matching.
 _HONORIFICS = {
@@ -823,6 +824,7 @@ def _perform_merge(
     strong_identifier_keys: Iterable[str] = _DEFAULT_STRONG_IDENTIFIER_KEYS,
     owner: dict[str, Any] | None = None,
     dropped: dict[str, int] | None = None,
+    wiki_root: Path | None = None,
 ) -> str:
     canonical_text = canonical_path.read_text(encoding="utf-8")
     absorbed_text = absorbed_path.read_text(encoding="utf-8")
@@ -850,6 +852,10 @@ def _perform_merge(
     if dry_run:
         return f"WOULD_MERGE:{absorbed_uid}->{canonical_uid}"
 
+    if wiki_root is not None and not admit_page_write(
+        wiki_root, canonical_path, new_text, source="dedupe-merge"
+    ):
+        return f"REFUSED_STORE_LINK:{absorbed_uid}->{canonical_uid}"
     atomic_write_text(canonical_path, new_text)
     absorbed_path.unlink()
     return f"MERGED:{absorbed_uid}->{canonical_uid}"
@@ -1025,11 +1031,16 @@ def merge_duplicate_persons(
                 strong_identifier_keys=si_keys,
                 owner=owner,
                 dropped=pair_dropped,
+                wiki_root=wiki_root,
             )
         except (OSError, UnicodeDecodeError) as exc:
             report.errors.append(f"{pair.absorbed_uid}: {exc}")
             continue
-        if outcome.startswith("SKIP_PARSE"):
+        if outcome.startswith("REFUSED_STORE_LINK"):
+            report.errors.append(
+                f"{pair.absorbed_uid}: refused, the merge would link to a more private store"
+            )
+        elif outcome.startswith("SKIP_PARSE"):
             report.skipped_parse += 1
         elif outcome.startswith("MERGED") or outcome.startswith("WOULD_MERGE"):
             report.merged += 1

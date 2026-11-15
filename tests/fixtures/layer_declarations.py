@@ -101,8 +101,8 @@ MODULE_LAYER: dict[str, int] = {
     "schemas": 1,
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,
-    "store_boundary": 3,  # issue athenaeum#2619: surface/rank predicates
-    "store_links": 4,  # issue athenaeum#2619: link guard + lint
+    "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
+    "store_links": 2,  # issue athenaeum#2619: link guard + lint
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
     # athenaeum#2159: pure single-key frontmatter-line surgery plus the one

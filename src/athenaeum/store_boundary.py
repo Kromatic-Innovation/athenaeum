@@ -16,7 +16,7 @@ This module holds the surface resolution and the two predicates; the link
 scan, the write-boundary guard and the lint live in
 :mod:`athenaeum.store_links`.
 
-Layering: L3. Imports only :mod:`athenaeum.models` (:class:`PageLocator`) and
+Layering: L2. Imports only :mod:`athenaeum.models` (:class:`PageLocator`) and
 :mod:`athenaeum.storage` (L1).
 """
 
@@ -51,13 +51,35 @@ def locator_for(wiki_root: Path, config: dict[str, Any] | None = None) -> PageLo
     return PageLocator(wiki_root, resolve_locator_surfaces(knowledge_root, config))
 
 
+#: The surface name :func:`surface_name_of` gives a path under no known surface root.
+UNPLACED_SURFACE = "(unplaced)"
+
+
+def extra_surface_roots(wiki_root: Path, config: dict[str, Any] | None = None) -> list[Path]:
+    """The roots of the extra page surfaces beside *wiki_root* (``[]`` when none)."""
+    return [Path(root) for _, root in locator_for(wiki_root, config).surfaces]
+
+
 def surface_name_of(locator: PageLocator, path: Path) -> str:
-    """The surface *path* lives on (symlinks resolved, as the locator's roots are)."""
+    """The surface *path* lives on (symlinks resolved, as the locator's roots are).
+
+    A path under neither ``wiki/`` nor an extra surface root (e.g. a page on a
+    non-indexed surface) is :data:`UNPLACED_SURFACE`, never silently ``wiki`` --
+    so a merge that reaches it is refused rather than waved through.
+    """
     try:
         path = path.resolve()
     except OSError:  # pragma: no cover - defensive
         pass
-    return locator.surface_of(path)
+    name = locator.surface_of(path)
+    if name == PageLocator.WIKI_SURFACE:
+        try:
+            wiki = locator.wiki_root.resolve()
+        except OSError:  # pragma: no cover - defensive
+            wiki = locator.wiki_root
+        if path != wiki and wiki not in path.parents:
+            return UNPLACED_SURFACE
+    return name
 
 
 def same_surface(locator: PageLocator, *paths: Path) -> bool:

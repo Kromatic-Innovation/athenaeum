@@ -245,3 +245,138 @@ class TestNoMergeAcrossStores:
         assert res["ok"] is False
         assert res["error_code"] == CROSS_STORE_MERGE_ERROR_CODE
         assert merges.read_text() == before
+
+
+class TestOtherWritePaths:
+    def test_structured_upsert_refuses_and_leaves_page_and_raw(self, kroot, tmp_path) -> None:
+        from athenaeum.structured_upsert import REASON_STORE_BOUNDARY, tier0_structured_upsert
+
+        cfg = _config(1)
+        cfg["librarian"] = {
+            "structured_upsert": {"reference": {"sections": ["Notes"], "append_sections": ["Notes"]}}
+        }
+        page = kroot / "recipes" / f"{SHARED_UID}-soup.md"
+        page.write_text(
+            f"---\nuid: {SHARED_UID}\ntype: reference\nname: Soup\naccess: internal\n---\n\n# Soup\n\n## Notes\n\n- a\n",
+            encoding="utf-8",
+        )
+        before = page.read_text()
+        raw_path = kroot / "raw.md"
+        raw_path.write_text(
+            f"---\nuid: {SHARED_UID}\ntype: reference\nname: Soup\n---\n\n# Soup\n\n## Notes\n\n- see [[{PRIVATE_UID}]]\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="src", timestamp="", uuid8="")
+        out = tier0_structured_upsert(raw, _index(kroot, cfg), kroot / "wiki", ["reference"], config=cfg)
+        assert out is not None and out.status == "refused" and out.reason == REASON_STORE_BOUNDARY
+        assert page.read_text() == before
+        assert raw_path.exists()
+
+    def test_structured_upsert_allows_a_shared_link(self, kroot) -> None:
+        from athenaeum.structured_upsert import tier0_structured_upsert
+
+        cfg = _config(1)
+        cfg["librarian"] = {
+            "structured_upsert": {"reference": {"sections": ["Notes"], "append_sections": ["Notes"]}}
+        }
+        page = kroot / "recipes" / f"{SHARED_UID}-soup.md"
+        page.write_text(
+            f"---\nuid: {SHARED_UID}\ntype: reference\nname: Soup\naccess: internal\n---\n\n# Soup\n\n## Notes\n\n- a\n",
+            encoding="utf-8",
+        )
+        raw_path = kroot / "raw.md"
+        raw_path.write_text(
+            f"---\nuid: {SHARED_UID}\ntype: reference\nname: Soup\n---\n\n# Soup\n\n## Notes\n\n- see [[{SHARED2_UID}]]\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="src", timestamp="", uuid8="")
+        out = tier0_structured_upsert(raw, _index(kroot, cfg), kroot / "wiki", ["reference"], config=cfg)
+        assert out is not None and out.status == "applied"
+
+    def test_batch_refusal_retains_the_raw(self, tmp_path, monkeypatch) -> None:
+        from athenaeum import batch as batch_mod
+        from athenaeum.batch import process_batch_run
+        from athenaeum.intake import discover_raw_files
+        from athenaeum.models import TokenUsage
+        from tests.test_batch_mode import (
+            FALLBACK_ACCESS,
+            FALLBACK_TAGS,
+            _FakeClient,
+            _scripted_responder,
+            _seed_root,
+        )
+
+        monkeypatch.setattr(batch_mod, "admit_page_write", lambda *a, **k: False)
+        root = _seed_root(tmp_path, "k", ["Standalone fact about WidgetPlate gadget.\n"])
+        raws = discover_raw_files(root / "raw")
+        result = process_batch_run(
+            raws, EntityIndex(root / "wiki"), root / "wiki",
+            _FakeClient(_scripted_responder, allow_sync=False), ["concept", "reference"],
+            FALLBACK_TAGS, FALLBACK_ACCESS, usage=TokenUsage(), config=None, max_api_calls=100,
+        )
+        assert result.created == 0
+        assert all(r.path.exists() for r in raws)
+
+    def test_admit_page_write_is_one_shape_and_notices_an_unindexed_surface(self, kroot) -> None:
+        from athenaeum.store_links import admit_page_write
+
+        cfg = _config(1)
+        bad = f"---\nuid: dddd4444\n---\n\n[[{PRIVATE_UID}]]"
+        page = kroot / "recipes" / "dddd4444-stew.md"
+        # index built WITHOUT the surfaces: the helper still judges correctly
+        assert admit_page_write(kroot / "wiki", page, bad, index=EntityIndex(kroot / "wiki"), config=cfg) is False
+        assert admit_page_write(kroot / "wiki", kroot / "wiki" / "x.md", bad, config=cfg) is True
+
+    def test_dedupe_merge_refused_when_it_would_add_a_private_link(self, kroot, monkeypatch) -> None:
+        from athenaeum import dedupe
+
+        calls: list[str] = []
+        monkeypatch.setattr(dedupe, "admit_page_write", lambda *a, **k: calls.append(k["source"]) or False)
+        a = _page(kroot / "wiki" / "ffff6666-a.md", "ffff6666", "Same")
+        b = _page(kroot / "wiki" / "ffff7777-b.md", "ffff7777", "Same")
+        pair = DuplicatePair("ffff6666", "ffff7777", "name_exact", "HIGH", str(a), str(b))
+        rep = merge_duplicate_persons([pair], apply=True, wiki_root=kroot / "wiki")
+        assert calls == ["dedupe-merge"] and rep.merged == 0 and b.exists() and rep.errors
+
+
+class TestPendingMergesAcrossSurfaces:
+    def _surface_cfg(self, kroot: Path) -> None:
+        (kroot / "athenaeum.yaml").write_text(
+            "storage:\n  adapters:\n    recipes:\n      backing_store: markdown\n"
+            "      surface_root: recipes\n      corpus_policy:\n        embedded: true\n"
+        )
+
+    def test_target_and_source_on_extra_surface_resolve(self, kroot) -> None:
+        from athenaeum.pending_merges import resolve_source_path, resolve_target_page
+
+        self._surface_cfg(kroot)
+        assert resolve_target_page("Soup", kroot / "wiki") == kroot / "recipes" / f"{SHARED_UID}-soup.md"
+        assert resolve_source_path(f"{SHARED2_UID}-bread.md", wiki_root=kroot / "wiki") == (
+            kroot / "recipes" / f"{SHARED2_UID}-bread.md"
+        )
+
+    def test_target_on_extra_surface_with_wiki_source_is_refused_not_created(self, kroot) -> None:
+        self._surface_cfg(kroot)
+        merges = kroot / "wiki" / "_pending_merges.md"
+        write_pending_merge(
+            merges, merge_target_name="Soup",
+            sources=[str(kroot / "wiki" / f"{PRIVATE_UID}-alice.md")],
+            rationale="same", draft_merged_body="merged", confidence=0.9,
+        )
+        before = merges.read_text()
+        res = resolve_merge(merges, parse_pending_merges(merges)[0].id, "approve", wiki_root=kroot / "wiki")
+        assert res["error_code"] == CROSS_STORE_MERGE_ERROR_CODE
+        assert merges.read_text() == before
+        assert not (kroot / "wiki" / "soup.md").exists()
+
+    def test_surface_sources_with_a_wiki_create_target_are_refused(self, kroot) -> None:
+        self._surface_cfg(kroot)
+        merges = kroot / "wiki" / "_pending_merges.md"
+        write_pending_merge(
+            merges, merge_target_name="Brand New Dish",
+            sources=[str(kroot / "recipes" / f"{SHARED_UID}-soup.md")],
+            rationale="same", draft_merged_body="merged", confidence=0.9,
+        )
+        res = resolve_merge(merges, parse_pending_merges(merges)[0].id, "approve", wiki_root=kroot / "wiki")
+        assert res["error_code"] == CROSS_STORE_MERGE_ERROR_CODE
+        assert not (kroot / "wiki" / "brand-new-dish.md").exists()

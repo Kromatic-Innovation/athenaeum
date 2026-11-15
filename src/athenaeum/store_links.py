@@ -17,21 +17,21 @@ page's links, resolves each target's surface through the multi-surface
   ``athenaeum store-link-lint``: every EXISTING link that breaks the rule.
 
 A "link" is any of the four shapes the corpus uses (the ones
-:func:`athenaeum.page_recompile_undo.find_inbound_links` already scans): a
+``page_recompile_undo.find_inbound_links`` already scans): a
 ``related:`` row's ``uid``, the ``parent:`` key, a ``[[wikilink]]`` and a
 markdown ``[label](page.md)`` link. A link whose target does not resolve to a
 page is not judged. With no extra surface configured, or a source page on a
 rank-0 surface, nothing can be forbidden and the work is skipped.
 
-Layering: L4. Imports :mod:`athenaeum.store_boundary` (L3),
-:mod:`athenaeum.page_recompile_undo` (L4, for the link grammar),
-:mod:`athenaeum.page_relations`, :mod:`athenaeum.models`.
+Layering: L2. Imports :mod:`athenaeum.store_boundary`, :mod:`athenaeum.models`,
+:mod:`athenaeum.storage`, :mod:`athenaeum.store`; nothing at L3+.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -39,9 +39,7 @@ from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import load_config
-from athenaeum.models import EntityIndex, parse_frontmatter
-from athenaeum.page_recompile_undo import _MD_LINK_RE, _WIKILINK_RE
-from athenaeum.page_relations import _related_rows
+from athenaeum.models import EntityIndex, PageLocator, parse_frontmatter
 from athenaeum.storage import resolve_locator_surfaces, surface_visibility
 from athenaeum.store import append_line_durable, now_iso
 from athenaeum.store_boundary import (
@@ -51,6 +49,13 @@ from athenaeum.store_boundary import (
 )
 
 log = logging.getLogger(__name__)
+
+#: The corpus' wikilink and markdown-inline-link grammar, restated exactly as
+#: :mod:`athenaeum.page_recompile_undo` states it (the convention every reader
+#: of this grammar follows; importing that L4 module would be an import cycle
+#: with the write paths that call this guard).
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|[^\[\]\n]*)?\]\]")
+_MD_LINK_RE = re.compile(r"\]\(\s*<?([^)<>\s]+)>?\s*\)")
 
 STORE_LINK_REJECTED_DIR_NAME = "_store_link_rejected"
 STORE_LINK_REJECTED_LEDGER_NAME = "_store_link_rejected.jsonl"
@@ -80,7 +85,8 @@ class LinkViolation:
 def extract_link_refs(meta: Mapping[str, Any], body: str) -> list[tuple[str, str]]:
     """Every ``(kind, ref)`` link a page makes, in a stable order, deduped."""
     refs: list[tuple[str, str]] = []
-    for row in _related_rows(meta):
+    related = meta.get("related")
+    for row in related if isinstance(related, list) else []:
         if isinstance(row, dict) and isinstance(row.get("uid"), str) and row["uid"]:
             refs.append(("related-row", row["uid"]))
     parent = meta.get("parent")
@@ -230,6 +236,60 @@ def guard_entity_store_links(
         (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"),
     )
     return False
+
+
+def admit_page_write(
+    wiki_root: Path,
+    page_path: Path,
+    content: str,
+    *,
+    index: EntityIndex | None = None,
+    config: Mapping[str, Any] | None = None,
+    source: str = "unknown",
+) -> bool:
+    """The ONE call every page-writing path makes before it writes (athenaeum#2619).
+
+    ``True`` admits the write; ``False`` refuses it (parked, ledgered and logged
+    by :func:`guard_entity_store_links`) and the caller must skip it -- and, if
+    the write came from a raw intake file, retain that raw rather than delete
+    it. Reads the page's current bytes itself, so only links the write ADDS are
+    judged. Cheap when it cannot matter: no extra surface configured, or a page
+    on a rank-0 surface, returns before any index is built.
+    """
+    cfg: dict[str, Any] | None = dict(config) if config is not None else None
+    knowledge_root = Path(wiki_root).parent
+    if cfg is None:
+        cfg = load_config(knowledge_root)
+    surfaces = (
+        index.locator.surfaces if index is not None and index.locator.surfaces else None
+    )
+    specs = resolve_locator_surfaces(knowledge_root, cfg)
+    if not specs:
+        return True
+    locator = PageLocator(wiki_root, specs)
+    if surface_visibility(surface_name_of(locator, page_path), cfg) <= 0:
+        return True
+    if surfaces is None:
+        index = EntityIndex(wiki_root, specs)
+    assert index is not None
+    previous: str | None = None
+    if page_path.is_file():
+        try:
+            previous = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            previous = None
+    meta, _ = parse_frontmatter(content)
+    return guard_entity_store_links(
+        wiki_root,
+        page_path.name,
+        content,
+        meta if isinstance(meta, dict) else {},
+        page_path=page_path,
+        index=index,
+        config=cfg,
+        previous_text=previous,
+        source=source,
+    )
 
 
 @dataclass(frozen=True)

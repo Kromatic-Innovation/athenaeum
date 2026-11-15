@@ -145,7 +145,12 @@ from athenaeum.sidecar_blocks import (
     split_blocks,
 )
 from athenaeum.store import now_iso
-from athenaeum.store_boundary import CrossStoreMergeError, assert_same_surface, locator_for
+from athenaeum.store_boundary import (
+    CrossStoreMergeError,
+    assert_same_surface,
+    extra_surface_roots,
+    locator_for,
+)
 from athenaeum.verdicts import content_hash
 
 log = logging.getLogger(__name__)
@@ -421,6 +426,50 @@ def _is_tombstone_file(path: Path) -> bool:
     return is_tombstone(meta)
 
 
+def _identity_pages_in_root(target_slug: str, root: Path, *, recursive: bool) -> list[Path]:
+    """The per-root half of :func:`find_identity_pages` (one surface root)."""
+    found: list[Path] = []
+    if recursive:
+        try:
+            bare_pages = sorted(root.rglob(f"{target_slug}.md"))
+            candidates = sorted(root.rglob(f"*-{target_slug}.md"))
+        except OSError:
+            return found
+        for bare in bare_pages:
+            rel = bare.relative_to(root)
+            if (
+                bare.is_file()
+                and not bare.name.startswith("_")
+                and not any(p.startswith(".") for p in rel.parts)
+                and not _is_tombstone_file(bare)
+            ):
+                found.append(bare)
+    else:
+        bare = root / f"{target_slug}.md"
+        if bare.is_file() and not _is_tombstone_file(bare):
+            found.append(bare)
+        try:
+            candidates = sorted(root.glob(f"*-{target_slug}.md"))
+        except OSError:
+            candidates = []
+    for fpath in candidates:
+        if fpath.name.startswith("_") or not fpath.is_file():
+            continue
+        try:
+            f_text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        f_meta, _ = parse_frontmatter(f_text)
+        # Issue athenaeum#2082: a tombstone (``status: folded``) is a redirect
+        # left by an earlier fold, not a live page — it neither owns the slug
+        # nor makes it ambiguous, and can never be a fold target.
+        if is_tombstone(f_meta):
+            continue
+        if identity_slug(fpath, f_meta) == target_slug:
+            found.append(fpath)
+    return found
+
+
 def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     """Every live page under *wiki_root* that owns ``merge_target_name``'s slug.
 
@@ -446,29 +495,11 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     target_slug = slugify(merge_target_name)
     if not target_slug:
         return []
-    found: list[Path] = []
-    bare = wiki_root / f"{target_slug}.md"
-    if bare.is_file() and not _is_tombstone_file(bare):
-        found.append(bare)
-    try:
-        candidates = sorted(wiki_root.glob(f"*-{target_slug}.md"))
-    except OSError:
-        candidates = []
-    for fpath in candidates:
-        if fpath.name.startswith("_") or not fpath.is_file():
-            continue
-        try:
-            f_text = fpath.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        f_meta, _ = parse_frontmatter(f_text)
-        # Issue athenaeum#2082: a tombstone (``status: folded``) is a redirect
-        # left by an earlier fold, not a live page — it neither owns the slug
-        # nor makes it ambiguous, and can never be a fold target.
-        if is_tombstone(f_meta):
-            continue
-        if identity_slug(fpath, f_meta) == target_slug:
-            found.append(fpath)
+    found = _identity_pages_in_root(target_slug, wiki_root, recursive=False)
+    # athenaeum#2619: the extra surfaces are part of the same lookup space, so a
+    # target that lives on one resolves to its real page (wiki pages first).
+    for extra in extra_surface_roots(wiki_root):
+        found.extend(_identity_pages_in_root(target_slug, extra, recursive=True))
     return found
 
 
@@ -798,7 +829,17 @@ def resolve_source_path(source: str, *, wiki_root: Path) -> Path | None:
     if direct.is_file():
         return direct
     candidate = Path(wiki_root).expanduser() / Path(source).name
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    # athenaeum#2619: a page on an extra surface is part of the same lookup space.
+    for extra in extra_surface_roots(Path(wiki_root).expanduser()):
+        rel = extra / Path(source)
+        if not Path(source).is_absolute() and rel.is_file():
+            return rel
+        found = sorted(extra.rglob(Path(source).name))
+        if found:
+            return found[0]
+    return None
 
 
 def source_content_digest(
@@ -3250,8 +3291,13 @@ def resolve_merge(
                 if p is not None
             ]
             _guard_target = resolve_target_page(target_pm.merge_target_name, _guard_root)
-            if _guard_target is not None:
-                _guard_pages.append(_guard_target)
+            # A target no page owns would be CREATED under wiki/: fail closed
+            # when that would pull surface pages into the wiki surface.
+            _guard_pages.append(
+                _guard_target
+                if _guard_target is not None
+                else _guard_root / f"{slugify(target_pm.merge_target_name)}.md"
+            )
             try:
                 assert_same_surface(_guard_locator, _guard_pages)
             except CrossStoreMergeError as exc:
