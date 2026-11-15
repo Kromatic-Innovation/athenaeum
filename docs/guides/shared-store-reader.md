@@ -73,14 +73,19 @@ you:
 git clone git@git.example.net:acme/recipes.git ~/shared-recipes
 ```
 
-Confirm the permission is what you were told it is. A push should be refused by the
-server (or, for a local or file-system-backed repository, by file permissions); if it
-succeeds, tell the owner, because you have more access than you were meant to:
+Confirm the permission is what you were told it is. Try to push an empty commit; it
+should be refused. If it succeeds, tell the owner, because you have more access than
+you were meant to. Then throw the test commit away so the clone matches the shared
+repository again:
 
 ```bash
 cd ~/shared-recipes
-git push origin HEAD
+git commit --allow-empty -m "push test" && git push origin HEAD
+git reset --hard @{upstream}
 ```
+
+The push is refused by the server (or, for a local or file-system-backed repository, by
+file permissions).
 
 The pages are plain markdown files with YAML frontmatter, each carrying `type:` (here
 `recipe`).
@@ -146,9 +151,12 @@ Hits from the mount are shown with the surface name as their path prefix
 (`shared-recipes/lemon-tart.md`). `recall` reads the **index**, so a page the owner
 pushed this morning is invisible to it until a `reindex` has pulled and indexed it.
 
-If the default vector backend prints a notice that `chromadb` is not installed, recall
-fell back to keyword search (FTS5), which is enough for this. See
-[Vector search](vector-search.md) if you want semantic search.
+**Which search backend you get.** athenaeum's configured default is `vector`, which
+needs the optional `chromadb` extra. A plain install does not have it, so `reindex` and
+`recall` print a notice and fall back to keyword search (FTS5) automatically. That is
+enough for a shared store, and nothing else needs installing. Install the vector extra
+(see [Vector search](vector-search.md)) only if you want semantic search, or set
+`search_backend: fts5` in `athenaeum.yaml` to silence the notice.
 
 ### What a failed pull does
 
