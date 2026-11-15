@@ -148,6 +148,7 @@ def build_plan_outline(
     *,
     page_name: str = "",
     page_chars: int = 0,
+    never_merge_rulings: "Sequence[Mapping[str, Any]]" = (),
 ) -> dict[str, Any]:
     """Project *plan* down to the decision item's outline (athenaeum#2547 AC7).
 
@@ -224,6 +225,7 @@ def build_plan_outline(
         "unit_count": len(plan.dispositions),
         "duplicate_count": duplicates,
         "page_actions": list(plan.page_actions),
+        "never_merge_rulings": [dict(r) for r in never_merge_rulings],
     }
 
 

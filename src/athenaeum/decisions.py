@@ -1176,6 +1176,18 @@ def page_recompile_plan_to_decision(rec: dict, *, resolver: SubjectResolver | No
         f"in-page restructure, or reject to leave the page alone until it "
         f"changes."
     )
+    rulings = outline.get("never_merge_rulings")
+    if isinstance(rulings, list) and rulings:
+        names = ", ".join(
+            str(r.get("target_name") or r.get("target_uid"))
+            for r in rulings
+            if isinstance(r, dict)
+        )
+        summary += (
+            f" Flag: this plan moves content onto or attaches page(s) this page "
+            f"was previously ruled never-merge with (merge_rejected_with): "
+            f"{names}. It is still approvable; check the ruling before approving."
+        )
     return {
         "type": "page-recompile",
         "id": rec.get("id"),

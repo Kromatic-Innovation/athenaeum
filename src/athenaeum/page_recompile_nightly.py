@@ -337,7 +337,7 @@ def run_nightly_page_recompile(
     change a run's exit code.
     """
     from athenaeum.models import EntityIndex, resolve_page_type
-    from athenaeum.page_recompile_apply import write_apply
+    from athenaeum.page_recompile_apply import find_never_merge_rulings, write_apply
     from athenaeum.page_recompile_plan import plan_page
 
     mode = resolve_page_recompile_mode(config)
@@ -614,6 +614,9 @@ def run_nightly_page_recompile(
                 _units_for(body),
                 page_name=candidate.path.stem,
                 page_chars=candidate.chars,
+                never_merge_rulings=find_never_merge_rulings(
+                    plan, wiki_root, page_meta or {}
+                ),
             )
             queue_plan_for_approval(
                 wiki_root,
