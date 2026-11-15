@@ -90,6 +90,52 @@ def _write_question_block(
     return parse_pending_questions(pending_path)[0].id
 
 
+def _write_short_name_escalated_block(
+    pending_path: Path,
+    *,
+    date: str = "2026-04-20",
+    entity: str = "cwc",
+    source: str = "sessions/20240406T120000Z-shortname.md",
+    observation: str = "cwc tracks the short-name mint policy itself.",
+) -> str:
+    """Write an unanswered ``short_name_escalated`` notice; return its id.
+
+    Mirrors :func:`athenaeum.tiers.tier4_escalate`'s real rendering (issue
+    athenaeum#2526): the parked observation rides in its own fenced
+    ``**Observation**:`` field, via the SAME
+    :func:`athenaeum.answers.render_observation_field` helper that function
+    calls — not a hand-rolled fence — so this fixture is byte-shape-true to
+    a real escalation, the same precedent
+    ``tests/test_page_recompile_apply.py``'s own
+    ``test_notice_with_a_parked_observation_stays_open`` already set for the
+    sibling ``oversize_page`` notice class.
+    """
+    from athenaeum.answers import parse_pending_questions, render_observation_field
+
+    block = (
+        f'## [{date}] Entity: "{entity}" (from {source})\n'
+        f"- [ ] create suppressed for a short, generic name?\n"
+        f"**Conflict type**: short_name_escalated\n"
+        f"**Description**: Tier-3 create for {entity!r} was suppressed "
+        f"(issue athenaeum#1173).\n"
+        f"{render_observation_field(observation)}\n"
+    )
+    pending_path.write_text("# Pending Questions\n\n" + block, encoding="utf-8")
+    return parse_pending_questions(pending_path)[0].id
+
+
+def _write_entity_page(
+    wiki_root: Path, *, uid: str, name: str, body: str = "\nBody text.\n"
+) -> Path:
+    """Write a minimal real entity page under *wiki_root* (issue athenaeum#2526's
+    short-name-escalated answer target) — same minimal shape
+    ``tests/test_entity_rename.py``'s own ``_write_page`` fixture uses."""
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    path = wiki_root / f"{uid}.md"
+    path.write_text(f"---\nuid: {uid}\ntype: company\nname: {name}\n---\n{body}", encoding="utf-8")
+    return path
+
+
 def _write_source(path: Path, *, name: str, body: str = "body\n") -> None:
     path.write_text(f"---\nname: {name}\ntype: feedback\n---\n{body}", encoding="utf-8")
 
@@ -1341,6 +1387,220 @@ class TestFoldRecoverability:
         )
         deleting_commits = [c for c in log.stdout.splitlines() if c]
         assert deleting_commits == []
+
+
+# ---------------------------------------------------------------------------
+# TestApplyShortNameEscalated — issue athenaeum#2526
+# ---------------------------------------------------------------------------
+
+
+class TestApplyShortNameEscalated:
+    """AC2/AC3/AC4: a ``short_name_escalated`` notice is answered with a
+    target page uid (+ optional rename), and the answer is APPLIED by
+    ``ingest-answers`` instead of being archived as free text."""
+
+    def test_known_uid_attaches_the_parked_observation_and_resolves(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(
+            pending_path, observation="cwc is the cross-workspace-config short name."
+        )
+        page_path = _write_entity_page(wiki_root, uid="page0001", name="Acme")
+
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="page0001"
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        assert report.skipped == 0
+        outcome = report.outcomes[0]
+        assert outcome.error_code is None
+
+        # The parked observation landed on the target page body, not just
+        # in the archived block's inert answer text.
+        page_text = page_path.read_text(encoding="utf-8")
+        assert "cwc is the cross-workspace-config short name." in page_text
+        assert "athenaeum#2526" in page_text
+
+        # Checkbox flipped — the item is resolved, and the subsequent
+        # ingest_answers pass (same tick) archives it cleanly, no hold.
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "- [x]" in pending_text
+
+        from athenaeum.answers import ingest_answers
+
+        count = ingest_answers(pending_path, raw_root, client=None, config=None)
+        assert count == 1
+        assert (wiki_root / "_pending_questions_archive.md").exists()
+        assert "short_name_escalated" not in pending_path.read_text(encoding="utf-8")
+
+    def test_answer_with_a_new_name_renames_through_the_2488_primitive(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.entity_rename import read_rename_provenance
+        from athenaeum.models import parse_frontmatter
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(pending_path)
+        page_path = _write_entity_page(wiki_root, uid="page0002", name="cwc")
+
+        write_decision_answer(
+            raw_root,
+            decision_id=qid,
+            decision_type="question",
+            verdict="page0002",
+            name="Cross-Workspace Config",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        meta, _body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        assert meta["name"] == "Cross-Workspace Config"
+        assert "cwc" in meta.get("aliases", [])
+
+        records = read_rename_provenance(wiki_root)
+        assert len(records) == 1
+        assert records[0]["old_name"] == "cwc"
+        assert records[0]["new_name"] == "Cross-Workspace Config"
+
+    def test_unknown_uid_is_refused_and_the_item_stays_open(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(pending_path)
+        # No page written at all — "nope" resolves to nothing.
+
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="nope"
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 0
+        assert report.skipped == 1
+        outcome = report.outcomes[0]
+        assert outcome.applied is False
+        assert outcome.error_code == "uid_not_found"
+
+        # The checkbox was never flipped — the item stays open.
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "- [ ]" in pending_text
+        assert "- [x]" not in pending_text
+
+    def test_refused_answer_is_never_archived_by_the_same_ingest_tick(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Seer review finding (PR athenaeum#2632): does ``ingest_answers``
+        archive a ``short_name_escalated`` block regardless of whether the
+        applier actually ran? No — archival in
+        :func:`athenaeum.answers.ingest_answers` is gated on
+        ``pq.answered`` (checked BEFORE ``writeback_class`` is even
+        consulted), and the checkbox is flipped ONLY by
+        :func:`athenaeum.decision_answers._apply_short_name_escalated_answer`
+        calling ``resolve_by_id`` — which a refusal (unknown uid here)
+        returns before ever reaching. Drives the FULL tick (decision-answer
+        apply, then ``ingest_answers``, exactly like
+        ``_cmd_pending.cmd_ingest_answers`` wires them) to prove the block
+        is neither archived nor silently dropped, and the parked
+        observation is still sitting in the (unanswered, still-open)
+        primary file afterward."""
+        from athenaeum.answers import ingest_answers
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(
+            pending_path, observation="an observation that must not be lost."
+        )
+        # No page written at all — "nope" resolves to nothing.
+
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="nope"
+        )
+        decision_report = apply_decision_answers(wiki_root, raw_root)
+        assert decision_report.applied == 0
+
+        count = ingest_answers(pending_path, raw_root, client=None, config=None)
+
+        assert count == 0
+        assert not (wiki_root / "_pending_questions_archive.md").exists()
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "short_name_escalated" in pending_text
+        assert "- [ ]" in pending_text
+        assert "- [x]" not in pending_text
+        assert "an observation that must not be lost." in pending_text
+
+    def test_a_raise_mid_apply_propagates_and_leaves_the_checkbox_unflipped(
+        self, wiki_root: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer review finding (PR athenaeum#2632): this applier has no
+        try/except around ``apply_rename``/``_attach_short_name_observation``
+        -- but neither does any peer applier that performs a real write
+        (``_apply_merge_answer`` -> ``resolve_merge``;
+        ``_apply_page_recompile_answer`` -> ``write_apply``;
+        ``_apply_coordinate_answer`` -> ``atomic_write_text``, all called
+        with no surrounding try/except). The ONLY try/except blocks in
+        ``apply_decision_answers`` guard POST-apply, best-effort
+        instrumentation (the decision-budget ledger, the calibration
+        sampler) explicitly commented "must never break apply" -- never the
+        dispatch call itself. This pins the SAME fail-loud behaviour for
+        the new applier: an exception propagates out of
+        ``apply_decision_answers`` rather than being silently swallowed,
+        and -- because it happens before ``resolve_by_id`` is ever reached
+        -- the checkbox is left unflipped, not half-applied."""
+        import athenaeum.decision_answers as decision_answers_mod
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(pending_path)
+        _write_entity_page(wiki_root, uid="page0005", name="Acme")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("disk full (simulated)")
+
+        monkeypatch.setattr(
+            decision_answers_mod, "_attach_short_name_observation", _boom
+        )
+        write_decision_answer(
+            raw_root, decision_id=qid, decision_type="question", verdict="page0005"
+        )
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            apply_decision_answers(wiki_root, raw_root)
+
+        pending_text = pending_path.read_text(encoding="utf-8")
+        assert "- [ ]" in pending_text
+        assert "- [x]" not in pending_text
+
+    def test_name_matching_the_current_name_is_a_clean_noop_rename(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Issue athenaeum#2488's rename idempotence carries through: naming
+        the page's OWN current name is not an error, no alias/provenance is
+        written, and the observation is still attached + the item still
+        resolves."""
+        from athenaeum.entity_rename import read_rename_provenance
+        from athenaeum.models import parse_frontmatter
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_short_name_escalated_block(pending_path)
+        page_path = _write_entity_page(wiki_root, uid="page0003", name="cwc")
+
+        write_decision_answer(
+            raw_root,
+            decision_id=qid,
+            decision_type="question",
+            verdict="page0003",
+            name="cwc",
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        meta, _body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        assert meta["name"] == "cwc"
+        assert meta.get("aliases", []) == []
+        assert read_rename_provenance(wiki_root) == []
+        assert "cwc tracks the short-name mint policy itself." in page_path.read_text(
+            encoding="utf-8"
+        )
 
 
 # ---------------------------------------------------------------------------

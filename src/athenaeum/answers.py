@@ -1064,8 +1064,21 @@ _WRITEBACK_STATUS_RE = re.compile(
 # (`corrections.retire_batch`). Write-back must never be attempted for these
 # classes: if a batch ever DID resolve, `_writeback_source` would annotate or
 # LLM-rewrite a raw `.jsonl` batch as if it were a memory file.
+# Issue athenaeum#2526: a `short_name_escalated` notice is answered with a
+# target page uid (+ optional rename), applied directly by
+# `athenaeum.decision_answers._apply_short_name_escalated_answer` (page
+# rename through the athenaeum#2488 primitive, then the parked observation
+# attached to the target page) BEFORE this module's `ingest_answers` ever
+# sees the answered block. Routing it through the default "source" class
+# would try to `_writeback_source` the answer's own
+# "attached to page uid=..." text against `pq.source` -- the raw file the
+# Tier-3 create was suppressed for, which the librarian may already have
+# unlinked (see `athenaeum.tiers.truncated_create_escalation`'s own "the
+# escalation is the ONLY surviving copy" reasoning for the sibling notice
+# shapes already in this set) -- holding the block forever, the exact
+# "never archived, answer has no effect" bug issue athenaeum#2526 closes.
 _NO_SOURCE_WRITEBACK_CONFLICT_TYPES: frozenset[str] = frozenset(
-    ("field-correction", "schema-amendment")
+    ("field-correction", "schema-amendment", "short_name_escalated")
 )
 
 # Issue athenaeum#2518: a `duplicate`-verdict FOLD question
@@ -1239,9 +1252,12 @@ def _writeback_class(pq: PendingQuestion) -> str:
     athenaeum#2518 — never a source write-back; approve/reject is handed to
     the normal merge path instead, see the ``"fold"`` branch in
     :func:`ingest_answers`), ``"field-correction"`` / ``"schema-amendment"``
-    for a block whose source ref is unresolvable by design (see
-    :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or ``"source"`` for every
-    ordinary detector-raised block, where a write-back IS expected.
+    / ``"short_name_escalated"`` (issue athenaeum#2526 — already applied
+    directly by :func:`athenaeum.decision_answers._apply_short_name_escalated_answer`)
+    for a block whose source ref is unresolvable by design, or already
+    handled elsewhere (see :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or
+    ``"source"`` for every ordinary detector-raised block, where a
+    write-back IS expected.
     """
     if pq.raised_by == "agent":
         return "agent"
@@ -2085,6 +2101,23 @@ def ingest_answers(
                 f"**Write-back**: none — {writeback_class} blocks never write "
                 "back to source; the batch is retired once recorded (see "
                 "athenaeum#1804) — re-submit the ratified change through its own applier"
+            )
+            if report is not None:
+                report.archived_no_writeback[writeback_class] = (
+                    report.archived_no_writeback.get(writeback_class, 0) + 1
+                )
+        elif writeback_class == "short_name_escalated":
+            # Issue athenaeum#2526: already fully applied (target page rename
+            # + parked-observation attach) by `decision_answers.
+            # _apply_short_name_escalated_answer`, BEFORE this function's
+            # checkbox-flip-triggered pass ever runs. Nothing left to write
+            # back — this block only needs archiving.
+            skip_writeback = True
+            archive_status_line = (
+                f"**Write-back**: none — {writeback_class} answers are applied "
+                "directly (page rename + parked-observation attach, issue "
+                "athenaeum#2526) by the decision-answer applier, before this "
+                "pass ever sees the answered block"
             )
             if report is not None:
                 report.archived_no_writeback[writeback_class] = (
