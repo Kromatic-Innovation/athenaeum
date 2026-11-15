@@ -102,6 +102,44 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         super().__init__(**kwargs)
         self._serve_auth = serve_auth
         self._audit_log_path = audit_log_path
+        # Monotonic time of the last key-set fetch this process allowed.
+        self._last_jwks_fetch: float | None = None
+
+    async def _get_jwks_key(self, kid: str | None) -> str:
+        """FastMCP's key lookup, but at most one key-set fetch per interval.
+
+        Upstream refetches the key set for EVERY token whose ``kid`` is not in
+        the cache, so an unauthenticated caller can make this server hammer the
+        issuer's key endpoint (athenaeum#2601). A lookup that would fetch --
+        the cache is empty or past its TTL, or the ``kid`` is unknown -- is
+        allowed only when ``serve.auth.jwks_refetch_interval`` seconds have
+        passed since the last allowed fetch; otherwise it is refused (raising
+        ``ValueError``, which FastMCP turns into a rejected token) with no
+        fetch. A cache hit never fetches and is never throttled, so normal TTL
+        refresh and a legitimately rotated ``kid`` (once the interval has
+        passed) work as before.
+        """
+        cached_hit = (
+            time.time() - self._jwks_cache_time < self._cache_ttl
+            and (
+                (kid is not None and kid in self._jwks_cache)
+                or (kid is None and len(self._jwks_cache) == 1)
+            )
+        )
+        if cached_hit:
+            return await super()._get_jwks_key(kid)
+        now = time.monotonic()
+        interval = self._serve_auth.jwks_refetch_interval
+        if self._last_jwks_fetch is not None and now - self._last_jwks_fetch < interval:
+            logger.warning(
+                "Bearer token rejected: unknown signing key id and the key set "
+                "was already fetched within the last %d s "
+                "(serve.auth.jwks_refetch_interval)",
+                interval,
+            )
+            raise ValueError("Signing key not in the cached key set; refetch throttled")
+        self._last_jwks_fetch = now
+        return await super()._get_jwks_key(kid)
 
     def _record_refusal(self, *, reason: str, claims: Mapping[str, Any] | None) -> None:
         """Append one ``refused`` audit record, swallowing an OSError.

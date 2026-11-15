@@ -44,14 +44,17 @@ raw token. The identity-rejection path logs the ``sub`` it rejected, never the
 credential that carried it.
 
 Layering: L0 — stdlib-only (``dataclasses``/``collections.abc``/
-``urllib.parse``), no ``athenaeum`` imports at all, so both the L2 config
+``urllib``/``json``), no ``athenaeum`` imports at all, so both the L2 config
 resolvers and the L5 MCP server can depend on it without either reaching
 through the other.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import json
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -88,6 +91,24 @@ SCOPE_ROLES: tuple[str, ...] = ("read", "write")
 #: ``docs/modules/mcp.md`` says so in those words rather than leaving an
 #: operator to discover it from a 404.
 JWKS_PATH = "/.well-known/jwks.json"
+
+#: Default minimum interval, in seconds, between key-set fetches triggered by
+#: a token whose ``kid`` is not in the cache (``serve.auth.jwks_refetch_interval``).
+DEFAULT_JWKS_REFETCH_INTERVAL = 60
+
+#: Seconds a startup discovery fetch may take before it counts as unavailable.
+DISCOVERY_TIMEOUT = 5.0
+
+#: Largest discovery document read; a larger body is treated as unavailable.
+_DISCOVERY_MAX_BYTES = 1_000_000
+
+#: How the key-set location was chosen, for the ``[auth]`` startup line.
+JWKS_SOURCES: tuple[str, ...] = ("configured", "discovered", "derived")
+
+#: A callable that GETs *url* and returns the decoded JSON object, or ``None``
+#: when the document is unavailable (network error, non-200, non-JSON, not an
+#: object). Injected so discovery is testable without a socket.
+DiscoveryFetcher = Callable[[str], "dict[str, object] | None"]
 
 #: The one JWS algorithm athenaeum accepts on a bearer token. Pinned, not
 #: configurable: a per-deployment algorithm knob widens the set of signatures
@@ -136,6 +157,12 @@ class ServeAuth:
             :func:`build_serve_auth`.
         read_scope: Scope name a READ tool call requires.
         write_scope: Scope name a WRITE tool call requires.
+        jwks_location: The key-set location, resolved ONCE at startup (see
+            :func:`resolve_jwks_uri`). Exposed as :attr:`jwks_uri`; ``None`` (a
+            hand-built instance) falls back to the path derived from *issuer*.
+        jwks_source: ``configured``, ``discovered`` or ``derived``.
+        jwks_refetch_interval: Minimum seconds between key-set fetches caused
+            by an unknown ``kid``.
         clock_leeway: Seconds of clock skew tolerated on ``nbf`` / ``iat``.
         max_token_lifetime: Optional ceiling, in seconds, on how long a token
             may be valid; ``None`` means no ceiling beyond the mandatory
@@ -149,18 +176,23 @@ class ServeAuth:
     write_scope: str
     clock_leeway: int = DEFAULT_CLOCK_LEEWAY
     max_token_lifetime: int | None = None
+    jwks_location: str | None = None
+    jwks_source: str = "derived"
+    jwks_refetch_interval: int = DEFAULT_JWKS_REFETCH_INTERVAL
 
     @property
     def jwks_uri(self) -> str:
-        """Where to fetch the issuer's key set — :data:`JWKS_PATH` under *issuer*.
+        """Where to fetch the issuer's key set.
 
-        Derived rather than configured (see :data:`JWKS_PATH`). The issuer's
-        own path, if it has one, is preserved: an issuer of
-        ``https://example.invalid/tenant-a`` publishes at
-        ``https://example.invalid/tenant-a/.well-known/jwks.json``, which is
-        what a path-scoped issuer means by the convention.
+        The value resolved at startup (:attr:`jwks_location`): the operator's
+        ``serve.auth.jwks_uri`` verbatim, else the ``jwks_uri`` the issuer's
+        discovery metadata published, else :data:`JWKS_PATH` under *issuer*
+        (path preserved: ``https://example.invalid/tenant-a`` derives
+        ``https://example.invalid/tenant-a/.well-known/jwks.json``).
         """
-        return self.issuer.rstrip("/") + JWKS_PATH
+        if self.jwks_location is not None:
+            return self.jwks_location
+        return derived_jwks_uri(self.issuer)
 
     @property
     def scopes_supported(self) -> list[str]:
@@ -230,6 +262,99 @@ class ServeAuth:
         tool whose class this cannot establish is treated as a mutator.
         """
         return self.read_scope if read_only is True else self.write_scope
+
+
+def derived_jwks_uri(issuer: str) -> str:
+    """:data:`JWKS_PATH` appended to *issuer* (the last-resort location)."""
+    return issuer.rstrip("/") + JWKS_PATH
+
+
+def discovery_urls(issuer: str) -> list[str]:
+    """The metadata documents to try, in order, for *issuer*.
+
+    1. RFC 8414 ``oauth-authorization-server``. Per RFC 8414 section 3.1 the
+       well-known segment is inserted between the host and the issuer's path
+       (``https://h/tenant`` -> ``https://h/.well-known/oauth-authorization-server/tenant``).
+    2. OpenID Connect ``openid-configuration``, which OIDC Discovery appends
+       to the issuer (``https://h/tenant/.well-known/openid-configuration``).
+
+    For an issuer with no path the two forms coincide with the plain
+    ``/.well-known/<name>`` locations.
+    """
+    parts = urlsplit(issuer)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path.rstrip("/")
+    return [
+        f"{origin}/.well-known/oauth-authorization-server{path}",
+        f"{issuer.rstrip('/')}/.well-known/openid-configuration",
+    ]
+
+
+def fetch_discovery_document(url: str) -> dict[str, object] | None:
+    """GET *url* with a short timeout; the JSON object, or ``None`` if unavailable.
+
+    Stdlib only. Every failure (network, non-200, oversize, non-JSON, not an
+    object) is ``None``: discovery is best-effort and the caller falls back to
+    the derived path. Nothing here carries a credential, and nothing is logged.
+    """
+    try:
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=DISCOVERY_TIMEOUT) as response:
+            if response.status != 200:
+                return None
+            body = response.read(_DISCOVERY_MAX_BYTES + 1)
+        if len(body) > _DISCOVERY_MAX_BYTES:
+            return None
+        document = json.loads(body)
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def discover_jwks_uri(issuer: str, fetch: DiscoveryFetcher) -> str | None:
+    """The ``jwks_uri`` *issuer*'s metadata publishes, or ``None`` if unavailable.
+
+    Tries each of :func:`discovery_urls`. A document that is unavailable, or
+    carries no ``jwks_uri``, moves on to the next. A document that IS served
+    but whose ``issuer`` is not exactly the configured one raises
+    :class:`ServeAuthError`: the metadata is the root of trust for where keys
+    come from, so one describing a different issuer (a mis-pointed proxy, or a
+    mix-up attack) must stop startup rather than be skipped. The comparison is
+    exact -- no trailing-slash or case normalization, matching how ``iss`` is
+    matched.
+    """
+    for url in discovery_urls(issuer):
+        document = fetch(url)
+        if document is None:
+            continue
+        discovered_issuer = document.get("issuer")
+        if discovered_issuer != issuer:
+            raise ServeAuthError(
+                f"The issuer's discovery metadata at {url} names issuer "
+                f"{discovered_issuer!r}, which does not equal the configured "
+                f"serve.auth.issuer {issuer!r}. Refusing to start: fix the issuer, "
+                "or set serve.auth.jwks_uri to skip discovery."
+            )
+        jwks_uri = document.get("jwks_uri")
+        if not isinstance(jwks_uri, str) or not jwks_uri.strip():
+            continue
+        return _require_absolute_url(jwks_uri, f"jwks_uri in the metadata at {url}")
+    return None
+
+
+def resolve_jwks_uri(
+    issuer: str,
+    configured: str | None,
+    fetch: DiscoveryFetcher | None,
+) -> tuple[str, str]:
+    """``(url, source)``: configured verbatim, else discovered, else derived."""
+    if configured is not None:
+        return _require_absolute_url(configured, "serve.auth.jwks_uri"), "configured"
+    if fetch is not None:
+        discovered = discover_jwks_uri(issuer, fetch)
+        if discovered is not None:
+            return discovered, "discovered"
+    return derived_jwks_uri(issuer), "derived"
 
 
 def _numeric_claim(claims: Mapping[str, object], name: str) -> float | None | bool:
@@ -416,6 +541,9 @@ def build_serve_auth(
     scopes: Mapping[str, str] | None = None,
     clock_leeway: int | None = None,
     max_token_lifetime: int | None = None,
+    jwks_uri: str | None = None,
+    jwks_refetch_interval: int | None = None,
+    discovery_fetcher: DiscoveryFetcher | None = None,
 ) -> ServeAuth | None:
     """Compose the four resolved pins into a :class:`ServeAuth`, or ``None``.
 
@@ -456,6 +584,14 @@ def build_serve_auth(
             takes :data:`DEFAULT_CLOCK_LEEWAY`. Non-negative.
         max_token_lifetime: Optional token-lifetime ceiling in seconds;
             positive. Neither knob counts as "auth configured" on its own.
+        jwks_uri: Optional ``serve.auth.jwks_uri``, used verbatim (an absolute
+            http(s) URL) and never combined with discovery.
+        jwks_refetch_interval: Seconds between unknown-``kid`` key-set fetches;
+            ``None`` takes :data:`DEFAULT_JWKS_REFETCH_INTERVAL`. Non-negative.
+        discovery_fetcher: When *jwks_uri* is unset, called to fetch the issuer's
+            metadata documents (see :func:`discover_jwks_uri`). ``None`` (the
+            default, so a programmatic caller never touches the network by
+            accident) skips discovery and derives the path.
     """
     configured = (issuer, resource, allowed_identities, scopes)
     if all(pin is None for pin in configured):
@@ -521,6 +657,13 @@ def build_serve_auth(
         else parse_seconds(max_token_lifetime, "serve.auth.max_token_lifetime", minimum=1)
     )
 
+    refetch = (
+        DEFAULT_JWKS_REFETCH_INTERVAL
+        if jwks_refetch_interval is None
+        else parse_seconds(jwks_refetch_interval, "serve.auth.jwks_refetch_interval", minimum=0)
+    )
+    jwks_location, jwks_source = resolve_jwks_uri(issuer_url, jwks_uri, discovery_fetcher)
+
     return ServeAuth(
         issuer=issuer_url,
         resource=resource_url,
@@ -529,6 +672,9 @@ def build_serve_auth(
         write_scope=write_scope,
         clock_leeway=leeway,
         max_token_lifetime=lifetime_cap,
+        jwks_location=jwks_location,
+        jwks_source=jwks_source,
+        jwks_refetch_interval=refetch,
     )
 
 

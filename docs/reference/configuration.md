@@ -5430,6 +5430,49 @@ next to a configured resource would make the whole block look unset. The
 URL itself is validated once, with the resource, by
 `athenaeum.serve_auth.build_serve_auth`. No seed in ``_DEFAULTS``.
 
+### `resolve_serve_auth_jwks_refetch_interval`
+
+- **YAML path:** `serve.auth.jwks_refetch_interval`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL`
+- **CLI flag:** —
+- **Default:** `60`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the minimum seconds between unknown-``kid`` key-set fetches.
+
+A token whose ``kid`` is not in the cached key set triggers a fetch; at
+most one such fetch happens per interval, and further unknown-``kid``
+tokens inside it are refused without one. Non-negative (``0`` disables the
+throttle); default
+`athenaeum.serve_auth.DEFAULT_JWKS_REFETCH_INTERVAL` (60).
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL``,
+``serve.auth.jwks_refetch_interval``. Raises
+`athenaeum.serve_auth.ServeAuthError` on a negative or non-integer
+value. No seed in ``_DEFAULTS``.
+
+### `resolve_serve_auth_jwks_uri`
+
+- **YAML path:** `serve.auth.jwks_uri`
+- **Environment variable:** `ATHENAEUM_SERVE_AUTH_JWKS_URI`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the optional explicit JSON Web Key Set URL.
+
+When set it is used verbatim, with no discovery. ``None`` (the default)
+means: discover ``jwks_uri`` from the issuer's metadata, else derive
+`athenaeum.serve_auth.JWKS_PATH` under the issuer. The URL is
+validated as an absolute http(s) URL by
+`athenaeum.serve_auth.build_serve_auth`.
+
+Precedence CLI > env > yaml > default: ``cli_value``,
+``ATHENAEUM_SERVE_AUTH_JWKS_URI``, ``serve.auth.jwks_uri``. Raises
+`athenaeum.serve_auth.ServeAuthError` on a non-string yaml value.
+No seed in ``_DEFAULTS``.
+
 ### `resolve_serve_auth_max_token_lifetime`
 
 - **YAML path:** `serve.auth.max_token_lifetime`

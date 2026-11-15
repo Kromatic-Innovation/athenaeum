@@ -372,6 +372,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_serve_auth_allowed_identities,
         resolve_serve_auth_clock_leeway,
         resolve_serve_auth_issuer,
+        resolve_serve_auth_jwks_refetch_interval,
+        resolve_serve_auth_jwks_uri,
         resolve_serve_auth_max_token_lifetime,
         resolve_serve_auth_resource,
         resolve_serve_auth_scopes,
@@ -384,7 +386,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     from athenaeum.mcp_server import create_server
     from athenaeum.remote_policy import RemotePolicyError, build_remote_policy
-    from athenaeum.serve_auth import ServeAuthError, build_serve_auth
+    from athenaeum.serve_auth import (
+        ServeAuthError,
+        build_serve_auth,
+        fetch_discovery_document,
+    )
 
     # Issue athenaeum#540 (M25): the MCP server process previously configured NO logging
     # at all — every mcp_server log line was dropped. Configure the shared
@@ -430,6 +436,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
             scopes=resolve_serve_auth_scopes(cfg, getattr(args, "auth_scopes", None)),
             clock_leeway=resolve_serve_auth_clock_leeway(cfg),
             max_token_lifetime=resolve_serve_auth_max_token_lifetime(cfg),
+            jwks_uri=resolve_serve_auth_jwks_uri(cfg),
+            jwks_refetch_interval=resolve_serve_auth_jwks_refetch_interval(cfg),
+            discovery_fetcher=fetch_discovery_document,
         )
     except ServeAuthError as exc:
         print(f"[auth] invalid configuration: {exc}", file=sys.stderr)
@@ -450,7 +459,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 f"audience {serve_auth.resource}, "
                 f"{len(serve_auth.allowed_identities)} allowed identit"
                 f"{'y' if len(serve_auth.allowed_identities) == 1 else 'ies'}, "
-                f"scopes {' '.join(serve_auth.scopes_supported)}",
+                f"scopes {' '.join(serve_auth.scopes_supported)}, "
+                f"JWKS {serve_auth.jwks_uri} ({serve_auth.jwks_source})",
                 file=sys.stderr,
             )
     elif serve_auth is not None:
