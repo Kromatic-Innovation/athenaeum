@@ -10356,12 +10356,8 @@ def resolve_serve_auth_max_token_lifetime(
         return parse_seconds(cli_value, "--auth-max-token-lifetime", minimum=1)
 
     env = os.environ.get("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME")
-    if env is not None:
-        return (
-            parse_seconds(env, "ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", minimum=1)
-            if env.strip()
-            else None
-        )
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", minimum=1)
 
     if isinstance(config, dict):
         serve_cfg = config.get("serve", {})

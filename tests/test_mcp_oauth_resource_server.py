@@ -1706,6 +1706,12 @@ class TestTimeClaimSettings:
         assert resolve_serve_auth_max_token_lifetime(self.YAML, 30) == 30
         assert resolve_serve_auth_clock_leeway(self.YAML, 7) == 7
 
+    def test_blank_env_falls_through_to_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_serve_auth_max_token_lifetime
+
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME", "  ")
+        assert resolve_serve_auth_max_token_lifetime(self.YAML) == 900
+
     @pytest.mark.parametrize("bad", [0, -5, True, 1.5, "abc"])
     def test_invalid_lifetime_is_refused(self, bad: Any) -> None:
         from athenaeum.config import resolve_serve_auth_max_token_lifetime
