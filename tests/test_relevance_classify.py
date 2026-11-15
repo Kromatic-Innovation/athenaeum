@@ -87,7 +87,7 @@ class _Responder:
         return tb._scripted_responder(params)
 
 
-def _run(root: Path, monkeypatch, responder, *, batch: bool):
+def _run(root: Path, monkeypatch, responder, *, batch: bool, expect_rc: int = 0):
     import anthropic as anthropic_mod
 
     from athenaeum.librarian import run
@@ -105,7 +105,7 @@ def _run(root: Path, monkeypatch, responder, *, batch: bool):
         max_api_calls=100,
         batch_mode=batch,
     )
-    assert rc == 0
+    assert rc == expect_rc
     return client
 
 
@@ -371,3 +371,18 @@ def test_a_confident_exception_category_is_kept_without_escalation(tmp_path):
         [entity], policy, raw_ref="r", raw_content="x", client=None, config=None
     )
     assert out.kept == [entity] and out.escalated == 0
+
+
+def test_batch_escalation_failure_keeps_the_raw_and_does_not_abort(tmp_path, monkeypatch):
+    root = _seed(tmp_path)
+    stuck = _raw(root, 1, "Note about WidgetStuck.\n")
+    clear = _raw(root, 2, "Note about WidgetClear.\n")
+
+    def responder(params: dict[str, Any]) -> str:
+        if params["system"] == RELEVANCE_ESCALATE_SYSTEM:
+            raise ValueError("backend exploded")
+        return _Responder()(params)
+
+    _run(root, monkeypatch, responder, batch=True, expect_rc=1)  # a file failed
+    assert stuck.exists() and not clear.exists()  # retried later; neighbour unaffected
+    assert len(_pages(root)) == 1 and _reasons(root) == []

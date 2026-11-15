@@ -1842,16 +1842,23 @@ def process_batch_run(
         _rel_jsonl = st.raw.path.suffix.lower() == ".jsonl"
         _rel_drops: list[Any] = []
         if relevance_policy is not None and relevance_policy.rules:
-            _rel_outcome = gate_classified_entities(
-                classified,
-                relevance_policy,
-                raw_ref=st.raw.ref,
-                raw_content=st.raw.content,
-                jsonl=_rel_jsonl,
-                client=AnthropicBatchClientBackend(client),
-                usage=usage,
-                config=config,
-            )
+            try:
+                _rel_outcome = gate_classified_entities(
+                    classified,
+                    relevance_policy,
+                    raw_ref=st.raw.ref,
+                    raw_content=st.raw.content,
+                    jsonl=_rel_jsonl,
+                    client=AnthropicBatchClientBackend(client),
+                    usage=usage,
+                    config=config,
+                )
+            except Exception:
+                # A failed reasoning-tier call is a per-file failure (raw kept,
+                # retried next run), never a run abort and never a drop.
+                log.exception("Failed to process %s", st.raw.ref)
+                st.failed = True
+                continue
             classified = _rel_outcome.kept
             _rel_drops.extend(_rel_outcome.drops)
         # Issue athenaeum#2653: hint-derived claims are capped and built by the
