@@ -792,7 +792,7 @@ class TestBatchSyncEquivalence:
             user_msg = params["messages"][0]["content"]
             if params["model"] == DEFAULT_CLASSIFY_MODEL and "uid-robin" in user_msg:
                 return json.dumps(
-                    [{"candidate_uid": "uid-robin", "observations": "Replied about tiered pricing."}]
+                    [{"candidate_uid": "uid-robin", "observations": "Replied about pricing."}]
                 )
             return _scripted_responder(params)
 
