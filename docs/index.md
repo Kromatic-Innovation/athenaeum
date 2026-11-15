@@ -41,6 +41,9 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Remote mode](guides/remote.md) — serving over HTTPS to a host that cannot launch a
   local process: TLS proxy, external OIDC provider, the `remote` profile, scheduling,
   rotation, and what egress to a host provider means.
+- [Reading a shared store](guides/shared-store-reader.md) — a second install that mounts
+  someone else's git repository read-only: clone, mount config, pull and index schedule,
+  connecting an assistant, and what your own `remember` calls do.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
