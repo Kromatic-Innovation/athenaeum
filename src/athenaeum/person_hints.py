@@ -144,7 +144,7 @@ def build_person_hints(
     person_registry: "PersonRegistry | None",
     config: dict[str, Any] | None,
 ) -> PersonHintSet:
-    """Build the tier-2 person-hint candidates for *raw* (athenaeum#1866, #2653).
+    """Build the tier-2 person-hint candidates for *raw* (athenaeum#1866, athenaeum#2653).
 
     Literal registry hits first (capped, logged), then the owner in its
     reserved slot (see the module docstring). A structured machine-record
