@@ -766,6 +766,40 @@ class TestProtectedResourceMetadata:
         # the operator knows which form their authorization server mints.
         assert [s.rstrip("/") for s in document["authorization_servers"]] == [ISSUER]
 
+    @pytest.mark.parametrize("configured", [ISSUER, ISSUER + "/"])
+    def test_the_issuer_is_advertised_byte_for_byte(
+        self, corpus: Path, issuer: _FakeIssuer, configured: str
+    ) -> None:
+        """athenaeum#2600: no trailing slash is added to, or taken from, the
+        configured issuer. Compared on the raw response bytes, not URL objects,
+        because RFC 8414 / RFC 9207 match the issuer as an exact string."""
+
+        async def _body(app: Any) -> tuple[int, bytes, dict[str, str]]:
+            async with _raw_client(app) as client:
+                response = await client.get("/.well-known/oauth-protected-resource")
+                return response.status_code, response.content, dict(response.headers)
+
+        status, raw, headers = _drive(
+            corpus, issuer, _serve_auth(issuer=configured), _body
+        )
+        assert status == 200
+        assert f'"authorization_servers":["{configured}"]'.encode() in raw
+        assert json.loads(raw)["authorization_servers"][0].encode() == configured.encode()
+        assert headers["content-length"] == str(len(raw))
+        assert headers["cache-control"] == "public, max-age=3600"
+
+    @pytest.mark.parametrize("resource", [RESOURCE, RESOURCE + "/mcp"])
+    def test_the_resource_field_is_unchanged_by_the_issuer_fix(
+        self, corpus: Path, issuer: _FakeIssuer, resource: str
+    ) -> None:
+        """The pinned resource is still served as FastMCP rendered it: the
+        canonical form of the configured pin, which for a path-less origin
+        carries the slash a pydantic URL renders."""
+        status, document = self._metadata(corpus, issuer, resource)
+        assert status == 200
+        assert document["resource"] == _serve_auth(resource=resource).resource
+        assert document["resource"] == (resource + "/" if resource == RESOURCE else resource)
+
     def test_a_path_scoped_resource_answers_at_its_rfc_9728_path(
         self, corpus: Path, issuer: _FakeIssuer
     ) -> None:

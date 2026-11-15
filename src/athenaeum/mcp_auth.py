@@ -50,6 +50,7 @@ dependency stays optional for every non-serve code path.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -58,6 +59,8 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from pydantic import AnyHttpUrl
+from starlette.routing import Route
+from starlette.types import Message, Receive, Scope, Send
 
 from athenaeum.serve_auth import SIGNING_ALGORITHM, ServeAuth
 
@@ -183,6 +186,16 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         return access
 
 
+class _AsgiCallable:
+    """Hold an ASGI function so ``Route`` mounts it as ASGI, not as a handler."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self._app(scope, receive, send)
+
+
 class _PinnedResourceAuthProvider(RemoteAuthProvider):
     """A ``RemoteAuthProvider`` whose resource URL is the operator's pin.
 
@@ -195,13 +208,79 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
     makes those three agree with the audience the verifier enforces.
     """
 
-    def __init__(self, resource: str, **kwargs: Any) -> None:
+    def __init__(self, resource: str, issuer: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._pinned_resource = AnyHttpUrl(resource)
+        self._issuer = issuer
 
     def _get_resource_url(self, path: str | None = None) -> AnyHttpUrl:
         """The pinned resource URL, whatever endpoint path is mounted."""
         return self._pinned_resource
+
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        """FastMCP's routes, with the metadata body carrying the raw issuer.
+
+        The SDK's metadata model types ``authorization_servers`` as
+        ``AnyHttpUrl``, which renders a path-less issuer with a trailing slash
+        (``https://id.example.net`` -> ``https://id.example.net/``). RFC 8414
+        and RFC 9207 compare the issuer as an exact string, and verification
+        here already uses it verbatim, so the advertised value must be the
+        configured string byte for byte. Each metadata route's response is
+        re-rendered with that one field replaced; the status, headers (CORS,
+        cache) and every other field are exactly what FastMCP serves.
+        """
+        routes: list[Route] = []
+        for route in super().get_routes(mcp_path):
+            if isinstance(route, Route) and route.path.startswith(
+                "/.well-known/oauth-protected-resource"
+            ):
+                route = Route(
+                    route.path,
+                    endpoint=self._with_raw_issuer(route.endpoint),
+                    methods=sorted(route.methods or ()),
+                )
+            routes.append(route)
+        return routes
+
+    def _with_raw_issuer(self, app: Any) -> Any:
+        """Wrap the route's ASGI app, rewriting only its 200 JSON body."""
+
+        async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+            start: Message | None = None
+
+            async def intercept(message: Message) -> None:
+                nonlocal start
+                if message["type"] == "http.response.start":
+                    start = message
+                    return
+                if message["type"] != "http.response.body" or start is None:
+                    await send(message)
+                    return
+                body = message.get("body", b"")
+                if start["status"] == 200 and body and not message.get("more_body"):
+                    document = json.loads(body)
+                    document["authorization_servers"] = [self._issuer]
+                    # Same compact, non-ASCII-escaping form pydantic emits, so
+                    # no byte other than the issuer's differs from the SDK's.
+                    body = json.dumps(
+                        document, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")
+                    message = {**message, "body": body}
+                    start = {
+                        **start,
+                        "headers": [
+                            (k, str(len(body)).encode() if k.lower() == b"content-length" else v)
+                            for k, v in start.get("headers", [])
+                        ],
+                    }
+                await send(start)
+                await send(message)
+
+            await app(scope, receive, intercept)
+
+        # Starlette's ``Route`` wraps a plain function as a request/response
+        # handler; a callable object is mounted as the raw ASGI app it is.
+        return _AsgiCallable(wrapped)
 
 
 def build_auth_provider(
@@ -263,6 +342,7 @@ def build_auth_provider(
     )
     return _PinnedResourceAuthProvider(
         serve_auth.resource,
+        serve_auth.issuer,
         token_verifier=verifier,
         authorization_servers=[AnyHttpUrl(serve_auth.issuer)],
         base_url=AnyHttpUrl(serve_auth.resource),
