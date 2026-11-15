@@ -108,38 +108,104 @@ def test_cli_init_default(tmp_path: Path, monkeypatch) -> None:
     assert (target / "wiki" / "_index.md").is_file()
 
 
-def test_git_identity_error_gives_helpful_message(
+def _no_git_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetically simulate a machine with no git identity."""
+    empty = tmp_path / "empty-gitconfig"
+    empty.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # Never auto-guess an identity from the host's username/hostname.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+    monkeypatch.setenv("EMAIL", "")
+    for var in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_no_git_identity_sets_repo_local_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Issue athenaeum#10: When git identity is not configured, init should raise
-    SystemExit with a helpful message instead of a raw CalledProcessError."""
+    """athenaeum#2593: no identity -> repo-local one is set, init succeeds."""
+    import subprocess
+
+    _no_git_identity(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge"
+    init_knowledge_dir(target)
+
+    assert (target / "wiki" / "_index.md").is_file()
+    local = subprocess.run(
+        ["git", "config", "--local", "user.email"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+    )
+    assert local.stdout.strip()
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=target, capture_output=True, text=True
+    )
+    assert "Initialize knowledge directory" in log.stdout
+    # Global config untouched; user told what happened and how to change it.
+    assert Path(__import__("os").environ["GIT_CONFIG_GLOBAL"]).read_text() == ""
+    err = capsys.readouterr().err
+    assert "repo-local" in err and "config user.name" in err
+
+
+def test_failed_init_leaves_no_partial_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2593: a failure after scaffolding rolls back a fresh dir."""
     import subprocess
 
     original_run = subprocess.run
-    call_count = 0
 
     def mock_run(cmd, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        # Let git init and git add succeed; fail on git commit (3rd call)
-        if call_count == 3:
-            raise subprocess.CalledProcessError(
-                128,
-                cmd,
-                stderr=b"Author identity unknown\n"
-                b"*** Please tell me who you are.\n"
-                b"  git config --global user.name ...\n"
-                b"  git config --global user.email ...\n",
-            )
+        if cmd[:2] == ["git", "commit"] or cmd[:3] == ["git", "config", "--local"]:
+            raise subprocess.CalledProcessError(128, cmd, stderr=b"user.name unknown")
         return original_run(cmd, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", mock_run)
-
-    target = tmp_path / "knowledge"
-
-    with pytest.raises(SystemExit, match="Git identity not configured"):
+    (tmp_path / "fresh").mkdir()
+    target = tmp_path / "fresh" / "knowledge"
+    with pytest.raises(SystemExit, match="Nothing was left behind"):
         init_knowledge_dir(target)
+    assert not target.exists()
+    assert (tmp_path / "fresh").exists()  # only what init created is removed
+
+
+def test_failed_init_preserves_preexisting_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2593: rollback never touches a pre-existing dir's content."""
+    import subprocess
+
+    original_run = subprocess.run
+
+    def mock_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "commit"]:
+            raise subprocess.CalledProcessError(1, cmd, stderr=b"boom")
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    target = tmp_path / "knowledge"
+    (target / "raw").mkdir(parents=True)
+    (target / "raw" / "keep.md").write_text("mine")
+    (target / "notes.txt").write_text("mine")
+    with pytest.raises(subprocess.CalledProcessError):
+        init_knowledge_dir(target)
+    assert (target / "raw" / "keep.md").read_text() == "mine"
+    assert (target / "notes.txt").read_text() == "mine"
+    assert not (target / "wiki").exists()
+    assert not (target / ".git").exists()
+    assert not (target / "athenaeum.yaml").exists()
 
 
 def test_force_help_mentions_no_backup(capsys: pytest.CaptureFixture[str]) -> None:

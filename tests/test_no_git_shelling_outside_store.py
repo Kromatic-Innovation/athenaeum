@@ -79,7 +79,10 @@ OWN_REPO_GIT_MODULES = frozenset(
 KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     "corrections": 1,
     "decay_sweep": 1,
-    "init": 3,
+    "init": 4,  # git init / add / commit, plus athenaeum#2593's repo-local
+    # `git config --local user.*` fallback when the machine has no git
+    # identity. init CREATES the knowledge repo, before any FilesystemStore
+    # exists over it, so there is no store primitive to route these through.
     "librarian": 3,  # git_push, git_pull, _capture_head's rev-parse — NOT snapshot
     "pending_merges": 2,
     "page_recompile_undo": 1,  # athenaeum#2541 AC1: `git cat-file blob <id>`
