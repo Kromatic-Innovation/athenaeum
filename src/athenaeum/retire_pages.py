@@ -58,6 +58,7 @@ from athenaeum.pending_merges import (
     WithdrawnMergeProposal,
     withdraw_pending_merges_for_retired_pages,
 )
+from athenaeum.storage import refuse_read_only_write
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +220,11 @@ def apply_retirement(
             rel = str(cand.path.resolve().relative_to(kr))
         except ValueError:
             report.errors.append(f"{cand.path.name}: outside knowledge_root - not retired")
+            continue
+        # Issue athenaeum#2621: a page on a read-only surface is never retired.
+        refusal = refuse_read_only_write(cand.path, knowledge_root, config, op="retire")
+        if refusal is not None:
+            report.errors.append(f"{cand.path.name}: {refusal}")
             continue
         pairs.append((cand, rel))
     if not pairs:

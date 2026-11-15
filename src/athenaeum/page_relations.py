@@ -90,7 +90,7 @@ from athenaeum.models import (
     parse_superseded_by,
     render_frontmatter,
 )
-from athenaeum.storage import resolve_locator_surfaces
+from athenaeum.storage import require_writable_paths, resolve_locator_surfaces
 
 #: The four origins a relation can be set from (issue athenaeum#2535 AC1).
 VALID_VIA: frozenset[str] = frozenset({"split", "attach", "fold", "manual"})
@@ -485,6 +485,11 @@ def set_relation(
         raise RelationError(f"unknown child uid: {child_uid!r}")
     if parent_path is None:
         raise RelationError(f"unknown parent uid: {parent_uid!r}")
+    # Issue athenaeum#2621: a relation rewrites BOTH pages; refuse whole when
+    # either lives on a read-only surface.
+    require_writable_paths(
+        [child_path, parent_path], wiki_root.parent, config, op="set relation"
+    )
 
     child_meta = _read_meta(child_path)
     parent_meta = _read_meta(parent_path)
@@ -570,6 +575,15 @@ def remove_relation(
     child_path = index.get(child_uid)
     if child_path is None:
         raise RelationError(f"unknown child uid: {child_uid!r}")
+    # Issue athenaeum#2621: refuse whole when the child (or its parent) is on a read-only surface.
+    _parent_ref = read_relations(_read_meta(child_path)).parent
+    _parent_page = index.get(_parent_ref.uid) if _parent_ref is not None else None
+    require_writable_paths(
+        [p for p in (child_path, _parent_page) if p is not None],
+        wiki_root.parent,
+        config,
+        op="remove relation",
+    )
 
     child_meta = _read_meta(child_path)
     child_body = parse_frontmatter(child_path.read_text(encoding="utf-8"))[1]

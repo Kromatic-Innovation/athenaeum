@@ -287,8 +287,11 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.storage import (
+    ReadOnlySurfaceError,
     open_store,
     page_write_root_for_class,
+    refuse_read_only_write,
+    require_writable_path,
     resolve_indexed_surfaces,
     resolve_locator_surfaces,
 )
@@ -748,12 +751,18 @@ class SurfaceSyncState:
 
 
 def _surface_sync_repos(
-    knowledge_root: Path, config: dict | None, surface_sync: "SurfaceSyncState"
+    knowledge_root: Path,
+    config: dict | None,
+    surface_sync: "SurfaceSyncState",
+    *,
+    for_push: bool = False,
 ) -> dict[Path, tuple[str, ...]]:
     """Surfaces that are their own git repo with a remote; a discovery failure
-    is recorded (and logged), never swallowed silently."""
+    is recorded (and logged), never swallowed silently. *for_push* drops
+    read-only mounts (athenaeum#2621: pulled, never pushed)."""
     try:
-        return open_store(config, knowledge_root).sync_repos()
+        store = open_store(config, knowledge_root)
+        return store.push_repos() if for_push else store.sync_repos()
     except Exception as exc:  # noqa: BLE001 — recorded in the run summary below
         log.warning("surface sync: could not enumerate surface repositories: %s", exc)
         surface_sync.record(("*",), "discover", "failed", type(exc).__name__)
@@ -769,6 +778,38 @@ def _capture_surface_heads(
     """Record each syncable surface repo's HEAD (call right after the pre-run pull)."""
     for repo in _surface_sync_repos(knowledge_root, config, surface_sync):
         surface_sync.heads_at_start[repo] = _capture_head(repo)
+
+
+def pull_read_only_surfaces(
+    knowledge_root: Path, config: dict | None = None
+) -> dict[str, bool]:
+    """Pull every read-only mount that is its own git repository (athenaeum#2621).
+
+    Called before each index build, independent of ``librarian.pull_before_run``
+    (a read-only surface exists to be kept current). Returns ``{surface: ok}``.
+    A failed pull is logged as a WARNING (``git_pull`` does it) and reported
+    here as ``False``; it never raises, and the last good checkout stays on
+    disk, so the index build that follows still serves it. A deployment with no
+    read-only surface returns ``{}``.
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+    try:
+        repos = open_store(config, knowledge_root).read_only_pull_repos()
+    except Exception as exc:  # noqa: BLE001 — a discovery failure must not block the index
+        log.warning("read-only surface pull: could not enumerate surfaces: %s", exc)
+        return {}
+    outcome: dict[str, bool] = {}
+    for repo, surfaces in repos.items():
+        ok = git_pull(repo, remote=resolve_push_remote(config), branch=None)
+        if not ok:
+            log.warning(
+                "read-only surface pull failed for %s; indexing the last good copy",
+                ", ".join(surfaces),
+            )
+        for name in surfaces:
+            outcome[name] = ok
+    return outcome
 
 
 def _maybe_pull_before_run(
@@ -873,7 +914,9 @@ def _push_surface_repos(
     surface_sync: SurfaceSyncState,
 ) -> None:
     """Push each own-repo surface whose HEAD moved this run; record every outcome."""
-    for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
+    for repo, surfaces in _surface_sync_repos(
+        knowledge_root, config, surface_sync, for_push=True
+    ).items():
         start = surface_sync.heads_at_start.get(repo)
         if start is None:
             log.info("post-run push skipped for %s: no pre-run HEAD captured", ", ".join(surfaces))
@@ -1078,6 +1121,21 @@ def git_pull(
     return True
 
 
+def _retain_raw_on_read_only(result: ProcessingResult, exc: Exception) -> ProcessingResult:
+    """Record a read-only-surface refusal so the raw is KEPT, never consumed (athenaeum#2621).
+
+    The entity loop deletes (or quarantines) a raw whose ``process_one``
+    returned without ``retain_raw``; a refusal must not lose the user's input.
+    The refusal is counted on ``result.read_only_refused`` and named in
+    ``result.skipped``.
+    """
+    log.warning("  Refused (read-only surface): %s: %s", type(exc).__name__, exc)
+    result.read_only_refused += 1
+    result.skipped.append("read-only-surface")
+    result.retain_raw = True
+    return result
+
+
 def tier0_handle_upsert(
     raw: RawFile,
     index: EntityIndex,
@@ -1086,6 +1144,7 @@ def tier0_handle_upsert(
     dry_run: bool = False,
     *,
     person_registry: "PersonRegistry | None" = None,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically merge a pre-structured seed's source-handle keys onto
     an EXISTING entity page, LLM-free (issue athenaeum#486).
@@ -1309,6 +1368,13 @@ def tier0_handle_upsert(
     if dry_run:
         return entity, True
 
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
+    )
+
     atomic_write_text(
         existing_path,
         render_frontmatter(merged_meta) + "\n" + existing_body,
@@ -1401,6 +1467,8 @@ def tier0_bounce_verdict_mark(
     index: EntityIndex,
     wiki_root: Path,
     dry_run: bool = False,
+    *,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically stamp a verified-undeliverable, non-RFC bounce
     verdict onto an EXISTING wiki page's ``bounced:`` frontmatter field
@@ -1577,6 +1645,13 @@ def tier0_bounce_verdict_mark(
     if dry_run:
         return entity, True
 
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
+    )
+
     atomic_write_text(
         existing_path,
         render_frontmatter(merged_meta) + "\n" + existing_body,
@@ -1589,6 +1664,8 @@ def tier0_do_not_email_mark(
     index: EntityIndex,
     wiki_root: Path,
     dry_run: bool = False,
+    *,
+    config: dict[str, object] | None = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically stamp ``do_not_email: true`` onto an EXISTING wiki
     page's frontmatter from a free-text opt-out statement, LLM-free (issue
@@ -1745,6 +1822,13 @@ def tier0_do_not_email_mark(
 
     if dry_run:
         return entity, True
+
+    # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+    # Raises ReadOnlySurfaceError; ``process_one`` turns that into a retained
+    # raw (never the "handled, delete it" no-op outcome).
+    require_writable_path(
+        existing_path, wiki_root.parent, config, op="tier-0 page update"
+    )
 
     atomic_write_text(
         existing_path,
@@ -2340,6 +2424,14 @@ def _apply_tier3_results(
             if _update_idx < len(updated_uids):
                 _prevented_uids.append(str(updated_uids[_update_idx]).strip())
             continue
+        # Issue athenaeum#2621: a page on a read-only mount is never rewritten.
+        _ro_refusal = refuse_read_only_write(
+            _update_path, wiki_root.parent, config, op="compile update"
+        )
+        if _ro_refusal is not None:
+            log.warning("  Refused (read-only surface): %s", _ro_refusal)
+            _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
+            continue
         if not admit_page_write(
             wiki_root, _update_path, _update_content, index=index, config=config,
             source="tier3-merge",
@@ -2385,11 +2477,20 @@ def _apply_tier3_results(
     # Resolve each entity's target surface up front (athenaeum#2618): a class
     # mapped to a non-indexed surface raises BEFORE any create is written.
     _page_config = config if config is not None else load_config(wiki_root.parent)
-    _create_roots = [
-        page_write_root_for_class(e.type, _page_config, wiki_root.parent) for e in new_entities
-    ]
+    # A class mapped to a READ-ONLY surface (athenaeum#2621) is refused per
+    # entity instead: nothing is written for it, the raw is retained and the
+    # refusal counted; the other entities in the file are unaffected.
+    _create_roots: list[Path | None] = []
+    for _e in new_entities:
+        try:
+            _create_roots.append(page_write_root_for_class(_e.type, _page_config, wiki_root.parent))
+        except ReadOnlySurfaceError as _exc:
+            _retain_raw_on_read_only(result, _exc)
+            _create_roots.append(None)
 
     for entity, _create_root in zip(new_entities, _create_roots):
+        if _create_root is None:
+            continue
         page_path = _create_root / entity.filename
         rendered = entity.render()
         # Schema-gate the LLM-produced entity before write. Re-parse the
@@ -2437,6 +2538,12 @@ def _apply_tier3_results(
                 entity.name,
                 len(_create_violations),
             )
+            continue
+        _ro_refusal = refuse_read_only_write(
+            page_path, wiki_root.parent, config, op="compile create"
+        )
+        if _ro_refusal is not None:
+            _retain_raw_on_read_only(result, ReadOnlySurfaceError(_ro_refusal))
             continue
         # Store-boundary link guard (athenaeum#2619): refuse a page that links
         # to a page on a more private surface than the one it lands on.
@@ -2784,14 +2891,18 @@ def process_one(
     # keys for a uid already in the wiki merges those keys onto the page's
     # frontmatter directly, instead of falling through to the LLM tiers (which
     # would flatten the handle block into prose and lose the structured schema).
-    upsert = tier0_handle_upsert(
-        raw,
-        index,
-        wiki_root,
-        valid_types,
-        dry_run=dry_run,
-        person_registry=person_registry,
-    )
+    try:
+        upsert = tier0_handle_upsert(
+            raw,
+            index,
+            wiki_root,
+            valid_types,
+            dry_run=dry_run,
+            person_registry=person_registry,
+            config=config,
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if upsert is not None:
         entity, changed = upsert
         if changed:
@@ -2846,7 +2957,12 @@ def process_one(
     # anything else that does not conform (ambiguous identifier, no verdict
     # signal, no matching existing page) falls through to Tier 1/2/3
     # completely unchanged.
-    verdict_upsert = tier0_bounce_verdict_mark(raw, index, wiki_root, dry_run=dry_run)
+    try:
+        verdict_upsert = tier0_bounce_verdict_mark(
+            raw, index, wiki_root, dry_run=dry_run, config=config
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if verdict_upsert is not None:
         verdict_entity, verdict_changed = verdict_upsert
         if verdict_changed:
@@ -2875,7 +2991,12 @@ def process_one(
     # tier0_do_not_email_mark's docstring. Anything that does not conform
     # (zero/multiple addresses, no recognized phrase, a hard-bounce report,
     # no matching existing page) falls through to Tier 1/2/3 unchanged.
-    dne_upsert = tier0_do_not_email_mark(raw, index, wiki_root, dry_run=dry_run)
+    try:
+        dne_upsert = tier0_do_not_email_mark(
+            raw, index, wiki_root, dry_run=dry_run, config=config
+        )
+    except ReadOnlySurfaceError as exc:
+        return _retain_raw_on_read_only(result, exc)
     if dne_upsert is not None:
         dne_entity, dne_changed = dne_upsert
         if dne_changed:
@@ -13204,6 +13325,9 @@ def reindex(
     # (yaml > shipped default) — the old inline `fts5` fallback fired for
     # every library caller that hand-built a config dict.
     backend_name = backend or resolve_search_backend(config)
+    # Issue athenaeum#2621: refresh read-only mounts first; a failed pull is
+    # logged and the last good copy is indexed.
+    pull_read_only_surfaces(knowledge_root, config)
     extra_roots = resolve_indexed_surfaces(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
     full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(

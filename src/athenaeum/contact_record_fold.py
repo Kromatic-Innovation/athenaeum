@@ -84,6 +84,7 @@ from typing import Any
 from athenaeum import pii, pii_attribution
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.storage import require_writable_paths
 
 log = logging.getLogger(__name__)
 
@@ -554,6 +555,10 @@ def fold_duplicate_record(
     that skipped the check still cannot fold a pair that needs a human.
     """
     summary = DuplicateFoldSummary()
+    # Issue athenaeum#2621: a read-only contacts surface is never folded into.
+    require_writable_paths(
+        [keep_path, copy_path], Path(contacts_root).parent, op="contact-record fold"
+    )
     keep_meta, keep_body = parse_frontmatter(keep_path.read_text(encoding="utf-8"))
     copy_meta, _ = parse_frontmatter(copy_path.read_text(encoding="utf-8"))
     keep_meta = keep_meta if isinstance(keep_meta, dict) else {}
@@ -651,6 +656,8 @@ def fold_contact_record(
     write this function makes.
     """
     root = Path(contacts_root)
+    # Issue athenaeum#2621: a read-only contacts surface is never folded into.
+    require_writable_paths([root], root.parent, op="contact-record fold")
     summary = ContactFoldSummary()
     absorbed_text = absorbed_path.read_text(encoding="utf-8")
     absorbed_meta, _ = parse_frontmatter(absorbed_text)
