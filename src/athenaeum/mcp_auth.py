@@ -59,8 +59,6 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from pydantic import AnyHttpUrl
-from starlette.routing import Route
-from starlette.types import Message, Receive, Scope, Send
 
 from athenaeum.serve_auth import SIGNING_ALGORITHM, ServeAuth
 
@@ -186,16 +184,6 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         return access
 
 
-class _AsgiCallable:
-    """Hold an ASGI function so ``Route`` mounts it as ASGI, not as a handler."""
-
-    def __init__(self, app: Any) -> None:
-        self._app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await self._app(scope, receive, send)
-
-
 class _PinnedResourceAuthProvider(RemoteAuthProvider):
     """A ``RemoteAuthProvider`` whose resource URL is the operator's pin.
 
@@ -217,7 +205,7 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
         """The pinned resource URL, whatever endpoint path is mounted."""
         return self._pinned_resource
 
-    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+    def get_routes(self, mcp_path: str | None = None) -> list[Any]:
         """FastMCP's routes, with the metadata body carrying the raw issuer.
 
         The SDK's metadata model types ``authorization_servers`` as
@@ -229,26 +217,24 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
         re-rendered with that one field replaced; the status, headers (CORS,
         cache) and every other field are exactly what FastMCP serves.
         """
-        routes: list[Route] = []
-        for route in super().get_routes(mcp_path):
-            if isinstance(route, Route) and route.path.startswith(
+        routes: list[Any] = super().get_routes(mcp_path)
+        for route in routes:
+            if str(getattr(route, "path", "")).startswith(
                 "/.well-known/oauth-protected-resource"
             ):
-                route = Route(
-                    route.path,
-                    endpoint=self._with_raw_issuer(route.endpoint),
-                    methods=sorted(route.methods or ()),
-                )
-            routes.append(route)
+                # ``Route.app`` is the ASGI callable Starlette dispatches to
+                # (CORS wrapper included); swapping it keeps path, methods and
+                # every header the route already carries.
+                route.app = self._with_raw_issuer(route.app)
         return routes
 
     def _with_raw_issuer(self, app: Any) -> Any:
         """Wrap the route's ASGI app, rewriting only its 200 JSON body."""
 
-        async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
-            start: Message | None = None
+        async def wrapped(scope: Any, receive: Any, send: Any) -> None:
+            start: dict[str, Any] | None = None
 
-            async def intercept(message: Message) -> None:
+            async def intercept(message: dict[str, Any]) -> None:
                 nonlocal start
                 if message["type"] == "http.response.start":
                     start = message
@@ -278,9 +264,7 @@ class _PinnedResourceAuthProvider(RemoteAuthProvider):
 
             await app(scope, receive, intercept)
 
-        # Starlette's ``Route`` wraps a plain function as a request/response
-        # handler; a callable object is mounted as the raw ASGI app it is.
-        return _AsgiCallable(wrapped)
+        return wrapped
 
 
 def build_auth_provider(
