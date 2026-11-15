@@ -121,6 +121,7 @@ DecisionType = Literal[
     "auto-apply-threshold",
     "dimension-proposal",
     "page-recompile",
+    "relevance-policy-edit",
 ]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
     (
@@ -135,6 +136,10 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
         # `approve` / `approve-structure-only` / `reject`. See
         # :func:`_apply_page_recompile_answer`.
         "page-recompile",
+        # Issue athenaeum#2649: a remote client's capture-rule edit,
+        # answered `approve` / `reject`. See
+        # :func:`_apply_relevance_policy_edit_answer`.
+        "relevance-policy-edit",
     )
 )
 
@@ -1815,6 +1820,41 @@ def _page_recompile_live_hash(wiki_root: Path, uid: str) -> tuple[str, str]:
     return page_content_hash(body), ""
 
 
+def _apply_relevance_policy_edit_answer(
+    wiki_root: Path, answer: DecisionAnswer
+) -> DecisionAnswerOutcome:
+    """Apply one ``relevance-policy-edit`` answer (issue athenaeum#2649).
+
+    ``approve`` applies the filed rule through
+    :func:`athenaeum.relevance_policy_edit.resolve_rule_edit_proposal` (policy
+    file edit + audit record, then the ledger approve record); ``reject``
+    writes the reject record only. Refusals are fail-soft outcomes.
+    """
+    from athenaeum.relevance_policy_edit import resolve_rule_edit_proposal
+
+    decision = answer.verdict.strip().lower()
+    if decision not in ("approve", "reject"):
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="invalid_decision",
+            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+        )
+    result = resolve_rule_edit_proposal(
+        wiki_root, answer.decision_id, approve=decision == "approve", note=answer.note
+    )
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=result.applied,
+        error_code=result.error_code,
+        message=result.message,
+    )
+
+
 def _apply_dimension_proposal_answer(
     knowledge_root: Path,
     wiki_root: Path,
@@ -2829,6 +2869,16 @@ def _raised_at_for(
                 if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
                     return str(rec.get("created_at") or "")
             return ""
+        if decision_type == "relevance-policy-edit":
+            from athenaeum.relevance_policy_edit import (
+                PROPOSAL_KIND,
+                read_proposals_ledger,
+            )
+
+            for rec in read_proposals_ledger(wiki_root):
+                if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
         if decision_type == "page-recompile":
             from athenaeum.page_recompile_queue import find_queued_plan
 
@@ -3162,6 +3212,10 @@ def apply_decision_answers(
             outcome = _apply_dimension_proposal_answer(
                 wiki_root.parent, wiki_root, answer, config=config
             )
+        elif answer.decision_type == "relevance-policy-edit":
+            # Issue athenaeum#2649: approve appends the rule to the
+            # relevance policy file (audited); reject discards the request.
+            outcome = _apply_relevance_policy_edit_answer(wiki_root, answer)
         elif answer.decision_type == "page-recompile":
             # Issue athenaeum#2547: its own applier -- an approve runs the
             # recompile applier under the caller's run lock and WRITES
