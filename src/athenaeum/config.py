@@ -10290,3 +10290,49 @@ def resolve_page_type_field_groups(
         if type_groups:
             out[page_type.strip()] = type_groups
     return out
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2589 -- `librarian.shared_content_page_type`. Appended
+# here, at the end of the file, per this module's own established
+# convention (see `resolve_page_type_field_groups` above) of giving a
+# concurrently-landing lane's resolver its own append point so two lanes'
+# diffs don't collide on the same hunk.
+# ---------------------------------------------------------------------------
+
+
+def resolve_shared_content_page_type(config: dict[str, Any] | None) -> str:
+    """Resolve ``librarian.shared_content_page_type`` -- the ONE page type,
+    if any, a fold or recompile plan may mint a shared-content page as
+    (issue athenaeum#2589 AC2).
+
+    **Mechanism, not policy.** This resolver does not decide WHEN content is
+    shared by two or more distinct subjects -- that judgement is made in
+    code, elsewhere (:mod:`athenaeum.page_recompile_apply`'s handling of a
+    ``shared:<group>`` disposition); this resolver only answers WHICH page
+    type, if any, a deployment has opted a shared page into. **With nothing
+    declared, the value is the empty string, and every caller treats that
+    as "the mechanism is off": no shared page is ever minted, and a
+    ``shared:<group>`` disposition downgrades to a plain ``child:<group>``
+    instead** -- the same "re-planned without it" downgrade
+    ``librarian.page_recompile.merge_near_duplicates`` already gives a
+    ``merge:<group>`` disposition when IT is off. Example::
+
+        librarian:
+          shared_content_page_type: relationship
+
+    Validation never raises: a non-dict ``librarian`` section, a non-dict
+    value nested there, or a non-string / empty
+    ``shared_content_page_type``, all resolve to ``""`` rather than
+    half-applying a malformed value -- the same fail-to-off posture every
+    other knob in this module takes.
+    """
+    if not isinstance(config, dict):
+        return ""
+    lib = config.get("librarian")
+    if not isinstance(lib, dict):
+        return ""
+    raw = lib.get("shared_content_page_type")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
