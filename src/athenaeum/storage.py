@@ -558,13 +558,18 @@ def validate_indexed_surfaces(
 
     *indexed* is the list of non-wiki indexed roots; *non_indexed* maps the
     name of each surface that is not indexed to its root. *wiki_root*, when
-    given, is checked the same way and also joins the prefix-collision check
-    (an indexed root whose prefix is ``wiki`` would shadow wiki hits).
+    given, reserves the ``wiki`` prefix (an indexed root whose prefix is
+    ``wiki`` would shadow wiki hits); it is not overlap-checked, because
+    surfaces inside ``wiki/`` are filtered per page class at scan time.
     """
     entries = list(indexed)
+    # The default wiki surface is deliberately NOT in the overlap check: a
+    # non-indexed surface rooted at or inside ``wiki/`` is the supported
+    # athenaeum#532 shape, kept out of the index per page class by the
+    # scan-time ``is_embedded`` filter (both scans walk the page and drop it).
+    # Refusing it here would break existing deployments. *wiki_root* only
+    # reserves the ``wiki`` prefix.
     checked: list[tuple[str, Path]] = [(e.prefix, e.root) for e in entries]
-    if wiki_root is not None:
-        checked.append(("wiki", wiki_root))
     seen: dict[str, Path] = {}
     for entry in entries:
         if "/" in entry.prefix or not entry.prefix:
@@ -631,8 +636,11 @@ def resolve_indexed_surfaces(
     for name, adapter in available_adapters(config).items():
         root = adapter.resolve_root(knowledge_root)
         if adapter.corpus_policy.embedded:
-            if root.resolve() == wiki_resolved:
-                continue  # the default wiki surface: bare names, scanned flat
+            if root.resolve() == wiki_resolved or wiki_resolved in root.resolve().parents:
+                # The default wiki surface, or a surface inside it: the wiki
+                # walk already scans these pages flat under bare names, so
+                # listing them again would index them twice.
+                continue
             if root.is_dir():
                 indexed.append(IndexedSurface(prefix=name, root=root.resolve()))
         else:

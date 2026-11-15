@@ -100,6 +100,24 @@ class TestResolver:
         cfg = _cfg({"shared": _surface("shared", True)}, extra=["shared"])
         assert [s.prefix for s in resolve_indexed_surfaces(kb, cfg)] == ["shared"]
 
+    def test_non_embedded_surface_rooted_at_wiki_is_accepted(self, kb: Path) -> None:
+        # The athenaeum#532 shape: a non-embedded surface whose root IS wiki/,
+        # excluded per page class by the scan-time is_embedded filter. It must
+        # not be refused as an overlap with the default wiki surface.
+        cfg = _cfg({"notes-unembedded": _surface("wiki", False)})
+        assert resolve_indexed_surfaces(kb, cfg, extra_roots=[]) == []
+
+    def test_non_embedded_surface_inside_wiki_is_accepted(self, kb: Path) -> None:
+        (kb / "wiki" / "private").mkdir()
+        cfg = _cfg({"private": _surface("wiki/private", False)})
+        assert resolve_indexed_surfaces(kb, cfg, extra_roots=[]) == []
+
+    def test_embedded_surface_inside_wiki_is_not_listed_twice(self, kb: Path) -> None:
+        # The wiki walk already scans wiki/recipes flat under bare names.
+        (kb / "wiki" / "recipes").mkdir()
+        cfg = _cfg({"recipes": _surface("wiki/recipes", True)})
+        assert resolve_indexed_surfaces(kb, cfg, extra_roots=[]) == []
+
 
 class TestExclusionGuards:
     def test_extra_root_equal_to_excluded_surface_refused(self, kb: Path) -> None:
