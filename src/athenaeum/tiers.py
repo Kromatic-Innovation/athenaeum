@@ -2742,6 +2742,52 @@ def _load_relevance_category_hint_prompt() -> str:
 RELEVANCE_CATEGORY_HINT_PROMPT = _load_relevance_category_hint_prompt()
 
 
+def _load_relevance_always_prompt() -> str:
+    """Read the relevance ``always`` hint block (athenaeum#2650).
+
+    Same module-import-time load as :func:`_load_relevance_category_prompt`;
+    the text lives in ``src/athenaeum/prompts/relevance_always.md``.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "relevance_always.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: The ``always``-rule hint block, rendered into the classify user message
+#: beside the observation filter only when a relevance policy has an
+#: ``always`` rule. ``<<rules>>`` is substituted by
+#: :func:`render_relevance_always_section`. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.relevance_always_prompt``.
+RELEVANCE_ALWAYS_PROMPT = _load_relevance_always_prompt()
+
+
+def render_relevance_always_section(policy: "RelevancePolicy | None") -> str:
+    """Render the classify prompt's ``always`` hint block (athenaeum#2650).
+
+    Empty string unless *policy* has an ``always`` rule, so a deployment with
+    no policy (or only ``never`` rules) sends a prompt BYTE-IDENTICAL to
+    before this issue. ``always`` is a prompt hint only: it is never
+    enforced and exempts nothing from the observation filter, decay or
+    pruning.
+    """
+    if policy is None:
+        return ""
+    lines = []
+    for rule in policy.rules:
+        if rule.verdict != "always":
+            continue
+        keys = ", ".join(
+            f"{k} `{v}`"
+            for k, v in (("type", rule.type), ("tag", rule.tag), ("subject", rule.subject))
+            if v is not None
+        )
+        lines.append(f"- {keys}")
+    if not lines:
+        return ""
+    return "\n" + RELEVANCE_ALWAYS_PROMPT.replace("<<rules>>", "\n".join(lines))
+
+
 def render_relevance_category_section(policy: "RelevancePolicy | None") -> str:
     """Render the classify prompt's relevance-category block (athenaeum#2647).
 
@@ -2860,6 +2906,7 @@ def tier2_request_params(
         # observation filter, so the template (and every no-policy prompt)
         # stays byte-identical.
         observation_filter_section=obs_filter
+        + render_relevance_always_section(relevance_policy)
         + render_relevance_category_section(relevance_policy),
         person_candidates_section=_render_person_candidates_section(
             person_candidates, relevance_policy

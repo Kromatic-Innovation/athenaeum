@@ -186,6 +186,34 @@ before Tier-3 runs, so a covered fact is caught on an update as well as on a
 create. A raw carrying `explicit_remember: true` is exempt from all of this.
 The synchronous and Batch API transports share one decision for each step.
 
+**`always` is a hint, not a guarantee.** When the policy has an `always` rule,
+the classify prompt carries a short "Relevance hints" block, placed beside the
+observation filter, that lists those rules and tells the classifier a fact fitting
+one leans toward being kept. It is advice to the classifier and nothing more:
+the classifier may still leave a matching fact out, and an `always` rule
+exempts nothing. A fact an `always` rule covers is still subject to the
+ephemeral-detail filter in `observation-filter.md`, to decay, and to pruning.
+With no `always` rule the prompt is unchanged. (Where an `always` rule is a
+more specific exception to a `never` rule, it also stays a choosable category
+for the `never` check above.)
+
+**Stale `observation-filter.md` on older installs.** `athenaeum init` copies the
+bundled `observation-filter.md` into `wiki/_schema/` once and never overwrites
+it. An install created before the filter was last revised may therefore carry an
+older copy, and `always` hints sit beside whatever that file says. If the
+classifier is keeping or dropping things you do not expect, compare your
+`wiki/_schema/observation-filter.md` with the bundled one.
+
+**Existing pages: `athenaeum relevance-policy report`.** A new `never` rule
+applies forward only: it never touches a page that is already in the wiki. To
+see which existing pages a rule would have covered, run `athenaeum
+relevance-policy report` (add `--json` for machine output). For every
+top-level `wiki/*.md` page it reads the frontmatter `type`, `tags` and `uid`,
+matches them the way the gate matches a raw note, and lists each page whose
+deciding rule is a `never` rule, grouped by rule. A page that a later `always`
+exception rescues is not listed. The command is read-only: it writes nothing and
+needs no run lock. What to do about a listed page is your call.
+
 ## Data lifecycle and upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw

@@ -6,7 +6,7 @@
 
 # LLM prompt inventory
 
-Athenaeum sends 33 distinct prompt constants to the model. Each stays an inline
+Athenaeum sends 34 distinct prompt constants to the model. Each stays an inline
 constant in its home module (next to the parser it feeds); `athenaeum.prompt_registry`
 indexes them and this file is generated from that index.
 
@@ -229,6 +229,26 @@ Being about a known person, including the owner, does not exempt a claim from
 the categories: the claim's own subject matter decides. Do not leave either
 field out.
 ````
+
+## `tiers.relevance_always_prompt`
+
+- **Constant:** `athenaeum.tiers.RELEVANCE_ALWAYS_PROMPT`
+- **Source:** `src/athenaeum/tiers.py`
+- **Model knob:** `classify` &middot; **max_tokens:** `4096`
+- **sha256:** `d5147b6056fc7b0a027262360588ece028995b2c2d545ab3662de1a2b77905a1`
+
+```text
+## Relevance hints (what this deployment wants kept)
+This deployment has standing capture rules that say these kinds of fact are
+worth keeping:
+<<rules>>
+
+Treat each line as a hint when deciding whether an observation is worth
+returning: a fact that clearly fits one of them leans toward being kept. A hint
+is not an instruction to keep. It does not override the observation filter
+above, and you must still leave out anything the filter says not to capture,
+such as ephemeral or transient detail.
+```
 
 ## `relevance_classify.relevance_escalate_system`
 

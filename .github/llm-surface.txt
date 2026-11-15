@@ -111,6 +111,7 @@ src/athenaeum/tiers.py::MERGE_TEMPLATE_FULL
 src/athenaeum/tiers.py::PERSON_HINT_CLASSIFY_PROMPT
 src/athenaeum/tiers.py::PERSON_HINT_OWNER_CLASSIFY_PROMPT
 src/athenaeum/tiers.py::RELEVANCE_CATEGORY_HINT_PROMPT
+src/athenaeum/tiers.py::RELEVANCE_ALWAYS_PROMPT
 src/athenaeum/tiers.py::RELEVANCE_CATEGORY_PROMPT
 src/athenaeum/relevance_classify.py::RELEVANCE_ESCALATE_SYSTEM
 src/athenaeum/relevance_classify.py::escalate_category
