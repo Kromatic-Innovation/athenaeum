@@ -455,10 +455,41 @@ def resolve_store_for_class(
     store instance to one surface.
     """
     resolve_adapter_for_class(entity_class, config)  # fail-closed validation only
-    roots = {
+    return open_store(config, knowledge_root)
+
+
+def open_store(
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    extra_roots: Mapping[str, Path] | None = None,
+) -> FilesystemStore:
+    """The one place production code builds a :class:`~athenaeum.store.FilesystemStore`
+    (issue athenaeum#2614).
+
+    Returns a store whose surface map carries every surface this *config*
+    makes available (:func:`available_adapters`, keyed by adapter name), so a
+    capability check made against it answers for the configured layout rather
+    than the default one. A *config* of ``None`` (or one with no ``storage:``
+    section) yields the built-in surfaces only, which is what every caller
+    that built ``FilesystemStore(knowledge_root, {})`` by hand effectively had
+    — those surfaces are only ever addressed by ``StoreKey.surface``, which
+    such callers did not use.
+
+    *extra_roots* adds caller-private surfaces (``{name: root}``) on top of the
+    configured ones — for a module that addresses its own internal surface
+    names (quarantine, the search index build) and has no config to derive
+    them from. An extra root wins over a configured surface of the same name.
+
+    ``tests/test_open_store_sole_constructor.py`` fails the build if any other
+    production module constructs a ``FilesystemStore`` directly.
+    """
+    roots: dict[str, Path] = {
         name: adapter.resolve_root(knowledge_root)
         for name, adapter in available_adapters(config).items()
     }
+    if extra_roots:
+        roots.update(extra_roots)
     return FilesystemStore(knowledge_root, roots)
 
 

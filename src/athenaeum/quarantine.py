@@ -68,7 +68,8 @@ import logging
 import os
 from typing import Any
 
-from athenaeum.store import FilesystemStore, Store, StoreKey, now_iso
+from athenaeum.storage import open_store
+from athenaeum.store import Store, StoreKey, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +174,7 @@ def _default_store(wiki_root: Any, raw_root: Any = None) -> Store:
     roots: dict[str, Any] = {_WIKI_SURFACE: wiki_root}
     if raw_root is not None:
         roots[_RAW_SURFACE] = raw_root
-    return FilesystemStore(wiki_root, roots)
+    return open_store(None, wiki_root, extra_roots=roots)
 
 
 def read_quarantine_ledger(

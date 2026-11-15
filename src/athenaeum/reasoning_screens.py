@@ -217,6 +217,7 @@ def t1_screen_rejects_merge_proposal(
             reason=decision.reason,
             config=config,
             cluster_id=cluster_id,
+            sources=member_paths,
         )
         log.info(
             "resolutions: T1 reasoning tier REJECTED merge proposal for cluster "
@@ -403,5 +404,6 @@ def t2_screen_merge_proposal(
         config=config,
         cluster_id=cluster_id,
         applied=True,
+        sources=member_paths,
     )
     return True

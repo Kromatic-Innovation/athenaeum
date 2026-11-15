@@ -278,7 +278,8 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.store import FilesystemStore, now_iso
+from athenaeum.storage import open_store
+from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
 )
@@ -6374,7 +6375,7 @@ class RunContext:
             phase,
         )
         if not self.dry_run:
-            FilesystemStore(self.knowledge_root, {}).snapshot(
+            open_store(self.config, self.knowledge_root).snapshot(
                 f"librarian: partial run (deadline {self.max_runtime}s exceeded "
                 f"during {phase})",
             )
@@ -9073,7 +9074,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             write_client = ctx.write_client
 
             if not ctx.dry_run:
-                FilesystemStore(ctx.knowledge_root, {}).snapshot(
+                open_store(ctx.config, ctx.knowledge_root).snapshot(
                     "librarian: pre-processing snapshot"
                 )
 
@@ -9129,7 +9130,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     files_processed=ctx.processed_count,
                     wiki_root=ctx.wiki_root,
                 )
-                FilesystemStore(ctx.knowledge_root, {}).snapshot(
+                open_store(ctx.config, ctx.knowledge_root).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
                     f"{ctx.total_escalated}E {len(ctx.failed_files)}F "
@@ -10158,7 +10159,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # not the only one missing the count.
                         f"{ctx.total_uid_bound}B)"
                     )
-                    FilesystemStore(ctx.knowledge_root, {}).snapshot(msg)
+                    open_store(ctx.config, ctx.knowledge_root).snapshot(msg)
             finally:
                 for _s, _prev in _prev_handlers:
                     signal.signal(_s, _prev)
@@ -11446,7 +11447,7 @@ def _maybe_run_nightly_anchor(ctx: "RunContext") -> None:
             report.mirrored,
         )
         if report.mirrored or report.anchored or report.imported:
-            FilesystemStore(ctx.knowledge_root, {}).snapshot(
+            open_store(ctx.config, ctx.knowledge_root).snapshot(
                 "athenaeum: witness anchor records (issue athenaeum#2040)"
             )
     except Exception as exc:  # noqa: BLE001 — anchoring must never break a run

@@ -97,7 +97,8 @@ from athenaeum.merge import (
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.session_recovery import SessionRecoverer
-from athenaeum.store import FilesystemStore, Store
+from athenaeum.storage import open_store
+from athenaeum.store import Store
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 from athenaeum.verdicts import get_verdict_status, make_pair_key, page_id_for_path
 
@@ -907,7 +908,7 @@ def run_retire_pass(
         _log_report(report)
         return report
 
-    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    store = store if store is not None else open_store(resolved_config, knowledge_root)
     if not store.capabilities.versioned:
         # Recovery is git-only (design note §4.4 R1): refuse to retire
         # against a store that cannot produce a restore point.

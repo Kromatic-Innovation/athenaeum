@@ -125,6 +125,7 @@ from pydantic import ValidationError as PydanticValidationError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
+    load_config,
     resolve_corrections_fields,
     resolve_corrections_max_batch_bytes,
     resolve_corrections_max_records_per_batch,
@@ -150,8 +151,8 @@ from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
-from athenaeum.storage import surface_root_for_class
-from athenaeum.store import FilesystemStore, Store, append_line_durable
+from athenaeum.storage import open_store, surface_root_for_class
+from athenaeum.store import Store, append_line_durable
 from athenaeum.trust_graph import (
     EQUAL,
     INCOMPARABLE,
@@ -3244,7 +3245,7 @@ def retire_batch(
     """
     if not batch_path.exists():
         return True
-    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    store = store if store is not None else open_store(load_config(knowledge_root), knowledge_root)
     if not store.capabilities.versioned:
         log.warning(
             "corrections: store at %s is not versioned — refusing to "

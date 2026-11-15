@@ -85,7 +85,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
-from athenaeum.storage import page_embedding_disabled, page_is_embedded
+from athenaeum.storage import open_store, page_embedding_disabled, page_is_embedded
 from athenaeum.store import FilesystemStore, ObjectMeta, Store, StoreKey
 
 # ---------------------------------------------------------------------------
@@ -794,7 +794,7 @@ def _scan_indexed_records(
         surface = f"extra{i}"
         roots[surface] = root
         extra_surfaces.append((surface, root.name))
-    store = FilesystemStore(knowledge_root=wiki_root, roots=roots)
+    store = open_store(None, wiki_root, extra_roots=roots)
 
     def _local_path_for(key: StoreKey) -> Path:
         fn = store.capabilities.local_path_for
@@ -2983,7 +2983,7 @@ class KeywordBackend:
         if wiki_root is None or not wiki_root.is_dir():
             return []
 
-        store = store if store is not None else FilesystemStore(wiki_root, {})
+        store = store if store is not None else open_store(None, wiki_root)
         if not store.capabilities.cheap_local_scan:
             raise KeywordScanNotSupportedError(
                 f"KeywordBackend cannot query {wiki_root}: this surface does "

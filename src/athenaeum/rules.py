@@ -113,6 +113,7 @@ from pydantic import ValidationError as PydanticValidationError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
+    load_config,
     resolve_preserved_log_adapter,
     resolve_preserved_log_dir,
     resolve_shape_rules_dispositions_retention_days,
@@ -128,9 +129,13 @@ from athenaeum.models import (
     parse_frontmatter,
 )
 from athenaeum.provenance import parse_source
-from athenaeum.storage import StorageConfigError, available_adapters, resolve_store_for_class
+from athenaeum.storage import (
+    StorageConfigError,
+    available_adapters,
+    open_store,
+    resolve_store_for_class,
+)
 from athenaeum.store import (
-    FilesystemStore,
     Store,
     StoreConflictError,
     StoreKey,
@@ -1406,7 +1411,7 @@ def _retire_raw_file(
     """
     if not raw_path.exists():
         return True
-    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    store = store if store is not None else open_store(load_config(knowledge_root), knowledge_root)
     if not store.capabilities.versioned:
         log.warning(
             "shape-rules: store at %s is not versioned — refusing to retire "

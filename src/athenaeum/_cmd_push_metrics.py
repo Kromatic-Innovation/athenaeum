@@ -578,10 +578,20 @@ def _cmd_push_metrics_follow_through(args: argparse.Namespace) -> int:
     """
     from athenaeum import follow_through
 
-    report = follow_through.build_follow_through_report(
-        cache_dir=args.cache_dir,
-        projects_root=args.projects_root,
-    )
+    overrides: dict[str, int] = {}
+    if args.short_max_user_turns is not None:
+        overrides["short_max_user_turns"] = args.short_max_user_turns
+    if args.medium_max_user_turns is not None:
+        overrides["medium_max_user_turns"] = args.medium_max_user_turns
+    try:
+        report = follow_through.build_follow_through_report(
+            cache_dir=args.cache_dir,
+            projects_root=args.projects_root,
+            **overrides,
+        )
+    except ValueError as exc:
+        print(f"athenaeum push-metrics follow-through: {exc}", file=sys.stderr)
+        return 2
     payload = report.to_dict()
     if args.json:
         sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
@@ -908,10 +918,10 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "afterward (via recall/read_entity/a file read), cited without "
         "opening, neither, or opened in a session that never pushed it. "
         "Only an open AFTER the push counts as following it. No model "
-        "calls. Segmented by session length and (when derivable) "
-        "interactive-vs-headless — currently always 'unknown', since "
-        "neither the ledger nor the transcript carries that field (see "
-        "athenaeum.follow_through's module docstring).",
+        "calls. Segmented by session length (user turns) and by "
+        "interactive-vs-headless, a launch-surface proxy read from the "
+        "transcript 'entrypoint' field (see athenaeum.follow_through's "
+        "module docstring).",
     )
     follow_through_p.add_argument(
         "--cache-dir",
@@ -927,6 +937,21 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Claude Code transcript root, holding "
         "<root>/<scope>/<session_id>.jsonl (default: CLAUDE_CONFIG_DIR "
         "env's `projects` dir, else ~/.claude/projects).",
+    )
+    follow_through_p.add_argument(
+        "--short-max-user-turns",
+        type=int,
+        default=None,
+        help="Sessions with fewer user turns than this are 'short' "
+        "(default: 5).",
+    )
+    follow_through_p.add_argument(
+        "--medium-max-user-turns",
+        type=int,
+        default=None,
+        help="Sessions with fewer user turns than this (and at least the "
+        "short cutoff) are 'medium'; the rest are 'long' "
+        "(default: 25).",
     )
     follow_through_p.add_argument(
         "--json",
