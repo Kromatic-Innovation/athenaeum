@@ -284,6 +284,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later mention forever); no match still escalates exactly as before; two
   or more matches still escalate, now naming every candidate page
   (athenaeum#2527).
+- `athenaeum import-memory --path <root>` now compiles the root it staged
+  files into, not the default knowledge base. `_default_compile_batch`
+  called `librarian.run(knowledge_root=...)` without `raw_root`/`wiki_root`,
+  so a real run fell back to `librarian.run`'s own defaults — the home
+  directory's `~/knowledge` — and compiled that corpus instead of the one
+  named by `--path`, while the files staged into the named root were never
+  compiled. Both roots are now passed explicitly, derived from the named
+  root the same way `athenaeum run` and `athenaeum drain` already do
+  (athenaeum#2582).
 
 - Merge proposals a human rejected, and proposals `athenaeum decisions
   revalidate --apply` archived as stale, are no longer re-proposed the next

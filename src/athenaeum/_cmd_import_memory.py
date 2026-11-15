@@ -407,10 +407,21 @@ def _default_compile_batch(
     in this repo substitutes a fake via ``run_import``'s ``compile_fn``
     parameter instead of calling this function, so no test here makes a
     real compile call.
+
+    Passes ``raw_root``/``wiki_root`` explicitly, derived from
+    *knowledge_root* the SAME way :func:`athenaeum._cmd_run.cmd_run` and
+    :func:`athenaeum.drain.run_drain` already do (``<knowledge_root>/raw``,
+    ``<knowledge_root>/wiki``). Without them, ``librarian.run`` falls back
+    to its own module-level ``DEFAULT_RAW_ROOT``/``DEFAULT_WIKI_ROOT`` —
+    the operator's home knowledge base — rather than the root *knowledge_root*
+    names, so a run against a throwaway/test root would silently compile the
+    default corpus instead (issue athenaeum#2582).
     """
     from athenaeum.librarian import run as librarian_run
 
     return librarian_run(
+        raw_root=knowledge_root / "raw",
+        wiki_root=knowledge_root / "wiki",
         knowledge_root=knowledge_root,
         max_files=max_files,
         max_api_calls=max_api_calls,
