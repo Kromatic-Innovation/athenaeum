@@ -41,6 +41,21 @@ Validation failures (unknown verdict, unknown type or tag, empty rule) raise
 file line. :func:`policy_hash_token` never raises (the run summary must not
 fail on a bad file): it reports ``invalid`` instead.
 
+Enforcement (athenaeum#2644, slice 2): :func:`gate_raw_content` is the ONE
+deterministic pre-tier decision. ``librarian.process_one``,
+``batch.process_batch_run`` and the auto-memory phase all call it, so the two
+pipeline transports cannot drift. It reads only DECLARED metadata (frontmatter
+``type`` / ``tags`` / ``uid``), never the body and never an LLM. A fact is
+dropped only when the last matching rule is ``never``; ``always`` is a prompt
+hint (a later slice) and exempts nothing here.
+
+An *item* is one declared fact inside a raw: a ``.jsonl`` record, or one of
+several concatenated ``---``-delimited frontmatter documents in a markdown
+raw (a block counts as a document boundary only when it parses to a mapping
+declaring ``type`` or ``tags``, so a horizontal rule is never mistaken for
+one). Any other raw is a single item. Items are judged independently; a raw
+that mixes covered and uncovered items loses only the covered ones.
+
 Layering: L2. Imports :mod:`athenaeum.models` (``load_schema_list``) and
 :mod:`athenaeum.schemas` (``KNOWN_TYPES``, both L1); never imports
 :mod:`athenaeum.mcp_server` or :mod:`athenaeum.librarian` — wiring is the
@@ -52,10 +67,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from athenaeum.models import load_schema_list
+import yaml
+
+from athenaeum.models import load_schema_list, parse_frontmatter
 from athenaeum.schemas import KNOWN_TYPES
 
 #: Filename under ``wiki/_schema/``.
@@ -134,9 +153,19 @@ class RelevancePolicy:
         subject: str | None = None,
     ) -> str | None:
         """The verdict of the LAST matching rule, or ``None`` when none match."""
+        rule = self.match(type_, tags, subject)
+        return rule.verdict if rule is not None else None
+
+    def match(
+        self,
+        type_: str | None = None,
+        tags: "list[str] | tuple[str, ...]" = (),
+        subject: str | None = None,
+    ) -> RelevanceRule | None:
+        """The LAST matching rule itself (what decided the verdict), or ``None``."""
         for rule in reversed(self.rules):
             if rule.matches(type_, tags, subject):
-                return rule.verdict
+                return rule
         return None
 
     def canonical_hash(self) -> str:
@@ -267,3 +296,185 @@ def render_policy(policy: RelevancePolicy) -> str:
     for r in policy.rules:
         lines.append(f"  {r.number}. {r.describe()}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic pre-tier gate (athenaeum#2644)
+# ---------------------------------------------------------------------------
+
+#: Prefix of every drop reason this gate emits, so ``athenaeum drops list``
+#: readers (and tests) can tell a policy drop from any other ``other`` drop.
+DROP_REASON_PREFIX = "relevance-policy"
+
+_EXCERPT_CHARS = 500
+
+
+@dataclass(frozen=True)
+class RelevanceDrop:
+    """One item a ``never`` rule covered, and the rule that decided it."""
+
+    rule: RelevanceRule
+    item_index: int
+    excerpt: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.rule.describe()} (rule {self.rule.number}, line {self.rule.line})"
+
+    @property
+    def reason(self) -> str:
+        return f"{DROP_REASON_PREFIX}: {self.label}"
+
+
+@dataclass(frozen=True)
+class RelevanceGateResult:
+    """Outcome of :func:`gate_raw_content` for one raw.
+
+    ``drops`` is empty when nothing was covered (the common case, and every
+    case with no policy). ``kept_content`` is the raw with covered items
+    removed; it equals the input when nothing was dropped and is meaningless
+    when ``fully_dropped``.
+    """
+
+    drops: tuple[RelevanceDrop, ...] = ()
+    kept_content: str = ""
+    n_items: int = 0
+
+    @property
+    def fully_dropped(self) -> bool:
+        return bool(self.drops) and len(self.drops) >= self.n_items
+
+    @property
+    def reason(self) -> str:
+        """One reason string naming every distinct matching rule."""
+        labels: list[str] = []
+        for d in self.drops:
+            if d.label not in labels:
+                labels.append(d.label)
+        return f"{DROP_REASON_PREFIX}: " + "; ".join(labels)
+
+
+@dataclass
+class _Item:
+    text: str
+    meta: dict[str, object] = field(default_factory=dict)
+
+
+def _declared_tags(meta: dict[str, object]) -> list[str]:
+    raw = meta.get("tags")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    if isinstance(raw, Iterable):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    return []
+
+
+def _declared(meta: dict[str, object]) -> tuple[str | None, list[str], str | None]:
+    type_ = str(meta.get("type") or "").strip() or None
+    subject = str(meta.get("uid") or "").strip() or None
+    return type_, _declared_tags(meta), subject
+
+
+def _split_jsonl(content: str) -> list[_Item]:
+    items: list[_Item] = []
+    for line in content.splitlines(keepends=True):
+        if not line.strip():
+            continue
+        meta: dict[str, object] = {}
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            meta = obj
+        items.append(_Item(line, meta))
+    return items
+
+
+def _split_markdown(content: str) -> list[_Item]:
+    meta, body = parse_frontmatter(content)
+    preamble = content[: len(content) - len(body)]
+    lines = body.splitlines(keepends=True)
+    boundaries: list[int] = []
+    boundary_meta: dict[int, dict[str, object]] = {}
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == "---":
+            j = next(
+                (k for k in range(i + 1, len(lines)) if lines[k].strip() == "---"), None
+            )
+            if j is not None:
+                try:
+                    doc = yaml.safe_load("".join(lines[i + 1 : j]))
+                except yaml.YAMLError:
+                    doc = None
+                if isinstance(doc, dict) and ("type" in doc or "tags" in doc):
+                    boundaries.append(i)
+                    boundary_meta[i] = {str(k): v for k, v in doc.items()}
+                    i = j + 1
+                    continue
+        i += 1
+    if not boundaries:
+        return [_Item(content, meta)]
+    items = [_Item(preamble + "".join(lines[: boundaries[0]]), meta)]
+    for n, start in enumerate(boundaries):
+        end = boundaries[n + 1] if n + 1 < len(boundaries) else len(lines)
+        items.append(_Item("".join(lines[start:end]), boundary_meta[start]))
+    return items
+
+
+def gate_raw_content(
+    policy: RelevancePolicy | None, content: str, *, jsonl: bool = False
+) -> RelevanceGateResult:
+    """Decide, per item, which declared facts a ``never`` rule covers.
+
+    Pure and deterministic: no I/O, no LLM, no clock. ``None`` or an empty
+    policy returns the no-op result immediately, so a deployment with no
+    policy file is byte-identical to before this gate existed.
+    """
+    if policy is None or not policy.rules:
+        return RelevanceGateResult(kept_content=content)
+    items = _split_jsonl(content) if jsonl else _split_markdown(content)
+    drops: list[RelevanceDrop] = []
+    kept: list[str] = []
+    for index, item in enumerate(items):
+        rule = policy.match(*_declared(item.meta))
+        if rule is not None and rule.verdict == "never":
+            drops.append(RelevanceDrop(rule, index, item.text.strip()[:_EXCERPT_CHARS]))
+        else:
+            kept.append(item.text)
+    if not drops:
+        return RelevanceGateResult(kept_content=content, n_items=len(items))
+    return RelevanceGateResult(tuple(drops), "".join(kept), len(items))
+
+
+def filter_relevance_never(
+    files: Iterable[Any],
+    policy: RelevancePolicy | None,
+) -> tuple[list[Any], list[tuple[Any, RelevanceGateResult]]]:
+    """Partition auto-memory files into ``(kept, refused)`` (athenaeum#2644).
+
+    A file is refused only when EVERY item it declares is covered by a
+    ``never`` rule. Auto-memory files belong to the host tool, never to this
+    pipeline, so a mixed file cannot be rewritten: it is kept whole. Nothing
+    is ever deleted here. An unreadable file is kept (it could not be
+    compiled either). A no-op returning every file when *policy* is empty.
+    """
+    if policy is None or not policy.rules:
+        return list(files), []
+    kept: list[Any] = []
+    refused: list[tuple[Any, RelevanceGateResult]] = []
+    for am in files:
+        try:
+            text = am.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            kept.append(am)
+            continue
+        gate = gate_raw_content(policy, text)
+        if gate.fully_dropped:
+            refused.append((am, gate))
+        else:
+            kept.append(am)
+    return kept, refused
