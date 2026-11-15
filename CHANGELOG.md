@@ -169,6 +169,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and rewrites inbound `[[wikilinks]]` (reusing the fold's own rewrite
   helper). Idempotent, and takes the run lock on `--apply` (athenaeum#2488).
 
+- A `short_name_escalated` decision-queue item (raised when the short-name
+  guard suppresses a Tier-3 create for a short, generic name) is now
+  answerable instead of only archivable as text: answer it with the uid of
+  an existing page to attach the parked observation to, plus an optional
+  qualified `name` to rename that page first — through the athenaeum#2488
+  rename primitive, so the old name lands in `aliases:` with provenance
+  recorded. `athenaeum ingest-answers` applies the answer (observation
+  attached, item resolved) rather than archiving it inert; a uid that does
+  not resolve is refused with a clear error and the item stays open
+  (athenaeum#2526).
+
 - `athenaeum provenance adapter --uid <uid>` reads the adapter-provenance
   ledger (`src/athenaeum/adapter_provenance.py`) and prints which adapter
   and source object produced a compiled page, or says plainly that none was
