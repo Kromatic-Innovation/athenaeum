@@ -74,6 +74,46 @@ written `athenaeum.yaml` selected and what it draws on:
 An *existing* `athenaeum.yaml` is never rewritten by `init` — this selection
 only happens once, the moment the file is first created.
 
+## I want first-person facts ("I prefer...") to land on my own page
+
+A fresh knowledge base has no page for you, so a note like "I prefer terse
+status updates" has nowhere to attach and is dropped by the compile. Tell
+Athenaeum who the owner is, once:
+
+```bash
+athenaeum owner set --name "Ada Example"
+athenaeum owner set --name "Ada Example" --alias "Ada J. Example"   # optional, repeatable
+athenaeum init --path ~/my-knowledge --owner-name "Ada Example"     # the same thing, at init time
+```
+
+`owner set` is non-interactive and idempotent. It creates your person page in
+`wiki/` and records `owner.uid` plus your name and aliases in
+`athenaeum.yaml`, leaving every other key and comment in that file untouched,
+so an existing knowledge base can opt in. Running it again changes nothing; a
+new `--alias` adds only that alias. Use full names (two or more words): the
+name matcher ignores single-word aliases, and `owner set` warns when you pass
+one. Pass `--path` to point it at a knowledge directory other than the default.
+
+**What lands on the owner page.** Once an owner is set, the compile always
+offers the owner page to the classifier, so first-person statements ("I
+decided...", "my team...", "the user...") in a raw note, whether it came from
+a hook, `remember`, or an imported memory file, become observations on that
+page. A preference, habit or standing instruction is filed under a
+`## Preferences` section of the page as a bullet. The shipped observation
+filter still applies: communication and workflow preferences are always
+captured, while topics such as food or travel are only kept once they are
+reinforced. With no owner set, behaviour is unchanged, and a dropped fact is
+recorded in the drop ledger (`athenaeum drops`) so you can see it.
+
+**Access level.** The owner page is created at the `personal` access level, so
+a restricted caller (for example a remote client served with a narrower
+`serve.audience`) cannot read it.
+
+**Contact data is never written to it.** `owner set` does not ask for, accept
+or store an email address or phone number, and the page holds only your name,
+aliases and the facts compiled onto it. Contact details live on the separate
+excluded surface, not on wiki pages.
+
 ## I want to supply an API key (without 1Password)
 
 `athenaeum run` needs `ANTHROPIC_API_KEY` in its own environment, unless you
