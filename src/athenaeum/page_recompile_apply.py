@@ -225,7 +225,8 @@ from athenaeum.page_relations import (
     set_relation,
 )
 from athenaeum.screening import more_restrictive
-from athenaeum.store import FilesystemStore, now_iso
+from athenaeum.storage import open_store
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -2607,7 +2608,7 @@ def write_apply(
     _append_record(target_ledger, ledger_record)
 
     knowledge_root = wiki_root.parent
-    snapshot_sha = FilesystemStore(knowledge_root, config or {}).snapshot(
+    snapshot_sha = open_store(config, knowledge_root).snapshot(
         f"page-recompile apply {plan.uid} ({resolved_plan_id})"
     )
 

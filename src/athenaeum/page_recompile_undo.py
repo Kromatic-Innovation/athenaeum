@@ -186,7 +186,8 @@ from athenaeum.page_relations import (
     read_relations,
     remove_relation,
 )
-from athenaeum.store import FilesystemStore, now_iso
+from athenaeum.storage import open_store
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -1081,7 +1082,7 @@ def write_undo(
     _append_record(target_ledger, _build_ledger_record(computed))
 
     knowledge_root = Path(wiki_root).parent
-    snapshot_sha = FilesystemStore(knowledge_root, config or {}).snapshot(
+    snapshot_sha = open_store(config, knowledge_root).snapshot(
         f"page-recompile undo {computed.uid} ({computed.plan_id})"
     )
 
