@@ -1825,3 +1825,285 @@ class TestTimeClaimSettings:
         assert _serve_auth().clock_leeway == 60
         with pytest.raises(ServeAuthError):
             _serve_auth(max_token_lifetime=0)
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2601 — configurable / discovered JWKS location; kid-refetch throttle.
+# ---------------------------------------------------------------------------
+
+
+class TestJwksLocation:
+    ISS = "https://id.example.net"
+    PATH_ISS = "https://id.example.net/tenant-a"
+
+    @staticmethod
+    def _build(issuer_url: str = ISS, **kw: Any):
+        return build_serve_auth(
+            issuer=issuer_url,
+            resource=RESOURCE,
+            allowed_identities=frozenset({ALLOWED_SUBJECT}),
+            **kw,
+        )
+
+    @staticmethod
+    def _fetcher(docs: dict[str, Any]):
+        calls: list[str] = []
+
+        def fetch(url: str) -> Any:
+            calls.append(url)
+            return docs.get(url)
+
+        fetch.calls = calls  # type: ignore[attr-defined]
+        return fetch
+
+    def test_default_is_derived_and_never_touches_the_network(self) -> None:
+        built = self._build()
+        assert built.jwks_uri == "https://id.example.net/.well-known/jwks.json"
+        assert built.jwks_source == "derived"
+
+    def test_configured_is_used_verbatim_and_skips_discovery(self) -> None:
+        fetch = self._fetcher({})
+        built = self._build(
+            jwks_uri="https://keys.example.net/oauth2/jwks", discovery_fetcher=fetch
+        )
+        assert (built.jwks_uri, built.jwks_source) == (
+            "https://keys.example.net/oauth2/jwks",
+            "configured",
+        )
+        assert fetch.calls == []
+
+    def test_configured_must_be_an_absolute_http_url(self) -> None:
+        from athenaeum.serve_auth import ServeAuthError
+
+        with pytest.raises(ServeAuthError):
+            self._build(jwks_uri="keys.example.net/jwks")
+
+    def test_discovered_from_rfc8414_first(self) -> None:
+        fetch = self._fetcher(
+            {
+                self.ISS + "/.well-known/oauth-authorization-server": {
+                    "issuer": self.ISS,
+                    "jwks_uri": "https://id.example.net/oauth2/jwks",
+                }
+            }
+        )
+        built = self._build(discovery_fetcher=fetch)
+        assert (built.jwks_uri, built.jwks_source) == (
+            "https://id.example.net/oauth2/jwks",
+            "discovered",
+        )
+        assert fetch.calls == [self.ISS + "/.well-known/oauth-authorization-server"]
+
+    def test_falls_through_to_openid_configuration(self) -> None:
+        fetch = self._fetcher(
+            {
+                self.ISS + "/.well-known/openid-configuration": {
+                    "issuer": self.ISS,
+                    "jwks_uri": "https://id.example.net/keys",
+                }
+            }
+        )
+        built = self._build(discovery_fetcher=fetch)
+        assert built.jwks_source == "discovered"
+        assert len(fetch.calls) == 2
+
+    def test_path_scoped_issuer_uses_rfc8414_insertion_and_oidc_append(self) -> None:
+        from athenaeum.serve_auth import discovery_urls
+
+        assert discovery_urls(self.PATH_ISS) == [
+            "https://id.example.net/.well-known/oauth-authorization-server/tenant-a",
+            "https://id.example.net/tenant-a/.well-known/openid-configuration",
+        ]
+
+    @pytest.mark.parametrize(
+        "named", ["https://id.example.net/", "https://other.example.net", None]
+    )
+    def test_issuer_mismatch_refuses_to_start(self, named: Any) -> None:
+        from athenaeum.serve_auth import ServeAuthError
+
+        fetch = self._fetcher(
+            {
+                self.ISS + "/.well-known/oauth-authorization-server": {
+                    "issuer": named,
+                    "jwks_uri": "https://id.example.net/oauth2/jwks",
+                }
+            }
+        )
+        with pytest.raises(ServeAuthError, match="does not equal"):
+            self._build(discovery_fetcher=fetch)
+
+    @pytest.mark.parametrize(
+        "docs",
+        [{}, {"/.well-known/oauth-authorization-server": {"issuer": ISS}}],
+    )
+    def test_unavailable_or_keyless_discovery_falls_back_to_derived(self, docs: dict) -> None:
+        fetch = self._fetcher({self.ISS + k: v for k, v in docs.items()})
+        built = self._build(discovery_fetcher=fetch)
+        assert (built.jwks_uri, built.jwks_source) == (
+            "https://id.example.net/.well-known/jwks.json",
+            "derived",
+        )
+
+    def test_real_fetcher_returns_none_on_a_malformed_http_response(self) -> None:
+        import socket
+        import threading
+
+        from athenaeum.serve_auth import fetch_discovery_document
+
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def _serve() -> None:
+            conn, _ = server.accept()
+            conn.recv(1024)
+            conn.sendall(b"not http at all\r\n\r\n")
+            conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.getsockname()[1]}/.well-known/x"
+            assert fetch_discovery_document(url) is None
+        finally:
+            server.close()
+
+    def test_real_fetcher_returns_none_when_unreachable(self) -> None:
+        from athenaeum.serve_auth import fetch_discovery_document
+
+        assert fetch_discovery_document("http://127.0.0.1:9/.well-known/x") is None
+
+
+class TestJwksRefetchThrottle:
+    def _fetch_count(self, issuer: _FakeIssuer, before: int) -> int:
+        return len(issuer.fetches) - before
+
+    def test_n_random_kid_tokens_cause_at_most_one_fetch(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        before = len(issuer.fetches)
+
+        async def _body(app: Any) -> list[int]:
+            statuses = []
+            async with _raw_client(app) as client:
+                for i in range(12):
+                    token = issuer.mint(kid=f"random-{i}")
+                    r = await client.post(
+                        MCP_PATH,
+                        headers={
+                            "Accept": "application/json, text/event-stream",
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {token}",
+                        },
+                        json=_INITIALIZE,
+                    )
+                    statuses.append(r.status_code)
+            return statuses
+
+        statuses = _drive(corpus, issuer, _serve_auth(), _body)
+        assert statuses == [401] * 12
+        assert self._fetch_count(issuer, before) <= 1
+
+    def test_legitimate_traffic_and_rotation_after_the_interval_still_work(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        before = len(issuer.fetches)
+
+        async def _post(client: Any, token: str) -> int:
+            r = await client.post(
+                MCP_PATH,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+                json=_INITIALIZE,
+            )
+            return r.status_code
+
+        async def _body(app: Any) -> tuple[int, int, int]:
+            async with _raw_client(app) as client:
+                first = await _post(client, issuer.mint())  # cold cache: one fetch
+                cached = await _post(client, issuer.mint())  # cache hit: no fetch
+                unknown = await _post(client, issuer.mint(kid="unknown-kid"))  # throttled
+                return first, cached, unknown
+
+        first, cached, unknown = _drive(
+            corpus, issuer, _serve_auth(jwks_refetch_interval=3600), _body
+        )
+        assert (first, cached, unknown) == (200, 200, 401)
+        assert self._fetch_count(issuer, before) == 1
+
+    def test_unknown_kid_refetches_again_once_the_interval_has_passed(
+        self, corpus: Path, issuer: _FakeIssuer
+    ) -> None:
+        before = len(issuer.fetches)
+
+        async def _body(app: Any) -> None:
+            async with _raw_client(app) as client:
+                for kid in ("a-1", "a-2"):
+                    await client.post(
+                        MCP_PATH,
+                        headers={
+                            "Accept": "application/json, text/event-stream",
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {issuer.mint(kid=kid)}",
+                        },
+                        json=_INITIALIZE,
+                    )
+                await asyncio.sleep(1.2)
+                await client.post(
+                    MCP_PATH,
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {issuer.mint(kid='a-3')}",
+                    },
+                    json=_INITIALIZE,
+                )
+
+        _drive(corpus, issuer, _serve_auth(jwks_refetch_interval=1), _body)
+        assert self._fetch_count(issuer, before) == 2
+
+
+class TestJwksSettings:
+    YAML = {
+        "serve": {"auth": {"jwks_uri": "https://k.example.net/jwks", "jwks_refetch_interval": 5}}
+    }
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SERVE_AUTH_JWKS_URI", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL", raising=False)
+
+    def test_defaults_and_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import (
+            resolve_serve_auth_jwks_refetch_interval,
+            resolve_serve_auth_jwks_uri,
+        )
+
+        assert resolve_serve_auth_jwks_uri(None) is None
+        assert resolve_serve_auth_jwks_refetch_interval(None) == 60
+        assert resolve_serve_auth_jwks_uri(self.YAML) == "https://k.example.net/jwks"
+        assert resolve_serve_auth_jwks_refetch_interval(self.YAML) == 5
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_JWKS_URI", "https://env.example.net/jwks")
+        monkeypatch.setenv("ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL", "0")
+        assert resolve_serve_auth_jwks_uri(self.YAML) == "https://env.example.net/jwks"
+        assert resolve_serve_auth_jwks_refetch_interval(self.YAML) == 0
+        assert resolve_serve_auth_jwks_uri(self.YAML, "https://cli.example.net/j") == (
+            "https://cli.example.net/j"
+        )
+
+    def test_invalid_values_are_refused(self) -> None:
+        from athenaeum.config import (
+            resolve_serve_auth_jwks_refetch_interval,
+            resolve_serve_auth_jwks_uri,
+        )
+        from athenaeum.serve_auth import ServeAuthError
+
+        with pytest.raises(ServeAuthError):
+            resolve_serve_auth_jwks_uri({"serve": {"auth": {"jwks_uri": 5}}})
+        with pytest.raises(ServeAuthError):
+            resolve_serve_auth_jwks_refetch_interval(
+                {"serve": {"auth": {"jwks_refetch_interval": -1}}}
+            )

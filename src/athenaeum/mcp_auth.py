@@ -50,6 +50,7 @@ dependency stays optional for every non-serve code path.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -100,9 +101,50 @@ class _IdentityAllowlistVerifier(JWTVerifier):
         audit_log_path: Path | None = None,
         **kwargs: Any,
     ) -> None:
+        # fastmcp >= 4.2 ships its own refresh throttle (constructor keyword
+        # ``jwks_refresh_interval``, default 30 s) layered above
+        # ``_fetch_jwks``. Hand it the configured interval when the installed
+        # release accepts it, so the two throttles agree instead of the
+        # library's default silently overriding ``serve.auth.
+        # jwks_refetch_interval``; older releases (the 4.0.x lock) have no
+        # such keyword and rely on the override below alone.
+        if "jwks_refresh_interval" in inspect.signature(JWTVerifier.__init__).parameters:
+            kwargs.setdefault("jwks_refresh_interval", float(serve_auth.jwks_refetch_interval))
         super().__init__(**kwargs)
         self._serve_auth = serve_auth
         self._audit_log_path = audit_log_path
+        # Monotonic time of the last key-set fetch this process allowed.
+        self._last_jwks_fetch: float | None = None
+
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        """FastMCP's key-set fetch, but at most one fetch per interval.
+
+        FastMCP 4.0.x refetches the key set for EVERY token whose ``kid`` is
+        not in the cache, so an unauthenticated caller can make this server
+        hammer the issuer's key endpoint (athenaeum#2601). The throttle sits on
+        the FETCH, not on the key lookup: ``_get_jwks_key`` only reaches here
+        on a cache miss (empty cache, TTL expiry, unknown ``kid``), so a cache
+        hit is never throttled and this override needs no knowledge of how the
+        library timestamps its cache (fastmcp 4.2 moved that clock from
+        ``time.time`` to ``time.monotonic``). A fetch inside
+        ``serve.auth.jwks_refetch_interval`` seconds of the last allowed one is
+        refused with ``ValueError`` -- which FastMCP turns into a rejected
+        token -- and no request is made. The interval counts from the last
+        ATTEMPT, so a failing key endpoint is also hit at most once per
+        interval; ``0`` disables the throttle.
+        """
+        now = time.monotonic()
+        interval = self._serve_auth.jwks_refetch_interval
+        if self._last_jwks_fetch is not None and now - self._last_jwks_fetch < interval:
+            logger.warning(
+                "Bearer token rejected: signing key not in the cached key set and "
+                "the key set was already fetched within the last %d s "
+                "(serve.auth.jwks_refetch_interval)",
+                interval,
+            )
+            raise ValueError("Signing key not in the cached key set; refetch throttled")
+        self._last_jwks_fetch = now
+        return await super()._fetch_jwks()
 
     def _record_refusal(self, *, reason: str, claims: Mapping[str, Any] | None) -> None:
         """Append one ``refused`` audit record, swallowing an OSError.

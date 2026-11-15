@@ -10535,6 +10535,86 @@ def resolve_serve_auth_clock_leeway(
     return DEFAULT_CLOCK_LEEWAY
 
 
+def resolve_serve_auth_jwks_uri(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> str | None:
+    """Resolve the optional explicit JSON Web Key Set URL (issue athenaeum#2601).
+
+    When set it is used verbatim, with no discovery. ``None`` (the default)
+    means: discover ``jwks_uri`` from the issuer's metadata, else derive
+    :data:`athenaeum.serve_auth.JWKS_PATH` under the issuer. The URL is
+    validated as an absolute http(s) URL by
+    :func:`athenaeum.serve_auth.build_serve_auth`.
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_JWKS_URI``, ``serve.auth.jwks_uri``. Raises
+    :class:`athenaeum.serve_auth.ServeAuthError` on a non-string yaml value.
+    No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import ServeAuthError
+
+    if cli_value is not None:
+        return cli_value.strip() or None
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_JWKS_URI")
+    if env is not None and env.strip():
+        return env.strip()
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                candidate = auth_cfg.get("jwks_uri")
+                if isinstance(candidate, str):
+                    return candidate.strip() or None
+                if candidate is not None:
+                    raise ServeAuthError(
+                        f"serve.auth.jwks_uri={candidate!r} must be a string "
+                        "holding an absolute http(s) URL."
+                    )
+    return None
+
+
+def resolve_serve_auth_jwks_refetch_interval(
+    config: dict[str, Any] | None,
+    cli_value: int | None = None,
+) -> int:
+    """Resolve the minimum seconds between unknown-``kid`` key-set fetches (issue athenaeum#2601).
+
+    A token whose ``kid`` is not in the cached key set triggers a fetch; at
+    most one such fetch happens per interval, and further unknown-``kid``
+    tokens inside it are refused without one. Non-negative (``0`` disables the
+    throttle); default
+    :data:`athenaeum.serve_auth.DEFAULT_JWKS_REFETCH_INTERVAL` (60).
+
+    Precedence CLI > env > yaml > default: ``cli_value``,
+    ``ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL``,
+    ``serve.auth.jwks_refetch_interval``. Raises
+    :class:`athenaeum.serve_auth.ServeAuthError` on a negative or non-integer
+    value. No seed in ``_DEFAULTS``.
+    """
+    from athenaeum.serve_auth import DEFAULT_JWKS_REFETCH_INTERVAL, parse_seconds
+
+    if cli_value is not None:
+        return parse_seconds(cli_value, "--auth-jwks-refetch-interval", minimum=0)
+
+    env = os.environ.get("ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL")
+    if env is not None and env.strip():
+        return parse_seconds(env, "ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL", minimum=0)
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve", {})
+        if isinstance(serve_cfg, dict):
+            auth_cfg = serve_cfg.get("auth", {})
+            if isinstance(auth_cfg, dict):
+                raw = auth_cfg.get("jwks_refetch_interval")
+                if raw is not None:
+                    return parse_seconds(raw, "serve.auth.jwks_refetch_interval", minimum=0)
+    return DEFAULT_JWKS_REFETCH_INTERVAL
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2472 -- `dedupe.strong_identifier_keys`. Appended here, at
 # the end of the file, per this module's own established convention (see
