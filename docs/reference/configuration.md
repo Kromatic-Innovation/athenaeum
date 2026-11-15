@@ -5905,6 +5905,24 @@ on a lower-ranked surface, and pages on different surfaces are never merged.
 A negative or non-integer value is a ``StorageConfigError``. With no
 ``visibility`` declared anywhere nothing is refused.
 
+A per-type store that ``athenaeum storage move-type`` moves pages into
+ is an entry with ``embedded: true`` whose ``surface_root``
+is a directory that is its OWN git repository (not the wiki's), e.g.:
+```
+storage:
+  adapters:
+    recipes:
+      backing_store: markdown
+      surface_root: /srv/shared/recipes   # a git repository
+      corpus_policy: {embedded: true, recallable: true}
+      visibility: 1                        # more widely shared than wiki (0)
+  mapping:
+    recipe: recipes                        # see storage.mapping
+```
+
+``visibility`` is what the store-link rule reads: once moved, a ``recipe``
+page may link to nothing on a lower-ranked surface (the wiki, rank 0).
+
 ### `resolve_excluded_fields_config`
 
 - **YAML path:** `storage.excluded_fields`
@@ -5974,6 +5992,16 @@ one). Returns an EMPTY dict when unset — the code default that keeps every
 class on the default wiki surface, so an unconfigured base is byte-identical
 (no seed in ``_DEFAULTS`` so this default stays reachable).
 Non-string keys/values and blank entries are dropped defensively.
+
+Moving a type into its own store: after
+``athenaeum storage move-type recipe --to recipes --apply`` the operator
+adds ``recipe: recipes`` under ``storage.mapping`` (the target adapter is
+defined under ``storage.adapters`` with its ``visibility``, see
+``resolve_storage_adapters``). The move itself does not edit the config;
+the mapping is what routes NEW pages of the type to the store, while pages
+that already moved are found wherever they live. ``move-type`` is a dry run
+unless ``--apply`` is given and prints the exact ``--undo`` command that
+restores both repositories to their pre-move snapshots.
 
 ### `resolve_pii_scan_exclude`
 

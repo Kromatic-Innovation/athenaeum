@@ -144,6 +144,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum storage lint-mapping`](#athenaeum-storage-lint-mapping) (command) — storage.mapping completeness lint + the deferred (read_policy, adapter) pair check: every sensitivity class the scanned corpus carries must have a live storage.mapping entry naming a real adapter; exit non-zero on a gap. Advisory-only D4 policy-mismatch findings are also reported but never fail the gate on their own.
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
+- [`athenaeum storage move-type`](#athenaeum-storage-move-type) (command) — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
 - [`athenaeum store-link-lint`](#athenaeum-store-link-lint) (command) — Read-only: list every link from a page to a page on a more private store (lower visibility rank). A link to a more shared store is fine.
 - [`athenaeum subject-population`](#athenaeum-subject-population) (command) — Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
@@ -1850,6 +1851,7 @@ Subcommands:
 - `athenaeum storage lint-mapping` — storage.mapping completeness lint + the deferred (read_policy, adapter) pair check: every sensitivity class the scanned corpus carries must have a live storage.mapping entry naming a real adapter; exit non-zero on a gap. Advisory-only D4 policy-mismatch findings are also reported but never fail the gate on their own.
 - `athenaeum storage lint-pii` — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - `athenaeum storage migrate-pii` — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
+- `athenaeum storage move-type` — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
 
 ## `athenaeum storage lint-mapping`
 
@@ -1887,6 +1889,24 @@ Move archival contact data (emails/phones) off entity pages to the excluded surf
 | `--rename-name-email` | off (flag absent) | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
 | `--rename-only` | off (flag absent) | — | Run ONLY the name-is-an-email rename slice; skip the body-text contact-data migration entirely. Implies --rename-name-email. Use this when the body-migration pass would act on findings you do not want migrated — e.g. while the phone axis still carries detector false positives, where a full --all --apply would redact real prose (; the failure mode spent two restore passes repairing). |
 | `--rename-to` | — | — | Operator-supplied display name for a --page rename. refuses to GUESS a name from an ambiguous local-part, but offered no way to supply one — so the deferred population had no route through the tool and could only be hand-edited, which skips the excluded record, the slug rename and the inbound-link rewrite. This is a human asserting the name, so it bypasses the confidence gate by design. Requires --page and --rename-name-email (or --rename-only). |
+
+## `athenaeum storage move-type`
+
+Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+
+**Positional arguments:**
+
+- `entity_type` — The entity type (frontmatter `type:`) whose wiki pages move.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | off (flag absent) | — | Perform the move. Without this flag the command is a dry run that writes nothing. Refused while any link would break the store-link rule or any destination file already exists. |
+| `--cache-dir` | — | — | Where move records are kept (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). |
+| `--force` | off (flag absent) | — | With --undo: reset even if a repository has moved on or has uncommitted changes. |
+| `--json` | off (flag absent) | — | Emit the dry-run plan as JSON. |
+| `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
+| `--to` | — | — | Target surface: a storage.adapters name (embedded: true, own git repo). |
+| `--undo` | — | — | Undo a previous --apply: RECORD is the record id --apply printed (found in the cache dir) or the path of its JSON file. Restores both repositories to their pre-move snapshots. |
 
 ## `athenaeum store-link-lint`
 
