@@ -45,6 +45,20 @@ Contract:
   lost. The outcome's ``field_group_misfits`` names what collided;
   :mod:`athenaeum.schema_amendment_proposals` is what turns that into a
   growing pending-decisions proposal.
+- A type's ``drop_sections`` rules (issue athenaeum#2587) let a raw RETIRE
+  sections, not just add or replace them: when the raw fills in any of a
+  rule's ``when_any`` sections, every section in its ``drop`` list is
+  removed from the page outright, even one the type's current ``sections``
+  no longer lists at all. Without this, a raw that restructures a page's
+  layout (e.g. replacing ``Ingredients``/``Steps`` with a different section
+  set) would leave the old sections sitting next to the new ones forever.
+- The provenance keys the ``remember`` MCP tool itself stamps when its
+  caller omits ``sources`` (``model``, ``originSessionId``, ``source``;
+  issue athenaeum#2587) are accepted on every configured type
+  unconditionally -- never refused for being undeclared, and never merged
+  onto the page, since the page already carries its own provenance. Every
+  structured raw written through the common, caller-unchanged ``remember``
+  path carries these keys, so refusing them would refuse that whole path.
 """
 
 from __future__ import annotations
@@ -59,6 +73,7 @@ from typing import TYPE_CHECKING, Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     STRUCTURED_UPSERT_PROTECTED_KEYS,
+    STRUCTURED_UPSERT_PROVENANCE_KEYS,
     StructuredUpsertSpec,
     resolve_page_type_field_groups,
     resolve_structured_upsert,
@@ -219,7 +234,8 @@ def _merge_body(
     code fence (every later heading would be swallowed into the fence).
 
     *allow_replace* ``False`` leaves existing ``replace_sections`` untouched
-    (a lower-ranked raw must not overwrite a higher-ranked page's content).
+    (a lower-ranked raw must not overwrite a higher-ranked page's content)
+    and skips every ``drop_sections`` rule for the same reason.
     """
     if _ends_in_open_fence(raw_body):
         raise ValueError("raw body ends inside an unclosed code fence")
@@ -243,6 +259,25 @@ def _merge_body(
 
     preamble, page_sections = _split_sections(page_body)
     changed = False
+    # Section drop rules (issue athenaeum#2587): a layout change (e.g. an
+    # Ingredients/Steps page converted to a household Shopping/Prep/Cooking/
+    # Serve layout) must REMOVE the old sections, not merely leave them
+    # stale next to the new ones. A rule fires when the raw carries non-empty
+    # content for any of its `when_any` sections; every one of its `drop`
+    # sections is then removed from the page outright, whether or not it is
+    # even a section `sections` still knows about. Gated by *allow_replace*
+    # like `replace_sections`: a lower-ranked raw must not retire a
+    # higher-ranked page's sections either.
+    if allow_replace and spec.drop_sections:
+        to_drop: set[str] = set()
+        for trigger, drop in spec.drop_sections:
+            if any(raw_map.get(key) for key in trigger):
+                to_drop |= drop
+        if to_drop:
+            kept = [sec for sec in page_sections if sec.key not in to_drop]
+            if len(kept) != len(page_sections):
+                changed = True
+            page_sections = kept
     for idx, title in enumerate(spec.sections):
         key = title.casefold()
         raw_content = raw_map.get(key, "")
@@ -523,11 +558,15 @@ def tier0_structured_upsert(
 
     # Every raw frontmatter key must be handled: identity keys (the page's own
     # values win; a differing raw ``name`` is ignored because name and H1 are
-    # identity), or a key the spec merges (union/set/ordered) or deliberately
-    # ignores (keep). Anything else would be silently lost when the raw is
-    # consumed, so refuse it, naming the keys.
+    # identity), the provenance keys the ``remember`` MCP tool itself stamps
+    # when its caller omits ``sources`` (issue athenaeum#2587 -- accepted on
+    # every type unconditionally, and dropped rather than merged, since the
+    # page already carries its own provenance), or a key the spec merges
+    # (union/set/ordered) or deliberately ignores (keep). Anything else would
+    # be silently lost when the raw is consumed, so refuse it, naming the keys.
     known = (
         _IDENTITY_KEYS
+        | STRUCTURED_UPSERT_PROVENANCE_KEYS
         | set(spec.union_keys)
         | set(spec.set_keys)
         | {k for k, _ in spec.ordered_keys}

@@ -814,7 +814,7 @@ Read-only health check of an athenaeum install — package version, interpreter,
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
 | `--claude-config-dir` | — | — | Claude Code config directory holding settings.json/.claude.json (default: CLAUDE_CONFIG_DIR env, else ~/.claude) |
-| `--home` | — | — | Home directory to check the `athenaeum schedule` state under (; default: the real home directory). |
+| `--home` | — | — | Home directory to check the `athenaeum schedule` state under, and to search for a home-level.claude.json MCP registration; default: the real home directory. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum drain`
