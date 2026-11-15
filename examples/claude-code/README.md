@@ -126,8 +126,19 @@ timer, or at session end. See "Compile raw → wiki" below.
    the hand-written Option B above has (no key in its environment, so it
    fails every night under cron with `ANTHROPIC_API_KEY not set`). Refuses
    outright if no key source is available instead of installing a schedule
-   that would fail. `athenaeum schedule remove` undoes it. `athenaeum
-   doctor` reports whether a schedule is installed.
+   that would fail. `athenaeum doctor` reports whether a schedule is
+   installed.
+
+   `athenaeum schedule remove` undoes it. It deletes the launchd plist, the
+   systemd service and timer, or athenaeum's tagged crontab line (every other
+   crontab entry is left exactly as it was), plus the scheduled run's log:
+   `~/Library/Logs/athenaeum-run.log` on macOS, or
+   `~/.local/state/athenaeum/schedule-run.log` on Linux along with that
+   directory when nothing else is in it. If `install` found you had no
+   crontab and the removal leaves it empty, the crontab itself is deleted;
+   a schedule installed by an older version leaves an empty crontab instead.
+   It never deletes files athenaeum did not create. Pass `--keep-logs` to
+   keep the logs.
 
    The scheduled run uses the cache directory `install` resolved
    (`--cache-dir`, else `ATHENAEUM_CACHE_DIR`, else `~/.cache/athenaeum`).

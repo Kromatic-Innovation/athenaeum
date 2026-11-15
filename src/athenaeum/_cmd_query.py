@@ -402,7 +402,6 @@ def cmd_recall(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
         resolve_audience,
-        resolve_extra_intake_roots,
         resolve_search_backend,
     )
     from athenaeum.models import (
@@ -425,7 +424,9 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # shipped default) so every recall surface answers on the same backend.
     backend_name = args.backend or resolve_search_backend(cfg)
     cache_dir = resolve_cache_dir(args.cache_dir).resolve()
-    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+    from athenaeum.storage import resolve_indexed_surfaces
+
+    extra_roots = resolve_indexed_surfaces(knowledge_root, cfg)
 
     # Issue athenaeum#312: resolve the read-scope pin (CLI > env > yaml). None = owner.
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))

@@ -114,6 +114,8 @@ from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
 from athenaeum.search import tokenize_keyword_query
 from athenaeum.serve_auth import ServeAuth
 from athenaeum.storage import (
+    IndexedRoot,
+    as_indexed_surface,
     is_excluded,
     is_recallable,
     storage_policy_configured,
@@ -655,7 +657,7 @@ def recall_search(
     *,
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
-    extra_roots: list[Path] | None = None,
+    extra_roots: Sequence[IndexedRoot] | None = None,
     caller_audience: set[str] | None = None,
     config: dict[str, object] | None = None,
     with_pii: bool = False,
@@ -1031,7 +1033,7 @@ _OFF_CORPUS_HIT_PREFIX = "off-corpus/"
 def _resolve_hit_path(
     filename: str,
     wiki_root: Path,
-    extra_roots: list[Path],
+    extra_roots: Sequence[IndexedRoot],
     *,
     off_corpus_root: Path | None = None,
 ) -> tuple[Path | None, str]:
@@ -1042,7 +1044,8 @@ def _resolve_hit_path(
     - Wiki entries: bare name (``lean-startup.md``). Resolved against
       ``wiki_root`` with the ``wiki/`` display prefix.
     - Extra-root entries: ``<root_name>/<relpath>``. The first path
-      segment is matched against an extra root's ``.name`` and the
+      segment is matched against an indexed surface's prefix (a configured
+      surface's name, or a bare extra root's folder name) and the
       remainder resolved against that root. Display prefix is
       ``<root_name>/`` so the path a human sees matches the indexed
       filename.
@@ -1066,9 +1069,10 @@ def _resolve_hit_path(
         return wiki_root / filename, f"wiki/{filename}"
 
     root_name, _, rel = filename.partition("/")
-    for root in extra_roots:
-        if root.name == root_name:
-            return root / rel, filename
+    for item in extra_roots:
+        surface = as_indexed_surface(item)
+        if surface.prefix == root_name:
+            return surface.root / rel, filename
     # Unknown root (index built against a different config, or an
     # off-corpus hit with no off_corpus_root supplied). Return the indexed
     # filename verbatim so callers still see what matched rather than a
@@ -1478,7 +1482,7 @@ def _reorder_hits_by_currency(
     hits: list[tuple[str, str, float]],
     *,
     wiki_root: Path,
-    extra_roots: list[Path],
+    extra_roots: Sequence[IndexedRoot],
     off_corpus_root: Path | None = None,
 ) -> list[tuple[str, str, float]]:
     """Stable-partition *hits* so an expired daily-bucket page sorts after
@@ -1545,7 +1549,7 @@ def _reorder_hits_by_supersession(
     hits: list[tuple[str, str, float]],
     *,
     wiki_root: Path,
-    extra_roots: list[Path],
+    extra_roots: Sequence[IndexedRoot],
     off_corpus_root: Path | None = None,
 ) -> list[tuple[str, str, float]]:
     """Stable-partition *hits* so a declared-superseded page sorts after every
@@ -1624,7 +1628,7 @@ def _reorder_hits_uncompiled_last(
     hits: list[tuple[str, str, float]],
     *,
     wiki_root: Path,
-    extra_roots: list[Path],
+    extra_roots: Sequence[IndexedRoot],
     off_corpus_root: Path | None = None,
 ) -> list[tuple[str, str, float]]:
     """Stable-partition *hits* so an uncompiled raw-intake hit sorts after
@@ -1846,7 +1850,7 @@ def _recall_via_backend(
     top_k: int,
     backend_name: str,
     cache_dir: Path | None,
-    extra_roots: list[Path],
+    extra_roots: Sequence[IndexedRoot],
     caller_audience: set[str] | None = None,
     config: dict[str, object] | None = None,
     *,
@@ -2835,8 +2839,8 @@ def _refresh_extra_root_index(
     try:
         import math
 
-        from athenaeum.config import resolve_extra_intake_roots
         from athenaeum.search import get_backend
+        from athenaeum.storage import resolve_indexed_surfaces
 
         with _INDEX_REFRESH_LOCK:
             # Re-resolved INSIDE the lock, not before it: the root list only
@@ -2847,7 +2851,7 @@ def _refresh_extra_root_index(
             # `raw/<subdir>` could run AFTER that sibling's build and, seeing
             # a narrower corpus than the manifest records, diff the sibling's
             # freshly-indexed entries as REMOVED.
-            extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
+            extra_roots = resolve_indexed_surfaces(wiki_root.parent, config)
             get_backend(search_backend).build_index(
                 wiki_root,
                 cache_dir,
@@ -3530,7 +3534,7 @@ def create_server(
     *,
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
-    extra_roots: list[Path] | None = None,
+    extra_roots: Sequence[IndexedRoot] | None = None,
     caller_audience: set[str] | None = None,
     screening: dict | None = None,
     remote_policy: RemotePolicy | None = None,
@@ -4070,11 +4074,11 @@ def create_server(
         # content -- the first-remember-then-recall confusion this issue
         # exists to remove, just displaced from new to pre-existing
         # installs. Cheap: a `stat` per configured root, never a corpus
-        # scan — `resolve_extra_intake_roots` reads the already-loaded
+        # scan — `resolve_indexed_surfaces` reads the already-loaded
         # *config* dict, not the YAML file again.
-        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.storage import resolve_indexed_surfaces
 
-        live_extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
+        live_extra_roots = resolve_indexed_surfaces(wiki_root.parent, config)
         # Issue athenaeum#2383: the serve-time excluded-fields pin, applied by
         # coercing `with_pii` OFF before the search runs -- deliberately
         # EARLIER than the `_excluded_block_for_hit` assembly site the issue's
