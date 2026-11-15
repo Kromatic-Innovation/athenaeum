@@ -28,7 +28,8 @@ from athenaeum.drops import (
     restore_drop,
     safe_excerpt,
 )
-from athenaeum.models import RawFile
+from athenaeum.librarian import process_one
+from athenaeum.models import EntityIndex, RawFile
 
 # ---------------------------------------------------------------------------
 # safe_excerpt: PII/excluded-field routing reuse
@@ -202,6 +203,39 @@ class TestQuarantineAndRestore:
         assert dest == quarantine_dir(cache_dir) / raw.ref
         assert dest.read_text(encoding="utf-8") == "dropped content"
 
+    def test_quarantine_survives_cross_device_rename(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer review on PR athenaeum#2639, Finding 2: the quarantine dir
+        (cache dir) and the raw file (knowledge root) are independently
+        configurable and can land on different filesystems, where a plain
+        rename raises ``OSError(EXDEV)``. Force exactly that error out of
+        ``os.rename`` (what ``shutil.move`` tries first) and assert the
+        file still ends up quarantined via the copy+unlink fallback —
+        proving the fix is the real ``shutil.move`` semantics, not a
+        same-filesystem-only illusion of one."""
+        import errno
+        import os
+
+        cache_dir = tmp_path / "cache"
+        raw = self._raw_file(tmp_path, "cross-device content")
+        original_path = raw.path
+
+        real_rename = os.rename
+
+        def _rename_raises_exdev(src: object, dst: object, *a: object, **k: object) -> None:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+        monkeypatch.setattr(os, "rename", _rename_raises_exdev)
+        try:
+            dest = quarantine_raw_file(cache_dir, raw)
+        finally:
+            monkeypatch.setattr(os, "rename", real_rename)
+
+        assert not original_path.exists()
+        assert dest.exists()
+        assert dest.read_text(encoding="utf-8") == "cross-device content"
+
     def test_restore_raises_when_never_dropped(self, tmp_path: Path) -> None:
         with pytest.raises(LookupError):
             restore_drop(tmp_path / "cache", tmp_path / "raw", "sessions/none.md")
@@ -282,6 +316,166 @@ class TestResolveDropAction:
 
     def test_valid_actions_tuple(self) -> None:
         assert set(VALID_DROP_ACTIONS) == {"delete", "quarantine"}
+
+
+# ---------------------------------------------------------------------------
+# handled_no_op: a deterministic Tier-0 step that positively handled a raw
+# file's content without growing created/updated must NOT be mistaken for a
+# drop (Seer review on PR athenaeum#2639, Finding 1). Each test below drives
+# `process_one` directly through the real Tier-0 function (never a stub),
+# reusing the exact fixture shape its own sibling test module already
+# exercises for the underlying tier0_* function, and asserts the entity
+# loop's actual drop-exemption signal (`result.handled_no_op`) is set.
+# ---------------------------------------------------------------------------
+
+
+class TestHandledNoOpIsNotADrop:
+    def _assert_no_entity_change_and_llm_untouched(self, result, client) -> None:
+        client.messages.create.assert_not_called()
+        assert result.created == []
+        assert result.updated == []
+
+    def test_handle_upsert_no_delta_sets_handled_no_op(self, tmp_path: Path) -> None:
+        """Mirrors tests/test_librarian.py::TestTier0HandleUpsert::test_reseed_no_delta_is_noop,
+        driven through process_one instead of tier0_handle_upsert directly."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        page = wiki / "company-x-x.md"
+        page.write_text(
+            "---\nuid: company-x\ntype: company\nname: X\naccess: internal\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nBody.\n",
+            encoding="utf-8",
+        )
+        raw_dir = tmp_path / "raw" / "contact-wiki"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "seed.md"
+        raw_path.write_text(
+            "---\nuid: company-x\ntype: company\nname: X\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nseed\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8="")
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError("must not reach the LLM tiers")
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            client,
+            valid_types=["company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+        )
+        self._assert_no_entity_change_and_llm_untouched(result, client)
+        assert result.handled_no_op is True
+
+    def test_bounce_mark_sets_handled_no_op(self, tmp_path: Path) -> None:
+        """Mirrors tests/test_bounce_mark.py::TestProcessOneShortCircuits::
+        test_llm_client_never_called."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw_dir = tmp_path / "raw" / "voltaire-bounce-relay"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "note.md"
+        raw_path.write_text(
+            "---\nobserved_at: 2026-08-05\nsource: script:voltaire-bounce-relay\n---\n\n"
+            "Alex's address alex@example.org hard-bounced. "
+            "Diagnostic: 550 5.1.1 user unknown.\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="voltaire-bounce-relay", timestamp="", uuid8="")
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError("must not reach the LLM tiers")
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            client,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            config={"storage": {"mapping": {"pii": "excluded"}}},
+        )
+        self._assert_no_entity_change_and_llm_untouched(result, client)
+        assert result.handled_no_op is True
+
+    def test_bounce_verdict_mark_no_op_sets_handled_no_op(self, tmp_path: Path) -> None:
+        """Companion to tests/test_bounce_verdict_mark.py — that file covers
+        the CHANGED=True stamp; this covers the idempotent no-op (the page
+        already carries a `bounced:` value), which it does not test."""
+        from tests.test_bounce_verdict_mark import _BARE_550_NOTE
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        page = wiki / "aaaa1111-someone-example-com.md"
+        page.write_text(
+            "---\nuid: aaaa1111\ntype: person\nname: someone@example.com\n"
+            "memory_class: entity\naccess: personal\n"
+            "created: '2026-08-20'\nupdated: '2026-08-20'\n"
+            "bounced: 'prior verdict'\n---\n\n# someone@example.com\n\nBody.\n",
+            encoding="utf-8",
+        )
+        raw_dir = tmp_path / "raw" / "voltaire-bounce-relay"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "note.md"
+        raw_path.write_text(_BARE_550_NOTE, encoding="utf-8")
+        raw = RawFile(path=raw_path, source="voltaire-bounce-relay", timestamp="", uuid8="")
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError("must not reach the LLM tiers")
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            client,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+        )
+        self._assert_no_entity_change_and_llm_untouched(result, client)
+        assert result.handled_no_op is True
+        # Prior verdict is untouched, never clobbered.
+        assert "prior verdict" in page.read_text(encoding="utf-8")
+
+    def test_do_not_email_mark_no_op_sets_handled_no_op(self, tmp_path: Path) -> None:
+        """Companion to tests/test_do_not_email_mark.py — that file covers
+        the CHANGED=True stamp; this covers the idempotent no-op (the page
+        already has do_not_email: true), which it does not test."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        page = wiki / "aaaa1111-someone-example-com.md"
+        page.write_text(
+            "---\nuid: aaaa1111\ntype: person\nname: someone@example.com\n"
+            "memory_class: entity\naccess: personal\n"
+            "created: '2026-08-20'\nupdated: '2026-08-20'\n"
+            "do_not_email: true\n---\n\n# someone@example.com\n\nBody.\n",
+            encoding="utf-8",
+        )
+        raw_dir = tmp_path / "raw" / "producer"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "note.md"
+        raw_path.write_text(
+            "---\nobserved_at: 2026-08-25\nsource: test\n---\n\n"
+            "Do not email someone@example.com. Operator-directed opt-out.\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="producer", timestamp="", uuid8="")
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError("must not reach the LLM tiers")
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            client,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+        )
+        self._assert_no_entity_change_and_llm_untouched(result, client)
+        assert result.handled_no_op is True
 
 
 # ---------------------------------------------------------------------------
@@ -441,3 +635,50 @@ class TestEntityLoopIntegration:
         quarantined = quarantine_dir(cache_dir) / "sessions" / "20260410T120000Z-aabbccdd.md"
         assert quarantined.exists()
         assert quarantined.read_text(encoding="utf-8") == "Nothing worth keeping here.\n"
+
+    def test_quarantine_failure_leaves_no_lying_ledger_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer review on PR athenaeum#2639, Finding 2 (ordering half): when
+        the on-disk quarantine move fails for ANY reason (simulated here by
+        making quarantine_raw_file raise unconditionally -- e.g. the
+        destination disk is full, which shutil.move's own cross-device
+        fallback cannot route around either), the drop ledger must NOT have
+        already recorded a quarantine that never happened. Proves the
+        entity loop disposes BEFORE it records, not after."""
+        import anthropic as anthropic_mod
+
+        import athenaeum.drops as drops_module
+        from athenaeum.librarian import run
+
+        cache_dir = tmp_path / "cache"
+        root = self._seed_knowledge_root(tmp_path, "Nothing worth keeping here.\n")
+        (root / "athenaeum.yaml").write_text("librarian:\n  drop_action: quarantine\n")
+
+        classify_response = MagicMock()
+        classify_response.content = [MagicMock(text=json.dumps([]))]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = classify_response
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        def _quarantine_always_fails(cache_dir: Path, raw: object) -> Path:
+            raise OSError("simulated: destination disk full")
+
+        monkeypatch.setattr(drops_module, "quarantine_raw_file", _quarantine_always_fails)
+
+        raw_path = root / "raw" / "sessions" / "20260410T120000Z-aabbccdd.md"
+        with pytest.raises(OSError, match="simulated"):
+            run(raw_root=root / "raw", wiki_root=root / "wiki", knowledge_root=root)
+
+        # The raw file was never touched -- disposal failed before anything
+        # else happened to it.
+        assert raw_path.exists()
+        assert raw_path.read_text(encoding="utf-8") == "Nothing worth keeping here.\n"
+        # And, the point of this test: no ledger row claims a quarantine
+        # that never happened. Either the ledger file was never created, or
+        # (equally acceptable) it exists but holds no row for this ref.
+        target_ref = "sessions/20260410T120000Z-aabbccdd.md"
+        rows = [r for r in iter_drops(cache_dir) if r.raw_ref == target_ref]
+        assert rows == []

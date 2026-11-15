@@ -2687,6 +2687,11 @@ def process_one(
                 entity.name,
                 entity.filename,
             )
+            # Issue athenaeum#2609 (Seer review, PR athenaeum#2639): the raw's
+            # source handles are ALREADY reflected on `entity`'s page -- this
+            # is a confirmed duplicate, not data loss. See
+            # ``ProcessingResult.handled_no_op``'s docstring.
+            result.handled_no_op = True
         return result
 
     # --- Tier 0 (bounce mark): deterministic hard-bounce recognition onto
@@ -2702,6 +2707,11 @@ def process_one(
             "  T0 bounce-mark: %s marked non-deliverable on the contacts surface",
             bounce_fact.identifier,
         )
+        # Issue athenaeum#2609 (Seer review, PR athenaeum#2639): this file's
+        # content WAS captured -- onto the PII/contacts excluded surface,
+        # never onto `created`/`updated`. See
+        # ``ProcessingResult.handled_no_op``'s docstring.
+        result.handled_no_op = True
         return result
 
     # --- Tier 0 (bounce verdict mark): deterministic recognition of a
@@ -2732,6 +2742,10 @@ def process_one(
                 verdict_entity.name,
                 verdict_entity.filename,
             )
+            # Issue athenaeum#2609 (Seer review, PR athenaeum#2639): the
+            # verdict is ALREADY reflected on `verdict_entity`'s page. See
+            # ``ProcessingResult.handled_no_op``'s docstring.
+            result.handled_no_op = True
         return result
 
     # --- Tier 0 (do-not-email mark): deterministic opt-out recognition onto
@@ -2757,6 +2771,10 @@ def process_one(
                 dne_entity.name,
                 dne_entity.filename,
             )
+            # Issue athenaeum#2609 (Seer review, PR athenaeum#2639): the
+            # opt-out is ALREADY reflected on `dne_entity`'s page. See
+            # ``ProcessingResult.handled_no_op``'s docstring.
+            result.handled_no_op = True
         return result
 
     # --- uid bind (issue athenaeum#1982): an explicit top-level `uid:` on raw
@@ -9926,7 +9944,49 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # computed above for the entity-heartbeat tick, so
                             # the two can never disagree about which files
                             # count as dropped.
-                            _is_drop = not _entity_made_change
+                            #
+                            # Seer review on PR athenaeum#2639: the ABSENCE of
+                            # created/updated is not by itself proof of a drop
+                            # -- a deterministic Tier-0 step (bounce-mark,
+                            # handle-upsert/bounce-verdict/do-not-email no-op)
+                            # can positively handle a file's content without
+                            # growing either list (see
+                            # ``ProcessingResult.handled_no_op``'s docstring).
+                            # ``getattr`` for the same stubbed-test-double
+                            # tolerance as the other ``ProcessingResult``
+                            # reads in this loop (a double predating this
+                            # field has no ``handled_no_op`` attribute).
+                            _is_drop = not _entity_made_change and not getattr(
+                                result, "handled_no_op", False
+                            )
+                            # Seer review on PR athenaeum#2639, Finding 2:
+                            # the on-disk disposition MUST happen BEFORE the
+                            # drop-ledger row is recorded, never after. The
+                            # quarantine dir (cache dir) and the raw file
+                            # (knowledge root) are independently configurable
+                            # roots that can sit on different filesystems, so
+                            # ``quarantine_raw_file`` (a ``shutil.move``, with
+                            # its own cross-device fallback — see that
+                            # function's docstring) can still raise for an
+                            # unrelated reason (permissions, a full
+                            # destination disk). Recording the ledger row
+                            # FIRST, as this used to, would durably claim a
+                            # quarantine that never happened if that move
+                            # then failed. Disposing first means a failure
+                            # here propagates exactly like any other
+                            # file-processing error (no row written, nothing
+                            # lied about) instead of lying. ``raw.content``
+                            # below is already cached in memory from
+                            # ``process_one``'s own very first line
+                            # (``parse_frontmatter(raw.content)``), so
+                            # reading it after the file is moved/deleted
+                            # never touches disk.
+                            if _is_drop and ctx.drop_action == "quarantine":
+                                drops_mod.quarantine_raw_file(_drops_cache_dir, raw)
+                                log.info("  Quarantined (dropped): %s", raw.path)
+                            else:
+                                raw.path.unlink()
+                                log.info("  Deleted: %s", raw.path)
                             if _is_drop and ctx.drop_log_enabled:
                                 _drop_stage = (
                                     drops_mod.DROP_STAGE_OTHER
@@ -9944,12 +10004,6 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     now=ctx.now,
                                 )
                                 ctx.total_drops += 1
-                            if _is_drop and ctx.drop_action == "quarantine":
-                                drops_mod.quarantine_raw_file(_drops_cache_dir, raw)
-                                log.info("  Quarantined (dropped): %s", raw.path)
-                            else:
-                                raw.path.unlink()
-                                log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1
                             # Issue athenaeum#1295: per-source twin of
                             # `processed_count` above, read back once the loop

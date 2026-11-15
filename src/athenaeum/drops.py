@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -310,10 +311,26 @@ def quarantine_raw_file(cache_dir: Path, raw: Any) -> Path:
     at ``raw.path`` after this call — this is a MOVE, not a copy, matching
     ``librarian.drop_action: delete``'s own "the raw no longer lives under
     raw/" contract; only the destination differs.
+
+    Uses :func:`shutil.move`, NOT ``Path.replace``/``os.rename`` (Seer
+    review on PR athenaeum#2639, Finding 2): the quarantine dir lives under
+    the CACHE dir while the raw file lives under the KNOWLEDGE root, and
+    those two roots are independently configurable (``ATHENAEUM_CACHE_DIR``
+    exists precisely so they can diverge) — so this move is not guaranteed
+    to stay on one filesystem. A same-filesystem rename raises ``OSError``
+    (``errno.EXDEV``, "Invalid cross-device link") the moment it crosses a
+    mount boundary; ``shutil.move`` already contains that exact fallback
+    (try ``os.rename`` first, and on failure fall back to ``copy2`` +
+    unlink-the-source) rather than this function hand-rolling a second copy
+    of it. The caller (``librarian.py``'s entity loop) is responsible for
+    calling this BEFORE recording the drop-ledger row, not after — see that
+    call site's own comment — so that a failure here (same-filesystem
+    permission error, full destination disk, etc.) never leaves the ledger
+    claiming a quarantine that did not happen.
     """
     target = quarantine_dir(cache_dir) / raw.source / raw.path.name
     target.parent.mkdir(parents=True, exist_ok=True)
-    raw.path.replace(target)
+    shutil.move(str(raw.path), str(target))
     return target
 
 
