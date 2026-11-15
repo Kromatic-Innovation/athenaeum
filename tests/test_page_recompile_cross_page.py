@@ -1898,10 +1898,13 @@ class TestAC12AliasesStayOnTheParent:
 
 class TestAC13ChangelogEntry:
     def test_the_unreleased_section_names_this_slice(self) -> None:
-        changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(
-            encoding="utf-8"
-        )
-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+        # The per-merge entries live in the release's build notes.
+        unreleased = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "changelog"
+            / "0.24.0-build-notes.md"
+        ).read_text(encoding="utf-8")
         assert "page recompile" in unreleased.lower()
         for phrase in ("move", "standalone", "attach"):
             assert phrase in unreleased.lower(), phrase

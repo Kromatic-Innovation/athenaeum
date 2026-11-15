@@ -472,8 +472,10 @@ class TestAC9Documentation:
         assert "queue" in lowered and "off" in lowered
 
     def test_changelog_has_a_behaviour_change_entry_for_this_slice(self) -> None:
-        changelog = (self._repo() / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0]
+        # The per-merge entries live in the release's build notes.
+        unreleased = (
+            self._repo() / "docs" / "changelog" / "0.24.0-build-notes.md"
+        ).read_text(encoding="utf-8")
         entry = next(
             block
             for block in unreleased.split("\n- ")
