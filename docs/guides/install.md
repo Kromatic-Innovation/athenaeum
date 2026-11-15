@@ -289,10 +289,12 @@ contrast, refuses outright: it exits `1` with `ANTHROPIC_API_KEY not set`
 unless you pass `--dry-run` or configure `llm.provider: claude-cli`.
 
 **Git identity.** `athenaeum init` creates a git repository for the new
-knowledge directory and commits its scaffold. If git has no `user.name` or
-`user.email` configured, `init` does not surface a raw git error — it exits
-with a direct message naming the two `git config --global` commands to run
-and telling you to retry `athenaeum init`.
+knowledge directory and commits its scaffold. You do not need a git identity
+configured: if git has none, `init` sets a repo-local `user.name`/`user.email`
+on the knowledge repo only (never your global config), prints a notice saying
+so, and shows the two `git config` commands to change it. If `init` fails for
+any other reason it removes what it created, so retrying `athenaeum init`
+starts clean; a directory that already existed keeps its own content.
 
 **Scheduler.** Nothing is scheduled by default. If you never set up cron,
 launchd, or a recurring manual run, `remember` keeps appending to
