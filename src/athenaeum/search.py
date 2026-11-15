@@ -85,7 +85,14 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
-from athenaeum.storage import open_store, page_embedding_disabled, page_is_embedded
+from athenaeum.storage import (
+    IndexedRoot,
+    IndexedSurface,
+    as_indexed_surface,
+    open_store,
+    page_embedding_disabled,
+    page_is_embedded,
+)
 from athenaeum.store import FilesystemStore, ObjectMeta, Store, StoreKey
 
 # ---------------------------------------------------------------------------
@@ -110,7 +117,7 @@ class SearchBackend(Protocol):
         wiki_root: Path,
         cache_dir: Path,
         *,
-        extra_roots: Iterable[Path] | None = None,
+        extra_roots: Iterable[IndexedRoot] | None = None,
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
@@ -715,7 +722,7 @@ def _scan_surface(
 
 def _scan_indexed_records(
     wiki_root: Path,
-    extra_roots: Iterable[Path] | None,
+    extra_roots: Iterable[IndexedRoot] | None,
     *,
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
@@ -788,12 +795,13 @@ def _scan_indexed_records(
 
     roots: dict[str, Path] = {"wiki": wiki_root}
     extra_surfaces: list[tuple[str, str]] = []  # (surface_name, indexed-name prefix)
-    for i, root in enumerate(extra_roots or ()):
-        if not root.is_dir():
+    for i, item in enumerate(extra_roots or ()):
+        spec = as_indexed_surface(item)
+        if not spec.root.is_dir():
             continue
         surface = f"extra{i}"
-        roots[surface] = root
-        extra_surfaces.append((surface, root.name))
+        roots[surface] = spec.root
+        extra_surfaces.append((surface, spec.prefix))
     store = open_store(None, wiki_root, extra_roots=roots)
 
     def _local_path_for(key: StoreKey) -> Path:
@@ -1322,7 +1330,7 @@ class FTS5Backend:
         wiki_root: Path,
         cache_dir: Path,
         *,
-        extra_roots: Iterable[Path] | None = None,
+        extra_roots: Iterable[IndexedRoot] | None = None,
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
@@ -2365,7 +2373,7 @@ class VectorBackend:
         wiki_root: Path,
         cache_dir: Path,
         *,
-        extra_roots: Iterable[Path] | None = None,
+        extra_roots: Iterable[IndexedRoot] | None = None,
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
@@ -2902,7 +2910,7 @@ class KeywordBackend:
         wiki_root: Path,
         cache_dir: Path,
         *,
-        extra_roots: Iterable[Path] | None = None,
+        extra_roots: Iterable[IndexedRoot] | None = None,
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
@@ -2939,7 +2947,8 @@ class KeywordBackend:
             and p.name not in _INTAKE_SKIP_NAMES
         )
         if extra_roots:
-            for root in extra_roots:
+            for item in extra_roots:
+                root = as_indexed_surface(item).root
                 if not root.is_dir():
                     continue
                 count += sum(
@@ -3464,7 +3473,7 @@ def build_fts5_index(
     wiki_root: str | Path,
     cache_dir: str | Path,
     *,
-    extra_roots: Iterable[str | Path] | None = None,
+    extra_roots: Iterable[str | IndexedRoot] | None = None,
     incremental: bool = True,
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
@@ -3486,7 +3495,11 @@ def build_fts5_index(
     ``full_rehash_max_age_days`` (issue athenaeum#373) sets the periodic full-re-hash
     backstop for the stat pre-filter.
     """
-    roots = [Path(r) for r in extra_roots] if extra_roots else None
+    roots: list[IndexedRoot] | None = (
+        [r if isinstance(r, IndexedSurface) else Path(r) for r in extra_roots]
+        if extra_roots
+        else None
+    )
     return FTS5Backend().build_index(
         Path(wiki_root),
         Path(cache_dir),
@@ -3515,7 +3528,7 @@ def build_vector_index(
     wiki_root: str | Path,
     cache_dir: str | Path,
     *,
-    extra_roots: Iterable[str | Path] | None = None,
+    extra_roots: Iterable[str | IndexedRoot] | None = None,
     incremental: bool = True,
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
@@ -3535,7 +3548,11 @@ def build_vector_index(
     ``full_rehash_max_age_days`` (issue athenaeum#373) sets the periodic full-re-hash
     backstop for the stat pre-filter.
     """
-    roots = [Path(r) for r in extra_roots] if extra_roots else None
+    roots: list[IndexedRoot] | None = (
+        [r if isinstance(r, IndexedSurface) else Path(r) for r in extra_roots]
+        if extra_roots
+        else None
+    )
     return get_backend("vector", embedding_model=embedding_model).build_index(
         Path(wiki_root),
         Path(cache_dir),

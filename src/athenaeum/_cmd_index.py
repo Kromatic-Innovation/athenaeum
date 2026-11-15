@@ -512,7 +512,6 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
         resolve_embedding_model,
-        resolve_extra_intake_roots,
         resolve_index_globs,
         resolve_reindex_full_rehash_max_age_days,
         resolve_search_backend,
@@ -539,7 +538,9 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
         # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`.
         backend = resolve_search_backend(cfg)
 
-    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+    from athenaeum.storage import resolve_indexed_surfaces
+
+    extra_roots = resolve_indexed_surfaces(knowledge_root, cfg)
     include_globs, exclude_globs = resolve_index_globs(cfg)
     embedding_model = resolve_embedding_model(cfg)
     full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(

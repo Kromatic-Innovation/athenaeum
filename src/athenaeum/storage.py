@@ -60,14 +60,19 @@ corpus policy for a specific entity beyond what ``storage.mapping`` says.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_storage_adapters, resolve_storage_mapping
+from athenaeum.config import (
+    load_config,
+    resolve_extra_intake_roots,
+    resolve_storage_adapters,
+    resolve_storage_mapping,
+)
 from athenaeum.store import FilesystemStore, Store
 
 # One-directional edge, real (not deferred): athenaeum.store (L0/L1) imports
@@ -138,6 +143,12 @@ class StorageAdapter:
     backing_store: str
     surface_root: str
     corpus_policy: CorpusPolicy
+    #: Whether a delete on this surface is a true erasure (design note §4.5
+    #: R2, athenaeum#2615). Defaults to ``True`` — what every surface has
+    #: always been. ``purgeable: false`` in config declares the surface
+    #: non-purgeable, so a destructive operation on it is refused unless the
+    #: surface is also versioned (inside a git working tree).
+    purgeable: bool = True
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -266,6 +277,7 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         backing_store=backing_store.strip(),
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
+        purgeable=_coerce_bool(raw.get("purgeable"), default=True),
     )
 
 
@@ -490,7 +502,169 @@ def open_store(
     }
     if extra_roots:
         roots.update(extra_roots)
-    return FilesystemStore(knowledge_root, roots)
+    non_purgeable = {
+        name for name, adapter in available_adapters(config).items() if not adapter.purgeable
+    }
+    return FilesystemStore(knowledge_root, roots, non_purgeable_surfaces=non_purgeable)
+
+
+# ---------------------------------------------------------------------------
+# Indexed surfaces: the ONE derivation of "which roots feed the search index"
+# ---------------------------------------------------------------------------
+
+
+class IndexedSurfaceError(StorageConfigError):
+    """Raised when the set of indexed roots is unsafe or ambiguous.
+
+    Two cases, both refused at config resolution (never at scan time):
+
+    * an indexed root that equals, contains, or sits inside the root of a
+      surface that is NOT indexed (``embedded: false``, e.g. the built-in
+      ``excluded`` surface) -- the data that surface keeps out of the index
+      would otherwise be one overlapping directory away from entering it;
+    * two indexed roots that would produce the same indexed-name prefix, so
+      their pages would collide (or silently shadow each other) in the index.
+    """
+
+
+@dataclass(frozen=True)
+class IndexedSurface:
+    """One non-wiki root the index scans: its indexed-name *prefix* + *root*.
+
+    Indexed names are ``<prefix>/<relpath>``. A configured storage surface
+    uses its surface (adapter) name as the prefix, so renaming the folder it
+    lives in does not orphan its index rows. A bare ``recall.extra_intake_roots``
+    entry keeps its historical prefix, the folder basename.
+    """
+
+    prefix: str
+    root: Path
+
+
+#: What the index scan and the hit-path resolvers accept per extra root: a
+#: bare :class:`~pathlib.Path` (prefix = folder basename, the historical shape)
+#: or an :class:`IndexedSurface` carrying its own prefix.
+IndexedRoot = Path | IndexedSurface
+
+
+def as_indexed_surface(item: IndexedRoot) -> IndexedSurface:
+    """Normalize a bare :class:`~pathlib.Path` to its :class:`IndexedSurface`."""
+    if isinstance(item, IndexedSurface):
+        return item
+    return IndexedSurface(prefix=item.name, root=item)
+
+
+def _is_within(inner: Path, outer: Path) -> bool:
+    return inner == outer or outer in inner.parents
+
+
+def validate_indexed_surfaces(
+    indexed: Sequence[IndexedSurface],
+    non_indexed: Mapping[str, Path],
+    *,
+    wiki_root: Path | None = None,
+) -> None:
+    """Refuse an unsafe or ambiguous indexed-root set (see :class:`IndexedSurfaceError`).
+
+    *indexed* is the list of non-wiki indexed roots; *non_indexed* maps the
+    name of each surface that is not indexed to its root. *wiki_root*, when
+    given, reserves the ``wiki`` prefix (an indexed root whose prefix is
+    ``wiki`` would shadow wiki hits); it is not overlap-checked, because
+    surfaces inside ``wiki/`` are filtered per page class at scan time.
+    """
+    entries = list(indexed)
+    # The default wiki surface is deliberately NOT in the overlap check: a
+    # non-indexed surface rooted at or inside ``wiki/`` is the supported
+    # athenaeum#532 shape, kept out of the index per page class by the
+    # scan-time ``is_embedded`` filter (both scans walk the page and drop it).
+    # Refusing it here would break existing deployments. *wiki_root* only
+    # reserves the ``wiki`` prefix.
+    checked: list[tuple[str, Path]] = [(e.prefix, e.root) for e in entries]
+    seen: dict[str, Path] = {}
+    for entry in entries:
+        if "/" in entry.prefix or not entry.prefix:
+            raise IndexedSurfaceError(
+                f"indexed root {entry.root} has an unusable index prefix "
+                f"{entry.prefix!r}: it must be non-empty and contain no '/'"
+            )
+        if entry.prefix == "wiki":
+            raise IndexedSurfaceError(
+                f"indexed root {entry.root} would use the reserved index prefix "
+                "'wiki' -- rename the surface or folder"
+            )
+        if entry.prefix in seen:
+            raise IndexedSurfaceError(
+                f"indexed roots {seen[entry.prefix]} and {entry.root} share the "
+                f"index prefix {entry.prefix!r}; their pages would collide in the "
+                "index -- rename one"
+            )
+        seen[entry.prefix] = entry.root
+    for label, root in checked:
+        resolved = root.resolve()
+        for ex_name, ex_root in non_indexed.items():
+            ex_resolved = ex_root.resolve()
+            if _is_within(resolved, ex_resolved) or _is_within(ex_resolved, resolved):
+                raise IndexedSurfaceError(
+                    f"indexed root {root} ({label!r}) overlaps the root of the "
+                    f"non-indexed surface {ex_name!r} ({ex_root}): it equals, "
+                    "contains, or sits inside it, so excluded pages could enter "
+                    "the index -- move one of them"
+                )
+
+
+def resolve_indexed_surfaces(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    *,
+    extra_roots: list[Path] | None = None,
+) -> list[IndexedSurface]:
+    """The ONE resolver for the non-wiki roots the search index scans (athenaeum#2616).
+
+    Used by both index backends' callers and by the hit-path resolvers, so
+    what is indexed and what a hit resolves back to can never drift apart.
+    Returns, in order: every configured storage surface whose corpus policy is
+    ``embedded: true`` (prefix = surface name), then every
+    ``recall.extra_intake_roots`` entry (prefix = folder basename, unchanged).
+    The default wiki surface is not listed -- its names are bare, so an
+    existing index needs no rebuild. With no extra surface configured the
+    result is exactly today's extra-roots list, hence a byte-identical index.
+
+    Raises :class:`IndexedSurfaceError` when an indexed root equals/contains/is
+    inside a non-indexed surface root (including the case where that root is
+    ALSO listed as an extra intake root), or two indexed roots share a prefix.
+    The scan-time ``pii:`` flag filter stays as the second layer.
+
+    *extra_roots* overrides the config's extra intake roots (callers that have
+    already resolved them).
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+    wiki_root = knowledge_root / "wiki"
+    wiki_resolved = wiki_root.resolve()
+    indexed: list[IndexedSurface] = []
+    non_indexed: dict[str, Path] = {}
+    for name, adapter in available_adapters(config).items():
+        root = adapter.resolve_root(knowledge_root)
+        if adapter.corpus_policy.embedded:
+            if root.resolve() == wiki_resolved or wiki_resolved in root.resolve().parents:
+                # The default wiki surface, or a surface inside it: the wiki
+                # walk already scans these pages flat under bare names, so
+                # listing them again would index them twice.
+                continue
+            if root.is_dir():
+                indexed.append(IndexedSurface(prefix=name, root=root.resolve()))
+        else:
+            non_indexed[name] = root
+    if extra_roots is None:
+        extra_roots = resolve_extra_intake_roots(knowledge_root, config)
+    already = {s_.root for s_ in indexed}
+    indexed.extend(
+        IndexedSurface(prefix=r.name, root=r)
+        for r in extra_roots
+        if r.resolve() not in already  # a surface also listed as an extra root
+    )
+    validate_indexed_surfaces(indexed, non_indexed, wiki_root=wiki_root)
+    return indexed
 
 
 _RAW_INTAKE_FILENAME_RETRIES = 5
