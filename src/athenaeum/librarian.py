@@ -252,6 +252,12 @@ from athenaeum.quarantine import record_attempt as _record_quarantine_attempt
 from athenaeum.registry import assert_handles_placed, collect_handles
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.relevance_policy import (
+    RelevancePolicy,
+    filter_relevance_never,
+    gate_raw_content,
+    load_relevance_policy,
+)
 from athenaeum.rule_proposals import (
     _get_rule_proposals_model,
     run_rule_proposal_detection,
@@ -2442,6 +2448,7 @@ def process_one(
     started_at_file: float | None = None,
     write_client: LLMBackend | None = None,
     never_ingest_manifest: AuthorityManifest | None = None,
+    relevance_policy: RelevancePolicy | None = None,
     person_registry: PersonRegistry | None = None,
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
 ) -> ProcessingResult:
@@ -2605,6 +2612,28 @@ def process_one(
             result.retain_raw = True
             result.retain_raw_by_design = True
             return result
+
+    # Issue athenaeum#2644: the relevance-policy gate. Deterministic -- declared
+    # type/tags/uid only, no LLM -- and ahead of every tier, so the Tier-0
+    # passthrough / structured-upsert paths (which never reach an LLM) are
+    # stopped too. The SAME ``gate_raw_content`` call sits in
+    # ``batch.process_batch_run``. A raw the policy covers WHOLE is consumed
+    # like any other nothing-created raw (skipped reason -> drop ledger, raw
+    # deleted by the entity loop); a MIXED raw continues with only its
+    # uncovered items. ``None``/empty policy: skipped entirely.
+    if relevance_policy is not None and relevance_policy.rules:
+        gate = gate_raw_content(
+            relevance_policy, raw.content, jsonl=raw.path.suffix.lower() == ".jsonl"
+        )
+        if gate.fully_dropped:
+            result.skipped.append(gate.reason)
+            return result
+        if gate.drops:
+            result.relevance_drops.extend(gate.drops)
+            raw._content = gate.kept_content
+            raw_meta, raw_body = parse_frontmatter(raw.content)
+            incoming_handles = collect_handles(raw_meta)
+            sticky_access = parse_access(raw_meta)
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---
     # When upstream producers already emit valid wiki-schema frontmatter,
@@ -9185,6 +9214,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     never_ingest_manifest = load_authority_manifest(
                         resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
                     )
+                    # Issue athenaeum#2644: the relevance policy, loaded once.
+                    # An INVALID policy file raises (fail closed): a `never`
+                    # rule that cannot be read must not silently stop being
+                    # enforced. Nothing is deleted when it raises.
+                    relevance_policy = load_relevance_policy(ctx.wiki_root)
                     # Issue athenaeum#236: phased fan-out via the Messages Batch API.
                     # The synchronous loop below is untouched when the flag
                     # is off. Issue athenaeum#337 note: `processed_count` is
@@ -9243,6 +9277,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # synchronous transport's process_one call enforces
                         # below (`never_ingest_manifest=never_ingest_manifest`).
                         never_ingest_manifest=never_ingest_manifest,
+                        relevance_policy=relevance_policy,
                     )
                     ctx.total_created = outcome.created
                     ctx.total_updated = outcome.updated
@@ -9336,6 +9371,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     never_ingest_manifest = load_authority_manifest(
                         resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
                     )
+                    # Issue athenaeum#2644: same once-per-run policy load as the
+                    # batch branch above (fail closed on an invalid file).
+                    relevance_policy = load_relevance_policy(ctx.wiki_root)
                     # Issue athenaeum#2609: resolve the drop-ledger off switch and
                     # the delete-vs-quarantine disposition ONCE per run (mirrors
                     # never_ingest_manifest immediately above) rather than
@@ -9606,6 +9644,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 # unchanged.
                                 write_client=write_client,
                                 never_ingest_manifest=never_ingest_manifest,
+                                relevance_policy=relevance_policy,
                                 person_registry=person_registry,
                                 # Issue athenaeum#1627: re-audit an `update`
                                 # action's target page before tier3_merge
@@ -10002,6 +10041,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             else:
                                 raw.path.unlink()
                                 log.info("  Deleted: %s", raw.path)
+                            # Issue athenaeum#2644: the covered items of a MIXED
+                            # raw (the rest compiled, so ``_is_drop`` is False
+                            # for the file) get one ledger row each, through
+                            # the same recorder, so a never-rule drop is never
+                            # silent. A WHOLE-raw drop takes the row below.
+                            if ctx.drop_log_enabled:
+                                for _rd in getattr(result, "relevance_drops", []):
+                                    drops_mod.record_drop(
+                                        _drops_cache_dir,
+                                        raw_ref=raw.ref,
+                                        content=_rd.excerpt,
+                                        stage=drops_mod.DROP_STAGE_OTHER,
+                                        reason=_rd.reason,
+                                        run_id=run_id_var.get(),
+                                        now=ctx.now,
+                                    )
+                                    ctx.total_drops += 1
                             if _is_drop and ctx.drop_log_enabled:
                                 _drop_stage = (
                                     drops_mod.DROP_STAGE_OTHER
@@ -10915,6 +10971,33 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         cache_dir=_resolve_cache_dir(None),
         dry_run=ctx.dry_run,
     )
+    # Issue athenaeum#2644: the relevance-policy gate, beside the never-ingest
+    # gate. Same deterministic decision as process_one/process_batch_run. A
+    # covered file is excluded from THIS run's compilation and ledgered as a
+    # drop; like never-ingest it is NEVER deleted (these files belong to the
+    # host tool) and is simply re-evaluated next run. Invalid policy raises.
+    relevance_policy = load_relevance_policy(ctx.wiki_root)
+    if relevance_policy.rules:
+        auto_memory_files, _relevance_refused = filter_relevance_never(
+            auto_memory_files, relevance_policy
+        )
+        if _relevance_refused:
+            log.info(
+                "relevance-policy: dropped %d auto-memory file(s) this run",
+                len(_relevance_refused),
+            )
+            if not ctx.dry_run and resolve_drop_log(ctx.config):
+                for _am, _gate in _relevance_refused:
+                    drops_mod.record_drop(
+                        _resolve_cache_dir(None),
+                        raw_ref=f"auto-memory/{_am.origin_scope}/{_am.path.name}",
+                        content="\n".join(d.excerpt for d in _gate.drops),
+                        stage=drops_mod.DROP_STAGE_OTHER,
+                        reason=_gate.reason,
+                        run_id=run_id_var.get(),
+                        now=ctx.now,
+                    )
+                    ctx.total_drops += 1
     ctx.never_ingest_summary = {
         "refused": len(never_ingest_refusals),
         "by_class": {

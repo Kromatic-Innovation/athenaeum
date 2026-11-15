@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence, cast
 import anthropic
 
 from athenaeum import batch_state, spend
+from athenaeum import drops as drops_mod
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
@@ -87,8 +88,9 @@ from athenaeum.compile_routing import (
     classify_route,
     resolved_correspondent_uid,
 )
-from athenaeum.config import resolve_page_size_threshold_chars
+from athenaeum.config import resolve_drop_log, resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
+from athenaeum.logconf import run_id_var
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
     EntityAction,
@@ -111,6 +113,7 @@ from athenaeum.provider import (
 )
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
+from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -1199,6 +1202,7 @@ def process_batch_run(
     batch_write: bool = True,
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
     never_ingest_manifest: AuthorityManifest | None = None,
+    relevance_policy: RelevancePolicy | None = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -1376,6 +1380,41 @@ def process_batch_run(
                         "detail": f"never-ingest:{ni_refusal.class_slug}",
                     }
                     continue
+
+            # Issue athenaeum#2644: the relevance-policy gate -- the SAME
+            # ``gate_raw_content`` decision ``librarian.process_one`` makes,
+            # ahead of the Tier-0 paths and every LLM tier. A raw covered
+            # WHOLE is done (skipped, no pages; ``st.done`` finalizes it by
+            # deleting the raw exactly as for any consumed raw); a MIXED raw
+            # continues with only its uncovered items. Drop-ledger rows are
+            # written here because this transport has no per-file drop loop.
+            if relevance_policy is not None and relevance_policy.rules:
+                _rp_gate = gate_raw_content(
+                    relevance_policy,
+                    raw.content,
+                    jsonl=raw.path.suffix.lower() == ".jsonl",
+                )
+                if _rp_gate.drops:
+                    _rp_rows = (
+                        [(_rp_gate.reason, "\n".join(d.excerpt for d in _rp_gate.drops))]
+                        if _rp_gate.fully_dropped
+                        else [(d.reason, d.excerpt) for d in _rp_gate.drops]
+                    )
+                    if resolve_drop_log(config):
+                        for _rp_reason, _rp_excerpt in _rp_rows:
+                            drops_mod.record_drop(
+                                effective_cache_dir,
+                                raw_ref=raw.ref,
+                                content=_rp_excerpt,
+                                stage=drops_mod.DROP_STAGE_OTHER,
+                                reason=_rp_reason,
+                                run_id=run_id_var.get(),
+                            )
+                    if _rp_gate.fully_dropped:
+                        st.skipped.append(_rp_gate.reason)
+                        st.done = True
+                        continue
+                    raw._content = _rp_gate.kept_content
 
             passthrough = tier0_passthrough(raw, index, wiki_root, valid_types)
             if passthrough is not None:
