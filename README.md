@@ -53,7 +53,8 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 
 **Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
 `PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
-check against if `athenaeum --version` ever looks stale.
+check against if `athenaeum --version` ever looks stale. `git` must be
+installed; no git identity is needed (`init` sets a repo-local one if you have none).
 
 ```bash
 # Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
