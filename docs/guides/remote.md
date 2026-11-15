@@ -303,6 +303,180 @@ allowlist, the scope split, and the pinned audience. Configure mTLS as an extra
 outer layer, keep every athenaeum auth setting exactly as it would be without it, and
 never widen the allowlist because mTLS is on.
 
+## Behind a tunnel
+
+A tunnel replaces the inbound port and the reverse proxy with an outbound
+connection from the host to a provider's edge, which then terminates TLS for your
+name. It is a reasonable way to serve from a machine with no routable address, and
+Cloudflare Tunnel is the worked example here. The hostname `kb.example.com` is
+invented; substitute your own. The same five behaviours apply to any
+edge-terminated ingress, and every one of them breaks or weakens a deployment that
+has not been told about it.
+
+Everything in [The reverse proxy](#the-reverse-proxy) still holds: keep the athenaeum
+bind on loopback, point the tunnel at it, and set `serve.auth.resource` to the public
+URL (`https://kb.example.com/mcp`). A tunnel is not an exception to the rule that
+athenaeum's own auth block must be configured; it is an authenticated server whose
+only listener is the tunnel's local connector. See
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)
+for creating one.
+
+```yaml
+# cloudflared configuration: one public hostname, one loopback origin
+ingress:
+  - hostname: kb.example.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+### 1. The origin sees no access log
+
+Traffic arrives from the local connector, not from clients, so the origin has no
+meaningful access log and no client address to attribute. Do not rely on a proxy log
+that does not exist. Use [the per-call audit log](#the-per-call-audit-log), which
+records every scope-gated call and every refusal that reached athenaeum's bearer-token
+check, with the caller's `sub` and client id. Anything the edge answers itself (a
+blocked path, a challenge page) never reaches the origin and shows up only in the
+edge provider's own logs.
+
+### 2. The edge has a proxy read timeout
+
+Cloudflare closes a connection when the origin sends no response bytes for about
+125 seconds, and returns its
+[error 524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/).
+A long streamed tool call must produce output, or finish, inside that window. Keep
+individual calls short, and prefer several small `recall` calls to one that scans a
+large store. The window is the edge's, not athenaeum's, so no athenaeum setting
+changes it. Because the stream passes through the edge, a call that stalls looks to
+the client like a dropped connection rather than a slow one.
+
+### 3. Zone-wide bot challenges break MCP connectors
+
+A hosted MCP client is a program, not a browser, and cannot solve a challenge page.
+[Bot Fight Mode](https://developers.cloudflare.com/bots/get-started/bot-fight-mode/)
+and [Super Bot Fight Mode](https://developers.cloudflare.com/bots/get-started/super-bot-fight-mode/)
+apply to the whole zone and challenge API clients, which fails connector
+registration and every later call. Either serve the deployment from a hostname in a
+zone where those features are off, or exempt the two paths below with a
+[WAF custom rule](https://developers.cloudflare.com/waf/custom-rules/) that skips
+them. The symptom is an HTML challenge body where the client expected JSON.
+
+### 4. Do not let the edge answer 403 to the first request
+
+An MCP client starts OAuth discovery only after the origin answers its first
+unauthenticated request with `401` and a `WWW-Authenticate` header naming the
+protected-resource metadata. If an edge rule answers `403` (or a challenge) to that
+first request, the client never learns where to authenticate and the connector fails
+with no useful error. So the edge must let two paths through to the origin untouched
+and may block everything else:
+
+| Path | Why it must reach the origin |
+|---|---|
+| `/mcp` (the value of `--path-prefix`, plus anything under it) | The endpoint itself, and the source of the `401` challenge. |
+| `/.well-known/oauth-protected-resource/mcp` | The RFC 9728 metadata the challenge points to. |
+
+As a WAF custom rule that blocks everything outside those two paths:
+
+```text
+(http.host eq "kb.example.com"
+  and not (starts_with(http.request.uri.path, "/mcp")
+           or http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp"))
+```
+
+Set the rule's action to Block. If you changed `--path-prefix`, change both paths to
+match; the metadata path ends in the same prefix. Then repeat the two off-host
+`curl` checks from [The reverse proxy](#the-reverse-proxy) against the public name:
+the metadata must return JSON and the bare endpoint must return `401`, not `403`.
+
+### 5. Edge login layers break hosted MCP clients
+
+A hosted client cannot complete an interactive login, present a service token it was
+never given, come from an address you can list, or hold your client certificate
+(beyond what a provider's own connector sends). So none of these belong in front of
+the MCP path:
+
+- an interactive access gate such as
+  [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/);
+- [service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/),
+  which require a header the host will not send;
+- an IP allowlist, because hosted clients call from provider address ranges you do
+  not control;
+- edge-enforced [mTLS](https://developers.cloudflare.com/ssl/client-certificates/enable-mtls/)
+  as the only gate (see
+  [Client certificates](#client-certificates-are-defense-in-depth-not-authorization)).
+
+Authentication is athenaeum's resource server and your authorization server. Leave
+the edge to path filtering and TLS.
+
+### Running the server under launchd on macOS
+
+A launchd job keeps `athenaeum serve` alive across logins and reboots. The label and
+paths are placeholders; adjust them to your own install. Set the cache directory to
+the same value the librarian and the scheduled `session-end` and `run` jobs use
+(`ATHENAEUM_CACHE_DIR`), or the server reads an index the compiler never wrote.
+
+```xml
+<!-- /Library/LaunchDaemons/com.example.athenaeum-serve.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.athenaeum-serve</string>
+  <key>UserName</key>
+  <string>athenaeum</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/example/athenaeum/venv/bin/athenaeum</string>
+    <string>serve</string>
+    <string>--path</string>
+    <string>/opt/example/athenaeum/knowledge</string>
+    <string>--transport</string>
+    <string>http</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8000</string>
+    <string>--profile</string>
+    <string>remote</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ATHENAEUM_CACHE_DIR</key>
+    <string>/opt/example/athenaeum/cache</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/example-athenaeum-serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/example-athenaeum-serve.log</string>
+</dict>
+</plist>
+```
+
+Put the `serve.auth.*` settings in `athenaeum.yaml` or add the `--auth-*` flags to
+`ProgramArguments`, as in [athenaeum's settings](#athenaeums-settings). Then:
+
+```bash
+# Load and start it
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.example.athenaeum-serve.plist
+
+# Restart it (also how a change to the allowlist takes effect)
+sudo launchctl kickstart -k system/com.example.athenaeum-serve
+
+# Kill switch: stop it and keep it from restarting
+sudo launchctl bootout system/com.example.athenaeum-serve
+sudo launchctl disable system/com.example.athenaeum-serve
+```
+
+`bootout` unloads the job so `KeepAlive` cannot bring it back; `disable` keeps it
+from loading again at the next boot. Re-enable with `launchctl enable` followed by
+`bootstrap`. To cut off remote access without touching the server, stop the tunnel
+connector instead.
+
 ## Keeping the corpus fresh on a server
 
 On a workstation, Claude Code's hooks compile and reindex around each session. **No
