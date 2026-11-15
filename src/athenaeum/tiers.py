@@ -162,6 +162,11 @@ from athenaeum.provider import (
     response_text,
     text_or_truncated,
 )
+from athenaeum.relevance_policy import (
+    CONFIDENCES,
+    RelevancePolicy,
+    policy_categories,
+)
 from athenaeum.search import embed_texts
 
 log = logging.getLogger(__name__)
@@ -2698,6 +2703,43 @@ def _load_person_hint_owner_classify_prompt() -> str:
 PERSON_HINT_OWNER_CLASSIFY_PROMPT = _load_person_hint_owner_classify_prompt()
 
 
+def _load_relevance_category_prompt() -> str:
+    """Read the relevance-category classify block (athenaeum#2647).
+
+    Same module-import-time load as :func:`_load_person_hint_classify_prompt`;
+    the text lives in ``src/athenaeum/prompts/relevance_category.md``.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "relevance_category.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: The relevance-category instruction block, rendered into the classify user
+#: message only when a relevance policy has a ``never`` rule keyed on a tag.
+#: ``<<categories>>`` is substituted by :func:`render_relevance_category_section`.
+#: Registered in ``athenaeum.prompt_registry`` as
+#: ``tiers.relevance_category_prompt``.
+RELEVANCE_CATEGORY_PROMPT = _load_relevance_category_prompt()
+
+
+def render_relevance_category_section(policy: "RelevancePolicy | None") -> str:
+    """Render the classify prompt's relevance-category block (athenaeum#2647).
+
+    Empty string unless *policy* has a ``never`` rule that names a tag, so a
+    deployment with no policy (or no tag-keyed ``never`` rule) sends a prompt
+    BYTE-IDENTICAL to before this issue. When rendered it lists every tag the
+    policy names (``never`` and ``always`` alike, so the exceptions are
+    choosable), in file order.
+    """
+    if policy is None or not any(
+        r.verdict == "never" and r.tag is not None for r in policy.rules
+    ):
+        return ""
+    categories = "\n".join(f"- {c}" for c in policy_categories(policy))
+    return "\n" + RELEVANCE_CATEGORY_PROMPT.replace("<<categories>>", categories)
+
+
 def _render_person_candidates_section(
     person_candidates: "list[dict[str, str]] | None",
 ) -> str:
@@ -2760,6 +2802,7 @@ def tier2_request_params(
     config: dict[str, Any] | None = None,
     *,
     person_candidates: "list[dict[str, str]] | None" = None,
+    relevance_policy: "RelevancePolicy | None" = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for one Tier-2 classification call.
 
@@ -2788,7 +2831,11 @@ def tier2_request_params(
         valid_types=", ".join(valid_types),
         valid_tags=", ".join(valid_tags),
         valid_access=", ".join(valid_access),
-        observation_filter_section=obs_filter,
+        # athenaeum#2647: the relevance-category block rides the same slot as the
+        # observation filter, so the template (and every no-policy prompt)
+        # stays byte-identical.
+        observation_filter_section=obs_filter
+        + render_relevance_category_section(relevance_policy),
         person_candidates_section=_render_person_candidates_section(person_candidates),
     )
     return {
@@ -2836,6 +2883,7 @@ def tier2_classify(
     stats: Tier2ParseStats | None = None,
     *,
     person_candidates: "list[dict[str, str]] | None" = None,
+    relevance_policy: "RelevancePolicy | None" = None,
 ) -> list[ClassifiedEntity]:
     """Use a fast LLM to classify entities in the raw text.
 
@@ -2879,6 +2927,7 @@ def tier2_classify(
         wiki_root=wiki_root,
         config=config,
         person_candidates=person_candidates,
+        relevance_policy=relevance_policy,
     )
 
     response = _timed_llm_call(
@@ -2945,6 +2994,7 @@ def tier2_classify(
             config=config,
             owner=owner,
             person_candidates=person_candidates,
+            relevance_policy=relevance_policy,
         )
         if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the truncation recorded on the first attempt so
@@ -3080,6 +3130,31 @@ class Tier2ParseStats:
     degraded: int = 0
     truncated: int = 0
     hint_drops: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_relevance_category(
+    item: dict[str, Any], valid_tags: list[str]
+) -> tuple[str | None, str | None]:
+    """The ``(category, confidence)`` pair of one classify item (athenaeum#2647).
+
+    ``category`` survives only when it is in the tag vocabulary (a made-up
+    category names no rule); ``confidence`` only when it is a known value. An
+    absent or unrecognised value comes back ``None``, which every consumer
+    reads as *unsure*.
+    """
+    raw_category = item.get("category")
+    category = (
+        raw_category.strip()
+        if isinstance(raw_category, str) and raw_category.strip() in valid_tags
+        else None
+    )
+    raw_conf = item.get("confidence")
+    confidence = (
+        raw_conf.strip().lower()
+        if isinstance(raw_conf, str) and raw_conf.strip().lower() in CONFIDENCES
+        else None
+    )
+    return category, confidence
 
 
 def parse_tier2_entities(
@@ -3324,6 +3399,7 @@ def parse_tier2_entities(
         if access not in valid_access:
             access = "internal"
         tags = [t for t in item.get("tags", []) if t in valid_tags]
+        category, category_confidence = _parse_relevance_category(item, valid_tags)
 
         results.append(
             ClassifiedEntity(
@@ -3333,6 +3409,8 @@ def parse_tier2_entities(
                 access=access,
                 is_new=True,
                 observations=item.get("observations", ""),
+                category=category,
+                category_confidence=category_confidence,
             )
         )
 
@@ -3352,6 +3430,7 @@ def tier2_reclassify_larger_budget(
     owner: dict[str, Any] | None = None,
     *,
     person_candidates: "list[dict[str, str]] | None" = None,
+    relevance_policy: "RelevancePolicy | None" = None,
 ) -> tuple[list[ClassifiedEntity], Tier2ParseStats]:
     """Re-run one Tier-2 classify with the LARGER retry budget (issue athenaeum#476).
 
@@ -3396,6 +3475,7 @@ def tier2_reclassify_larger_budget(
         wiki_root=wiki_root,
         config=config,
         person_candidates=person_candidates,
+        relevance_policy=relevance_policy,
     )
     params["max_tokens"] = resolve_max_tokens(
         "classify_retry",

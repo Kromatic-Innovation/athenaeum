@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -312,7 +313,10 @@ def _collect_after_policy_change(tmp_path, monkeypatch, content):
         # text, so a covered item left in the raw WOULD reach the write prompt.
         out = scripted(params)
         if params["model"] == tb.DEFAULT_CLASSIFY_MODEL and out != "[]":
-            return out.replace("Facts about WidgetKept.", "")
+            # A policy keyed on a tag asks classify for a category (athenaeum#2647);
+            # a confident "none applies" keeps this test about the item gate.
+            items = json.loads(out.replace("Facts about WidgetKept.", ""))
+            return json.dumps([{**i, "category": None, "confidence": "high"} for i in items])
         return out
 
     monkeypatch.setattr(tb, "_scripted_responder", no_observations)

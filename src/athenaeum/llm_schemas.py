@@ -448,6 +448,12 @@ class Tier2Entity(BaseModel):
     access: Optional[str] = None
     tags: Optional[list[Any]] = None
     observations: Optional[str] = None
+    #: Relevance category and the classifier's confidence in it (athenaeum#2647);
+    #: emitted only when a relevance policy names a tag. Optional, so a
+    #: response without them is not a mismatch. Reused by later slices that
+    #: put the same pair on other response shapes.
+    category: Optional[str] = None
+    confidence: Optional[str] = None
 
 
 class Tier2ClassifyResponse(RootModel[list[Tier2Entity]]):
