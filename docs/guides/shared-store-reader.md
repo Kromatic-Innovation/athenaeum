@@ -174,11 +174,12 @@ never commit to it, so there is nothing to lose.
 Nothing refreshes the mount by itself, so put the refresh on a schedule. The command
 to schedule is `athenaeum reindex`; it is the thing that pulls.
 
-A cron line that refreshes every 30 minutes (adjust the path to `athenaeum`, which
-`which athenaeum` prints, because cron has a minimal `PATH`):
+A cron line that refreshes every 30 minutes. cron has a minimal `PATH` and does not
+expand `~` in every shell, so write the full path to `athenaeum` (`which athenaeum`
+prints it) and to your knowledge directory in place of `<home>`:
 
 ```cron
-*/30 * * * * /home/you/.local/bin/athenaeum reindex --path /home/you/knowledge >> /home/you/.local/state/athenaeum-reindex.log 2>&1
+*/30 * * * * <home>/.local/bin/athenaeum reindex --path <home>/knowledge >> <home>/athenaeum-reindex.log 2>&1
 ```
 
 `reindex` is incremental, so an idle tick is cheap. [Remote mode](remote.md) shows the
