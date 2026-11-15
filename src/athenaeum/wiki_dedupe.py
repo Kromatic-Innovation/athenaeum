@@ -600,13 +600,15 @@ def _split_rejected_pairs(
     from the RAW cluster closes that hole before any pair reaches the
     comparator at all.
 
-    Cooldown-aware (issue athenaeum#2077/#2107, pre-existing): a rejection
-    is only treated as a conflict here when :func:`athenaeum.prior_rulings
-    .match_rulings` does NOT report it as ``expired`` with no ``in_force``
-    record -- i.e. a pair with a queued-and-resolved rejection whose
-    ``librarian.rejected_merge_cooldown_days`` has lapsed is left for the
-    pair loop's own (already-existing) lapsed-rejection handling instead of
-    being dropped here. A ``merge_rejected_with:`` entry with NO matching
+    Cooldown-aware (issue athenaeum#2077/#2107, pre-existing) via
+    :func:`athenaeum.prior_rulings.rejection_still_binds` -- the same
+    shared check the ``propose-fold`` guard and the fold-apply preflight
+    in :mod:`athenaeum.pending_merges` now also use (issue athenaeum#2546
+    review finding), so all three sites decay identically: a pair with a
+    queued-and-resolved rejection whose ``librarian.
+    rejected_merge_cooldown_days`` has lapsed is left for the pair loop's
+    own (already-existing) lapsed-rejection handling instead of being
+    dropped here. A ``merge_rejected_with:`` entry with NO matching
     ``_pending_merges.md``/archive record at all (hand-authored frontmatter,
     or athenaeum#2546's own durable link with no decay) has nothing to
     expire, so it is always treated as a conflict -- this is what keeps
@@ -619,15 +621,10 @@ def _split_rejected_pairs(
     function's caller, which already drops every size-1 cluster for the
     same "no signal" reason).
     """
-    from athenaeum.config import resolve_rejected_merge_cooldown_days
-    from athenaeum.prior_rulings import load_prior_rulings, match_rulings
-
-    prior_rulings = load_prior_rulings(wiki_root)
-    cooldown_days = resolve_rejected_merge_cooldown_days(config)
+    from athenaeum.prior_rulings import rejection_still_binds
 
     def _still_binding(name_i: str, name_j: str) -> bool:
-        match = match_rulings(prior_rulings, [name_i, name_j], cooldown_days=cooldown_days)
-        return not (match.expired is not None and match.in_force is None)
+        return rejection_still_binds(wiki_root, name_i, name_j, config=config)
 
     by_relpath: dict[str, AutoMemoryFile] = {}
     for am in files:

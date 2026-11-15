@@ -968,6 +968,30 @@ def _apply_merge_answer(
                 sources = list(pm.sources)
                 break
 
+    # Issue athenaeum#2546 review finding: an "approve" through THIS
+    # (deferred, already-human-reviewed) path is the same shape as every
+    # other resolve_merge("approve") call site -- a lapsed
+    # rejected_merge_cooldown_days must not block it forever. `sources`
+    # above is only populated when the verdict ledger capture is active;
+    # this needs it regardless, so it re-derives it when that capture did
+    # not already run.
+    rejection_cooldown_lapsed = False
+    if decision == "approve":
+        from athenaeum.prior_rulings import all_pairs_rejection_lapsed
+
+        approve_sources = sources
+        if not approve_sources:
+            for pm in parse_pending_merges(merges_path):
+                if pm.id == answer.decision_id and not pm.resolved:
+                    approve_sources = list(pm.sources)
+                    break
+        if len(approve_sources) >= 2:
+            rejection_cooldown_lapsed = all_pairs_rejection_lapsed(
+                wiki_root,
+                [Path(s).name for s in approve_sources],
+                config=cfg if isinstance(cfg, dict) else None,
+            )
+
     result = resolve_merge(
         merges_path,
         merge_id=answer.decision_id,
@@ -976,6 +1000,7 @@ def _apply_merge_answer(
         wiki_root=wiki_root,
         cache_dir=cache_dir,
         search_backend=search_backend,
+        rejection_cooldown_lapsed=rejection_cooldown_lapsed,
     )
 
     # Issue athenaeum#712: record this decision — approve/reject on a proposed

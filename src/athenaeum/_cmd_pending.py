@@ -200,6 +200,7 @@ def _resolve_fold_question(
         resolve_merge,
         write_pending_merge,
     )
+    from athenaeum.prior_rulings import rejection_still_binds
     from athenaeum.verdicts import page_id_for_path
 
     def _retire_refused_fold_proposal(merges_path: Path, merge_id: str, *, reason: str) -> None:
@@ -351,6 +352,13 @@ def _resolve_fold_question(
             decision,
             note=f"{decision} via fold question {pq.id} (athenaeum#2518)",
             wiki_root=wiki_root,
+            # Issue athenaeum#2546 review finding: consistent with every
+            # other resolve_merge("approve") call site that has a config
+            # in scope. Always exactly two pages here (canonical_path,
+            # other_path), so the single-pair form applies.
+            rejection_cooldown_lapsed=not rejection_still_binds(
+                wiki_root, canonical_path.name, other_path.name, config=config
+            ),
         )
         if not result.get("ok"):
             error_code = result.get("error_code")

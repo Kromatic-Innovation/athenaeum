@@ -360,16 +360,27 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # so a link against either page's pre-rename/pre-fold identity still
     # matches). Checked on both dry-run and --apply, same as every other
     # refusal above.
+    #
+    # Cooldown-aware (issue athenaeum#2546 review finding), consistent with
+    # the wiki-dedupe clusterer and the fold-apply preflight below it in
+    # pending_merges.py: "proposed again" after the configured
+    # rejected_merge_cooldown_days lapses (issue athenaeum#2077) is exactly
+    # what the nightly clusterer already does for the identical pair, so an
+    # operator-driven propose-fold refusing unconditionally here would be
+    # STRICTER than the automatic path for the same pair.
     conflict = find_merge_rejection_conflict([into_path, *source_paths])
     if conflict is not None:
         a, b = conflict
-        return _fail(
-            f"{a.name} and {b.name} are linked by merge_rejected_with (an "
-            "operator previously rejected merging them); refusing to "
-            "propose a fold that would unite them, directly or through this "
-            "fold chain. Revoke the link first (athenaeum decisions "
-            "revoke-merge-rejection) if the ruling no longer applies."
-        )
+        from athenaeum.prior_rulings import rejection_still_binds
+
+        if rejection_still_binds(wiki_root, a.name, b.name, config=load_config(args.path)):
+            return _fail(
+                f"{a.name} and {b.name} are linked by merge_rejected_with (an "
+                "operator previously rejected merging them); refusing to "
+                "propose a fold that would unite them, directly or through this "
+                "fold chain. Revoke the link first (athenaeum decisions "
+                "revoke-merge-rejection) if the ruling no longer applies."
+            )
 
     # 3. Draft page text — verbatim canonical text unless overridden.
     #
@@ -492,13 +503,23 @@ def _cmd_revoke_merge_rejection(args: argparse.Namespace) -> int:
     concept of a declared-relationship frontmatter field to reuse here.
 
     Removes, from EACH page that carries one, the ``merge_rejected_with:``
-    entry naming the OTHER page (by slug, so either side's current
-    ``name:`` matches regardless of how the link was originally spelled).
+    entry naming the OTHER page BY EITHER SIDE'S FULL IDENTITY (its current
+    ``name:`` OR any of its ``aliases:``) — not just the current name.
+    Without that widening, a link written against a page's PRE-rename name
+    would be unrevocable by naming the page's new identity: the reading
+    path (:func:`athenaeum.declared_relationships.declared_relationship`)
+    is alias-aware so the link keeps being honoured forever, but a
+    current-name-only strip here could never find the old-named entry to
+    remove it — exactly the asymmetry this command exists to avoid. Reuses
+    :func:`athenaeum.declared_relationships.identity_slugs` rather than
+    re-deriving the union.
+
     Dry-run by default — prints what WOULD change, writes nothing;
     ``--apply`` writes. Refuses (exit 2) when neither page carries a link
     naming the other, so a typo'd pair never silently reports success.
     """
     from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.declared_relationships import DeclaredRelationshipFacts, identity_slugs
     from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
 
     wiki_root = _resolve_wiki_root(args)
@@ -534,21 +555,31 @@ def _cmd_revoke_merge_rejection(args: argparse.Namespace) -> int:
     if path_a == path_b:
         return _fail("--a and --b name the same page")
 
-    def _meta_and_slug(path: Path) -> tuple[dict, str]:
+    def _meta_and_identity(path: Path) -> tuple[dict, set[str]]:
         meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
         if not isinstance(meta, dict):
             meta = {}
         name = meta.get("name")
-        return meta, slugify(str(name) if isinstance(name, str) and name.strip() else path.stem)
+        aliases_raw = meta.get("aliases")
+        aliases = (
+            [str(x) for x in aliases_raw if isinstance(x, str)]
+            if isinstance(aliases_raw, list)
+            else []
+        )
+        facts = DeclaredRelationshipFacts(
+            name=str(name) if isinstance(name, str) and name.strip() else path.stem,
+            aliases=aliases,
+        )
+        return meta, identity_slugs(facts)
 
-    meta_a, slug_a = _meta_and_slug(path_a)
-    meta_b, slug_b = _meta_and_slug(path_b)
+    meta_a, identity_a = _meta_and_identity(path_a)
+    meta_b, identity_b = _meta_and_identity(path_b)
 
-    def _drop_entry(meta: dict, other_slug: str) -> tuple[dict, bool]:
+    def _drop_entry(meta: dict, other_identity: set[str]) -> tuple[dict, bool]:
         raw = meta.get("merge_rejected_with")
         if not isinstance(raw, list):
             return meta, False
-        kept = [r for r in raw if slugify(str(r)) != other_slug]
+        kept = [r for r in raw if slugify(str(r)) not in other_identity]
         if len(kept) == len(raw):
             return meta, False
         new_meta = dict(meta)
@@ -558,8 +589,8 @@ def _cmd_revoke_merge_rejection(args: argparse.Namespace) -> int:
             new_meta.pop("merge_rejected_with", None)
         return new_meta, True
 
-    new_meta_a, changed_a = _drop_entry(meta_a, slug_b)
-    new_meta_b, changed_b = _drop_entry(meta_b, slug_a)
+    new_meta_a, changed_a = _drop_entry(meta_a, identity_b)
+    new_meta_b, changed_b = _drop_entry(meta_b, identity_a)
 
     if not changed_a and not changed_b:
         return _fail(

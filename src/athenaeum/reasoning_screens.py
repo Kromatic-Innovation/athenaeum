@@ -61,6 +61,7 @@ from athenaeum import spend
 from athenaeum.calibration import sample_tier_decision
 from athenaeum.models import TokenUsage
 from athenaeum.pending_merges import _make_id, resolve_merge, write_pending_merge
+from athenaeum.prior_rulings import all_pairs_rejection_lapsed
 from athenaeum.reasoning_tiers import (
     ReasoningProposal,
     record_reasoning_tier_t2_decision,
@@ -360,6 +361,13 @@ def t2_screen_merge_proposal(
         note=f"T2 auto-finalized (safe class): {decision.reason}",
         wiki_root=wiki_root,
         auto_applied=True,
+        # Issue athenaeum#2546 review finding: see auto_apply.py's
+        # identical-shaped kwarg (write immediately followed by approve).
+        # member_paths may carry MORE than two sources (a T1 cluster), so
+        # this uses the all-pairs form rather than assuming exactly two.
+        rejection_cooldown_lapsed=all_pairs_rejection_lapsed(
+            wiki_root, [Path(p).name for p in member_paths], config=config
+        ),
     )
     if not result.get("ok"):
         # Defense in depth: a resolve_merge failure (e.g. target_exists —

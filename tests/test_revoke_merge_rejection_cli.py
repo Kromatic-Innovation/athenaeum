@@ -214,3 +214,93 @@ def test_revoked_pair_becomes_proposable_again(tmp_path: Path) -> None:
     )
     assert rc_fold == 0, out_fold
     assert json.loads(out_fold)["ok"] is True
+
+
+def test_revoke_resolves_via_alias_after_rename(tmp_path: Path) -> None:
+    """Seer finding on athenaeum#2546 (PR athenaeum#2638): the READ path
+    (declared_relationship) resolves a merge_rejected_with entry against a
+    page's full identity (current name OR any alias), so a link written
+    before a rename keeps being honoured forever. Revocation must widen
+    the same way, or the operator's only documented way to clear that link
+    can never find it: naming the page's CURRENT (post-rename) identity
+    would miss the OLD-named entry sitting on the other side.
+
+    Exercises the REAL athenaeum#2488 rename primitive (build_rename_preview
+    + apply_rename), not a hand-edited fixture: reject A/B, rename B (its
+    frontmatter `name:` changes to "New B Name", its OLD name "B" lands in
+    `aliases:` — the file itself is untouched, since this does not pass
+    `reslug=True`), then revoke the pair. A's own `merge_rejected_with`
+    entry still literally reads "B" (A was never touched by B's rename),
+    so the fix under test is whether stripping it resolves against B's
+    FULL identity (current name OR alias) rather than B's current name
+    only — which is the only way the stale "B" entry can ever be found.
+    """
+    from athenaeum.entity_rename import apply_rename, build_rename_preview
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    page_a = wiki / "a.md"
+    page_b = wiki / "b.md"
+    _write(page_a, name="A", rejected_with=["B"])
+    page_b.write_text(
+        "---\nuid: b-uid\ntype: concept\nname: B\nmerge_rejected_with: [\"A\"]\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    # Rename B -> "New B Name" through the real primitive. B's own
+    # merge_rejected_with (naming "A") is untouched by a rename; its
+    # `aliases:` gains the pre-rename name "B".
+    preview = build_rename_preview(wiki, "b-uid", "New B Name")
+    assert preview.error is None
+    apply_rename(wiki, preview, by="tristan", reason="test rename")
+    b_meta_after_rename, _ = parse_frontmatter(page_b.read_text(encoding="utf-8"))
+    assert b_meta_after_rename["name"] == "New B Name"
+    assert "B" in b_meta_after_rename.get("aliases", [])
+
+    # The pair is still refused (the link survives the rename) -- sanity
+    # check before revoking.
+    assert find_merge_rejection_conflict([page_a, page_b]) is not None
+
+    # Revoke naming B's OLD name (not its current one) — must still find
+    # and strip the stale entry on A.
+    rc, out = _run(
+        [
+            "decisions",
+            "revoke-merge-rejection",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--a",
+            "a",
+            "--b",
+            "b",
+            "--apply",
+        ]
+    )
+    assert rc == 0, out
+    plan = json.loads(out)
+    assert plan["a_changed"] is True
+    assert plan["b_changed"] is True
+
+    a_meta, _ = parse_frontmatter(page_a.read_text(encoding="utf-8"))
+    b_meta, _ = parse_frontmatter(page_b.read_text(encoding="utf-8"))
+    assert "merge_rejected_with" not in a_meta
+    assert "merge_rejected_with" not in b_meta
+
+    # The pair is proposable again.
+    assert find_merge_rejection_conflict([page_a, page_b]) is None
+    rc_fold, out_fold = _run(
+        [
+            "decisions",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "a",
+            "--source",
+            "b",
+        ]
+    )
+    assert rc_fold == 0, out_fold
+    assert json.loads(out_fold)["ok"] is True

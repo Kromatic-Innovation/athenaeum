@@ -80,6 +80,23 @@ class DeclaredRelationshipFacts:
     aliases: list[str] = field(default_factory=list)
 
 
+def identity_slugs(facts: DeclaredRelationshipFacts) -> set[str]:
+    """This side's full identity: its own slug, plus every ``aliases:`` slug.
+
+    Issue athenaeum#2546: factored out of :func:`declared_relationship`'s
+    merge-rejection branch (the exact set it unions there) so every OTHER
+    caller that needs to resolve "does this slug name this page, under any
+    name it has ever carried" — e.g. ``revoke-merge-rejection`` stripping a
+    ``merge_rejected_with:`` entry naming a page's PRE-rename name — reuses
+    this one primitive instead of re-deriving the union by hand. Empty
+    names/aliases are dropped, so a page with neither contributes nothing.
+    """
+    own = slugify((facts.name or "").strip())
+    slugs = {own} if own else set()
+    slugs.update(slugify(a) for a in facts.aliases if (a or "").strip())
+    return slugs
+
+
 def declared_relationship(
     a: DeclaredRelationshipFacts, b: DeclaredRelationshipFacts
 ) -> str | None:
@@ -152,8 +169,8 @@ def declared_relationship(
     # strict superset of the pre-athenaeum#2546 ``{a_slug}``/``{b_slug}``-only
     # check and changes nothing for any page that has never been renamed
     # or folded.
-    a_identity = {a_slug} | {slugify(x) for x in a.aliases}
-    b_identity = {b_slug} | {slugify(x) for x in b.aliases}
+    a_identity = identity_slugs(a)
+    b_identity = identity_slugs(b)
     if b_identity & a_rejected or a_identity & b_rejected:
         return DECLARED_MERGE_REJECTION
     return None

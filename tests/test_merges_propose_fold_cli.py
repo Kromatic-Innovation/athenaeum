@@ -515,6 +515,64 @@ def test_refuses_rejected_pair(tmp_path: Path) -> None:
     assert not (wiki / "_pending_merges.md").exists()
 
 
+def test_rejected_pair_proposable_again_once_cooldown_lapses(tmp_path: Path) -> None:
+    """athenaeum#2546 review finding (Seer, PR athenaeum#2638): propose-fold's
+    own refusal must be cooldown-aware, same as the nightly wiki-dedupe
+    clusterer -- otherwise an operator-driven propose-fold is STRICTER than
+    the automatic path for the identical pair once
+    `librarian.rejected_merge_cooldown_days` lapses. Uses a REAL
+    `athenaeum.yaml` (the CLI always resolves config from the knowledge
+    root on disk), not an in-memory config dict.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from athenaeum.pending_merges import (
+        ingest_resolved_merges,
+        parse_pending_merges,
+        resolve_merge,
+        write_pending_merge,
+    )
+
+    wiki, canonical, src_b, _src_c = _seed(tmp_path)
+    merges_path = wiki / "_pending_merges.md"
+    write_pending_merge(
+        merges_path,
+        merge_target_name="Maria Springer",
+        sources=[str(canonical), str(src_b)],
+        rationale="fixture rejection",
+        draft_merged_body="draft",
+        confidence=0.9,
+    )
+    pm_id = parse_pending_merges(merges_path)[0].id
+    old = (datetime.now(timezone.utc) - timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = resolve_merge(merges_path, pm_id, "reject", wiki_root=wiki, answered_at=old)
+    assert result["ok"] is True
+    ingest_resolved_merges(merges_path)
+
+    (tmp_path / "athenaeum.yaml").write_text(
+        "librarian:\n  rejected_merge_cooldown_days: 30\n", encoding="utf-8"
+    )
+
+    # Refused while cooldown is in force is covered by test_refuses_rejected_pair
+    # (cooldown_days=0 / unset there). Here the SAME shape of rejection, now
+    # 31 days old against a 30-day cooldown, must be let through.
+    rc, out = _run(
+        [
+            "decisions",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "maria-springer",
+            "--source",
+            "springer-maria",
+        ]
+    )
+    assert rc == 0, out
+    assert json.loads(out)["ok"] is True
+
+
 def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> None:
     """A page whose filename matches neither the bare-slug form nor its OWN
     `<uid>-<slug>.md` form (no `uid:` frontmatter here at all, so the

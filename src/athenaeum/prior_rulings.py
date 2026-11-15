@@ -64,7 +64,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -262,14 +262,103 @@ def match_rulings(
     )
 
 
+def rejection_still_binds(
+    wiki_root: Path,
+    name_a: str,
+    name_b: str,
+    *,
+    config: dict[str, Any] | None = None,
+    cooldown_days: int | None = None,
+) -> bool:
+    """Does a rejection between the two page FILENAMES *name_a*/*name_b*
+    still bind a proposer, once the ``rejected_merge_cooldown_days`` decay
+    (issue athenaeum#2077) is taken into account?
+
+    Issue athenaeum#2546: the one place that question is answered, reused
+    by every site that must decide whether to refuse uniting a
+    ``merge_rejected_with``-linked pair — the wiki-dedupe clusterer, the
+    ``propose-fold`` guard, and the fold-apply preflight in
+    :mod:`athenaeum.pending_merges`. Before this, only the clusterer asked
+    it (inline); the other two refused unconditionally, which silently
+    broke the pre-existing cooldown feature for anything downstream of a
+    proposal — most sharply the reversible-verdict fold-on-duplicate
+    auto-apply (:mod:`athenaeum.auto_apply`), which calls
+    ``write_pending_merge`` immediately followed by ``resolve_merge
+    ("approve")`` for a pair the comparator has ALREADY freshly re-decided
+    is a duplicate (via the pair loop's own cooldown-aware
+    ``_lift_lapsed_rejection``) — an unconditional apply-time refusal would
+    have silently stuck that fold forever, re-litigating with STALE
+    (on-disk, never-lifted) frontmatter a question the system had already
+    answered upstream.
+
+    Returns ``True`` (binding) when there is NO matching queued-and-resolved
+    rejection record in ``_pending_merges.md``/its archive at all — a
+    hand-authored ``merge_rejected_with:``, or athenaeum#2546's own durable
+    link recorded with no corresponding block, has nothing to decay — OR a
+    matching record that is still in force. Returns ``False`` only when a
+    matching record exists AND has lapsed (:class:`RulingMatch` reports
+    ``expired`` with no ``in_force``) — the one case the cooldown feature
+    exists to produce.
+
+    *cooldown_days* overrides *config* when given (the cheap path for a
+    caller/test that already has the resolved int); otherwise resolved
+    from *config* via
+    :func:`athenaeum.config.resolve_rejected_merge_cooldown_days` (``None``
+    resolves to the documented default, ``0`` — never expires).
+    """
+    from athenaeum.config import resolve_rejected_merge_cooldown_days
+
+    resolved_cooldown_days = (
+        cooldown_days
+        if cooldown_days is not None
+        else resolve_rejected_merge_cooldown_days(config)
+    )
+    rulings = load_prior_rulings(wiki_root)
+    match = match_rulings(rulings, [name_a, name_b], cooldown_days=resolved_cooldown_days)
+    return not (match.expired is not None and match.in_force is None)
+
+
+def all_pairs_rejection_lapsed(
+    wiki_root: Path,
+    names: Iterable[str],
+    *,
+    config: dict[str, Any] | None = None,
+    cooldown_days: int | None = None,
+) -> bool:
+    """Has EVERY pairwise rejection among *names* (page FILENAMES) lapsed?
+
+    Issue athenaeum#2546 review finding: the multi-source generalization of
+    :func:`rejection_still_binds`, for a caller (e.g. the T2 auto-finalize
+    screen, a human-approved multi-source fold) whose fold set may have
+    more than two members — a single pairwise check cannot tell whether
+    some OTHER pair among 3+ sources is still binding. Fails closed: a
+    source set of fewer than 2 names, or any pair still binding, returns
+    ``False`` (strict — matches :func:`rejection_still_binds`'s single-pair
+    default posture of "refuse unless proven lapsed").
+    """
+    from itertools import combinations
+
+    names = list(names)
+    if len(names) < 2:
+        return False
+    for name_a, name_b in combinations(names, 2):
+        if rejection_still_binds(
+            wiki_root, name_a, name_b, config=config, cooldown_days=cooldown_days
+        ):
+            return False
+    return True
+
+
 __all__ = [
     "ARCHIVED_DECISION",
     "ARCHIVE_FILENAME",
     "PENDING_FILENAME",
     "PriorRuling",
     "RulingMatch",
+    "all_pairs_rejection_lapsed",
     "load_prior_rulings",
     "match_rulings",
+    "rejection_still_binds",
     "ruling_in_force",
     "source_key",
 ]

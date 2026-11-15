@@ -2027,6 +2027,7 @@ def _apply_fold_into_existing(
     embedding_model: str | None,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
     human_approved: bool = True,
+    rejection_cooldown_lapsed: bool = False,
 ) -> dict:
     """Execute the ``fold-into-existing`` write path (issue athenaeum#425; issue
     athenaeum#716 lane 716-B turned step 5 from a delete into a tombstone and
@@ -2267,18 +2268,48 @@ def _apply_fold_into_existing(
     _conflict = merge_rejection_conflict(_rejection_facts_list)
     if _conflict is not None:
         i, j = _conflict
-        return {
-            "ok": False,
-            "error_code": "fold_rejected_pair",
-            "message": (
-                f"{_rejection_members[i]} and {_rejection_members[j]} are linked "
-                "by merge_rejected_with (an operator previously rejected merging "
-                "them); refusing to fold them onto the same canonical page, "
-                "directly or through this fold chain. Revoke the link first "
-                "(athenaeum decisions revoke-merge-rejection) if the ruling no "
-                "longer applies."
-            ),
-        }
+        # Issue athenaeum#2546 review finding: this refusal must be
+        # cooldown-aware, same as the wiki-dedupe clusterer
+        # (athenaeum.prior_rulings.rejection_still_binds, issue
+        # athenaeum#2077/#2107) -- otherwise it silently breaks the
+        # reversible-verdict fold-on-duplicate auto-apply
+        # (athenaeum.auto_apply): that path calls write_pending_merge
+        # immediately followed by resolve_merge ("approve") for a pair the
+        # comparator ALREADY freshly re-decided is a duplicate once the
+        # cooldown lapsed (the pair loop lifts the stale stamp in-memory
+        # before comparing) -- an unconditional refusal HERE would
+        # re-litigate that already-settled question against the STALE
+        # on-disk frontmatter and stick the fold forever.
+        #
+        # ``rejection_cooldown_lapsed`` is a plain BOOL, computed by the
+        # CALLER via :func:`athenaeum.prior_rulings.rejection_still_binds`
+        # -- this module cannot import :mod:`athenaeum.prior_rulings`
+        # itself (that module already imports `parse_pending_merges`/
+        # `source_content_digest` FROM here; importing it back would be a
+        # 2-node cycle `tests/test_import_graph_acyclic.py` forbids). Every
+        # current caller that passes `True` (athenaeum.auto_apply,
+        # athenaeum.reasoning_screens, athenaeum.name_collisions,
+        # athenaeum.decision_answers, the fold-question ratify path in
+        # athenaeum._cmd_pending) has exactly two sources, so the pair it
+        # already checked via `rejection_still_binds` IS the pair this
+        # preflight would find -- this does not generalize to a 3+-source
+        # fold with ONE lapsed pair among several, which stays refused
+        # (fails closed) until a caller needs that shape. Defaults to
+        # ``False`` (strict), so a caller that does not thread it through
+        # keeps the exact pre-fix refusal.
+        if not rejection_cooldown_lapsed:
+            return {
+                "ok": False,
+                "error_code": "fold_rejected_pair",
+                "message": (
+                    f"{_rejection_members[i]} and {_rejection_members[j]} are linked "
+                    "by merge_rejected_with (an operator previously rejected merging "
+                    "them); refusing to fold them onto the same canonical page, "
+                    "directly or through this fold chain. Revoke the link first "
+                    "(athenaeum decisions revoke-merge-rejection) if the ruling no "
+                    "longer applies."
+                ),
+            }
 
     # Step -1c (issue athenaeum#716): coordinate widening + the narrowing-
     # invariant refusal. Parse the draft's OWN frontmatter (it may carry
@@ -2987,12 +3018,31 @@ def resolve_merge(
     auto_applied: bool = False,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
     answered_at: str | None = None,
+    rejection_cooldown_lapsed: bool = False,
 ) -> dict:
     """Mark a pending-merge block as resolved.
 
     ``answered_at`` (issue athenaeum#1990): the decision-time metric's
     resolution timestamp, forwarded to :func:`_rewrite_block_resolved`.
     Defaults to the current instant when not supplied.
+
+    ``rejection_cooldown_lapsed`` (issue athenaeum#2546 review finding, on a
+    ``"fold-into-existing"`` approve only): forwarded to
+    :func:`_apply_fold_into_existing`'s ``merge_rejected_with`` preflight —
+    a plain bool, not a config knob this function resolves itself, because
+    this module cannot import :mod:`athenaeum.prior_rulings` (see that
+    function's docstring for the import-cycle reason). Defaults to
+    ``False`` (strict), so every pre-existing caller that does not pass it
+    keeps the exact pre-athenaeum#2546 refusal. A caller with exactly two
+    sources and a resolved config in scope (``athenaeum.auto_apply``,
+    ``athenaeum.reasoning_screens``, ``athenaeum.name_collisions``,
+    ``athenaeum.decision_answers``, the fold-question ratify path in
+    ``athenaeum._cmd_pending``) computes it via
+    :func:`athenaeum.prior_rulings.rejection_still_binds` over its own two
+    paths and passes ``not rejection_still_binds(...)`` through, so a
+    lapsed rejection does not block a fold the comparator has ALREADY
+    freshly re-decided should happen — see the issue athenaeum#2546 review
+    finding for the auto-apply regression this closes.
 
     Args:
         merges_path: Path to ``_pending_merges.md``.
@@ -3293,6 +3343,7 @@ def resolve_merge(
                 search_backend=search_backend,
                 embedding_model=embedding_model,
                 registry=registry,
+                rejection_cooldown_lapsed=rejection_cooldown_lapsed,
                 # Issue athenaeum#2076: the athenaeum#2069 widen path (universal
                 # marker / fold_widen_impossible decision) now applies to
                 # any proposal a HUMAN has approved, regardless of origin

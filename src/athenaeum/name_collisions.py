@@ -47,7 +47,7 @@ from athenaeum.pending_merges import (
     resolve_merge,
     write_pending_merge,
 )
-from athenaeum.prior_rulings import load_prior_rulings, match_rulings
+from athenaeum.prior_rulings import all_pairs_rejection_lapsed, load_prior_rulings, match_rulings
 from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
 
 if TYPE_CHECKING:
@@ -790,6 +790,14 @@ def resolve_name_collisions(
                         note="athenaeum#1170 nightly name-collision auto-merge",
                         wiki_root=wiki_root,
                         auto_applied=True,
+                        # Issue athenaeum#2546 review finding: `sources` may
+                        # carry more than two pages (a name collision among
+                        # 3+ pages), so this checks every pair.
+                        rejection_cooldown_lapsed=all_pairs_rejection_lapsed(
+                            wiki_root,
+                            [Path(s).name for s in sources],
+                            cooldown_days=cooldown_days,
+                        ),
                     )
                     if result.get("ok"):
                         merged += 1
@@ -856,6 +864,11 @@ def resolve_name_collisions(
                     ),
                     wiki_root=wiki_root,
                     auto_applied=True,
+                    rejection_cooldown_lapsed=all_pairs_rejection_lapsed(
+                        wiki_root,
+                        [Path(s).name for s in sources],
+                        cooldown_days=cooldown_days,
+                    ),
                 )
                 if result.get("ok"):
                     merged += 1
