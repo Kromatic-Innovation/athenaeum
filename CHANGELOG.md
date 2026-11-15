@@ -5,6 +5,13 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+From the next release on, each release opens with a short `**Summary.**`
+paragraph, followed by sections headed with the Keep a Changelog names, in
+this order and only the ones that apply: `### Removed`, `### Changed`,
+`### Added`, `### Fixed`, `### Security`. Each heading appears once per
+release, so release-notes tooling can parse them. Older release sections are
+kept as they were written.
+
 ## [Unreleased]
 
 ### Added
