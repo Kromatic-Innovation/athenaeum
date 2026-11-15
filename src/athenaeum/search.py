@@ -793,14 +793,14 @@ def _scan_indexed_records(
     prior_map = prior or {}
 
     roots: dict[str, Path] = {"wiki": wiki_root}
-    extra_surfaces: list[tuple[str, str]] = []  # (surface_name, indexed-name prefix)
+    extra_surfaces: list[tuple[str, str, bool]] = []  # (surface, name prefix, is_intake)
     for i, item in enumerate(extra_roots or ()):
         spec = as_indexed_surface(item)
         if not spec.root.is_dir():
             continue
         surface = f"extra{i}"
         roots[surface] = spec.root
-        extra_surfaces.append((surface, spec.prefix))
+        extra_surfaces.append((surface, spec.prefix, bool(getattr(spec, "intake", False))))
     store = open_store(None, wiki_root, extra_roots=roots)
 
     def _local_path_for(key: StoreKey) -> Path:
@@ -897,7 +897,18 @@ def _scan_indexed_records(
             yield record
 
     # -- extra roots: recursive, .md only, name-prefixed --------------------
-    for surface, root_name in extra_surfaces:
+    # Issue athenaeum#2648: a raw-intake note whose declared type/tags resolve to
+    # a relevance-policy ``never`` (and that lacks the explicit-remember marker)
+    # never enters the index, so recall and the hook cannot surface it before
+    # compile drops it. The policy is read only when there is an intake root to
+    # filter; a missing file is a no-op and an unreadable/invalid one fails OPEN
+    # (indexed as before) so a bad policy file cannot take recall down.
+    relevance_policy = (
+        _load_intake_relevance_policy(wiki_root)
+        if any(is_intake for _s, _n, is_intake in extra_surfaces)
+        else None
+    )
+    for surface, root_name, is_intake in extra_surfaces:
         name_prefix = root_name + "/"
 
         def _extra_keep(rel: str, _root_name: str = root_name) -> bool:
@@ -920,8 +931,41 @@ def _scan_indexed_records(
             record = _decode(
                 indexed_name, extra_current[rel].key, extra_current[rel], extra_contents
             )
-            if record is not None:
-                yield record
+            if record is None:
+                continue
+            if is_intake and relevance_policy is not None and record[3]:
+                # ``record[3]`` is empty only for a version-matched placeholder
+                # row, which was already admitted by an earlier build.
+                from athenaeum.relevance_policy import gate_raw_content
+
+                gate = gate_raw_content(relevance_policy, record[3])
+                if gate.drops:
+                    # Any covered item keeps the WHOLE raw out: a hit renders
+                    # the raw file itself, so indexing only its uncovered
+                    # items would still surface the covered ones. Compile
+                    # drops the covered items and the rest is recallable
+                    # from the compiled page.
+                    continue
+            yield record
+
+
+def _load_intake_relevance_policy(wiki_root: Path) -> Any:
+    """The relevance policy for the index scan, or ``None`` (no-op / fail open)."""
+    import logging
+
+    from athenaeum.relevance_policy import load_relevance_policy
+
+    log = logging.getLogger(__name__)
+    try:
+        policy = load_relevance_policy(wiki_root)
+    except (ValueError, OSError):
+        log.warning(
+            "relevance-policy.md unreadable or invalid; raw notes are indexed "
+            "without the never filter",
+            exc_info=True,
+        )
+        return None
+    return policy if policy.rules else None
 
 
 def _compute_delta(
