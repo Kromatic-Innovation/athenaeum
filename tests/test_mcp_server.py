@@ -2259,6 +2259,7 @@ class TestAllMcpToolWrappers:
         "read_entity": lambda fn: fn("no-such-uid", "person"),
         "entity_schema": lambda fn: fn(),
         "relevance_policy": lambda fn: fn(),
+        "set_capture_rule": lambda fn: fn("always", tag="personal/travel"),
         "enumerate_entities": lambda fn: fn("no-such-type"),
     }
     _EXPECTED_TYPE = {
@@ -2279,6 +2280,7 @@ class TestAllMcpToolWrappers:
         "read_entity": str,
         "entity_schema": dict,
         "relevance_policy": dict,
+        "set_capture_rule": dict,
         "enumerate_entities": dict,
     }
 
@@ -2327,8 +2329,9 @@ class TestAllMcpToolWrappers:
         # athenaeum#888 removes one: the person-shaped `read_person` tool, once
         # every known consumer had migrated to `read_entity`. Bumping this
         # number is exactly the tripwire this test exists for. Issue
-        # athenaeum#2643 adds `relevance_policy` (read-only policy read-back).
-        assert len(registered) == 16
+        # athenaeum#2643 adds `relevance_policy` (read-only policy read-back);
+        # athenaeum#2649 adds `set_capture_rule` (policy write / proposal).
+        assert len(registered) == 17
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
@@ -2458,6 +2461,7 @@ class TestToolAnnotations:
         "recall": True,
         "entity_schema": True,
         "relevance_policy": True,
+        "set_capture_rule": False,
         "enumerate_entities": True,
         "read_entity": True,
         "list_pending_questions": True,

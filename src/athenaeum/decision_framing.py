@@ -758,6 +758,29 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "misfit count alone can decide."
         ),
     },
+    "relevance-policy-edit": {
+        # Issue athenaeum#2649: approving appends one rule to the relevance
+        # policy file; deleting that line (or filing the opposite rule)
+        # undoes it, and the rule only gates FUTURE capture, so nothing
+        # already in the corpus is changed.
+        "reversibility": REVERSIBILITY_REVERSIBLE,
+        # What the deployment remembers is the operator's call.
+        "routing": ROUTING_AUTHORITY,
+        "schema": _approve_reject_schema(
+            description="approve = add the requested always/never capture "
+            "rule to the relevance policy; reject = leave the policy unchanged.",
+        ),
+        "default_action": "reject (leave the relevance policy unchanged)",
+        "default_consequences": (
+            "Capture behaviour stays as the policy file already says; the "
+            "remote client's request is dropped."
+        ),
+        "rationale": (
+            "A remote client asked to change what this deployment "
+            "remembers. Remote clients may only propose a capture-rule "
+            "change; whether it becomes policy is the operator's call."
+        ),
+    },
     "page-recompile": {
         # Issue athenaeum#2547 AC7. `reversible-with-work`, not
         # `reversible`: approving this REWRITES a page and creates sub-pages,
@@ -1235,6 +1258,10 @@ _JOB: dict[str, str] = {
         "Decide whether to widen a page type's schema so a repeatedly "
         "refused second value can be kept."
     ),
+    "relevance-policy-edit": (
+        "Decide whether to add an always/never capture rule to what this "
+        "deployment remembers."
+    ),
     "page-recompile": (
         "Decide whether an oversized page is cut into a parent page plus sub-pages."
     ),
@@ -1327,6 +1354,16 @@ _OPTION_COPY: dict[tuple[str, str], _Opt] = {
         "Discard the proposal",
         ["The registry is unchanged."],
         ["The shape keeps recurring."],
+    ),
+    ("relevance-policy-edit", "approve"): (
+        "Add the capture rule",
+        ["The deployment starts following the requested rule for new facts."],
+        ["Changes the relevance policy file; existing pages are not touched."],
+    ),
+    ("relevance-policy-edit", "reject"): (
+        "Leave the policy unchanged",
+        ["Capture behaviour is exactly as it was."],
+        ["The remote client's request is dropped."],
     ),
     ("auto-apply-threshold", "approve"): (
         "Lower the auto-apply floor",
@@ -1715,6 +1752,9 @@ ANSWERABLE_AS: dict[str, str] = {
     # nobody can answer would just be a second, slower way of leaving an
     # oversized page alone.
     "page-recompile": "page-recompile",
+    # Issue athenaeum#2649: self-mapped; answerable from day one -- the
+    # applier lands in the slice that files the item.
+    "relevance-policy-edit": "relevance-policy-edit",
 }
 
 
