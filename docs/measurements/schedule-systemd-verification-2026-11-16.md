@@ -8,12 +8,19 @@ init system, so the systemd user timer that athenaeum#2304 generates never
 ran. This report runs it in a container where systemd is PID 1, with a real
 `systemd --user` manager, and lets the timer fire a real tick.
 
+**Two runs.** The first run, on athenaeum 0.24.0, found that `remove` left
+systemd's persistent-timer stamp behind. That was filed and fixed as
+athenaeum#2707 (PR athenaeum#2716). The whole procedure was then repeated from
+scratch on athenaeum 0.25.0, which includes the fix. The results below are
+from that **re-run**. The first run's findings are kept under
+[First run (0.24.0)](#first-run-0240).
+
 ## Summary
 
 | # | Acceptance criterion | Result |
 |---|---|---|
 | 1 | On a systemd host, `install` loads the systemd unit or timer, and a scheduled tick compiles a pending raw file with no login environment | **Pass.** The timer fired at its calendar minute. The service exited 0 and both raw files compiled into `wiki/`. The tick's environment was the user manager's defaults plus the unit's `Environment=` lines. |
-| 2 | `remove` leaves no unit, timer or generated file behind, checked by listing the systemd user unit locations before and after | **Not met: one file remains.** The service, the timer, the `timers.target.wants` symlink, the run log and the run-log directory are all gone. systemd's persistent-timer stamp `~/.local/share/systemd/timers/stamp-athenaeum-run.timer` remains. Filed as athenaeum#2707. Empty directories also remain (see AC2). |
+| 2 | `remove` leaves no unit, timer or generated file behind, checked by listing the systemd user unit locations before and after | **Pass.** The service, the timer, the `timers.target.wants` symlink, the run log, the run-log directory and systemd's persistent-timer stamp are all gone. No file remains. Empty directories remain (see AC2). On 0.24.0 the stamp was left behind; that was fixed by athenaeum#2707. |
 | 3 | `doctor` reports scheduled after install and unscheduled after remove | **Pass** |
 | 4 | Dated report with host type, versions and repeatable steps, no host-specific names or paths | This document |
 
@@ -39,8 +46,10 @@ three are fixed on the systemd path (see [Blocker re-checks](#blocker-re-checks)
 | User | An unprivileged user created in the image. `athenaeum` and `claude` were both absent from its `PATH` |
 | Clock | Container time is UTC. Every time below is UTC |
 
-- athenaeum 0.24.0, built from `origin/develop` at commit
-  `0b6cffd85a43f1a0c95fdeb25f8d0f313eac32b1`. It was exported with
+- Re-run: athenaeum 0.25.0, built from `origin/develop` at commit
+  `c53e19fa27d7914958892b9c693797c8be2f4936`, which contains the
+  athenaeum#2707 fix (`e243f11f`). First run: athenaeum 0.24.0 at
+  `0b6cffd85a43f1a0c95fdeb25f8d0f313eac32b1`. Each build was exported with
   `git archive`, copied into the container and installed with `pip install`
   into a venv at `~/venv`.
 - `detect_platform()` found `systemctl` on `PATH` and chose `systemd` by
@@ -154,7 +163,7 @@ Use a throwaway knowledge root and a throwaway cache directory.
 
 3. Copy a `git archive` of the commit into the container. Then
    `python3 -m venv ~/venv && ~/venv/bin/pip install <src>` and check that
-   `~/venv/bin/athenaeum --version` prints `athenaeum 0.24.0`. Install the
+   `~/venv/bin/athenaeum --version` prints the expected version (`athenaeum 0.25.0` on the re-run). Install the
    stub and its table under `/opt/fake-claude/`.
 4. Run `~/venv/bin/athenaeum init --path ~/verify-kb`, then append
    `llm:` / `  provider: claude-cli` to `~/verify-kb/athenaeum.yaml`. The unit
@@ -249,7 +258,7 @@ StandardOutput=append:/home/<user>/.local/state/athenaeum/schedule-run.log
 StandardError=append:/home/<user>/.local/state/athenaeum/schedule-run.log
 ```
 
-The timer had `OnCalendar=*-*-* 01:28:00`, `Persistent=true` and
+The timer had `OnCalendar=*-*-* 10:25:00`, `Persistent=true` and
 `WantedBy=timers.target`.
 
 Both unit files were mode **0600**. The 2026-11-14 report left this open.
@@ -259,18 +268,21 @@ Loader state after install:
 - `is-enabled` returned `enabled`, and `is-active` returned `active`.
 - `list-unit-files` listed `athenaeum-run.timer enabled` and
   `athenaeum-run.service static`.
-- `list-timers` showed NEXT as `Mon 2026-11-16 01:28:00 UTC`, with LAST as `-`.
+- `list-timers` showed NEXT as `Mon 2026-11-16 10:25:00 UTC`, with LAST as `-`.
 - `install` also created the symlink
-  `~/.config/systemd/user/timers.target.wants/athenaeum-run.timer`.
+  `~/.config/systemd/user/timers.target.wants/athenaeum-run.timer`. Enabling
+  the timer made the user manager create the stamp
+  `~/.local/share/systemd/timers/stamp-athenaeum-run.timer`; the tick then
+  updated its mtime.
 
 The tick fired from the timer, and nothing started it by hand:
 
-- Timer: `LastTriggerUSec=Mon 2026-11-16 01:28:02 UTC`, `Result=success`.
-  NEXT moved to `Tue 2026-11-17 01:28:00 UTC`.
+- Timer: `LastTriggerUSec=Mon 2026-11-16 10:25:02 UTC`, `Result=success`.
+  NEXT moved to `Tue 2026-11-17 10:25:00 UTC`.
 - Service: `Result=success`, `ExecMainCode=1` (exited), `ExecMainStatus=0`.
-  It started at 01:28:02 and exited at 01:28:03.
+  It started at 10:25:02 and exited at 10:25:03.
 - Journal: `Starting athenaeum-run.service ...`, then `Finished
-  athenaeum-run.service ...`, then `Consumed 1.133s CPU time`.
+  athenaeum-run.service ...`, then `Consumed 1.203s CPU time`.
 - Run log (`~/.local/state/athenaeum/schedule-run.log`, 25 lines):
   - `Discovered 2 auto-memory file(s) across 1 scope(s)`
   - `merge: wrote .../wiki/auto-bakery.md`
@@ -283,7 +295,7 @@ The tick fired from the timer, and nothing started it by hand:
   commit (`auto-memory raw intake provenance snapshot`, then
   `move-then-retire (2 moved, 0 held)`).
 - Stub log: 4 calls, 2 per file (`claim_kind`, then `decay_bucket`), all at
-  01:28:03.
+  10:25:03.
 
 **No login environment.** The user manager's environment
 (`systemctl --user show-environment`) was:
@@ -313,7 +325,7 @@ four groups:
 Nothing came from a shell profile or a login session. Neither the stub's
 directory nor the venv was on `PATH`.
 
-### AC2: `remove`, not met (one file remains)
+### AC2: `remove`, pass
 
 `remove` exited 0 and printed:
 
@@ -343,28 +355,21 @@ baseline against the post-remove listing:
 > ~/.local/share
 > ~/.local/share/systemd
 > ~/.local/share/systemd/timers
-> ~/.local/share/systemd/timers/stamp-athenaeum-run.timer
 > ~/.local/state
 ```
 
-- **One generated file remains:**
-  `~/.local/share/systemd/timers/stamp-athenaeum-run.timer`. It is not in a
-  unit path. It is the stamp systemd keeps because the generated timer has
-  `Persistent=true`, and its mtime is the tick's 01:28. `remove` disables the
-  timer and deletes the unit files, but nothing deletes this stamp, so the
-  criterion's "no generated file behind" is not met. Filed as
-  **athenaeum#2707**.
-- **Checked as a fix:** `systemctl --user stop athenaeum-run.timer` followed
-  by `systemctl --user clean --what=state athenaeum-run.timer` exits 0 and
-  deletes the stamp. This was run on a second, untimed install made only to
-  test it. It was then removed.
+- **Timer stamp deleted (athenaeum#2707):** just before `remove`,
+  `~/.local/share/systemd/timers/` held `stamp-athenaeum-run.timer` (mtime
+  10:25, the tick). After `remove` that directory is empty. Every line in the
+  diff above is a directory; no file remains.
 - **Empty directories remain:** `~/.config/systemd/user` (and its parents)
   and `~/.local/share/systemd/timers`, both created by `install` and the
   user manager, and `~/.local/state`. These are empty directories, not
   files. `remove` deliberately never deletes the shared `~/.local/state`
   (athenaeum#2596), and it did delete its own `~/.local/state/athenaeum`. They
   are listed here so the issue owner can rule on them, the same way the
-  2026-11-14 report listed the empty crontab.
+  2026-11-14 report listed the empty crontab. They were not part of
+  athenaeum#2707.
 
 ### AC3: `doctor`, pass
 
@@ -385,12 +390,11 @@ baseline against the post-remove listing:
 
 ## Findings
 
-Filed:
+Filed and fixed:
 
-- **athenaeum#2707**: `remove` leaves systemd's persistent-timer stamp
-  `~/.local/share/systemd/timers/stamp-athenaeum-run.timer`. This is why AC2
-  is not met. Suggested fix: `systemctl --user clean --what=state` before the
-  unit files are deleted.
+- **athenaeum#2707**: on 0.24.0, `remove` left systemd's persistent-timer
+  stamp `~/.local/share/systemd/timers/stamp-athenaeum-run.timer`. It was
+  fixed in PR athenaeum#2716 and verified by the re-run (AC2).
 
 Not filed (judgment calls, for the issue owner):
 
@@ -408,10 +412,21 @@ Not filed (judgment calls, for the issue owner):
 - The run log still does not name the key source it used. Here the stub
   running at all is the evidence (see AC1).
 
+## First run (0.24.0)
+
+The first run used the same procedure on athenaeum 0.24.0 (`0b6cffd8`). AC1
+and AC3 passed with the same evidence: the tick fired at 01:28:02, exited 0,
+moved both raw files and saw the same environment-variable names. AC2 was not
+met. After `remove`, `~/.local/share/systemd/timers/stamp-athenaeum-run.timer`
+remained, because nothing deleted it. Running
+`systemctl --user stop athenaeum-run.timer` and then
+`systemctl --user clean --what=state athenaeum-run.timer` on a separate test
+install exited 0 and deleted the stamp. That became the athenaeum#2707 fix.
+
 ## What was left on the host
 
-- The container was destroyed with `docker rm -f`, taking the knowledge root,
-  the cache, the stub, the logs and the leftover stamp file with it.
+- Each run's container was destroyed with `docker rm -f`, taking the
+  knowledge root, the cache, the stub and the logs with it.
 - The image `athenaeum-systemd-verify` was removed. The base image
   `python:3.13-slim-bookworm` remains in the local Docker cache, as it did
   after the 2026-11-14 run.
