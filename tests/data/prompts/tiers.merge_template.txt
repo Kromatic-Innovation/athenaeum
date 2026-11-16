@@ -7,7 +7,7 @@
 
 ## New observation (source: {source_ref})
 {observations}
-
+{type_guidance_section}
 ## Instructions
 {scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:

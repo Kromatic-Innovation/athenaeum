@@ -35,6 +35,9 @@ of `--apply` maintenance commands — acquires the same **run lock** before touc
 - `wiki/_schema/observation-filter.md` / `_entity-template.md` — the operator-tunable
   fragments Tier-2's classify/create prompts read at call time (see
   [intake](intake.md)'s observation-filter section).
+- `wiki/_schema/_type-guidance-<type>.md` / `_entity-template-<type>.md` — optional
+  per-type guidance and template override for Tier-3 create and merge prompts (see
+  [data formats](../reference/data-formats.md)).
 - `.athenaeum.lock` under the knowledge root — the run-lock file the CLI reads to report a
   contended holder's PID, acquire time, and heartbeat age.
 
@@ -53,6 +56,7 @@ of `--apply` maintenance commands — acquires the same **run lock** before touc
 - `.athenaeum.lock`, refreshed by a background heartbeat thread roughly every 30 seconds
   while the lock is held, independent of whatever phase the run loop is doing.
 - The `librarian-run-summary` log line, one per run, carrying `schema_fragments=`,
+  `type_guidance=` (only when a per-type file exists),
   `prompt_manifest=`, `zero_yield=`, and a per-phase breakdown.
 
 ## What it refuses

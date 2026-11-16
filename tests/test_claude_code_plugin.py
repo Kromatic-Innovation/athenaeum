@@ -7,10 +7,11 @@ One test per acceptance criterion in the issue:
   resolves to a script that actually exists, either inside the plugin tree
   or inside ``examples/claude-code/`` (the hooks it reuses, per the issue's
   own "no second copy that can drift" instruction).
-- AC2: the manifest's pinned athenaeum version must equal
-  ``pyproject.toml``'s ``[project].version`` -- a drift test that is
-  SUPPOSED to go red at a release until the manifest is bumped alongside it
-  (see the plugin README's "Version-bump rule").
+- AC2: the manifest's pinned athenaeum version must equal the latest
+  RELEASED version (the first dated ``## [X.Y.Z] - <date>`` heading in
+  ``CHANGELOG.md``), not ``pyproject.toml``'s per-merge PATCH bump, and must
+  stay within ``pyproject.toml``'s MAJOR.MINOR without exceeding it
+  (athenaeum#2719; see the plugin README's "Version-bump rule").
 - AC3: the launcher, run with ``uv`` genuinely absent from ``PATH`` (a
   from-scratch minimal ``PATH`` directory under ``tmp_path``, never the
   real ``PATH`` -- the real test box always has uv installed), exits 0 and
@@ -47,6 +48,7 @@ _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _HOOKS_JSON = _PLUGIN_DIR / "hooks" / "hooks.json"
 _LAUNCHER = _PLUGIN_DIR / "hooks" / "launcher.sh"
 _PYPROJECT = _REPO / "pyproject.toml"
+_CHANGELOG = _REPO / "CHANGELOG.md"
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +172,17 @@ def test_hooks_json_reuses_the_existing_recall_hooks_not_a_second_copy() -> None
 
 
 # ---------------------------------------------------------------------------
-# AC2: the manifest's pinned version must track pyproject.toml.
+# AC2: the manifest's pinned version must track the latest RELEASE.
+#
+# pyproject.toml's PATCH digit moves on every merge to develop, but only a
+# release tag publishes to PyPI, so the pin tracks the latest released
+# version recorded in CHANGELOG.md (athenaeum#2719). A looser guard against
+# pyproject.toml (same MAJOR.MINOR, never ahead of it) still catches a pin
+# that drifts far, e.g. a MINOR bump made without a CHANGELOG cut.
 # ---------------------------------------------------------------------------
+
+_BUMP_RULE_HINT = "see examples/claude-code-plugin/README.md, 'Version-bump rule'"
+_RELEASE_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\] - \S+", re.MULTILINE)
 
 
 def _pyproject_version() -> str:
@@ -181,6 +192,47 @@ def _pyproject_version() -> str:
     return match.group(1)
 
 
+def _latest_released_version(changelog_text: str) -> str | None:
+    """The version of the first dated ``## [X.Y.Z] - <date>`` heading.
+
+    ``## [Unreleased]`` never matches (it is neither a version nor dated),
+    so it is skipped without special-casing. Returns ``None`` when the
+    changelog records no release at all."""
+    match = _RELEASE_HEADING.search(changelog_text)
+    return match.group(1) if match else None
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    assert match, f"{version!r} is not a plain MAJOR.MINOR.PATCH version"
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def _pin_violation(pinned: str, released: str, pyproject: str) -> str | None:
+    """Why ``pinned`` is wrong, or ``None`` when it is acceptable."""
+    if pinned != released:
+        return (
+            f"plugin.json pins athenaeum=={pinned} but the latest released version in "
+            f"CHANGELOG.md is {released} -- the pin tracks the latest release, so bump "
+            f"the manifest's 'version' at the release cut ({_BUMP_RULE_HINT})"
+        )
+    pin_v, py_v = _version_tuple(pinned), _version_tuple(pyproject)
+    if pin_v[:2] != py_v[:2]:
+        return (
+            f"plugin.json pins athenaeum=={pinned} but pyproject.toml's [project].version "
+            f"is {pyproject} -- MAJOR.MINOR differ, so the pin has drifted from the "
+            f"version line being developed ({_BUMP_RULE_HINT})"
+        )
+    if pin_v > py_v:
+        return (
+            f"plugin.json pins athenaeum=={pinned}, which is ahead of pyproject.toml's "
+            f"[project].version {pyproject} -- the pin must name an already-released "
+            f"version ({_BUMP_RULE_HINT})"
+        )
+    return None
+
+
 def test_manifest_pins_exactly_one_athenaeum_version() -> None:
     manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
     assert isinstance(manifest.get("version"), str) and manifest["version"], (
@@ -188,15 +240,67 @@ def test_manifest_pins_exactly_one_athenaeum_version() -> None:
     )
 
 
-def test_manifest_version_pin_matches_pyproject() -> None:
+def test_manifest_version_pin_matches_latest_release() -> None:
     manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
-    pinned = manifest["version"]
-    released = _pyproject_version()
-    assert pinned == released, (
-        f"plugin.json pins athenaeum=={pinned} but pyproject.toml's [project].version "
-        f"is {released} -- bump the manifest's 'version' at this release "
-        "(see examples/claude-code-plugin/README.md, 'Version-bump rule')"
-    )
+    released = _latest_released_version(_CHANGELOG.read_text(encoding="utf-8"))
+    assert released, "no dated '## [X.Y.Z] - <date>' heading in CHANGELOG.md -- scan is broken"
+    violation = _pin_violation(manifest["version"], released, _pyproject_version())
+    assert violation is None, violation
+
+
+_CHANGELOG_SAMPLE = """# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- Something (athenaeum#1).
+
+## [0.25.0] - 2026-11-16
+
+## [0.24.0] - 2026-11-15
+"""
+
+
+def test_latest_released_version_skips_unreleased_and_takes_first_dated_heading() -> None:
+    assert _latest_released_version(_CHANGELOG_SAMPLE) == "0.25.0"
+
+
+def test_latest_released_version_ignores_undated_version_headings() -> None:
+    text = "## [Unreleased]\n\n## [0.26.0]\n\n## [0.25.0] - 2026-11-16\n"
+    assert _latest_released_version(text) == "0.25.0"
+
+
+def test_latest_released_version_is_none_without_any_release() -> None:
+    assert _latest_released_version("# Changelog\n\n## [Unreleased]\n") is None
+
+
+def test_pin_passes_when_pyproject_is_a_patch_ahead_of_the_release() -> None:
+    assert _pin_violation("0.25.0", "0.25.0", "0.25.1") is None
+    assert _pin_violation("0.25.0", "0.25.0", "0.25.0") is None
+
+
+def test_pin_fails_when_it_differs_from_the_latest_release() -> None:
+    for pinned in ("0.24.0", "0.25.1"):
+        violation = _pin_violation(pinned, "0.25.0", "0.25.3")
+        assert violation is not None
+        assert "latest released version" in violation
+        assert "Version-bump rule" in violation
+
+
+def test_pin_fails_when_major_minor_differs_from_pyproject() -> None:
+    for pyproject in ("0.26.0", "1.25.0"):
+        violation = _pin_violation("0.25.0", "0.25.0", pyproject)
+        assert violation is not None
+        assert "MAJOR.MINOR" in violation
+        assert "Version-bump rule" in violation
+
+
+def test_pin_fails_when_ahead_of_pyproject() -> None:
+    violation = _pin_violation("0.25.2", "0.25.2", "0.25.1")
+    assert violation is not None
+    assert "ahead of" in violation
+    assert "Version-bump rule" in violation
 
 
 def test_launcher_derives_the_same_pin_from_the_manifest() -> None:
