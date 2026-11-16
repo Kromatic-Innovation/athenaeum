@@ -14,41 +14,127 @@ kept as they were written.
 
 ## [Unreleased]
 
-### Added
+## [0.25.0] - 2026-11-16
 
-- **`athenaeum serve --transport http` without auth now refuses a rebound `Host` or a foreign `Origin` (athenaeum#2605).** An unauthenticated server can only bind loopback, and it now turns on FastMCP's strict Host/Origin guard (DNS-rebinding protection): a request whose `Host` is not `localhost`, `127.0.0.1` or `::1` is answered `421`, and one whose `Origin` is a foreign site `403`, before it reaches any tool. With auth configured the guard stays off (tunnel and proxy ingress carry the public hostname; every request already needs a verified token). The startup log gains a `[transport] Host/Origin guard: on|off` line.
-- **Remote mode finds the issuer's signing keys by configuration or discovery, and throttles unknown-`kid` refetches (athenaeum#2601).** The key set location was hard-coded to `<issuer>/.well-known/jwks.json`. New optional `serve.auth.jwks_uri` (`ATHENAEUM_SERVE_AUTH_JWKS_URI`) is used verbatim; when unset, `athenaeum serve` fetches the issuer's RFC 8414 / OpenID Connect discovery metadata at startup and uses its `jwks_uri`, refusing to start if the metadata names a different issuer, and falls back to the old derived path when discovery is unavailable. The `[auth]` startup line reports the chosen URL and whether it was configured, discovered or derived. A token with an unknown `kid` no longer refetches the key set every time: at most one fetch per `serve.auth.jwks_refetch_interval` seconds (default 60, `ATHENAEUM_SERVE_AUTH_JWKS_REFETCH_INTERVAL`), with other unknown-`kid` tokens in that window refused without a fetch. `docs/guides/remote.md` no longer lists providers by key path.
-- **`serve.auth.allowed_clients`: pin which apps may use a remote server, and make any of them read-only (athenaeum#2602).** An optional yaml list matched against a verified token's `azp` or `client_id`. Unset, nothing changes. Set, a token naming an unlisted client, no client, or two different clients gets a 401, and the refusal is logged with the client id, never the token. An entry `{id: ..., read_only: true}` removes the write scope from that client's token, so its write tools refuse and are left out of its `tools/list`; the cap only removes scopes and never adds one. An empty list is a startup error.
-- **`always` relevance rules now reach the classify prompt, and `athenaeum relevance-policy report` lists existing pages a `never` rule covers (athenaeum#2650).** When the policy has an `always` rule, Tier-2 classify gets a "Relevance hints" block (new `prompts/relevance_always.md`) beside the observation filter; it is a hint only and exempts nothing from the ephemeral filter, decay or pruning, and with no `always` rule the prompt is byte-identical. The new read-only report matches each top-level wiki page's `type` / `tags` / `uid` against the policy and lists the pages a `never` rule still decides (`--json` supported); a `never` rule stays forward-only. The relevance-policy reference now states the `always` limits and that an older install may carry a stale `observation-filter.md` copied once by `init`.
-- **A `never` relevance rule now also covers facts that declare no category: classify returns a category and confidence, an unsure one escalates to the reasoning tier, and an unresolved one is dropped (athenaeum#2647).** When the policy has a tag-keyed `never` rule, Tier-2 classify is asked (new `prompts/relevance_category.md` block, omitted otherwise so a no-policy prompt is byte-identical) for a `category` and `confidence` per entity. A confident `never` match is dropped; an unsure one goes to the reasoning tier (the existing `reasoning_t2` model knob, no new knob), and if that is unsure too the fact is dropped, not held, with drop-ledger reason `relevance-unsure`. A fact landing on an existing page is judged by that page's own type, tags and uid before Tier-3, and a raw flagged `explicit_remember` is never dropped by either gate. The synchronous and batch transports share the decision (`athenaeum.relevance_classify`). A failed reasoning-tier call leaves the raw on disk to retry. With no policy file, behaviour is unchanged.
-- **A `never` relevance rule now also covers hint-derived facts, owner facts included (athenaeum#2654).** The `candidate_uid` person-hint answer carries the same `category` and `confidence` pair as an ordinary classify item (a new `prompts/relevance_category_hint.md` block, rendered only when the category block is, so a no-policy prompt is byte-identical). A hint-derived fact a `never` rule covers is dropped and recorded in the drop ledger with the matching rule; an unsure one escalates to the reasoning tier and fails closed as `relevance-unsure`; a raw flagged `explicit_remember` is never dropped. A rule keyed on the owner's uid in the subject column scopes to owner facts only. Both transports share the decision.
-- **The owner page is proven end to end and documented (athenaeum#2655).** A new test initialises a fresh knowledge root, runs `athenaeum owner set`, compiles an always-capture preference through stub LLM tiers and shows `recall` returning it from the owner page in a fresh call; with no owner set the same fact appears in the drop ledger. The install guide gains a section on `owner set`, what lands on the owner page, its `personal` access level and that contact data is never written to it. No behaviour change.
-- **Remote mode refuses access tokens with no `exp`, enforces `nbf`/`iat`, and can cap token lifetime (athenaeum#2599).** The resource server previously relied on FastMCP, which checks `exp` only when present and never `nbf`, so a token with no expiry, a future `nbf`, or a ten-year lifetime was accepted. The identity-allowlist verifier now refuses (401 `invalid_token`, logged with the `sub` and a reason, never the token) a token without `exp`, an expired one, one whose `nbf` or `iat` is later than now plus `serve.auth.clock_leeway` (default 60 seconds), and, when the new optional `serve.auth.max_token_lifetime` (seconds) is set, one whose `exp - iat` exceeds it (or `exp - now` when `iat` is absent). Both settings read from `ATHENAEUM_SERVE_AUTH_MAX_TOKEN_LIFETIME` / `ATHENAEUM_SERVE_AUTH_CLOCK_LEEWAY` or `athenaeum.yaml`. With no cap set, behaviour changes only for tokens that were already invalid by those checks.
-- **The configured owner is now offered to the classifier on every file, so first-person facts reach the owner's page (athenaeum#2653).** With `owner.uid` set and the owner's page present, the tier-2 classifier is shown the owner as a standing person-hint candidate, in a reserved slot outside `PERSON_HINT_MAX_CANDIDATES` and exempt from `PERSON_OBSERVATION_MAX_FANOUT`, de-duplicated when the owner's name also matches literally. "I prefer...", "my team..." and "the user..." statements in a raw note become observations on the owner page, and preferences are filed under a `## Preferences` section. The owner has its own classify and verify prompts (`prompts/person_hint_owner_classify.md`, `prompts/person_hint_owner_verify.md`); the existing invented-uid check and the tier-3 `person_hint_verify` step apply to it unchanged. One helper, `athenaeum.person_hints`, builds the candidates for both the synchronous and the Batch API transports, so batch runs now get person hints too (a literal person match is a hint there as well, instead of an unconditional tier-1 merge). With no owner configured, behaviour is unchanged.
-- **Compile now writes a new page to the surface its type maps to (athenaeum#2618).** Entity creation, batch apply and page recompile (sub-pages and standalone pages) ask `athenaeum.storage.page_write_root_for_class` where the page's type lives, so a type mapped to an indexed surface outside `wiki/` via `storage.mapping` lands there instead of in `wiki/`, is committed by that surface's snapshot (its own repo, when it has one) and is returned by recall. A type mapped to a surface that is not indexed (`embedded: false`, such as the built-in `excluded` surface) is refused with `SurfaceNotIndexedError` before anything is written (a page recompile reports it as a `surface-not-indexed` plan issue); only the existing excluded-surface writers may write there. A structured upsert still rewrites the page where the locator found it. Operational files beside pages (pending queues, manifests, `_schema`) stay in the primary wiki. A deployment with no `storage:` mapping writes the same bytes to the same paths as before.
-- **A raw note that a `never` relevance rule covers is no longer added to the recall index (athenaeum#2648).** When `remember` refreshes the index (and on any other index build that scans a `recall.extra_intake_roots` raw root, such as `athenaeum reindex`), a raw whose declared `type` / `tags` / `uid` resolve to `never` and that lacks the explicit-remember marker is skipped, so `recall` and the per-prompt hook cannot return it before compile drops it. A raw with any covered item stays out whole, because a hit renders the raw file itself. Raws with no `never` match, raws flagged `explicit_remember`, deployments with no policy file, and compiled storage surfaces are indexed exactly as before; an unreadable policy file fails open (indexed, with a warning). Forward only: an already-indexed raw leaves the index when its content next changes.
-- **New guide, `docs/guides/shared-store-reader.md`: set up a second install that reads a shared git store read-only (athenaeum#2622).** It walks a reader through installing athenaeum, cloning the shared repository, declaring the `storage.adapters` mount (`read_only: true`, `surface_root`, `visibility`, `corpus_policy`, plus the `storage.mapping` entry), scheduling `athenaeum reindex` (the command that pulls the mount; `athenaeum schedule install` does not), what a failed pull keeps, and connecting an assistant. It states that write protection comes from repository permission with athenaeum refusing writes as defence in depth, that each install keeps its own index, and that the reader's own `remember` calls stay in the reader's own install, including what happens to a note whose type is mapped to the mount. Documentation only; no behaviour change.
-- **`remember` takes an `explicit_request` flag that overrides `never` relevance rules, with an audit record (athenaeum#2646).** An assistant sets it only when the user explicitly asked to remember the content (the tool description says so). The raw is stamped `explicit_remember: true` in its frontmatter and the relevance gate (`gate_raw_content`, which stays pure) no longer drops it: it keeps the item and reports the rule it overrode. When a flagged fact matches a `never` rule, `remember` appends an `override` record (rule, client transport `stdio` or `http`, time) to `wiki/_relevance_policy_audit.jsonl` before writing the raw; if that append fails the write is refused, so no override goes unaudited. Behaviour is identical on both transports; unflagged facts and deployments with no policy file are unchanged.
-- **Per-type stores never merge across stores, and a shared page may not link to a private one (athenaeum#2619).** Each `storage.adapters` entry takes an integer `visibility` (higher = more widely shared; the built-in wiki surface and any surface that omits it are rank 0, the most private; a negative or non-integer value is a `StorageConfigError`). Merge discovery skips a pair whose pages sit on two different surfaces, and applying one (`resolve_merge`, `merge_duplicate_persons`) is refused with a named error (`cross_store_merge` / `CrossStoreMergeError`) before anything is written. A librarian write that would add a link (a `related:` row, `parent:`, a `[[wikilink]]` or a markdown link) from a page to a page on a more private surface is refused, parked under `wiki/_store_link_rejected/`, ledgered, and logged with both page uids and both surface names; a link from a private page to a shared page resolves as before. `athenaeum store-link-lint [--json]` lists every existing link that breaks the rule and exits 2 when there is one; it rewrites nothing. A deployment with no `storage:` config, or none that declares `visibility`, behaves exactly as before.
-- **`athenaeum import-memory` records a relevance-policy refusal as handled (athenaeum#2645).** A staged auto-memory file whose every declared item a `never` rule covers is left on disk by the compile pass, so it used to look "not compiled" and was restaged, and re-refused, on every run, consuming the per-run file cap. After the compile, `import-memory` now consults the same gate (`filter_relevance_never`) on each staged file still present; a refused file is written to `import_memory_state.json` with a `refused` field holding the rule that decided it, is not restaged on the next run (until its source file changes), and does not consume the cap. The staged copy is never deleted. No policy file: behaviour unchanged.
-- **`athenaeum storage move-type <type> --to <surface>` moves a type's existing pages into a store in its own git repository (athenaeum#2620).** Dry run by default: it lists every wiki page of the type that would move and every link that, once the pages sit on the target store's visibility rank, would point at a more private page (the store-link rule). `--apply` refuses while any such link or any destination collision remains; otherwise it commits both the wiki's repository and the target store's repository as restore points, moves the files byte-for-byte (page uids unchanged, links from private pages still resolve, recall / `read_entity` / structured upsert find the pages in their new home), commits each repository, and reindexes. It prints a record id and the exact undo; `--undo <record>` resets both repositories to their pre-move commits and refuses if either has moved on since (`--force` overrides). The target must be an indexed surface that is its own git repository. The operator then adds the type to `storage.mapping` (documented in the configuration reference). A deployment with no `storage:` config behaves exactly as before.
-- **One page locator finds a page by uid or name on every indexed surface, not only `wiki/` (athenaeum#2617).** `EntityIndex` (and the persisted entity-index cache), `read_entity`, recall's link-name rendering and the librarian's structured-upsert target lookup now read `wiki/` plus the configured storage surfaces the search index builder includes (`embedded: true`, with its exclusion guards), through the new `PageLocator`. A surface that is not indexed is never visible. The same uid on two surfaces raises `AmbiguousPageUidError` (surfaced by `read_entity` as a named error) instead of silently taking the first match. A deployment with no extra storage surface behaves exactly as before; maintenance and audit commands that walk `wiki/` are unchanged.
-- **`athenaeum owner set --name NAME [--alias ALIAS ...]` records the owner without hand-editing config (athenaeum#2652).** Non-interactive and idempotent: it creates the owner's person page (uid from `generate_uid`, `access: personal`, no email or phone written) and records `owner.uid` plus the name and aliases in `athenaeum.yaml` as a single-block edit that leaves every comment and other key untouched, so existing installs can opt in. A second run changes nothing; a new alias adds only that alias. A single-word alias prints a warning that the name matcher ignores single words. `athenaeum init --owner-name NAME` calls the same code path. With no owner configured, behaviour is unchanged.
-- **A `storage.adapters` surface can be declared `read_only: true` to mount a shared git repository that is pulled and indexed but never written (athenaeum#2621).** The first use is a second install whose only shared content is a clone of a shared recipe repository. A read-only surface is pulled (`git pull --ff-only`) before every index build (`athenaeum reindex` and the librarian's index refresh); a failed pull is logged and reported and the last good checkout stays searchable. Its pages are indexed and returned by recall as compiled pages (no longer labelled `[uncompiled]`, which is now reserved for `recall.extra_intake_roots` raw notes), and `read_entity` and type-filtered recall work on them. Every write path refuses a page on it with the named `ReadOnlySurfaceError`: compile, structured upsert, merge, fold, repair, retire and the migration commands, and the store's `put`/`append`/`delete`/`move`. The post-run push and the snapshot commit skip it. `read_only` defaults to `false` and a non-boolean value is rejected with `StorageConfigError`; a deployment with no `storage:` config behaves exactly as before.
-- **A new `set_capture_rule` MCP tool records "always/never remember X" as policy, not as a fact (athenaeum#2649).** The calling model passes a structured rule (`verdict` `always`/`never` plus a `type`, `tag` and/or `subject`; no language parsing, no LLM call), and the rule is appended to `wiki/_schema/relevance-policy.md` after validation through the same loader `athenaeum relevance-policy` and the `relevance_policy` tool read back (last match wins, so the new rule overrides what it overlaps; existing lines and comments are untouched; invalid rules write nothing). Over local stdio the file is edited directly and every edit appends a record (rules before and after, transport, time) to `wiki/_relevance_policy_audit.jsonl`. Under `--transport http` a remote client cannot edit: the tool files a proposal (`wiki/_relevance_policy_edit_proposals.jsonl`, modelled on the policy-pack-edit proposals) that appears in the decisions queue as a `relevance-policy-edit` item, owner-only; approving it applies the same audited edit and rejecting it leaves the policy unchanged. Restricted callers are refused. Forward-only: existing pages are not touched.
-- **Never-merge rulings now survive page splits (athenaeum#2651).** Every sub-page a page-recompile split creates inherits each `merge_rejected_with` entry its parent holds (carried with the same helper a fold uses), so the wiki-page clusterer and `propose-fold` still refuse to unite a sub-page with a page the parent was ruled distinct from. A queued plan that moves units onto, or attaches, a page linked to the source by `merge_rejected_with` now lists that ruling in the `page-recompile` decision item (outline field `never_merge_rulings`, plus a flag sentence in the item summary); it stays approvable -- flagged, not refused. Undoing a split removes the sub-pages together with their inherited links.
-- **`never` relevance rules are now enforced before any tier runs (athenaeum#2644).** With a `wiki/_schema/relevance-policy.md` in place, a fact whose declared `type` / `tags` / `uid` resolve to `never` is not compiled, on the synchronous librarian, the batch transport and the auto-memory phase alike (one shared decision, `relevance_policy.gate_raw_content`, so the transports cannot drift). The gate runs ahead of the Tier-0 passthrough and structured-upsert paths, which never reach an LLM. A dropped fact is recorded in the drop ledger (reason `relevance-policy: never ... (rule N, line L)`) and the raw note is deleted on processing as before; a raw mixing items (`.jsonl` records or concatenated `---` frontmatter documents) loses only the covered items; auto-memory files are skipped, never deleted. No policy file: behaviour unchanged. An invalid policy file stops the run before any raw is touched. Forward only; no prompt text, model setting or LLM call changed.
-- **A removed config key that is still set now warns in `athenaeum run` and `athenaeum doctor`, not only in the log (athenaeum#2686).** `athenaeum run` prints one `WARNING:` line to stderr per key, and `athenaeum doctor` gains a `removed_config_keys` row at the new `WARN` level (a warning never changes the exit code). Both read the same list `load_config` already warns from, so the three cannot disagree. A key counts as set whatever its value.
-- **`athenaeum --help` groups the subcommands (athenaeum#2686).** The flat list of about 70 names is now grouped under Setup and health, Everyday, Decisions, Maintenance and repair, Audit and verification, Hook and integration helpers, and Experimental and measurement. Every command is still reachable and every invocation parses as before; a test fails if a new subcommand is not assigned to a group.
+**Summary.** 0.25.0 is a MINOR release on 0.24.0. It enforces the relevance
+policy: `always` and `never` capture rules in `wiki/_schema/relevance-policy.md`,
+which 0.24.0 could only read, now decide what every intake path compiles. It
+adds an owner page, so first-person facts and preferences have a page to live
+on, and per-type stores, so one type's pages can live in their own git
+repository or be read from a shared one. It also hardens remote mode. An
+install with no policy file, no owner and no `storage:` config compiles exactly
+as before. Read "Upgrading from 0.24.0" if you run `athenaeum serve --transport http`.
 
-### Changed
+**Breaking changes** (remote mode only; stdio serving is unchanged)
 
-- **`serve --transport http --profile remote` refuses to start with no audience configured (athenaeum#2604).** An unset audience means owner, the whole corpus; a remote server now needs that to be a choice. The refusal happens before anything binds and names both options: pin a role (`--audience <role>`, `serve.audience`, `ATHENAEUM_AUDIENCE`), or set `owner` explicitly, which starts and prints `[audience] owner — every page is readable by authenticated remote callers`. A role audience prints `[audience] <roles>`. A blank value counts as unset. **Existing remote deployments that never set an audience must now set one**; see `docs/guides/upgrading.md`. stdio and non-remote profiles are unchanged, and `owner` stays an ordinary role id there.
+- `athenaeum serve --transport http --profile remote` refuses to start when no
+  audience is configured (athenaeum#2604). Pin a role with `--audience <role>`,
+  `serve.audience` or `ATHENAEUM_AUDIENCE`, or set `owner` deliberately.
+- Remote mode refuses an access token with no `exp`, a future `nbf` or `iat`
+  (beyond `serve.auth.clock_leeway`, default 60 seconds), or, when the new
+  `serve.auth.max_token_lifetime` is set, a lifetime over that cap
+  (athenaeum#2599). An issuer that mints tokens without `exp` no longer works.
+- An unauthenticated HTTP server answers a request whose `Host` is not
+  `localhost`, `127.0.0.1` or `::1` with `421`, and a foreign `Origin` with
+  `403` (athenaeum#2605). Reach it through one of those names.
 
-### Fixed
+**Behaviour changes** (an install that changes no configuration will notice these)
 
-- **An answered `classification_failed` question is applied even after its raw note was consumed (athenaeum#2705).** These questions are raised when a statement's subject is an email address that resolves to no known entity. `athenaeum ingest-answers` used to annotate the source raw note, which the librarian normally removes before anyone answers, so every such answer stayed `held — no source ref resolved` and no page was created or updated. The answer is now applied by writing the statement copy the question already carries, plus the answer, as a new raw note under `raw/question-answers/`; the next compile creates or updates the page the answer directs. An answer that starts with `dismiss`, `skip`, `ignore`, `reject`, `not_a_conflict` (or a similar word) writes nothing. Answers already held this way are applied on the next `ingest-answers` run. A question that has neither a stored copy nor its raw note is archived as `unrecoverable` and counted in the summary line, instead of being held forever.
-- **Protected resource metadata advertises the configured issuer byte for byte (athenaeum#2600).** `GET /.well-known/oauth-protected-resource` used to serve `authorization_servers` through a pydantic URL, so an issuer configured as `https://id.example.net` was advertised as `https://id.example.net/`. A strict client comparing the issuer as an exact string (RFC 8414, RFC 9207) would refuse it. The metadata response now carries the configured `serve.auth.issuer` string unchanged, with or without a trailing slash; the `resource` field, status and headers are unchanged, and token verification is untouched.
+- `athenaeum ingest-answers` now applies an answered `classification_failed`
+  question: it writes the answer as a new raw note under `raw/question-answers/`
+  for the next compile, and archives a question with nothing left to apply as
+  `unrecoverable` (athenaeum#2705). Answers held under 0.24.0 are applied on the
+  first run.
+- `athenaeum run` prints a `WARNING:` line for each removed config key still
+  set, and `athenaeum doctor` reports them at a new `WARN` level that does not
+  change its exit code (athenaeum#2686).
+- `athenaeum --help` groups its subcommands; every invocation parses as before
+  (athenaeum#2686).
+- Protected resource metadata advertises `serve.auth.issuer` byte for byte,
+  with no added trailing slash (athenaeum#2600).
+
+**New, opt-in** (each does nothing until configured)
+
+- Relevance policy enforcement (athenaeum#2644 to athenaeum#2650). A `never`
+  rule drops a covered fact before any model tier runs, on the synchronous,
+  batch and auto-memory paths alike, and records it in the drop ledger. Facts
+  with no declared category are classified, escalated to the reasoning tier when
+  the classifier is unsure, and dropped if still unsure. A covered raw note is
+  kept out of the recall index. `always` rules reach the classify prompt as a
+  hint. `remember(explicit_request=true)` overrides a `never` rule, with an
+  audit record. The new `set_capture_rule` MCP tool records a rule from
+  conversation (a proposal, not an edit, over HTTP), and
+  `athenaeum relevance-policy report` lists existing pages a `never` rule covers.
+- Owner page (athenaeum#2652 to athenaeum#2655). `athenaeum owner set --name NAME`
+  (or `athenaeum init --owner-name NAME`) creates the owner's person page and
+  records `owner.uid`. With an owner set, first-person facts and preferences
+  ("I prefer...", "my team...") are filed on that page, and batch runs get
+  person hints too.
+- Per-type stores (athenaeum#2617 to athenaeum#2622). Compile writes a page to
+  the surface its type maps to in `storage.mapping`; `read_entity`, recall and
+  structured upsert find a page on any indexed surface. `storage.adapters`
+  entries gain `visibility` (no merges across stores, no link from a shared page
+  to a more private one, checked by `athenaeum store-link-lint`) and `read_only`
+  (a shared git repository that is pulled and indexed but never written).
+  `athenaeum storage move-type <type> --to <surface>` moves a type's existing
+  pages, dry run by default, with `--undo`. Guide:
+  `docs/guides/shared-store-reader.md`.
+- Never-merge rulings survive page splits (athenaeum#2651).
+
+**Experimental surface** (not in `athenaeum.__all__`; flags, keys, formats and
+import paths may change in any minor release without a deprecation cycle)
+
+- Everything listed under "New, opt-in" above: the relevance policy file format,
+  `set_capture_rule`, `explicit_request`, `athenaeum relevance-policy`,
+  `athenaeum owner`, the `storage.adapters` keys `visibility` and `read_only`,
+  `athenaeum storage move-type` and `athenaeum store-link-lint`.
+- Remote serving stays experimental, including the new `serve.auth.jwks_uri`,
+  `serve.auth.jwks_refetch_interval`, `serve.auth.allowed_clients`,
+  `serve.auth.max_token_lifetime` and `serve.auth.clock_leeway` keys.
+- `athenaeum.__all__` is unchanged from 0.24.0.
+
+**Security-relevant changes** (all in experimental remote mode)
+
+- Token checks: `exp` required, `nbf` and `iat` enforced, optional lifetime cap
+  (athenaeum#2599). Refusals are logged with the `sub` and a reason, never the
+  token.
+- A remote server can no longer serve the whole corpus by omission
+  (athenaeum#2604).
+- DNS-rebinding protection for unauthenticated HTTP servers (athenaeum#2605).
+- `serve.auth.allowed_clients` pins which client apps may use a server and can
+  make any of them read-only (athenaeum#2602).
+- Signing keys are found from `serve.auth.jwks_uri` or issuer discovery, and an
+  unknown `kid` refetches the key set at most once per
+  `serve.auth.jwks_refetch_interval` seconds (athenaeum#2601).
+- A `remember` that overrides a `never` rule is refused unless its audit record
+  is written first (athenaeum#2646); a remote client cannot edit the relevance
+  policy directly (athenaeum#2649).
+
+**Upgrading from 0.24.0**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`. The Python floor (3.13+) is unchanged.
+2. If you run `athenaeum serve --transport http --profile remote` without an
+   audience, set `serve.audience` (a role, or `owner` deliberately) before
+   restarting. See `docs/guides/upgrading.md`.
+3. If your remote server's issuer mints access tokens without `exp`, change the
+   issuer first: those tokens are now refused.
+4. If you reach an unauthenticated HTTP server by a name other than
+   `localhost`, `127.0.0.1` or `::1`, switch to one of those.
+5. Optional: `athenaeum owner set --name "Your Name"` to give first-person facts
+   a page, and a `wiki/_schema/relevance-policy.md` to declare what is always
+   or never captured (format in `docs/reference/data-formats.md`).
+
+```bash
+athenaeum --version            # expect 0.25.0
+athenaeum doctor               # read-only health check; names a fix per FAIL or WARN
+athenaeum test-mcp             # smoke-test remember/recall, no API key needed
+athenaeum relevance-policy     # show the active capture rules, if any
+```
+
+The per-merge Added / Changed / Fixed entries are in
+[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.25.0-build-notes.md).
+They are reference material; this section is the release.
 
 ## [0.24.0] - 2026-11-15
 
