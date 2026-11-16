@@ -14,6 +14,15 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Fixed
+
+- `athenaeum schedule remove` on the systemd backend no longer leaves the
+  `Persistent=true` timer's stamp file
+  (`~/.local/share/systemd/timers/stamp-athenaeum-run.timer`) behind. It runs
+  `systemctl --user clean --what=state` and, when that is unavailable (systemd
+  older than 247) or fails, deletes the stamp directly, so a later `install`
+  no longer fires a stale "missed" run straight away (athenaeum#2707).
+
 ## [0.25.0] - 2026-11-16
 
 **Summary.** 0.25.0 is a MINOR release on 0.24.0. It enforces the relevance

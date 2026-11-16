@@ -330,6 +330,25 @@ def _systemd_timer_path(home: Path) -> Path:
     return _systemd_dir(home) / f"{SYSTEMD_UNIT_NAME}.timer"
 
 
+def _systemd_timer_stamp_path(home: Path, *, honour_xdg: bool) -> Path:
+    """Where the systemd user manager keeps the ``Persistent=true`` timer's
+    last-trigger stamp (athenaeum#2707): ``$XDG_DATA_HOME/systemd/timers/
+    stamp-<unit>.timer``, defaulting ``XDG_DATA_HOME`` to ``~/.local/share``.
+
+    ``XDG_DATA_HOME`` is honoured only when *honour_xdg* -- i.e. when the
+    caller did not pass an explicit ``home`` -- so a ``remove`` pointed at a
+    temporary or alternate home never reaches into the invoking user's own
+    data directory. An empty or relative value is ignored, as the XDG Base
+    Directory spec requires.
+    """
+    data_home = home / ".local" / "share"
+    if honour_xdg:
+        xdg = os.environ.get("XDG_DATA_HOME", "")
+        if xdg and Path(xdg).is_absolute():
+            data_home = Path(xdg)
+    return data_home / "systemd" / "timers" / f"stamp-{SYSTEMD_UNIT_NAME}.timer"
+
+
 def _state_log_path(home: Path) -> Path:
     """Shared log destination for the Linux generators.
 
@@ -713,6 +732,11 @@ def remove(
     before, the crontab is deleted (``crontab -r``); otherwise it is left with
     exactly the remaining entries (an empty one when the install predates the
     marker).
+
+    **Systemd timer stamp (athenaeum#2707):** the ``Persistent=true`` timer's
+    last-trigger stamp is cleared with ``systemctl --user clean --what=state``
+    and, if that is unavailable or fails, unlinked directly -- so a later
+    ``install`` does not inherit a stale "missed run" and fire at once.
     """
     loader_fn = loader or _default_loader
     resolved_home = (home or Path.home()).expanduser().resolve()
@@ -739,9 +763,21 @@ def remove(
         disable_result = loader_fn(
             ["systemctl", "--user", "disable", "--now", f"{SYSTEMD_UNIT_NAME}.timer"], None
         )
+        # athenaeum#2707: the timer is `Persistent=true`, so systemd keeps a
+        # last-trigger stamp that outlives the unit files. `clean` deletes it
+        # (it needs the unit still loaded and inactive -- hence after
+        # `disable --now`, before the unlink). Best-effort: systemd < 247 has
+        # no `clean` for timers, and a failure here must not fail `remove`,
+        # so its exit code is not folded into `rc`; the unlink below is the
+        # fallback either way.
+        loader_fn(
+            ["systemctl", "--user", "clean", "--what=state", f"{SYSTEMD_UNIT_NAME}.timer"],
+            None,
+        )
+        stamp_path = _systemd_timer_stamp_path(resolved_home, honour_xdg=home is None)
         removed = []
-        for path in (service_path, timer_path):
-            if path.is_file():
+        for path in (service_path, timer_path, stamp_path):
+            if path.is_file() or path.is_symlink():
                 path.unlink()
                 removed.append(path)
         reload_result = loader_fn(["systemctl", "--user", "daemon-reload"], None)
