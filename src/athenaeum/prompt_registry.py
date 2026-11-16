@@ -155,6 +155,17 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 12288, False),
     ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144, False),
     ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288, False),
+    # Issue athenaeum#2590: precedence clause rendered ahead of an operator's
+    # per-type guidance in the Tier-3 create/merge user messages, only when a
+    # `_type-guidance-<type>.md` exists. Largest budget of the templates it
+    # renders into (merge_full).
+    (
+        "tiers.type_guidance_prompt",
+        "TYPE_GUIDANCE_PROMPT",
+        "write",
+        12288,
+        False,
+    ),
     # Issue athenaeum#1866: prepended to a hint-derived merge's scoping_note
     # slot in MERGE_TEMPLATE — same `write`/merge_patch knob/budget as the
     # template it renders into.

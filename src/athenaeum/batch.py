@@ -2079,6 +2079,11 @@ def process_batch_run(
                                 # record_merge_echo for this request at all
                                 # before, unlike the sync transport.
                                 usage=usage,
+                                # Issue athenaeum#2590: same per-type guidance
+                                # keying as the sync transport — the TARGET
+                                # page's type, never action.entity_type.
+                                wiki_root=wiki_root,
+                                target_type=resolve_page_type(meta) or None,
                             ),
                         )
                     )
@@ -2362,6 +2367,7 @@ def process_batch_run(
                         config=config,
                         attribution_context=attribution_context,
                         target_type=merge_target_type,
+                        wiki_root=wiki_root,
                     )
                 if esc:
                     # Issue athenaeum#2519: same durable write-back stamp as

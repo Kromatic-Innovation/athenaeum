@@ -7,7 +7,7 @@
 
 ## New observation (source: {source_ref})
 {observations}
-
+{type_guidance_section}
 ## Instructions
 Begin your response with exactly `ADDS_NEW_CLAIM: true` or
 `ADDS_NEW_CLAIM: false` on its own line (see system instructions), then

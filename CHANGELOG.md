@@ -14,6 +14,20 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Added
+
+- Per-type librarian guidance. Two optional operator files in `wiki/_schema/`
+  steer the Tier-3 create and merge prompts for one page type:
+  `_entity-template-<type>.md` replaces `_entity-template.md` for creates of
+  that type, and `_type-guidance-<type>.md` adds guidance to the create prompt
+  and to the patch, full-echo and append merge prompts, on both the sync and
+  Batch API transports. A merge is keyed on the target page's own type. Only
+  types declared in `types.md` with a plain lowercase key are read; both files
+  are capped and defanged like the other schema fragments, and a fixed
+  precedence clause keeps guidance from overriding the librarian's rules or
+  authorising paraphrase. The run summary gains a `type_guidance=` token. With
+  no such file, every prompt is unchanged (athenaeum#2590).
+
 ### Fixed
 
 - `athenaeum schedule remove` on the systemd backend no longer leaves the

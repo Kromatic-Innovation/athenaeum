@@ -133,6 +133,7 @@ from athenaeum.models import (
     cache_usage_counts,
     generate_uid,
     is_tombstone,
+    load_schema_list,
     parse_frontmatter,
     render_frontmatter,
     resolve_page_type,
@@ -355,6 +356,156 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
         default_sha = hashlib.sha256(default_bytes).hexdigest()
         state[fname] = (live_sha, live_path.exists() and live_sha == default_sha)
     return state
+
+
+# ---------------------------------------------------------------------------
+# Per-type Tier-3 guidance and template overrides (issue athenaeum#2590)
+# ---------------------------------------------------------------------------
+
+#: Filename prefix of an operator-authored per-type guidance fragment,
+#: ``wiki/_schema/_type-guidance-<type>.md``. Flat and underscore-prefixed on
+#: purpose: the page walkers that use ``rglob`` with a filename-only ``_``
+#: check would sweep a ``types/`` subdirectory of non-underscore names.
+TYPE_GUIDANCE_PREFIX = "_type-guidance-"
+
+#: Filename prefix of an operator-authored per-type create template,
+#: ``wiki/_schema/_entity-template-<type>.md``. Replaces the global
+#: ``_entity-template.md`` for creates of that type.
+TYPE_TEMPLATE_PREFIX = "_entity-template-"
+
+#: A type is only ever used to build a path after it passes this shape check
+#: AND appears in the declared ``types.md`` list (issue athenaeum#2590).
+_TYPE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+class TypeGuidance(NamedTuple):
+    """The per-type fragments the Tier-3 builders inject (issue athenaeum#2590).
+
+    Both fields are ``""`` when the type has no file, is invalid, or is not
+    declared — the builders treat ``""`` as "render nothing", which is what
+    keeps a wiki without these files byte-identical to before.
+    """
+
+    guidance: str
+    template: str
+
+
+_NO_TYPE_GUIDANCE = TypeGuidance("", "")
+
+
+def _has_any_type_fragment(schema_dir: Path) -> bool:
+    """True when ``_schema/`` holds at least one per-type fragment file."""
+    try:
+        for child in schema_dir.iterdir():
+            name = child.name
+            if name.endswith(".md") and (
+                name.startswith(TYPE_GUIDANCE_PREFIX) or name.startswith(TYPE_TEMPLATE_PREFIX)
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def resolve_type_guidance(wiki_root: Path | None, entity_type: str | None) -> TypeGuidance:
+    """Return the operator's guidance text and template override for *entity_type*.
+
+    Issue athenaeum#2590. Reads ``wiki/_schema/_type-guidance-<type>.md`` and
+    ``wiki/_schema/_entity-template-<type>.md`` through
+    :func:`_load_schema_text`, so both are capped at
+    :data:`_SCHEMA_FRAGMENT_MAX_CHARS` and defanged exactly like the global
+    fragments.
+
+    The type comes from LLM output over untrusted text (create) or from page
+    frontmatter (merge), so no path is built from it until it matches
+    :data:`_TYPE_KEY_RE` and is listed in the declared ``types.md``. Any other
+    type (``../x``, ``Recipe``, an undeclared class) yields empty fragments and
+    a warning. When ``_schema/`` holds no per-type files at all, this returns
+    empty without reading ``types.md`` or logging anything, so a wiki that
+    never opted in pays nothing.
+    """
+    if wiki_root is None or not entity_type:
+        return _NO_TYPE_GUIDANCE
+    schema_dir = Path(wiki_root) / "_schema"
+    if not _has_any_type_fragment(schema_dir):
+        return _NO_TYPE_GUIDANCE
+    if not _TYPE_KEY_RE.match(entity_type):
+        log.warning(
+            "type-guidance: ignoring type %r: not a valid type key (issue athenaeum#2590)",
+            entity_type,
+        )
+        return _NO_TYPE_GUIDANCE
+    if entity_type not in load_schema_list(schema_dir, "types.md"):
+        log.warning(
+            "type-guidance: ignoring type %r: not declared in types.md (issue athenaeum#2590)",
+            entity_type,
+        )
+        return _NO_TYPE_GUIDANCE
+    return TypeGuidance(
+        guidance=_load_schema_text(wiki_root, f"{TYPE_GUIDANCE_PREFIX}{entity_type}.md"),
+        template=_load_schema_text(wiki_root, f"{TYPE_TEMPLATE_PREFIX}{entity_type}.md"),
+    )
+
+
+def type_guidance_state(wiki_root: Path) -> dict[str, str]:
+    """Report ``{type: sha256_hex}`` for each declared type that has a per-type file.
+
+    Issue athenaeum#2590: the input to the run summary's ``type_guidance=``
+    token. The hash covers the guidance file and the template override
+    together, so an edit to either changes it. Only types the builders would
+    actually use (valid key, declared in ``types.md``) are reported, in
+    sorted order. Empty when ``_schema/`` holds no per-type files.
+    """
+    schema_dir = Path(wiki_root) / "_schema"
+    if not _has_any_type_fragment(schema_dir):
+        return {}
+    state: dict[str, str] = {}
+    for entity_type in sorted(set(load_schema_list(schema_dir, "types.md"))):
+        if not _TYPE_KEY_RE.match(entity_type):
+            continue
+        parts: list[bytes] = []
+        found = False
+        for prefix in (TYPE_GUIDANCE_PREFIX, TYPE_TEMPLATE_PREFIX):
+            path = schema_dir / f"{prefix}{entity_type}.md"
+            try:
+                data = path.read_bytes()
+                found = True
+            except OSError:
+                data = b""
+            parts.append(prefix.encode() + b"\0" + data)
+        if found:
+            state[entity_type] = hashlib.sha256(b"\0\0".join(parts)).hexdigest()
+    return state
+
+
+def _load_type_guidance_prompt() -> str:
+    """Read the type-guidance precedence clause (issue athenaeum#2590).
+
+    Prompt text is content, not code: the clause lives in
+    ``src/athenaeum/prompts/type_guidance.md`` and is bound to
+    :data:`TYPE_GUIDANCE_PROMPT` at import time, the same convention as
+    :func:`_load_relevance_category_prompt`.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath("type_guidance.md")
+    return resource.read_text(encoding="utf-8")
+
+
+#: The precedence clause rendered ahead of an operator's per-type guidance,
+#: and only when a guidance file exists. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.type_guidance_prompt``.
+TYPE_GUIDANCE_PROMPT = _load_type_guidance_prompt()
+
+
+def render_type_guidance_section(entity_type: str | None, guidance: str) -> str:
+    """Render the Tier-3 ``{type_guidance_section}`` slot (issue athenaeum#2590).
+
+    ``""`` when there is no guidance, which leaves every Tier-3 prompt
+    byte-identical to before this issue. The one-line heading stays inline
+    (it only names the type); the clause text lives in the package prompt.
+    """
+    if not guidance or not entity_type:
+        return ""
+    return f"\n## Guidance for `{entity_type}` pages\n{TYPE_GUIDANCE_PROMPT}{guidance}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -3645,7 +3796,7 @@ Access: {access}
 
 ## Raw observation (source: {source_ref})
 {observations}
-{entity_template_section}
+{entity_template_section}{type_guidance_section}
 ## Instructions
 Write the body content (no frontmatter) for this entity's wiki page, led by
 the single `Description: ...` line described in the rules.
@@ -3916,7 +4067,7 @@ MERGE_TEMPLATE = """## Existing page content
 
 ## New observation (source: {source_ref})
 {observations}
-
+{type_guidance_section}
 ## Instructions
 {scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
@@ -3941,7 +4092,7 @@ MERGE_TEMPLATE_FULL = """## Existing page content
 
 ## New observation (source: {source_ref})
 {observations}
-
+{type_guidance_section}
 ## Instructions
 Begin your response with exactly `ADDS_NEW_CLAIM: true` or
 `ADDS_NEW_CLAIM: false` on its own line (see system instructions), then
@@ -4010,7 +4161,7 @@ MERGE_TEMPLATE_FULL_APPEND = """## Tail of the existing page ({tail_chars} of {t
 
 ## New observation (source: {source_ref})
 {observations}
-
+{type_guidance_section}
 ## Instructions
 Begin your response with exactly `ADDS_NEW_CLAIM: true` or
 `ADDS_NEW_CLAIM: false` on its own line (see system instructions), then
@@ -4034,10 +4185,17 @@ def tier3_create_params(
 
     Shared by the synchronous path (:func:`tier3_create`) and the Batch
     API assembly (issue athenaeum#236).
+
+    Issue athenaeum#2590: an operator's ``_entity-template-<type>.md``
+    replaces the global ``_entity-template.md`` for creates of that type,
+    and ``_type-guidance-<type>.md`` adds a guidance section. The type is
+    ``action.entity_type`` (a create's own classified type); see
+    :func:`resolve_type_guidance` for the validation it passes first.
     """
+    type_frag = resolve_type_guidance(wiki_root, action.entity_type)
     tmpl_section = ""
     if wiki_root:
-        tmpl_text = _load_schema_text(wiki_root, "_entity-template.md")
+        tmpl_text = type_frag.template or _load_schema_text(wiki_root, "_entity-template.md")
         if tmpl_text:
             tmpl_section = (
                 f"\n## Entity template (follow this structure)\n{tmpl_text}\n"
@@ -4053,6 +4211,9 @@ def tier3_create_params(
             action.observations, tag="user_document", max_chars=3000
         ),
         entity_template_section=tmpl_section,
+        type_guidance_section=render_type_guidance_section(
+            action.entity_type, type_frag.guidance
+        ),
     )
     model = _get_write_model(config)
     return {
@@ -5080,6 +5241,13 @@ def _person_hint_verify_note(
     return PERSON_HINT_VERIFY_NOTE
 
 
+def _merge_type_guidance_section(wiki_root: Path | None, target_type: str | None) -> str:
+    """The ``{type_guidance_section}`` slot for the three merge builders (athenaeum#2590)."""
+    return render_type_guidance_section(
+        target_type, resolve_type_guidance(wiki_root, target_type).guidance
+    )
+
+
 def tier3_merge_params(
     action: EntityAction,
     existing_body: str,
@@ -5087,8 +5255,16 @@ def tier3_merge_params(
     config: dict[str, Any] | None = None,
     *,
     usage: TokenUsage | None = None,
+    wiki_root: Path | None = None,
+    target_type: str | None = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for one patch-mode Tier-3 merge call.
+
+    *wiki_root* / *target_type* (issue athenaeum#2590, keyword-only, ``None``
+    default): select the operator's per-type guidance section. *target_type*
+    is the TARGET page's ``resolve_page_type(meta)``, never
+    ``action.entity_type`` (always ``""`` on a merge action). With either
+    ``None``, or no guidance file, the request is byte-identical to before.
 
     Issue athenaeum#469: the primary merge contract returns a small list of anchored
     edit operations (see :data:`MERGE_SYSTEM`) rather than the full page, so
@@ -5187,6 +5363,7 @@ def tier3_merge_params(
         observations=fence_untrusted(
             action.observations, tag="user_document", max_chars=3000
         ),
+        type_guidance_section=_merge_type_guidance_section(wiki_root, target_type),
     )
     model = _get_write_model(config)
     return {
@@ -5218,8 +5395,15 @@ def tier3_merge_full_params(
     existing_body: str,
     source_ref: str,
     config: dict[str, Any] | None = None,
+    *,
+    wiki_root: Path | None = None,
+    target_type: str | None = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for the full-echo fallback merge call.
+
+    *wiki_root* / *target_type*: same per-type guidance selection as
+    :func:`tier3_merge_params` (issue athenaeum#2590), so a fallback never
+    quietly writes without the guidance the patch attempt carried.
 
     Issue athenaeum#469: used only when a patch-mode response is unparseable,
     truncated, or fails to apply — the pre-patch contract that reproduces
@@ -5235,6 +5419,7 @@ def tier3_merge_full_params(
         observations=fence_untrusted(
             action.observations, tag="user_document", max_chars=3000
         ),
+        type_guidance_section=_merge_type_guidance_section(wiki_root, target_type),
     )
     model = _get_write_model(config)
     return {
@@ -5260,8 +5445,14 @@ def tier3_merge_append_params(
     existing_body: str,
     source_ref: str,
     config: dict[str, Any] | None = None,
+    *,
+    wiki_root: Path | None = None,
+    target_type: str | None = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for the append-mode full-echo call.
+
+    *wiki_root* / *target_type*: same per-type guidance selection as
+    :func:`tier3_merge_params` (issue athenaeum#2590).
 
     Issue athenaeum#2078 AC2: used instead of :func:`tier3_merge_full_params`
     once *existing_body* exceeds :data:`_MAX_EXISTING_BODY_CHARS` -- the
@@ -5281,6 +5472,7 @@ def tier3_merge_append_params(
         observations=fence_untrusted(
             action.observations, tag="user_document", max_chars=3000
         ),
+        type_guidance_section=_merge_type_guidance_section(wiki_root, target_type),
     )
     model = _get_write_model(config)
     return {
@@ -6364,6 +6556,7 @@ def tier3_merge(
             client,
             usage=usage,
             config=config,
+            wiki_root=wiki_root,
             attribution_context=attribution_context,
             target_type=target_type,
         )
@@ -6380,7 +6573,15 @@ def tier3_merge(
     # depends on section selection (athenaeum#1181), which only
     # tier3_merge_params computes, so it is also the only place that can
     # record it accurately for both transports.
-    params = tier3_merge_params(action, existing_body, source_ref, config=config, usage=usage)
+    params = tier3_merge_params(
+        action,
+        existing_body,
+        source_ref,
+        config=config,
+        usage=usage,
+        wiki_root=wiki_root,
+        target_type=target_type,
+    )
 
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
@@ -6445,6 +6646,7 @@ def tier3_merge(
         client,
         usage=usage,
         config=config,
+        wiki_root=wiki_root,
         attribution_context=attribution_context,
         target_type=target_type,
     )
@@ -6460,8 +6662,14 @@ def tier3_merge_full(
     *,
     attribution_context: AttributionContext | None = None,
     target_type: str | None = None,
+    wiki_root: Path | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Full-echo merge fallback (issue athenaeum#469).
+
+    *wiki_root* (issue athenaeum#2590, keyword-only, ``None`` default):
+    together with *target_type*, selects the operator's per-type guidance
+    for the full-echo and append-mode requests, so the fallback carries the
+    same guidance as the patch attempt it replaces.
 
     *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
     default): when given, the prose-compile scrub
@@ -6522,7 +6730,14 @@ def tier3_merge_full(
             len(existing_body),
             _MAX_EXISTING_BODY_CHARS,
         )
-        append_params = tier3_merge_append_params(action, existing_body, source_ref, config=config)
+        append_params = tier3_merge_append_params(
+            action,
+            existing_body,
+            source_ref,
+            config=config,
+            wiki_root=wiki_root,
+            target_type=target_type,
+        )
         append_response = _timed_llm_call(
             lambda: client.messages.create(**append_params),
             f"tier3_merge_append {source_ref}",
@@ -6562,7 +6777,14 @@ def tier3_merge_full(
         )
         return append_body, append_escalation
 
-    params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
+    params = tier3_merge_full_params(
+        action,
+        existing_body,
+        source_ref,
+        config=config,
+        wiki_root=wiki_root,
+        target_type=target_type,
+    )
 
     response = _timed_llm_call(
         lambda: client.messages.create(**params),

@@ -214,6 +214,69 @@ deciding rule is a `never` rule, grouped by rule. A page that a later `always`
 exception rescues is not listed. The command is read-only: it writes nothing and
 needs no run lock. What to do about a listed page is your call.
 
+## Per-type librarian guidance (`wiki/_schema/_type-guidance-<type>.md`)
+
+Two optional, operator-written files in `wiki/_schema/` tell the librarian how
+to write and merge pages of one type. Neither is created by `athenaeum init`;
+with neither present nothing changes and every prompt is byte-identical to a
+wiki without them.
+
+- **`_entity-template-<type>.md`** replaces `_entity-template.md` when the
+  librarian creates a page of `<type>`. It is not layered on top: the create
+  prompt carries one template. Without it, the global template is used.
+- **`_type-guidance-<type>.md`** is free-text guidance added to the create
+  prompt and to every merge prompt for pages of `<type>`, including the
+  full-echo and append fallbacks.
+
+A merge picks the guidance by the `type:` of the page being merged into, not by
+the type the new observation was classified as. `<type>` must be listed in
+`types.md` and be lowercase letters, digits, `-` and `_`. A file for any other
+type is ignored with a warning. Each file is capped at 8,192 characters
+(truncated with a warning) and has `<user_document>` fence markers neutralised,
+the same as `observation-filter.md`.
+
+For example, an invented household wiki that declares `recipe` and `preference`
+in `types.md` could hold:
+
+```markdown
+<!-- wiki/_schema/_type-guidance-preference.md -->
+Keep each stated rule in the owner's own words. "Dice the shallots very fine"
+stays as written; never generalise it to "likes small pieces".
+If an observation is about a different person's preferences, escalate rather
+than adding it here.
+```
+
+```markdown
+<!-- wiki/_schema/_entity-template-recipe.md -->
+## Ingredients
+
+## Oven method
+
+## Stovetop method
+```
+
+**Scope.** Only unstructured raws that go through Tier-2 classify and then a
+Tier-3 create or merge, on both the synchronous and Batch API transports. The
+guidance does not reach the Tier-2 classify prompt (`observation-filter.md` is
+still the only classify fragment), raws written verbatim by passthrough or
+structured upsert, the auto-memory cluster merge, or page recompile. Guidance
+cannot change which page an observation is merged into; that is decided before
+any merge prompt runs. At most it can lead the model to escalate.
+
+**Content boundary.** The prompt places a fixed precedence clause, shipped with
+the package, ahead of the guidance. It tells the model the guidance may say
+where content goes, what to keep apart, what to preserve and when to refuse,
+but cannot override the librarian's own rules: keep existing content, copy
+anchors verbatim, cite with footnotes, and follow the `ESCALATE:` and
+`ADDS_NEW_CLAIM` contracts. It can never authorise rewording, summarising or
+paraphrasing source text. Write guidance that stays inside that boundary;
+anything outside it is ignored.
+
+**Attribution.** When any such file is in use, the `librarian-run-summary` line
+carries `type_guidance=<type>:<8-hex hash>,...`, one entry per declared type
+with a file. The hash covers both files for that type, so an edit to either
+shows up in the run log. The token is omitted when no file exists.
+
 ## Data lifecycle and upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw
