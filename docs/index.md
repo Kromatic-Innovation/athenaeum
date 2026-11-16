@@ -207,6 +207,7 @@ Evidence, kept out of the reading path.
 - [Recall relevance floor sweep](measurements/recall-relevance-floor-sweep.md)
 - [Recall hybrid RRF fusion — real-embedder sweep](measurements/recall-hybrid-fusion-sweep.md)
 - [Follow-through on real sessions](measurements/follow-through-real-sessions-2026-11-14.md) — whether pushed pages were opened afterward, by interactive and headless population and session length; rates and counts only.
+- [Recall metrics on a real-session gold set](measurements/recall-metrics-real-sessions-2026-11-15.md) — push coverage, recall-through, use precision and session use rate per population against LLM relevance labels, plus the `used` heuristic's precision and recall; operator spot-check pending.
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
