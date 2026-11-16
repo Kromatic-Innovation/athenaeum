@@ -225,6 +225,55 @@ class TestBuildChildEnv:
         assert full["PROMPTWITNESS_LAUNCHER"] == "my-launcher"
 
 
+    def test_isolates_the_athenaeum_cache_dir_and_turns_off_auto_recall(
+        self, tmp_path: Path
+    ) -> None:
+        # athenaeum#2709: an inherited real cache dir / recall-on must never
+        # reach the child.
+        real_cache = tmp_path / "operator-home" / ".cache" / "athenaeum"
+        base_env = {"ATHENAEUM_CACHE_DIR": str(real_cache), "AUTO_RECALL": "true"}
+        harness_tmp = tmp_path / "harness"
+        harness_cache = harness_tmp / "athenaeum-cache-dir"
+
+        child_env = build_child_env(
+            base_env,
+            promptwitness_dir=harness_tmp / "pw",
+            athenaeum_cache_dir=harness_cache,
+        )
+
+        assert child_env["ATHENAEUM_CACHE_DIR"] == str(harness_cache)
+        assert child_env["AUTO_RECALL"] == "false"
+        assert base_env == {"ATHENAEUM_CACHE_DIR": str(real_cache), "AUTO_RECALL": "true"}
+
+    def test_cache_dir_defaults_under_the_harness_tmp_tree(self, tmp_path: Path) -> None:
+        base_env = {"ATHENAEUM_CACHE_DIR": "/var/empty/not-the-harness", "AUTO_RECALL": "true"}
+
+        child_env = build_child_env(base_env, promptwitness_dir=tmp_path / "pw")
+
+        cache_dir = Path(child_env["ATHENAEUM_CACHE_DIR"])
+        assert cache_dir.is_relative_to(tmp_path)
+        assert cache_dir != tmp_path / "pw"
+        assert child_env["AUTO_RECALL"] == "false"
+
+    def test_live_harness_paths_wire_a_tmp_cache_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The live-only glue must pass a tmp-rooted cache dir that exists.
+        monkeypatch.setattr(harness, "resolve_hook_command", lambda: "true")
+        monkeypatch.setattr(
+            harness, "seed_isolated_config_dir", lambda *_a, **_k: "api-key-env"
+        )
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "real-cache"))
+        monkeypatch.setenv("AUTO_RECALL", "true")
+
+        paths = harness._build_live_harness_paths(tmp_path)
+
+        cache_dir = Path(paths.child_env["ATHENAEUM_CACHE_DIR"])
+        assert cache_dir == tmp_path / "athenaeum-cache-dir"
+        assert cache_dir.is_dir()
+        assert paths.child_env["AUTO_RECALL"] == "false"
+
+
 # ---------------------------------------------------------------------------
 # Observations JSON writer
 # ---------------------------------------------------------------------------
