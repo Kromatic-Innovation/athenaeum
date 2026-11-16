@@ -30,6 +30,13 @@ kept as they were written.
 
 ### Fixed
 
+- The Claude Code plugin's version-pin test now compares the pin in
+  `examples/claude-code-plugin/.claude-plugin/plugin.json` to the latest
+  released version in `CHANGELOG.md`, not `pyproject.toml`'s per-merge PATCH
+  bump, so merges to `develop` after a release no longer fail CI. The pin must
+  still share `pyproject.toml`'s MAJOR.MINOR and must not be ahead of it. The
+  test is renamed `test_manifest_version_pin_matches_latest_release`
+  (athenaeum#2719).
 - `athenaeum schedule remove` on the systemd backend no longer leaves the
   `Persistent=true` timer's stamp file
   (`~/.local/share/systemd/timers/stamp-athenaeum-run.timer`) behind. It runs

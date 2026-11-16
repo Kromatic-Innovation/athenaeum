@@ -71,8 +71,9 @@ fi
 # dependency -- a plain bash parameter-expansion scan, matched against the
 # FIRST line containing the literal substring "version" (plugin.json's own
 # top-level "version" field is the first such line; see
-# tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_pyproject
-# for the authoritative, real-JSON-parsed comparison against pyproject.toml).
+# tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_latest_release
+# for the authoritative, real-JSON-parsed comparison against the latest
+# released version in CHANGELOG.md).
 # ---------------------------------------------------------------------------
 PINNED_VERSION=""
 if [ -f "$MANIFEST" ]; then
