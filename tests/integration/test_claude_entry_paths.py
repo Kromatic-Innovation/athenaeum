@@ -302,6 +302,7 @@ def build_child_env(
     promptwitness_dir: Path,
     claude_config_dir: Path | None = None,
     launcher: str | None = None,
+    athenaeum_cache_dir: Path | None = None,
 ) -> dict[str, str]:
     """Build the env dict for the SPAWNED ``claude`` child only.
 
@@ -321,6 +322,19 @@ def build_child_env(
       operator's real ``~/.claude``;
     - ``PROMPTWITNESS_LAUNCHER`` to *launcher* when given (athenaeum#2172,
       a free-text label only -- never affects classification);
+    - ``ATHENAEUM_CACHE_DIR`` to *athenaeum_cache_dir*, defaulting to an
+      ``athenaeum-cache-dir`` sibling of *promptwitness_dir* -- ALWAYS set,
+      overriding any inherited value (athenaeum#2709). Without it the child's
+      hook resolves the operator's REAL cache dir: it reads the real
+      ``config.env`` and writes ``witness_hook_errors.jsonl``, hook-health
+      records, recall telemetry and seen-files there;
+    - ``AUTO_RECALL=false``, overriding any inherited value (athenaeum#2709),
+      so the child's hook never searches the operator's real knowledge base.
+      This does not change classification: the hook writes its witness
+      ledger line BEFORE it checks ``AUTO_RECALL``
+      (:func:`athenaeum.claude_code_adapter.main`), and a ``config.env``
+      value can never override it (process env wins in
+      :func:`athenaeum.claude_code_adapter._load_config_env`);
     - ``TERM=xterm-256color`` (a pty child otherwise inherits whatever the
       test runner has, possibly ``dumb``).
 
@@ -335,6 +349,10 @@ def build_child_env(
         child_env["CLAUDE_CONFIG_DIR"] = str(claude_config_dir)
     if launcher is not None:
         child_env["PROMPTWITNESS_LAUNCHER"] = launcher
+    if athenaeum_cache_dir is None:
+        athenaeum_cache_dir = promptwitness_dir.parent / "athenaeum-cache-dir"
+    child_env["ATHENAEUM_CACHE_DIR"] = str(athenaeum_cache_dir)
+    child_env["AUTO_RECALL"] = "false"
     return child_env
 
 
@@ -990,6 +1008,8 @@ def _build_live_harness_paths(tmp_path: Path) -> _LiveHarnessPaths:
     promptwitness_dir.mkdir()
     claude_config_dir = tmp_path / "claude-config-dir"
     claude_config_dir.mkdir()
+    athenaeum_cache_dir = tmp_path / "athenaeum-cache-dir"
+    athenaeum_cache_dir.mkdir()
     hook_command = resolve_hook_command()
     settings_path = write_settings_file(tmp_path, hook_command)
     auth_method = seed_isolated_config_dir(claude_config_dir, workdir=tmp_path, env=os.environ)
@@ -998,6 +1018,7 @@ def _build_live_harness_paths(tmp_path: Path) -> _LiveHarnessPaths:
         promptwitness_dir=promptwitness_dir,
         claude_config_dir=claude_config_dir,
         launcher="athenaeum-2235-entry-path-harness",
+        athenaeum_cache_dir=athenaeum_cache_dir,
     )
     return _LiveHarnessPaths(
         promptwitness_dir=promptwitness_dir,
