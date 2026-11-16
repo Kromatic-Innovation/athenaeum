@@ -14,35 +14,76 @@ kept as they were written.
 
 ## [Unreleased]
 
-### Added
+## [0.26.0] - 2026-11-16
 
-- Per-type librarian guidance. Two optional operator files in `wiki/_schema/`
-  steer the Tier-3 create and merge prompts for one page type:
+**Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian
+guidance, so an operator can tell the librarian how to write and merge one page
+type, and it fixes `athenaeum schedule remove` on systemd, which left a timer
+stamp behind that made a later `schedule install` fire a stale run straight
+away. Nothing changes for an install that adds no guidance file. The
+remote-mode hardening planned with this release already shipped in 0.25.0.
+
+**Breaking changes**
+
+- None.
+
+**Behaviour changes** (an install that changes no configuration will notice these)
+
+- On the systemd backend, `athenaeum schedule remove` now also clears the
+  `athenaeum-run.timer` stamp: it runs `systemctl --user clean --what=state`
+  (systemd 247 or later) and then deletes the stamp file if it is still there
+  (athenaeum#2707). A later `athenaeum schedule install` no longer runs a
+  "missed" compile at once.
+
+**New, opt-in** (each does nothing until configured)
+
+- Per-type librarian guidance (athenaeum#2590). Two optional files in
+  `wiki/_schema/` steer the Tier-3 create and merge prompts for one page type:
   `_entity-template-<type>.md` replaces `_entity-template.md` for creates of
-  that type, and `_type-guidance-<type>.md` adds guidance to the create prompt
-  and to the patch, full-echo and append merge prompts, on both the sync and
-  Batch API transports. A merge is keyed on the target page's own type. Only
-  types declared in `types.md` with a plain lowercase key are read; both files
-  are capped and defanged like the other schema fragments, and a fixed
-  precedence clause keeps guidance from overriding the librarian's rules or
-  authorising paraphrase. The run summary gains a `type_guidance=` token. With
-  no such file, every prompt is unchanged (athenaeum#2590).
+  that type, and `_type-guidance-<type>.md` adds guidance to the create and
+  merge prompts, on both the synchronous and Batch API transports. Only types
+  declared in `types.md` with a plain lowercase key are read. The run summary
+  gains a `type_guidance=` token.
 
-### Fixed
+**Experimental surface** (not in `athenaeum.__all__`; flags, keys, formats and
+import paths may change in any minor release without a deprecation cycle)
 
-- The Claude Code plugin's version-pin test now compares the pin in
-  `examples/claude-code-plugin/.claude-plugin/plugin.json` to the latest
-  released version in `CHANGELOG.md`, not `pyproject.toml`'s per-merge PATCH
-  bump, so merges to `develop` after a release no longer fail CI. The pin must
-  still share `pyproject.toml`'s MAJOR.MINOR and must not be ahead of it. The
-  test is renamed `test_manifest_version_pin_matches_latest_release`
-  (athenaeum#2719).
-- `athenaeum schedule remove` on the systemd backend no longer leaves the
-  `Persistent=true` timer's stamp file
-  (`~/.local/share/systemd/timers/stamp-athenaeum-run.timer`) behind. It runs
-  `systemctl --user clean --what=state` and, when that is unavailable (systemd
-  older than 247) or fails, deletes the stamp directly, so a later `install`
-  no longer fires a stale "missed" run straight away (athenaeum#2707).
+- The per-type guidance file names and format, and the `type_guidance=` run
+  summary token.
+- Everything 0.25.0 listed as experimental stays experimental, remote serving
+  included.
+- `athenaeum.__all__` is unchanged from 0.25.0.
+
+**Security-relevant changes**
+
+- None. The new guidance files are operator-authored prompt input: they are
+  size-capped and defanged like the other `wiki/_schema/` fragments, and a fixed
+  precedence clause stops guidance from overriding the librarian's rules or
+  authorising paraphrase (athenaeum#2590).
+
+**Upgrading from 0.25.0**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`. The Python floor (3.13+) is unchanged. No configuration
+   change is needed.
+2. If you removed a systemd schedule with 0.25.0 or earlier and will install it
+   again, first delete the stamp that removal left behind,
+   `~/.local/share/systemd/timers/stamp-athenaeum-run.timer` (under
+   `$XDG_DATA_HOME` if you set it). The new `schedule remove` only cleans up a
+   schedule that is still installed.
+3. Optional: add `wiki/_schema/_type-guidance-<type>.md` or
+   `wiki/_schema/_entity-template-<type>.md` for a page type you want written
+   differently. The format is in `docs/reference/data-formats.md`.
+
+```bash
+athenaeum --version            # expect 0.26.0
+athenaeum doctor               # read-only health check; names a fix per FAIL or WARN
+athenaeum test-mcp             # smoke-test remember/recall, no API key needed
+```
+
+The per-merge Added / Fixed entries are in
+[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.26.0-build-notes.md).
+They are reference material; this section is the release.
 
 ## [0.25.0] - 2026-11-16
 
