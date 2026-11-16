@@ -240,6 +240,7 @@ Evidence, kept out of the reading path.
 - [Claude Code entry-path live run — 2026-11-14](measurements/claude-entry-paths-live-run-2026-11-14.md) — the first real-binary pass of the entry-path harness: the headless row passes, the interactive rows were not exercised (harness driver defects), and the ledger was not enabled.
 - [Witness-attestation readout — template](measurements/witness-attestation-readout.md) — the fill-in shape for a witnessed-hits / per-miss-incident reading from `athenaeum receipts attest-readout`; a template, not a reading.
 - [Schedule install/remove host verification — 2026-11-14](measurements/schedule-host-verification-2026-11-14.md) — a real scheduled tick on macOS (launchd) and Linux (cron, in a container), the no-key counter-example, `doctor` states and `remove` listings against baseline.
+- [Schedule install/remove with systemd — 2026-11-16](measurements/schedule-systemd-verification-2026-11-16.md) — the systemd user timer in a container with systemd as PID 1: a timer-fired tick with no login environment, `doctor` states, and the unit-path listings before and after `remove`.
 
 ---
 
