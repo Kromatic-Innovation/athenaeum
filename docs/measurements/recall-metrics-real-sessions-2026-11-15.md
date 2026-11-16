@@ -35,12 +35,14 @@ appears in the full tables below.
   been pushed to that session by the end of the turn. For headless sessions it
   is about a quarter.
 - The agent almost never went on to recall or open a relevant page: 14 of 385
-  in interactive turns, none in headless. Headless sessions made no recall or
-  read calls at all in this sample.
+  in interactive turns, none in headless. The 120 sampled headless windows held
+  no `recall` call, no `read_entity` call and no file read of a page-shaped
+  file. The 105 interactive windows held 28 `recall` calls and 1 `read_entity`
+  call.
 - Under the shipped citation rule for "used", no recalled or opened page was
   used. Under the LLM's `changed_work` judgement, 3 of 21 were.
-- Most pushed pages were judged irrelevant: 92.4% of interactive pushes and
-  96.3% of headless pushes. That reads as a retrieval problem first. It is not
+- Most pushed pages were judged irrelevant: 1,978 of 2,156 labelled
+  interactive pushed pages (91.7%) and 772 of 802 headless ones (96.3%). That reads as a retrieval problem first. It is not
   mainly an ignored-pointer problem.
 - The athenaeum#2302 `used` heuristic scores precision **0.14** (7/50, Wilson
   0.07 to 0.26) and recall **0.44** (7/16, Wilson 0.23 to 0.67) against the LLM
@@ -143,14 +145,21 @@ was also not told how each page was found.
   response), called through the plain Anthropic Python SDK at effort `low`.
   Nothing went through athenaeum's own LLM helpers, and nothing was written to
   the deployment.
-- **Calls.** 256 calls with up to 40 candidates each. There were no refusals,
-  no parse failures and no unlabelled tasks. Tokens: 4,367,688 in and 160,062
-  out, about USD 20.70 at list price.
+- **Calls.** 256 chunks with up to 40 candidates each. There were no refusals
+  and no unlabelled tasks: every chunk eventually returned a complete, valid
+  label set. A chunk whose reply failed to parse, or left out a candidate, was
+  retried silently, and those retries were not logged. The recorded totals
+  are 4,367,688 tokens in and 160,062 out, about USD 20.70 at list price.
+  Because retries were not counted, both the token totals and the cost are a
+  lower bound.
 - **Blinding.** The labeller saw the request text, a turn excerpt and each
   page's title plus the first 1,400 characters. Candidate order was shuffled.
   It was not told which pages were pushed, opened or cited. Eight-character
-  hex identifiers in the excerpt and pages were masked as `[id]`, so a
-  `changed_work` label cannot simply follow a citation.
+  hex identifiers in the excerpt and page text were masked as `[id]`.
+- **Masking gaps.** The masking was partial, so a `changed_work` label can
+  still sometimes follow a visible citation. Two kinds of id were not
+  masked. Raw-intake pages use filename-form ids, which were not masked
+  anywhere. The request block itself was also passed unmasked.
 - **Excerpt.** The excerpt was user and assistant text, plus tool calls and the
   first 400 characters of each tool result. It was capped at 24,000
   characters, with the middle of very long turns omitted.
@@ -367,7 +376,7 @@ labels, which is why every one of those items is in the spot-check sheet.
   open anything. Their recall-through and use are zero by construction of
   their tool use, as athenaeum#2306 found.
 - **Most pushes are irrelevant** to the task in front of the agent, by these
-  labels: over 92% in both populations. That shows up as a retrieval-precision
+  labels: about 92% of interactive and 96% of headless pushed pages. That shows up as a retrieval-precision
   problem before it is a delivery-form problem.
 - **Use precision under the citation rule is 0/28.** Engaged pages are few, so
   the Wilson upper bound is 12%. The LLM rule gives 3/21. Read the two
