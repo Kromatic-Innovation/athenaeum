@@ -10,7 +10,7 @@ Access: {access}
 
 ## Raw observation (source: {source_ref})
 {observations}
-{entity_template_section}
+{entity_template_section}{type_guidance_section}
 ## Instructions
 Write the body content (no frontmatter) for this entity's wiki page, led by
 the single `Description: ...` line described in the rules.

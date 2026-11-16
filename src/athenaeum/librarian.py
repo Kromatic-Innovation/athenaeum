@@ -320,6 +320,7 @@ from athenaeum.tiers import (
     tier2_classify,
     tier3_derive_actions,
     tier4_escalate,
+    type_guidance_state,
 )
 from athenaeum.wiki_write_guard import guard_entity_write_type, resolve_admitted_wiki_types
 
@@ -5517,6 +5518,7 @@ def _render_run_summary(
     zero_yield_consecutive: "int | None" = None,
     starved_streaks: "dict[str, int] | None" = None,
     stall_streaks: "dict[str, int] | None" = None,
+    type_guidance: "dict[str, str] | None" = None,
 ) -> str:
     """Render the accumulated per-phase *profile* into ONE greppable line.
 
@@ -5555,6 +5557,12 @@ def _render_run_summary(
     the pre-athenaeum#567 head and the direct unit-test callers are byte-unchanged.
     ``relevance_policy=`` (athenaeum#2643) follows the same omit-on-``None`` rule. No
     phase logic, ordering, or exit code is affected.
+
+    ``type_guidance=`` (athenaeum#2590) follows ``schema_fragments=``: one
+    ``<type>:<sha8>`` pair per declared type with a per-type guidance or
+    template file (see :func:`~athenaeum.tiers.type_guidance_state`), so an
+    edit to one shows up in run attribution. Omitted when the mapping is
+    ``None`` or empty, so a wiki with no such files keeps its line unchanged.
 
     ``zero_yield_consecutive`` (issue athenaeum#899) is the run's zero-yield counter:
     the CONSECUTIVE zero-yield run count as of this run, persisted by
@@ -5595,6 +5603,10 @@ def _render_run_summary(
     if schema_fragments is not None:
         head += (
             f" schema_fragments={_render_schema_fragment_attribution(schema_fragments)}"
+        )
+    if type_guidance:
+        head += " type_guidance=" + ",".join(
+            f"{name}:{sha[:8]}" for name, sha in sorted(type_guidance.items())
         )
     # Issue athenaeum#2643: the relevance-policy hash rides next to
     # ``schema_fragments=``; omitted when no policy file exists.
@@ -6421,6 +6433,13 @@ class RunContext:
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
+        # Issue athenaeum#2590: per-type guidance attribution, same
+        # never-raise posture as the fragment state above.
+        try:
+            type_guidance: "dict[str, str] | None" = type_guidance_state(self.wiki_root)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: type_guidance_state skipped: %s", exc)
+            type_guidance = None
         try:
             from athenaeum.relevance_policy import policy_hash_token
 
@@ -6460,6 +6479,7 @@ class RunContext:
             _render_run_summary(
                 self.run_profile,
                 schema_fragments=frag_state,
+                type_guidance=type_guidance,
                 relevance_policy_hash=relevance_hash,
                 prompt_manifest_hash=manifest_hash,
                 zero_yield_consecutive=self.zero_yield_consecutive,
