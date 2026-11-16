@@ -55,19 +55,28 @@ point (tracked by athenaeum#2308, not resolved here):
 `.claude-plugin/plugin.json`'s top-level `"version"` field is the **one**
 pinned athenaeum release this plugin runs through `uv` (see
 `hooks/launcher.sh`) — not an independent plugin-semver counter.
-`tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_pyproject`
-fails CI the moment this value differs from `pyproject.toml`'s
-`[project].version`.
 
-**Bump both together, at the weekly release, and nowhere else.** The plugin
-does not follow develop's PATCH-per-merge version churn (see
-`docs/guides/install.md`'s Quick start on why the PATCH digit moves on every
-merge) — it pins one tested release and advances deliberately. Concretely:
-when the weekly release cuts a new `pyproject.toml` version, update
-`plugin.json`'s `"version"` to match in the SAME change (or immediately
-after, before the next plugin-affecting PR lands) — never let the two drift
-for more than one commit, because the drift test above is the only thing
-that would catch it.
+**The pin tracks the latest release, not per-merge bumps.** Every merge to
+`develop` bumps `pyproject.toml`'s PATCH digit (see `docs/guides/install.md`'s
+Quick start), but only a release tag publishes that version to PyPI. A pin to
+an unpublished PATCH version would break plugin installs, so the pin names
+the latest released version: the first dated `## [X.Y.Z] - <date>` heading in
+`CHANGELOG.md` (the one after `## [Unreleased]`).
+
+`tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_latest_release`
+fails CI when:
+
+- the pin differs from that latest released CHANGELOG version, or
+- the pin's MAJOR.MINOR differs from `pyproject.toml`'s `[project].version`,
+  or the pin is greater than it.
+
+The second check catches a pin that drifts far, for example a MINOR bump in
+`pyproject.toml` made without a CHANGELOG cut. Per-merge PATCH bumps on
+`develop` do not fail it.
+
+**Bump the pin at the release cut, and nowhere else.** When a release
+retitles `[Unreleased]` to `[X.Y.Z] - <date>`, update `plugin.json`'s
+`"version"` to `X.Y.Z` in the same change.
 
 ## What happens when `uv` is missing (AC3)
 

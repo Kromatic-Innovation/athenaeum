@@ -18,5 +18,5 @@
       "default": "~/knowledge"
     }
   },
-  "_versionPinNote": "This 'version' field is the SINGLE pinned athenaeum package version this plugin runs via uv (see hooks/launcher.sh) -- not an independent plugin-semver. tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_pyproject fails CI if this drifts from pyproject.toml's [project].version. Bump both together at the weekly release (see README.md, 'Version-bump rule')."
+  "_versionPinNote": "This 'version' field is the SINGLE pinned athenaeum package version this plugin runs via uv (see hooks/launcher.sh) -- not an independent plugin-semver. tests/test_claude_code_plugin.py::test_manifest_version_pin_matches_latest_release fails CI if this differs from the latest released version in CHANGELOG.md (not develop's per-merge pyproject.toml PATCH bump). Bump it at the release cut (see README.md, 'Version-bump rule')."
 }

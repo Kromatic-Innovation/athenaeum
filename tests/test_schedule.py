@@ -445,6 +445,139 @@ class TestInstallSystemd:
         assert schedule.status(home=home, platform_override="systemd").scheduled is False
 
 
+def _stamp_path(data_home: Path) -> Path:
+    return data_home / "systemd" / "timers" / f"stamp-{schedule.SYSTEMD_UNIT_NAME}.timer"
+
+
+def _write_stamp(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+class _CleanLoader(FakeLoader):
+    """FakeLoader whose ``systemctl --user clean`` returns *clean_rc*, and on
+    success deletes *stamp* the way the real systemd user manager does."""
+
+    def __init__(self, clean_rc: int, stamp: Path | None = None) -> None:
+        super().__init__()
+        self.clean_rc = clean_rc
+        self.stamp = stamp
+
+    def __call__(self, argv: list[str], input_text: str | None = None) -> schedule.LoaderResult:
+        if argv[:3] == ["systemctl", "--user", "clean"]:
+            self.calls.append((argv, input_text))
+            if self.clean_rc == 0 and self.stamp is not None and self.stamp.exists():
+                self.stamp.unlink()
+            err = "clean failed\n" if self.clean_rc else ""
+            return schedule.LoaderResult(self.clean_rc, "", err)
+        return super().__call__(argv, input_text)
+
+
+class TestSystemdTimerStamp:
+    """athenaeum#2707: ``remove`` must not leave the ``Persistent=true``
+    timer's stamp file behind, even when ``systemctl clean`` is unavailable."""
+
+    TIMER = f"{schedule.SYSTEMD_UNIT_NAME}.timer"
+
+    def test_clean_runs_after_disable_and_before_daemon_reload(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = FakeLoader()
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        loader.calls.clear()
+        schedule.remove(home=home, loader=loader, platform_override="systemd")
+        assert [argv for argv, _ in loader.calls] == [
+            ["systemctl", "--user", "disable", "--now", self.TIMER],
+            ["systemctl", "--user", "clean", "--what=state", self.TIMER],
+            ["systemctl", "--user", "daemon-reload"],
+        ]
+
+    def test_successful_clean_leaves_no_stamp(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        loader = _CleanLoader(0, stamp)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        _write_stamp(stamp)  # one timer tick
+        result = schedule.remove(home=home, loader=loader, platform_override="systemd")
+        assert not stamp.exists()
+        assert result.loader_returncode == 0
+
+    @pytest.mark.parametrize("clean_rc", [1, 127])
+    def test_failed_or_missing_clean_falls_back_to_unlink(
+        self, home: Path, knowledge_root: Path, api_key_env: None, clean_rc: int
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        loader = _CleanLoader(clean_rc)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        _write_stamp(stamp)
+        service_path, timer_path = _systemd_paths(home)
+
+        result = schedule.remove(home=home, loader=loader, platform_override="systemd")
+
+        assert not stamp.exists()
+        assert set(result.removed_paths) == {service_path, timer_path, stamp}
+        assert not service_path.exists() and not timer_path.exists()
+        # A failed/absent `clean` does not fail `remove`.
+        assert result.loader_returncode == 0
+        assert result.had_schedule is True
+
+    def test_no_stamp_is_fine(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        loader = _CleanLoader(1)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        result = schedule.remove(home=home, loader=loader, platform_override="systemd")
+        assert set(result.removed_paths) == set(_systemd_paths(home))
+        assert result.loader_returncode == 0
+
+    def test_xdg_data_home_is_honoured_for_the_default_home(
+        self,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        xdg = tmp_path / "xdg-data"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        stamp = _stamp_path(xdg)
+        default_stamp = _stamp_path(home / ".local" / "share")
+        loader = _CleanLoader(1)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        _write_stamp(stamp)
+        _write_stamp(default_stamp)
+
+        schedule.remove(loader=loader, platform_override="systemd")
+
+        assert not stamp.exists()
+        # Only the location systemd actually uses is touched.
+        assert default_stamp.exists()
+
+    def test_explicit_home_ignores_xdg_data_home(
+        self,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        xdg = tmp_path / "invoking-user-data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        outside = _stamp_path(xdg)
+        inside = _stamp_path(home / ".local" / "share")
+        loader = _CleanLoader(1)
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        _write_stamp(outside)
+        _write_stamp(inside)
+
+        schedule.remove(home=home, loader=loader, platform_override="systemd")
+
+        assert not inside.exists()
+        assert outside.exists()
+
+
 class TestInstallCron:
     def test_install_writes_crontab_line(
         self, home: Path, knowledge_root: Path, api_key_env: None
