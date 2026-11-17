@@ -16,6 +16,14 @@ kept as they were written.
 
 ### Fixed
 
+- Full-echo Tier-3 merge replies whose `ADDS_NEW_CLAIM:` line carries trailing
+  prose no longer drop the observation silently. `ADDS_NEW_CLAIM: false --
+  re-confirmation only` now parses as `false` (citation-only), and `true` with
+  trailing prose followed by a body keeps that body. A reply with no usable
+  body that is neither an explicit `false` nor `ESCALATE:` is logged under
+  `tier3-merge-malformed-reply` and counted as `malformed_merges` in the run
+  summary. The append-mode parser tolerates the same trailing prose
+  (athenaeum#2739).
 - The test suite now isolates git config itself: an autouse fixture points
   `GIT_CONFIG_GLOBAL` at an empty-hooks config, sets `GIT_CONFIG_NOSYSTEM=1` and
   strips `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, so a contributor's global
