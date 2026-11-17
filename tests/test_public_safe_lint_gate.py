@@ -24,12 +24,13 @@ run directly in CI and in the push-boundary hook this issue adds).
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import strip_git_config_env
 
 REPO_ROOT = Path(__file__).parent.parent
 GATE = REPO_ROOT / "scripts" / "public-safe-lint-gate.sh"
@@ -38,24 +39,11 @@ PRE_PUSH_HOOK = REPO_ROOT / ".githooks" / "pre-push"
 PUSH_WRAPPER = REPO_ROOT / "scripts" / "git-push-safe.sh"
 
 
-def _clean_git_env() -> dict[str, str]:
-    """os.environ with any GIT_CONFIG_COUNT/KEY_n/VALUE_n stripped.
-
-    Some containerized dev environments this repo is built in set those to
-    force `core.hooksPath` workspace-wide for their own unrelated hook
-    needs -- env-based git config outranks a repo's own `.git/config`, so
-    left in place it would silently defeat the plain-`git push` tests
-    below (they'd test the ambient environment's hooks, not this repo's).
-    `test_push_wrapper_survives_hostile_hookspath_override` below restores
-    exactly this shape deliberately, to prove the wrapper's resilience to
-    it."""
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k != "GIT_CONFIG_COUNT"
-        and not k.startswith("GIT_CONFIG_KEY_")
-        and not k.startswith("GIT_CONFIG_VALUE_")
-    }
+# Shared with the autouse git-config isolation in tests/conftest.py
+# (athenaeum#2729). `test_push_wrapper_survives_hostile_hookspath_override`
+# below restores a hostile GIT_CONFIG_COUNT/KEY_n/VALUE_n shape deliberately,
+# to prove the wrapper's resilience to it.
+_clean_git_env = strip_git_config_env
 
 
 def _run_gate(scan_dir: Path) -> subprocess.CompletedProcess[str]:

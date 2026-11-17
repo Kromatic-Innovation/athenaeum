@@ -16,6 +16,7 @@ kept as they were written.
 
 ### Changed
 
+- Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file
   bytes. The first real-login run measured about 2,800 tokens per file (two
   classify calls each) against an estimate about 38 times too low. The prompt
@@ -26,6 +27,22 @@ kept as they were written.
 
 ### Fixed
 
+- Full-echo Tier-3 merge replies whose `ADDS_NEW_CLAIM:` line carries trailing
+  prose no longer drop the observation silently. `ADDS_NEW_CLAIM: false --
+  re-confirmation only` now parses as `false` (citation-only), and `true` with
+  trailing prose followed by a body keeps that body. A reply with no usable
+  body that is neither an explicit `false` nor `ESCALATE:` is logged under
+  `tier3-merge-malformed-reply` and counted as `malformed_merges` in the run
+  summary. The append-mode parser tolerates the same trailing prose
+  (athenaeum#2739).
+- The test suite now isolates git config itself: an autouse fixture points
+  `GIT_CONFIG_GLOBAL` at an empty-hooks config, sets `GIT_CONFIG_NOSYSTEM=1` and
+  strips `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, so a contributor's global
+  `core.hooksPath` or hook manager no longer fails fixture commits (opt out with
+  `@pytest.mark.real_git_config`). The calibration sweep's default summary path
+  is now a temp directory instead of the tracked repo-root
+  `calibration-summary.json`, so a test run leaves the working tree clean
+  (athenaeum#2729).
 - `athenaeum import-memory` re-runs now finish when a file sits in a
   multi-member cluster that the comparator hold keeps queued. Such a file's
   content already reached a compiled page, so it is recorded in the

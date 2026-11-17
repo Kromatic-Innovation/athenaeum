@@ -5560,7 +5560,7 @@ def _render_run_summary(
 
     ``type_guidance=`` (athenaeum#2590) follows ``schema_fragments=``: one
     ``<type>:<sha8>`` pair per declared type with a per-type guidance or
-    template file (see :func:`~athenaeum.tiers.type_guidance_state`), so an
+    template file (see :func:`~athenaeum.type_guidance.type_guidance_state`), so an
     edit to one shows up in run attribution. Omitted when the mapping is
     ``None`` or empty, so a wiki with no such files keeps its line unchanged.
 
@@ -10833,6 +10833,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"full_merges": ctx.usage.full_merges}
                         if ctx.usage.full_merges
+                        else {}
+                    ),
+                    # athenaeum#2739: full-echo replies with no usable body.
+                    **(
+                        {"malformed_merges": ctx.usage.malformed_merges}
+                        if ctx.usage.malformed_merges
                         else {}
                     ),
                     # athenaeum#1196: NEW entity writes the write-boundary type guard
