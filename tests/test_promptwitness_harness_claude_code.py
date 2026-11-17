@@ -45,6 +45,24 @@ class TestClassifyPromptKind:
         )
         assert (kind, human) == ("slash-command", True)
 
+    def test_raw_slash_line_is_slash_command(self) -> None:
+        """The live hook sees the unexpanded ``/name args`` line (athenaeum#2161)."""
+        for prompt in ("/review fix the typo", "/review", "  /ns:cmd-1.x args"):
+            kind, human = claude_code.classify_prompt_kind(prompt, **self._NO_OVERRIDE)
+            assert (kind, human) == ("slash-command", True), prompt
+
+    def test_single_segment_path_is_a_slash_command_false_miss(self) -> None:
+        """Documented false miss: a one-segment path is indistinguishable from
+        a command name, so it classifies ``slash-command`` (human, counted)."""
+        for prompt in ("/etc is broken", "/tmp", "/help me fix this"):
+            kind, human = claude_code.classify_prompt_kind(prompt, **self._NO_OVERRIDE)
+            assert (kind, human) == ("slash-command", True), prompt
+
+    def test_path_like_or_mid_sentence_slash_is_still_human(self) -> None:
+        for prompt in ("/usr/bin is missing", "/ not a command", "see /review later", "//x"):
+            kind, human = claude_code.classify_prompt_kind(prompt, **self._NO_OVERRIDE)
+            assert (kind, human) == ("human", True), prompt
+
     def test_task_notification_prefix_is_non_human(self) -> None:
         kind, human = claude_code.classify_prompt_kind(
             "<task-notification>done</task-notification>", **self._NO_OVERRIDE
@@ -203,6 +221,17 @@ class TestSlashArgsSegment:
         assert prompt[segment.start : segment.end] == "fix the typo in README"
         assert segment.digest == canon.digest("fix the typo in README")
 
+    def test_raw_slash_line_args_yield_one_segment(self) -> None:
+        prompt = "/review fix the typo in README"
+        segment = claude_code.slash_args_segment(prompt)
+        assert segment is not None
+        assert prompt[segment.start : segment.end] == "fix the typo in README"
+        assert segment.digest == canon.digest("fix the typo in README")
+
+    def test_raw_slash_line_without_args_yields_none(self) -> None:
+        assert claude_code.slash_args_segment("/review") is None
+        assert claude_code.slash_args_segment("/review   ") is None
+
     def test_no_command_args_tag_yields_none(self) -> None:
         prompt = (
             "<command-message>running /review</command-message>"
@@ -256,7 +285,9 @@ class TestDetectChannel:
         )
         assert channel == "unknown"
 
-    def test_cli_attended_tty_child_session_gives_unknown(self) -> None:
+    def test_cli_attended_tty_child_session_flag_is_not_a_classifier_input(self) -> None:
+        """A live top-level interactive hook carries CHILD_SESSION=1
+        (athenaeum#2161), so the flag must not demote it."""
         env = {
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "CLAUDE_CODE_SESSION_ATTENDED": "1",
@@ -265,7 +296,8 @@ class TestDetectChannel:
         channel, _signals = claude_code.detect_channel(
             env, pid="123", tty_probe=lambda pid: True
         )
-        assert channel == "unknown"
+        assert channel == "interactive"
+        assert _signals["child_session"] == "1"
 
     def test_cli_attended_tty_bridge_gives_bridge(self) -> None:
         env = {
@@ -644,3 +676,151 @@ class TestSessionClose:
         assert close_line.turns == 2
         assert close_line.turns_witnessed == 1
         assert close_line.last_seq == 2
+
+
+class TestLaunchArgumentFromPsOutput:
+    """``ps -o args=`` joins argv with single spaces and no quoting
+    (athenaeum#2161), so a multi-word launch prompt spans several tokens."""
+
+    def test_multi_word_prompt_matches_as_contiguous_run(self) -> None:
+        prompt = "please reply with the single word 'ack'"
+        assert claude_code._is_launch_argument(
+            prompt,
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: f"claude --settings /x/s.json {prompt}",
+        )
+
+    def test_unmatched_positional_in_ps_output_fails_closed(self) -> None:
+        """``ps`` cannot rule out that the positional is a mangled version of
+        the prompt, so it counts as a launch argument (the exact-argv path,
+        which can rule it out, is tested below)."""
+        assert claude_code._is_launch_argument(
+            "something typed later",
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: "claude --settings /x/s.json please reply",
+        )
+
+    def test_later_turn_is_never_a_launch_argument(self) -> None:
+        assert not claude_code._is_launch_argument(
+            "hello",
+            pid="1",
+            is_first_turn=False,
+            argv_probe=lambda _pid: "claude hello",
+        )
+
+    def test_typed_prompt_with_flags_only_is_human(self) -> None:
+        for line in ("claude", "claude --settings /x/s.json", "claude --verbose --model opus"):
+            assert not claude_code._is_launch_argument(
+                "typed by hand",
+                pid="1",
+                is_first_turn=True,
+                argv_probe=lambda _pid, line=line: line,
+            )
+
+    def test_ps_mangled_multiline_prompt_fails_closed(self) -> None:
+        prompt = "first line\nsecond line\n\nthird line"
+        for rendered in (
+            "first line?second line??third line",
+            "first line\\012second line\\012\\012third line",
+        ):
+            assert claude_code._is_launch_argument(
+                prompt,
+                pid="1",
+                is_first_turn=True,
+                argv_probe=lambda _pid, r=rendered: f"claude --settings /x/s.json {r}",
+            )
+
+    def test_over_400_word_prompt_is_a_launch_argument(self) -> None:
+        prompt = " ".join(f"w{i}" for i in range(450))
+        assert claude_code._is_launch_argument(
+            prompt,
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: f"claude {prompt}",
+        )
+        # And a typed prompt is not confused with it.
+        assert not claude_code._is_launch_argument(
+            "typed by hand",
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: "claude --verbose",
+        )
+
+    def test_unparsable_ps_line_with_positional_fails_closed(self) -> None:
+        # Unbalanced quote: shlex cannot parse it, a positional is present.
+        assert claude_code._is_launch_argument(
+            "something typed",
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: "claude 'half quoted launch brief",
+        )
+
+    def test_exact_argv_multiline_prompt_matches_whole_argument(self) -> None:
+        prompt = "line one\nline  two\n\nline three"
+        argv = "\0".join(["node", "/x/claude.js", "--settings", "/x/s.json", prompt]) + "\0"
+        assert claude_code._is_launch_argument(
+            prompt, pid="1", is_first_turn=True, argv_probe=lambda _pid: argv
+        )
+        # Whitespace-normalised: the hook may see different spacing.
+        assert claude_code._is_launch_argument(
+            "line one line two line three",
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: argv,
+        )
+
+    def test_exact_argv_long_prompt_matches(self) -> None:
+        prompt = " ".join(f"w{i}" for i in range(500))
+        argv = "\0".join(["claude", prompt]) + "\0"
+        assert claude_code._is_launch_argument(
+            prompt, pid="1", is_first_turn=True, argv_probe=lambda _pid: argv
+        )
+
+    def test_exact_argv_typed_prompt_is_human(self) -> None:
+        argv = "\0".join(["claude", "--settings", "/x/s.json"]) + "\0"
+        assert not claude_code._is_launch_argument(
+            "typed by hand", pid="1", is_first_turn=True, argv_probe=lambda _pid: argv
+        )
+
+    def test_exact_argv_other_positional_is_ruled_out(self) -> None:
+        argv = "\0".join(["claude", "a different launch prompt"]) + "\0"
+        assert not claude_code._is_launch_argument(
+            "typed by hand", pid="1", is_first_turn=True, argv_probe=lambda _pid: argv
+        )
+
+    def test_proc_cmdline_is_preferred_over_ps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(claude_code, "_probe_proc_cmdline", lambda pid: "claude\0hi there\0")
+
+        def boom(*_a: object, **_k: object) -> None:
+            raise AssertionError("ps must not run when /proc answers")
+
+        monkeypatch.setattr(claude_code.subprocess, "run", boom)
+        assert claude_code._probe_argv("5") == "claude\0hi there\0"
+
+    def test_proc_cmdline_rejects_non_numeric_pid(self) -> None:
+        assert claude_code._probe_proc_cmdline("../self") is None
+
+    @pytest.mark.parametrize("size", [5000])
+    def test_very_long_argv_is_classified_quickly(self, size: int) -> None:
+        import time
+
+        words = [f"w{i}" for i in range(size)]
+        ps_line = "claude " + " ".join(words)
+        exact = "\0".join(["claude", *words]) + "\0"
+        start = time.monotonic()
+        for probe in (ps_line, exact):
+            claude_code._is_launch_argument(
+                "typed by hand", pid="1", is_first_turn=True, argv_probe=lambda _p, p=probe: p
+            )
+            claude_code._is_launch_argument(
+                " ".join(words[100:2600]),
+                pid="1",
+                is_first_turn=True,
+                argv_probe=lambda _p, p=probe: p,
+            )
+        assert time.monotonic() - start < 2.0
+

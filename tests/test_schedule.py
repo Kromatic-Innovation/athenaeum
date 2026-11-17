@@ -578,6 +578,152 @@ class TestSystemdTimerStamp:
         assert outside.exists()
 
 
+class TestInstallClearsOrphanedSystemdStamp:
+    """athenaeum#2721: a schedule removed by 0.25.0 or earlier left the
+    ``Persistent=true`` timer stamp behind with no unit files. A fresh
+    ``install`` must clear it before enabling the timer, so the new schedule
+    does not fire a stale "missed" run at once."""
+
+    TIMER = f"{schedule.SYSTEMD_UNIT_NAME}.timer"
+
+    def test_orphaned_stamp_is_deleted_before_the_timer_is_enabled(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        _write_stamp(stamp)  # what a pre-0.26.0 `remove` left behind
+        service_path, timer_path = _systemd_paths(home)
+        assert not service_path.exists() and not timer_path.exists()
+
+        seen_at_enable: list[bool] = []
+
+        class _Recorder(FakeLoader):
+            def __call__(
+                self, argv: list[str], input_text: str | None = None
+            ) -> schedule.LoaderResult:
+                if argv[:3] == ["systemctl", "--user", "enable"]:
+                    seen_at_enable.append(stamp.exists())
+                return super().__call__(argv, input_text)
+
+        result = schedule.install(
+            knowledge_root, home=home, loader=_Recorder(), platform_override="systemd"
+        )
+
+        assert not stamp.exists()
+        assert seen_at_enable == [False]
+        assert result.cleared_stamp == stamp
+        assert result.loader_returncode == 0
+
+    def test_no_stamp_reports_nothing_cleared(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        result = schedule.install(
+            knowledge_root, home=home, loader=FakeLoader(), platform_override="systemd"
+        )
+        assert result.cleared_stamp is None
+
+    def test_reinstall_over_a_live_schedule_keeps_its_stamp(
+        self, home: Path, knowledge_root: Path, api_key_env: None
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        loader = FakeLoader()
+        schedule.install(knowledge_root, home=home, loader=loader, platform_override="systemd")
+        _write_stamp(stamp)  # the live timer's own last-trigger state
+
+        result = schedule.install(
+            knowledge_root, home=home, loader=loader, platform_override="systemd"
+        )
+
+        assert stamp.exists()
+        assert result.cleared_stamp is None
+
+    def test_xdg_data_home_is_honoured_for_the_default_home(
+        self,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        xdg = tmp_path / "xdg-data"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        stamp = _stamp_path(xdg)
+        default_stamp = _stamp_path(home / ".local" / "share")
+        _write_stamp(stamp)
+        _write_stamp(default_stamp)
+
+        result = schedule.install(
+            knowledge_root, loader=FakeLoader(), platform_override="systemd"
+        )
+
+        assert not stamp.exists()
+        assert result.cleared_stamp == stamp
+        # Only the location systemd actually uses is touched.
+        assert default_stamp.exists()
+
+    def test_explicit_home_ignores_xdg_data_home(
+        self,
+        tmp_path: Path,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        xdg = tmp_path / "invoking-user-data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        outside = _stamp_path(xdg)
+        inside = _stamp_path(home / ".local" / "share")
+        _write_stamp(outside)
+        _write_stamp(inside)
+
+        schedule.install(
+            knowledge_root, home=home, loader=FakeLoader(), platform_override="systemd"
+        )
+
+        assert not inside.exists()
+        assert outside.exists()
+
+    @pytest.mark.parametrize("backend", ["launchd", "cron"])
+    def test_other_backends_never_touch_the_stamp(
+        self, home: Path, knowledge_root: Path, api_key_env: None, backend: str
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        _write_stamp(stamp)
+        result = schedule.install(
+            knowledge_root, home=home, loader=FakeLoader(), platform_override=backend
+        )
+        assert stamp.exists()
+        assert result.cleared_stamp is None
+
+    def test_cli_reports_the_cleared_stamp(
+        self,
+        home: Path,
+        knowledge_root: Path,
+        api_key_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stamp = _stamp_path(home / ".local" / "share")
+        _write_stamp(stamp)
+        monkeypatch.setattr(schedule, "_default_loader", FakeLoader())
+
+        rc, out, _err = _run_cli(
+            [
+                "schedule",
+                "install",
+                "--path",
+                str(knowledge_root),
+                "--home",
+                str(home),
+                "--backend",
+                "systemd",
+            ]
+        )
+
+        assert rc == 0, out
+        assert f"cleared orphaned timer stamp: {stamp}" in out
+        assert not stamp.exists()
+
+
 class TestInstallCron:
     def test_install_writes_crontab_line(
         self, home: Path, knowledge_root: Path, api_key_env: None

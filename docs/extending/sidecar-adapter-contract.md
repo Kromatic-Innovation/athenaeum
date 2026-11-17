@@ -360,13 +360,13 @@ own):
 | stdin keys, including `prompt_id` (headless, 2.1.308) | **verified** (probe) |
 | stdin `prompt` == transcript record content (headless, plain text) | **verified** (probe) |
 | Hook env carries `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` (headless) | **verified** (probe) |
-| A sub-agent of an interactive session shows `entrypoint=cli`, `attended=1`, `CHILD_SESSION=1`, and a `claude` on a tty, in its Bash env | **verified, but not a human-typed context.** The values a top-level interactive hook sees are unverified. |
-| The hook does not fire for sub-agent prompts | suggested by one record, not verified. The `subagent` kind row covers it either way. |
-| The first prompt of a `claude "<prompt>"` TTY launch is distinguishable | assumed. The `launch-argument` check covers it. |
-| Interactive hook stdin has the same keys | assumed |
-| Pasted content is expanded inline in stdin `prompt` | assumed (verified only in transcript records) |
-| Queued prompts fire the hook with their own `prompt_id` | assumed |
-| Slash-command stdin carries `<command-args>` inline | assumed |
+| A sub-agent of an interactive session shows `entrypoint=cli`, `attended=1`, `CHILD_SESSION=1`, and a `claude` on a tty, in its Bash env | **verified, but not a human-typed context.** A top-level interactive hook shows the same values, `CHILD_SESSION=1` included (claude 2.1.326, athenaeum#2161), so that flag does not separate the two. |
+| The hook does not fire for sub-agent prompts | **verified** (claude 2.1.326): no line carried an `agent_id`. The parent's turn that receives the sub-agent's report fires, as `unknown`. |
+| The first prompt of a `claude "<prompt>"` TTY launch is distinguishable | **verified live for a single-line prompt** (claude 2.1.326). Multi-line and over-400-word prompts are covered by unit tests only, not run live. |
+| Interactive hook stdin has the same keys | **verified** (claude 2.1.326) |
+| Pasted content is expanded inline in stdin `prompt` | **verified for a large paste**, which arrives wrapped in `<pasted_content>`; a short paste arrives as plain text (athenaeum#2161) |
+| Queued prompts fire the hook with their own `prompt_id` | **false** (claude 2.1.326): the queued prompt reuses the previous prompt's id |
+| Slash-command stdin carries `<command-args>` inline | **false** (claude 2.1.326): the hook gets the raw `/name args` line |
 | claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` in the hook env | assumed |
 | `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | assumed (undocumented) |
 

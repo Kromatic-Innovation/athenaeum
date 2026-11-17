@@ -563,6 +563,9 @@ class InstallResult:
     #: ``install`` surfaces it so a mismatch with the operator's expectation
     #: is visible.
     athenaeum_bin: Path | None = None
+    #: The orphaned systemd timer stamp ``install`` deleted before enabling the
+    #: timer (athenaeum#2721), or ``None`` when there was none to clear.
+    cleared_stamp: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -576,6 +579,30 @@ class RemoveResult:
     removed_logs: tuple[Path, ...] = ()
     #: True when the cron backend deleted the (otherwise empty) crontab.
     crontab_deleted: bool = False
+
+
+def _clear_orphaned_systemd_stamp(
+    home: Path, *, honour_xdg: bool, units_installed: bool
+) -> Path | None:
+    """Delete a timer stamp no installed schedule owns (athenaeum#2721).
+
+    ``remove`` clears the ``Persistent=true`` stamp since athenaeum#2707, but a
+    schedule removed by 0.25.0 or earlier left it behind with no unit files,
+    and a fresh ``install`` that enabled the timer over it would fire a
+    "missed" compile at once. With no athenaeum unit file on disk there is no
+    schedule the stamp could belong to, so it is unlinked before the timer is
+    enabled. When a unit file IS installed (a reinstall over a live schedule)
+    the stamp is the live timer's own state and is left alone.
+
+    Returns the deleted path, or ``None`` when nothing was deleted.
+    """
+    if units_installed:
+        return None
+    stamp_path = _systemd_timer_stamp_path(home, honour_xdg=honour_xdg)
+    if stamp_path.is_file() or stamp_path.is_symlink():
+        stamp_path.unlink()
+        return stamp_path
+    return None
 
 
 def install(
@@ -592,7 +619,13 @@ def install(
 ) -> InstallResult:
     """Generate the platform's unit, write it, and invoke the loader (issue
     athenaeum#2304 AC1). Raises :class:`NoKeySourceError` (AC3) before
-    writing anything when no key source resolves."""
+    writing anything when no key source resolves.
+
+    **Systemd timer stamp (athenaeum#2721):** with no athenaeum unit file
+    installed, a leftover ``Persistent=true`` stamp (left by a 0.25.0-or-older
+    ``remove``) is deleted before the timer is enabled, so the fresh schedule
+    does not fire a stale catch-up run. The deleted path is reported as
+    :attr:`InstallResult.cleared_stamp`."""
     from athenaeum.config import DEFAULT_CACHE_DIR, resolve_cache_dir
 
     loader_fn = loader or _default_loader
@@ -631,6 +664,11 @@ def install(
         service_path = _systemd_service_path(resolved_home)
         timer_path = _systemd_timer_path(resolved_home)
         log_path = _state_log_path(resolved_home)
+        cleared_stamp = _clear_orphaned_systemd_stamp(
+            resolved_home,
+            honour_xdg=home is None,
+            units_installed=service_path.is_file() or timer_path.is_file(),
+        )
         # Finding athenaeum#2408 review (HIGH): `StandardOutput=append:` does
         # not create a missing directory -- without this, the unit fails
         # every run on a fresh host. `_write` already does the equivalent
@@ -656,6 +694,7 @@ def install(
             rc,
             reload_result.output + enable_result.output,
             bin_path,
+            cleared_stamp,
         )
 
     # cron
