@@ -1077,6 +1077,33 @@ class TestRecordTurnLedgerLockDeadline:
         finally:
             os.close(fd)
         assert list(ledger.iter_lines(tmp_path)) == []
-        # No state was cached for the skipped turn, so the next one is turn 1.
+        # The skipped turn wrote no line, so the next one is turn 1.
         line = claude_code.record_turn(raw, {"CLAUDE_PID": "999"})
         assert line is not None and line.turn == 1
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock holder")
+    def test_turn_after_a_skipped_first_turn_is_not_rechecked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A skipped first turn still ran this process's launch check, so the
+        next turn is not checked again: a typed prompt against a launch
+        prompt it does not match would otherwise fail closed."""
+        import fcntl
+        import os
+
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(ledger, "HOOK_LOCK_TIMEOUT", 0.1)
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: "claude launch me now")
+        env = {"CLAUDE_PID": "999"}
+        fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            launch = '{"prompt": "launch me now", "session_id": "s-skip"}'
+            assert claude_code.record_turn(launch, env) is None
+        finally:
+            os.close(fd)
+        typed = '{"prompt": "typed by hand", "session_id": "s-skip"}'
+        line = claude_code.record_turn(typed, env)
+        assert line is not None
+        assert line.prompt_kind == "human"
+        assert line.turn == 1

@@ -770,6 +770,14 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine | None:
     )
 
     if line is None:
+        # No line was written, so the turn count does not advance, but this
+        # process's launch-argument check has run: cache its pid so the next
+        # turn is not checked again as the process's first (a typed second
+        # turn would otherwise fail closed on the `ps` fallback).
+        skipped: dict[str, Any] = {"turn": prior_turn, "claude_pid": claude_pid}
+        if state and "last_seq" in state:
+            skipped["last_seq"] = state["last_seq"]
+        _save_state(ledger_dir, session, skipped)
         return None
     _save_state(ledger_dir, session, {"turn": turn, "claude_pid": claude_pid, "last_seq": line.seq})
     return line
