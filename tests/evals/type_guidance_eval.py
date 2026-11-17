@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from athenaeum import tiers
+from athenaeum import tiers, type_guidance
 from athenaeum.models import EntityAction, TokenUsage, _rates_for_model
 
 ENTITY_TYPE = "preference"
@@ -358,7 +358,7 @@ def run_batch(
     """Run chains and escalate trials. Arms with/without the clause run in
     separate batches so the module-global clause swap never overlaps."""
     records: list[dict[str, Any]] = []
-    original = tiers.TYPE_GUIDANCE_PROMPT
+    original = type_guidance.TYPE_GUIDANCE_PROMPT
     for clause in (True, False):
         batch_arms = [a for a in arms if ARMS[a]["clause"] is clause]
         if not batch_arms:
@@ -376,11 +376,11 @@ def run_batch(
                             )
                         )
         with _CLAUSE_LOCK:
-            tiers.TYPE_GUIDANCE_PROMPT = original if clause else ""
+            type_guidance.TYPE_GUIDANCE_PROMPT = original if clause else ""
             try:
                 records.extend(_run_jobs(jobs, workers))
             finally:
-                tiers.TYPE_GUIDANCE_PROMPT = original
+                type_guidance.TYPE_GUIDANCE_PROMPT = original
     return records
 
 

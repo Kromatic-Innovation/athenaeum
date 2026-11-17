@@ -2675,6 +2675,12 @@ class TokenUsage:
     # ``librarian-run-summary`` only when non-zero.
     citation_only_merges: int = 0
     full_merges: int = 0
+    # ``malformed_merges`` counts a full-echo merge reply with no usable body
+    # that was neither an explicit ``ADDS_NEW_CLAIM: false`` nor ``ESCALATE:``
+    # (issue athenaeum#2739): the observation was dropped, not judged
+    # redundant. Incremented in ``tiers.parse_tier3_merge``; rendered in
+    # ``librarian-run-summary`` only when non-zero.
+    malformed_merges: int = 0
     # Per-hinted-candidate decisions (issue athenaeum#1866). Each tuple is
     # ``(uid, tier, verdict)``: ``uid`` is a person-registry uid the tier-0
     # consult passed to tier 2 as a hint candidate; ``tier`` is whichever

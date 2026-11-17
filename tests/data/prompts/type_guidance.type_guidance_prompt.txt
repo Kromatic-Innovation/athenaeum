@@ -1,6 +1,6 @@
 # GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
 # Editing this file changes what the test EXPECTS, not what the model receives.
-# To change this prompt, edit `athenaeum.tiers.TYPE_GUIDANCE_PROMPT`, then run: python -m athenaeum.prompt_registry --write
+# To change this prompt, edit `athenaeum.type_guidance.TYPE_GUIDANCE_PROMPT`, then run: python -m athenaeum.prompt_registry --write
 # ===8<=== prompt bytes below this line are asserted verbatim ===8<===
 The operator has written the guidance below for pages of this type. Follow it
 when deciding where new content goes, what to keep apart, what to preserve and

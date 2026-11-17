@@ -133,7 +133,6 @@ from athenaeum.models import (
     cache_usage_counts,
     generate_uid,
     is_tombstone,
-    load_schema_list,
     parse_frontmatter,
     render_frontmatter,
     resolve_page_type,
@@ -149,7 +148,6 @@ from athenaeum.prompt_safety import (
     UNTRUSTED_DATA_CLAUSE,
     contains_tag,
     data_only_clause,
-    defang_tag,
     fence_untrusted,
 )
 from athenaeum.provider import (
@@ -168,7 +166,18 @@ from athenaeum.relevance_policy import (
     RelevancePolicy,
     policy_categories,
 )
+from athenaeum.schema_text import _SCHEMA_FRAGMENT_MAX_CHARS, _load_schema_text  # noqa: F401
 from athenaeum.search import embed_texts
+from athenaeum.type_guidance import (  # noqa: F401  (re-exported: existing import paths)
+    TYPE_GUIDANCE_PREFIX,
+    TYPE_GUIDANCE_PROMPT,
+    TYPE_TEMPLATE_PREFIX,
+    TypeGuidance,
+    _load_type_guidance_prompt,
+    render_type_guidance_section,
+    resolve_type_guidance,
+    type_guidance_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -274,55 +283,11 @@ def _timed_llm_call(
     return result
 
 
-# Cap on operator-tunable schema fragments read from the live wiki at runtime
-# (issue athenaeum#563). Both shipped defaults are well under 2KB; the cap degrades a
-# too-long or accidentally-appended fragment (truncate, do not drop) so it
-# cannot silently inflate every classify/create call.
-_SCHEMA_FRAGMENT_MAX_CHARS = 8192
-
 # The operator-tunable schema fragments that tiers.py interpolates into prompt
 # *instruction position* (adjacent to the fenced <user_document> block). These
 # are the subset of init._SCHEMA_FILES whose live-vs-default divergence the
 # attribution child (athenaeum#567) surfaces via :func:`schema_fragment_state`.
 _ATTRIBUTED_SCHEMA_FRAGMENTS = ("observation-filter.md", "_entity-template.md")
-
-
-def _load_schema_text(wiki_root: Path, filename: str) -> str:
-    """Load an operator-tunable schema fragment from the live wiki.
-
-    This is the designed operator tuning knob (issue athenaeum#17): the package ships
-    defaults under ``athenaeum.schema`` that ``init`` copies write-once into
-    ``wiki/_schema/``, and this reads the (possibly edited) copy back at runtime.
-    Returns ``''`` if the fragment is absent or unreadable.
-
-    Hardened per issue athenaeum#563, because the two callers interpolate the result into
-    prompt *instruction position* next to the fenced ``<user_document>`` block:
-
-    - **Bounded** to :data:`_SCHEMA_FRAGMENT_MAX_CHARS` — a too-long fragment is
-      truncated (with a warning naming the file and its size), never dropped.
-    - **Defanged** — literal ``<user_document>`` / ``</user_document>`` markers
-      are neutralized so an edited fragment cannot forge the trust boundary of
-      the adjacent untrusted block.
-
-    A fragment with no fence markers that is under the cap (both shipped
-    defaults) renders byte-identically to before.
-    """
-    path = wiki_root / "_schema" / filename
-    if not path.exists():
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    if len(text) > _SCHEMA_FRAGMENT_MAX_CHARS:
-        log.warning(
-            "schema fragment %s is %d chars; truncating to %d (issue athenaeum#563)",
-            filename,
-            len(text),
-            _SCHEMA_FRAGMENT_MAX_CHARS,
-        )
-        text = text[:_SCHEMA_FRAGMENT_MAX_CHARS]
-    return defang_tag(text, "user_document")
 
 
 def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
@@ -356,156 +321,6 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
         default_sha = hashlib.sha256(default_bytes).hexdigest()
         state[fname] = (live_sha, live_path.exists() and live_sha == default_sha)
     return state
-
-
-# ---------------------------------------------------------------------------
-# Per-type Tier-3 guidance and template overrides (issue athenaeum#2590)
-# ---------------------------------------------------------------------------
-
-#: Filename prefix of an operator-authored per-type guidance fragment,
-#: ``wiki/_schema/_type-guidance-<type>.md``. Flat and underscore-prefixed on
-#: purpose: the page walkers that use ``rglob`` with a filename-only ``_``
-#: check would sweep a ``types/`` subdirectory of non-underscore names.
-TYPE_GUIDANCE_PREFIX = "_type-guidance-"
-
-#: Filename prefix of an operator-authored per-type create template,
-#: ``wiki/_schema/_entity-template-<type>.md``. Replaces the global
-#: ``_entity-template.md`` for creates of that type.
-TYPE_TEMPLATE_PREFIX = "_entity-template-"
-
-#: A type is only ever used to build a path after it passes this shape check
-#: AND appears in the declared ``types.md`` list (issue athenaeum#2590).
-_TYPE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-
-
-class TypeGuidance(NamedTuple):
-    """The per-type fragments the Tier-3 builders inject (issue athenaeum#2590).
-
-    Both fields are ``""`` when the type has no file, is invalid, or is not
-    declared — the builders treat ``""`` as "render nothing", which is what
-    keeps a wiki without these files byte-identical to before.
-    """
-
-    guidance: str
-    template: str
-
-
-_NO_TYPE_GUIDANCE = TypeGuidance("", "")
-
-
-def _has_any_type_fragment(schema_dir: Path) -> bool:
-    """True when ``_schema/`` holds at least one per-type fragment file."""
-    try:
-        for child in schema_dir.iterdir():
-            name = child.name
-            if name.endswith(".md") and (
-                name.startswith(TYPE_GUIDANCE_PREFIX) or name.startswith(TYPE_TEMPLATE_PREFIX)
-            ):
-                return True
-    except OSError:
-        return False
-    return False
-
-
-def resolve_type_guidance(wiki_root: Path | None, entity_type: str | None) -> TypeGuidance:
-    """Return the operator's guidance text and template override for *entity_type*.
-
-    Issue athenaeum#2590. Reads ``wiki/_schema/_type-guidance-<type>.md`` and
-    ``wiki/_schema/_entity-template-<type>.md`` through
-    :func:`_load_schema_text`, so both are capped at
-    :data:`_SCHEMA_FRAGMENT_MAX_CHARS` and defanged exactly like the global
-    fragments.
-
-    The type comes from LLM output over untrusted text (create) or from page
-    frontmatter (merge), so no path is built from it until it matches
-    :data:`_TYPE_KEY_RE` and is listed in the declared ``types.md``. Any other
-    type (``../x``, ``Recipe``, an undeclared class) yields empty fragments and
-    a warning. When ``_schema/`` holds no per-type files at all, this returns
-    empty without reading ``types.md`` or logging anything, so a wiki that
-    never opted in pays nothing.
-    """
-    if wiki_root is None or not entity_type:
-        return _NO_TYPE_GUIDANCE
-    schema_dir = Path(wiki_root) / "_schema"
-    if not _has_any_type_fragment(schema_dir):
-        return _NO_TYPE_GUIDANCE
-    if not _TYPE_KEY_RE.match(entity_type):
-        log.warning(
-            "type-guidance: ignoring type %r: not a valid type key (issue athenaeum#2590)",
-            entity_type,
-        )
-        return _NO_TYPE_GUIDANCE
-    if entity_type not in load_schema_list(schema_dir, "types.md"):
-        log.warning(
-            "type-guidance: ignoring type %r: not declared in types.md (issue athenaeum#2590)",
-            entity_type,
-        )
-        return _NO_TYPE_GUIDANCE
-    return TypeGuidance(
-        guidance=_load_schema_text(wiki_root, f"{TYPE_GUIDANCE_PREFIX}{entity_type}.md"),
-        template=_load_schema_text(wiki_root, f"{TYPE_TEMPLATE_PREFIX}{entity_type}.md"),
-    )
-
-
-def type_guidance_state(wiki_root: Path) -> dict[str, str]:
-    """Report ``{type: sha256_hex}`` for each declared type that has a per-type file.
-
-    Issue athenaeum#2590: the input to the run summary's ``type_guidance=``
-    token. The hash covers the guidance file and the template override
-    together, so an edit to either changes it. Only types the builders would
-    actually use (valid key, declared in ``types.md``) are reported, in
-    sorted order. Empty when ``_schema/`` holds no per-type files.
-    """
-    schema_dir = Path(wiki_root) / "_schema"
-    if not _has_any_type_fragment(schema_dir):
-        return {}
-    state: dict[str, str] = {}
-    for entity_type in sorted(set(load_schema_list(schema_dir, "types.md"))):
-        if not _TYPE_KEY_RE.match(entity_type):
-            continue
-        parts: list[bytes] = []
-        found = False
-        for prefix in (TYPE_GUIDANCE_PREFIX, TYPE_TEMPLATE_PREFIX):
-            path = schema_dir / f"{prefix}{entity_type}.md"
-            try:
-                data = path.read_bytes()
-                found = True
-            except OSError:
-                data = b""
-            parts.append(prefix.encode() + b"\0" + data)
-        if found:
-            state[entity_type] = hashlib.sha256(b"\0\0".join(parts)).hexdigest()
-    return state
-
-
-def _load_type_guidance_prompt() -> str:
-    """Read the type-guidance precedence clause (issue athenaeum#2590).
-
-    Prompt text is content, not code: the clause lives in
-    ``src/athenaeum/prompts/type_guidance.md`` and is bound to
-    :data:`TYPE_GUIDANCE_PROMPT` at import time, the same convention as
-    :func:`_load_relevance_category_prompt`.
-    """
-    resource = importlib.resources.files("athenaeum.prompts").joinpath("type_guidance.md")
-    return resource.read_text(encoding="utf-8")
-
-
-#: The precedence clause rendered ahead of an operator's per-type guidance,
-#: and only when a guidance file exists. Registered in
-#: ``athenaeum.prompt_registry`` as ``tiers.type_guidance_prompt``.
-TYPE_GUIDANCE_PROMPT = _load_type_guidance_prompt()
-
-
-def render_type_guidance_section(entity_type: str | None, guidance: str) -> str:
-    """Render the Tier-3 ``{type_guidance_section}`` slot (issue athenaeum#2590).
-
-    ``""`` when there is no guidance, which leaves every Tier-3 prompt
-    byte-identical to before this issue. The one-line heading stays inline
-    (it only names the type); the clause text lives in the package prompt.
-    """
-    if not guidance or not entity_type:
-        return ""
-    return f"\n## Guidance for `{entity_type}` pages\n{TYPE_GUIDANCE_PROMPT}{guidance}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -5488,6 +5303,22 @@ def tier3_merge_append_params(
     }
 
 
+_ADDS_NEW_CLAIM_VERDICT_RE = re.compile(r"(true|false)(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def _adds_new_claim_verdict(first_line: str) -> str:
+    """Return ``"true"``/``"false"``/``""`` for an ``ADDS_NEW_CLAIM:`` line.
+
+    Issue athenaeum#2739: the verdict is the LEADING word after the colon;
+    anything the model writes after it on the same line (``false -- a
+    re-confirmation``) is prose, not part of the verdict. ``""`` means the
+    value did not start with ``true``/``false`` (unparseable).
+    """
+    value = first_line.split(":", 1)[1].strip()
+    m = _ADDS_NEW_CLAIM_VERDICT_RE.match(value)
+    return m.group(1).lower() if m else ""
+
+
 def parse_tier3_merge_append(
     text: str,
     action: EntityAction,
@@ -5524,7 +5355,7 @@ def parse_tier3_merge_append(
 
     first_line, _sep, rest = text.partition("\n")
     if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
-        verdict = first_line.split(":", 1)[1].strip().lower()
+        verdict = _adds_new_claim_verdict(first_line)
         text = rest.strip()
         if verdict == "false":
             if usage is not None:
@@ -6041,6 +5872,10 @@ def _append_source_citation(existing_body: str, source_ref: str) -> str:
 #: this fires for any source, never gated on adapter name, source type, or
 #: page title.
 MERGE_CITATION_ONLY_LOG_PREFIX = "tier3-merge-citation-only"
+
+#: Log prefix for a full-echo merge reply with no usable body that is neither
+#: an explicit ``ADDS_NEW_CLAIM: false`` nor ``ESCALATE:`` (athenaeum#2739).
+MERGE_MALFORMED_LOG_PREFIX = "tier3-merge-malformed-reply"
 
 #: Stable, greppable log prefix for the hint-derived subject-mismatch
 #: decision (issue athenaeum#1866): a merge verify for an
@@ -7029,7 +6864,7 @@ def parse_tier3_merge(
     # today's behaviour, unchanged.
     first_line, _sep, rest = text.partition("\n")
     if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
-        verdict = first_line.split(":", 1)[1].strip().lower()
+        verdict = _adds_new_claim_verdict(first_line)
         # Strip the sentinel line regardless of verdict — even an
         # unparseable value must not leave "ADDS_NEW_CLAIM: ..." glued onto
         # what the NO_MERGE:/ESCALATE:/plausible-echo checks below treat as
@@ -7075,6 +6910,23 @@ def parse_tier3_merge(
             text = parts[1].strip()
         else:
             return None, escalation
+
+    # Issue athenaeum#2739: no body left at all (e.g. a bare ``ADDS_NEW_CLAIM:
+    # true`` line) and not an explicit false / NO_MERGE / ESCALATE-only reply.
+    # Callers treat a falsy body as "no write", so say so loudly instead of
+    # letting the dropped observation look like a redundant merge.
+    if not text.strip():
+        if usage is not None:
+            usage.malformed_merges += 1
+        log.warning(
+            "%s page=%s source=%s — full-echo reply has no usable page body "
+            "and is neither ADDS_NEW_CLAIM: false nor ESCALATE:; existing "
+            "page left unchanged, observation not recorded",
+            MERGE_MALFORMED_LOG_PREFIX,
+            action.name,
+            source_ref,
+        )
+        return None, escalation
 
     # AC2: independent of whether the model used either sentinel above —
     # catches a response that ignores both and just writes prose (the exact

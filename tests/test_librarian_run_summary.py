@@ -235,6 +235,15 @@ class TestRenderRunSummary:
         assert "citation_only_merges" not in line
         assert "full_merges" not in line
 
+    def test_malformed_merges_rendered_only_when_present(self) -> None:
+        # Issue athenaeum#2739: dropped full-echo replies ride the entity segment.
+        with_it = _render_run_summary(
+            [("entity", 4.2, {"calls": 2, "files": 1, "malformed_merges": 3})]
+        )
+        without = _render_run_summary([("entity", 4.2, {"calls": 2, "files": 1})])
+        assert "malformed_merges=3" in with_it
+        assert "malformed_merges" not in without
+
     def test_out_tok_per_call_rendered_in_entity_segment(self) -> None:
         # Issue athenaeum#490 (slice A): output-tokens-per-call rides the entity
         # segment so the silent full-page-echo fallback's ~10x output-cost
