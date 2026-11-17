@@ -110,6 +110,21 @@ def _is_identity_error(exc: subprocess.CalledProcessError) -> bool:
     return "user.name" in stderr or "user.email" in stderr or exc.returncode == 128
 
 
+def _git(cmd: list[str], cwd: Path) -> None:
+    """Run a git command; turn a failure into a short ``SystemExit`` message."""
+    try:
+        subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        raise _git_failure(exc) from exc
+
+
+def _git_failure(exc: subprocess.CalledProcessError) -> SystemExit:
+    stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+    cmd = exc.cmd if isinstance(exc.cmd, str) else " ".join(str(c) for c in exc.cmd)
+    detail = (stderr or "").strip() or f"exit status {exc.returncode}"
+    return SystemExit(f"athenaeum init: `{cmd}` failed:\n{detail}")
+
+
 def _rollback(root: Path, created: list[Path]) -> None:
     """Remove only what this call created, newest first; never pre-existing content."""
     import shutil
@@ -189,14 +204,14 @@ def _scaffold(path: Path, created: list[Path]) -> None:
     git_dir = path / ".git"
     if not git_dir.exists():
         created.append(git_dir)
-        subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+        _git(["git", "init"], path)
+        _git(["git", "add", "."], path)
         commit = ["git", "commit", "-m", "Initialize knowledge directory"]
         try:
             subprocess.run(commit, cwd=path, check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:
             if not _is_identity_error(exc):
-                raise
+                raise _git_failure(exc) from exc
             # No git identity anywhere: set a REPO-LOCAL one on this new repo
             # only, so a fresh machine needs no unlisted prerequisite.
             import sys
