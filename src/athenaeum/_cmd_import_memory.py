@@ -81,8 +81,10 @@ in the staging queue when its cluster is held (every multi-member cluster is,
 until the comparator lane has a live caller, athenaeum#1946), so by presence
 alone a held file looks "not compiled". But its content already reached a
 ``wiki/auto-*.md`` page, whose body carries a ``## From `<scope>/<file>```
-header per member. :func:`_compiled_member_refs` reads those headers; a
-staged file that remains AND is named there is recorded in the state file with
+header per member (a member whose paragraphs all duplicate an earlier
+member's gets no header, so :class:`_CompiledPages` also accepts a file whose
+every paragraph is on a page). Only pages written by THIS compile count. A
+staged file that remains AND reached a page is recorded in the state file with
 a ``held`` reason, so it is never restaged or reclassified. The state file is
 the place (rather than the librarian) because "which source files has the user
 asked import-memory to handle" is this command's own bookkeeping: the
@@ -109,6 +111,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -501,18 +504,69 @@ HELD_REASON = (
 )
 
 
-def _compiled_member_refs(wiki_root: Path) -> set[str]:
-    """``<scope>/<filename>`` of every member a compiled ``auto-*`` page cites."""
-    from athenaeum.merge import AUTO_WIKI_PREFIX
+#: Footnote markers (``[^src-1]``) the merge stamps onto the surviving copy of
+#: a paragraph; stripping them restores the member's own text.
+_FOOTNOTE_MARKER_RE = re.compile(r"\[\^[^\]\s]+\]")
 
-    refs: set[str] = set()
-    for page in wiki_root.glob(f"{AUTO_WIKI_PREFIX}*.md"):
+#: Slack for coarse filesystem timestamps when asking "was this page written
+#: by the compile that just ran".
+_MTIME_SLACK_SECONDS = 2.0
+
+
+def _canonical_paragraphs(text: str) -> set[str]:
+    """Whitespace-canonical, marker-free paragraphs of *text* (the unit
+    :func:`athenaeum.merge.synthesize_body` dedupes on)."""
+    plain = _FOOTNOTE_MARKER_RE.sub("", text)
+    return {
+        canonical
+        for para in re.split(r"\n\s*\n", plain)
+        if (canonical := " ".join(para.split()))
+    }
+
+
+class _CompiledPages:
+    """What the ``wiki/auto-*.md`` pages written since *since* say they hold.
+
+    ``refs`` is every ``<scope>/<filename>`` a page cites in a ``## From``
+    header; ``paragraphs`` is every canonical paragraph on those pages. Only
+    pages modified at or after *since* count, so a stale page from an earlier
+    run cannot vouch for a file this run's compile dropped (a miss leaves the
+    file pending, the safe direction).
+    """
+
+    def __init__(self, wiki_root: Path, since: float) -> None:
+        from athenaeum.merge import AUTO_WIKI_PREFIX
+
+        self.refs: set[str] = set()
+        self.paragraphs: set[str] = set()
+        for page in wiki_root.glob(f"{AUTO_WIKI_PREFIX}*.md"):
+            try:
+                if page.stat().st_mtime < since:
+                    continue
+                text = page.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            self.refs.update(_MEMBER_HEADER_RE.findall(text))
+            self.paragraphs |= _canonical_paragraphs(text)
+
+    def holds(self, key: str, staged: Path) -> bool:
+        """True when the content of the staged file *key* reached a page.
+
+        Either its section header is on a page, or — when the merge dropped
+        the whole section because every paragraph duplicated an earlier
+        member's, so no header was written — every paragraph of its body is
+        on a page.
+        """
+        if key in self.refs:
+            return True
+        from athenaeum.models import parse_frontmatter
+
         try:
-            text = page.read_text(encoding="utf-8")
+            _meta, body = parse_frontmatter(staged.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
-            continue
-        refs.update(_MEMBER_HEADER_RE.findall(text))
-    return refs
+            return False
+        mine = _canonical_paragraphs(body)
+        return bool(mine) and mine <= self.paragraphs
 
 
 def _pending_files(
@@ -745,6 +799,7 @@ def run_import(
             _stage_file(knowledge_root, project, file)
 
         compile = compile_fn or _default_compile_batch
+        compile_started = time.time()
         try:
             with _tally_classify_outcomes() as tally:
                 exit_code = compile(
@@ -814,15 +869,18 @@ def run_import(
         refused_count = 0
         processed_count = 0
         held_count = 0
-        compiled_refs: set[str] | None = None
+        compiled: _CompiledPages | None = None
         for project, file in batch:
             staged = _staged_path(knowledge_root, project, file)
             if staged.exists():
                 reason = _relevance_refusal(staged, relevance_policy)
                 if reason is None:
-                    if compiled_refs is None:
-                        compiled_refs = _compiled_member_refs(knowledge_root / "wiki")
-                    if _record_key(project.scope, file.path.name) in compiled_refs:
+                    if compiled is None:
+                        compiled = _CompiledPages(
+                            knowledge_root / "wiki",
+                            compile_started - _MTIME_SLACK_SECONDS,
+                        )
+                    if compiled.holds(_record_key(project.scope, file.path.name), staged):
                         _mark_imported(
                             state,
                             project.scope,

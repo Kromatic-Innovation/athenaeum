@@ -987,3 +987,74 @@ class TestHeldButCompiledFilesConverge:
             out=io.StringIO(),
         )
         assert load_state(tmp_path / "cache")["imported"] == {}
+
+
+class TestHeldDetectionEdges:
+    """Edges of "content reached a compiled page" (athenaeum#2734)."""
+
+    def _import(
+        self, tmp_path: Path, names: list[str], contents: dict[str, str], compile_fn
+    ) -> None:  # type: ignore[no-untyped-def]
+        root = tmp_path / "claude-projects"
+        for name in names:
+            _write(root / "proj-a" / "memory" / name, contents[name])
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discover_project_memories(root),
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=compile_fn,
+            out=io.StringIO(),
+        )
+
+    def test_stale_page_from_an_earlier_run_does_not_vouch(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "knowledge" / "wiki"
+        wiki.mkdir(parents=True)
+        stale = wiki / "auto-old.md"
+        stale.write_text("## From `proj-a/note.md`\n\nold fact\n", encoding="utf-8")
+        os.utime(stale, (time.time() - 3600, time.time() - 3600))
+        self._import(
+            tmp_path, ["note.md"], {"note.md": "new fact"}, lambda *a, **k: 0
+        )
+        assert load_state(tmp_path / "cache")["imported"] == {}
+
+    def test_member_fully_deduplicated_into_a_sibling_is_still_held(
+        self, tmp_path: Path
+    ) -> None:
+        """Two members with identical text: the merge writes ONE section (the
+        second has no header) and stamps footnote markers on the survivor."""
+        from athenaeum.footnote_markers import marker_label
+        from athenaeum.merge import synthesize_body
+
+        text = "The ledger rounds toward the vendor. It never rounds toward the buyer."
+
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            wiki = knowledge_root / "wiki"
+            wiki.mkdir(parents=True, exist_ok=True)
+            body = synthesize_body(
+                [("proj-a", "dup-1.md", text), ("proj-a", "dup-2.md", text)],
+                [[marker_label(1)], [marker_label(2)]],
+            )
+            assert "dup-2.md" not in body  # the premise: no header for member 2
+            (wiki / "auto-dup.md").write_text(
+                "---\nname: dup\n---\n\n" + body, encoding="utf-8"
+            )
+            return 0  # both stay staged: the cluster is held
+
+        self._import(
+            tmp_path,
+            ["dup-1.md", "dup-2.md"],
+            {"dup-1.md": text, "dup-2.md": text},
+            _compile,
+        )
+        records = load_state(tmp_path / "cache")["imported"]
+        assert set(records) == {"proj-a/dup-1.md", "proj-a/dup-2.md"}
+        assert all("held" in r for r in records.values())
