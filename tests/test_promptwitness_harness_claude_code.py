@@ -45,6 +45,17 @@ class TestClassifyPromptKind:
         )
         assert (kind, human) == ("slash-command", True)
 
+    def test_raw_slash_line_is_slash_command(self) -> None:
+        """The live hook sees the unexpanded ``/name args`` line (athenaeum#2161)."""
+        for prompt in ("/review fix the typo", "/review", "  /ns:cmd-1.x args"):
+            kind, human = claude_code.classify_prompt_kind(prompt, **self._NO_OVERRIDE)
+            assert (kind, human) == ("slash-command", True), prompt
+
+    def test_path_like_or_mid_sentence_slash_is_still_human(self) -> None:
+        for prompt in ("/usr/bin is missing", "/ not a command", "see /review later", "//x"):
+            kind, human = claude_code.classify_prompt_kind(prompt, **self._NO_OVERRIDE)
+            assert (kind, human) == ("human", True), prompt
+
     def test_task_notification_prefix_is_non_human(self) -> None:
         kind, human = claude_code.classify_prompt_kind(
             "<task-notification>done</task-notification>", **self._NO_OVERRIDE
@@ -203,6 +214,17 @@ class TestSlashArgsSegment:
         assert prompt[segment.start : segment.end] == "fix the typo in README"
         assert segment.digest == canon.digest("fix the typo in README")
 
+    def test_raw_slash_line_args_yield_one_segment(self) -> None:
+        prompt = "/review fix the typo in README"
+        segment = claude_code.slash_args_segment(prompt)
+        assert segment is not None
+        assert prompt[segment.start : segment.end] == "fix the typo in README"
+        assert segment.digest == canon.digest("fix the typo in README")
+
+    def test_raw_slash_line_without_args_yields_none(self) -> None:
+        assert claude_code.slash_args_segment("/review") is None
+        assert claude_code.slash_args_segment("/review   ") is None
+
     def test_no_command_args_tag_yields_none(self) -> None:
         prompt = (
             "<command-message>running /review</command-message>"
@@ -256,7 +278,9 @@ class TestDetectChannel:
         )
         assert channel == "unknown"
 
-    def test_cli_attended_tty_child_session_gives_unknown(self) -> None:
+    def test_cli_attended_tty_child_session_flag_is_not_a_classifier_input(self) -> None:
+        """A live top-level interactive hook carries CHILD_SESSION=1
+        (athenaeum#2161), so the flag must not demote it."""
         env = {
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "CLAUDE_CODE_SESSION_ATTENDED": "1",
@@ -265,7 +289,8 @@ class TestDetectChannel:
         channel, _signals = claude_code.detect_channel(
             env, pid="123", tty_probe=lambda pid: True
         )
-        assert channel == "unknown"
+        assert channel == "interactive"
+        assert _signals["child_session"] == "1"
 
     def test_cli_attended_tty_bridge_gives_bridge(self) -> None:
         env = {
@@ -644,3 +669,33 @@ class TestSessionClose:
         assert close_line.turns == 2
         assert close_line.turns_witnessed == 1
         assert close_line.last_seq == 2
+
+
+class TestLaunchArgumentFromPsOutput:
+    """``ps -o args=`` joins argv with single spaces and no quoting
+    (athenaeum#2161), so a multi-word launch prompt spans several tokens."""
+
+    def test_multi_word_prompt_matches_as_contiguous_run(self) -> None:
+        prompt = "please reply with the single word 'ack'"
+        assert claude_code._is_launch_argument(
+            canon.digest(prompt),
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: f"claude --settings /x/s.json {prompt}",
+        )
+
+    def test_non_matching_prompt_is_not_a_launch_argument(self) -> None:
+        assert not claude_code._is_launch_argument(
+            canon.digest("something typed later"),
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: "claude --settings /x/s.json please reply",
+        )
+
+    def test_later_turn_is_never_a_launch_argument(self) -> None:
+        assert not claude_code._is_launch_argument(
+            canon.digest("hello"),
+            pid="1",
+            is_first_turn=False,
+            argv_probe=lambda _pid: "claude hello",
+        )

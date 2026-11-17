@@ -115,6 +115,7 @@ from athenaeum.transcript_verify import (
 )
 from athenaeum.witness_attestation import AttestationIndex, AttestationOutcome, attest
 from promptwitness import canon, ledger
+from promptwitness.harness import claude_code
 
 __all__ = [
     "PROMPTWITNESS_LIVE_CLAUDE_ENV",
@@ -552,12 +553,23 @@ _PTY_ROWS = 50
 _PTY_COLS = 200
 
 
+def _become_session_leader_with_ctty() -> None:
+    """``preexec_fn`` for :func:`spawn_claude_pty`: new session, then adopt
+    the pty on fd 0 as the controlling terminal."""
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> PtySession:
     """Spawn *argv* (normally ``["claude", ...]``) attached to a fresh pty.
 
-    ``start_new_session=True`` gives the child its own session/controlling
-    terminal, mirroring a real interactive launch rather than inheriting
-    this test process's own (nonexistent, under pytest) controlling tty --
+    The child becomes a session leader (``setsid``) and the pty slave is
+    made its CONTROLLING terminal (``TIOCSCTTY``), mirroring a real
+    interactive launch. ``start_new_session=True`` alone is not enough:
+    ``setsid`` detaches from any tty but does not acquire one, so the child
+    had stdin on a tty yet ``tty_nr == 0`` in ``/proc/<pid>/stat`` and the
+    hook classified every interactive row as ``unknown`` (athenaeum#2161 live
+    run, Linux container) --
     :func:`promptwitness.harness.claude_code._probe_has_tty` reads the
     CHILD's ``/proc/<pid>/stat`` tty field, not this process's. It also
     makes the child the leader of its own process group, which is exactly
@@ -578,7 +590,7 @@ def spawn_claude_pty(argv: list[str], *, env: Mapping[str, str], cwd: Path) -> P
             stderr=slave_fd,
             cwd=str(cwd),
             env=dict(env),
-            start_new_session=True,
+            preexec_fn=_become_session_leader_with_ctty,
         )
     finally:
         os.close(slave_fd)
@@ -844,12 +856,13 @@ class EntryPathCase:
     intake_miss_reason_prefix: str | None
 
 
-#: `/compact` is a real built-in slash command that accepts freeform
-#: trailing args. ASSUMED, not verified here, that its args wrap in
-#: `<command-args>` the same way every OTHER slash command's args do --
-#: see the module docstring's "Verified vs assumed" note; swap this
-#: constant if athenaeum#2161 finds a better-behaved built-in.
-_SLASH_COMMAND_LINE = "/compact keep the recent discussion about entry paths"
+#: A custom slash command the driver writes into the isolated config dir.
+#: The built-in ``/compact`` was the first choice but the live run
+#: (athenaeum#2161) showed local built-in commands never fire
+#: ``UserPromptSubmit``; only a command that expands into a model prompt does.
+_SLASH_COMMAND_NAME = "entrypath-echo"
+_SLASH_COMMAND_FILE_BODY = "Reply with the single word 'ack'. Ignore these arguments: $ARGUMENTS\n"
+_SLASH_COMMAND_LINE = f"/{_SLASH_COMMAND_NAME} keep the recent discussion about entry paths"
 
 #: A prompt asking Claude to use its own Agent/Task tool. Whether this
 #: reliably triggers a sub-agent turn (vs. Claude answering directly) is
@@ -873,7 +886,10 @@ _ACK_AGAIN_PROMPT = "please reply with the single word 'ack' again"
 _QUEUED_FIRST_PROMPT = "count slowly from 1 to 20, one number per line"
 _QUEUED_SECOND_PROMPT = "also tell me a short fact about lighthouses"
 _SLASH_NEEDLE = "keep the recent discussion about entry paths"
-_PASTE_BODY = "pasted block of reference text"
+_PASTE_BODY = "\n".join(
+    f"reference line {i}: the quick brown fox jumps over the lazy dog" for i in range(1, 41)
+)
+_PASTE_NEEDLE = "reference line 1:"
 _SUBAGENT_NEEDLE = "spawn a sub-agent that replies"
 _BACKGROUND_NEEDLE = "as a background task"
 _HEADLESS_PROMPT = "reply with the word 'ack'"
@@ -889,6 +905,12 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         intake_hit=True,
         intake_miss_reason_prefix=None,
     ),
+    # Live observation (athenaeum#2161, claude 2.1.326): a prompt queued
+    # behind a running turn fires the hook with the SAME ``prompt_id`` as the
+    # turn it queued behind, not its own. Intake resolves the prompt by that
+    # id, finds the first prompt's text, and reports a clean
+    # ``digest-mismatch`` miss -- never a false "witnessed". The row pins that
+    # safe miss; flip it to a hit once the adapter can attest a shared id.
     EntryPathCase(
         id="queued-while-turn-runs",
         description="queued (typed while a turn runs)",
@@ -896,9 +918,15 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         expected_channel="interactive",
         expected_segment_kinds=("typed",),
         expect_resumed=False,
-        intake_hit=True,
-        intake_miss_reason_prefix=None,
+        intake_hit=False,
+        intake_miss_reason_prefix="digest-mismatch",
     ),
+    # Live observation (athenaeum#2161, claude 2.1.326): the hook classifies
+    # and records the slash line correctly, but the transcript record of a
+    # slash command carries NO ``promptSource`` (``origin.kind`` is
+    # ``human``), so intake reports a clean ``transcript-promptsource:absent``
+    # miss -- never a false "witnessed". The row pins that safe miss; flip it
+    # to a hit once intake accepts a slash record without ``promptSource``.
     EntryPathCase(
         id="slash-command-with-args",
         description="slash command with args",
@@ -906,8 +934,8 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         expected_channel="interactive",
         expected_segment_kinds=("slash-args",),
         expect_resumed=False,
-        intake_hit=True,
-        intake_miss_reason_prefix=None,
+        intake_hit=False,
+        intake_miss_reason_prefix="transcript-promptsource",
     ),
     EntryPathCase(
         id="pasted-content",
@@ -919,15 +947,19 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         intake_hit=True,
         intake_miss_reason_prefix=None,
     ),
+    # The ``-p`` prompt IS a launch argument, so once ``ps`` output is matched
+    # as contiguous words (athenaeum#2161) the first headless turn classifies
+    # ``launch-argument``; the channel stays ``headless`` and the prompt is
+    # never human-countable either way.
     EntryPathCase(
         id="headless-claude-p",
         description="headless `claude -p`",
-        expected_prompt_kind="human",
+        expected_prompt_kind="launch-argument",
         expected_channel="headless",
-        expected_segment_kinds=("typed",),
+        expected_segment_kinds=(),
         expect_resumed=False,
         intake_hit=False,
-        intake_miss_reason_prefix="channel-not-interactive",
+        intake_miss_reason_prefix="kind-not-human",
     ),
     EntryPathCase(
         id="resumed-session",
@@ -1071,11 +1103,18 @@ def _attest_line(
     utterance_digest = canon.digest(canon.normalize(fields["matched_record_text"])).removeprefix(
         "sha256:"
     )
+    claim = fields["matched_record_text"]
+    if line.prompt_kind == "slash-command":
+        # A memory quotes what the human typed, which for a slash command is
+        # its args -- intake checks the claim against the args span.
+        args_segment = claude_code.slash_args_segment(claim)
+        if args_segment is not None:
+            claim = claim[args_segment.start : args_segment.end]
     outcome = attest(
         index,
         prompt_id=fields["prompt_id"],
         origin_session_id=str(line.session),
-        claim=fields["matched_record_text"],
+        claim=claim,
         utterance_digest=utterance_digest,
         matched_record_text=fields["matched_record_text"],
         transcript_origin_kind=fields["transcript_origin_kind"],
@@ -1138,11 +1177,16 @@ def _drive_queued_while_turn_runs(paths: _LiveHarnessPaths, tmp_path: Path) -> l
     lines = _ledger_lines_since(paths.promptwitness_dir, before)
     assert len(lines) == 2, f"expected two turn lines (initial + queued), got {len(lines)}"
     queued = lines[1]
-    assert queued.prompt_id, "the queued turn is expected to carry its own prompt_id"
+    assert queued.prompt_id, "the queued turn is expected to carry a prompt_id"
     return queued
 
 
 def _drive_slash_command_with_args(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.WitnessLine:
+    command_dir = paths.claude_config_dir / "commands"
+    command_dir.mkdir(parents=True, exist_ok=True)
+    (command_dir / f"{_SLASH_COMMAND_NAME}.md").write_text(
+        _SLASH_COMMAND_FILE_BODY, encoding="utf-8"
+    )
     session = spawn_claude_pty(
         ["claude", "--settings", str(paths.settings_path)],
         env=paths.child_env,
@@ -1179,7 +1223,7 @@ def _drive_pasted_content(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.Wi
                 ("paste", _PASTE_BODY),
                 ("type", " -- please summarize it in one word"),
             ],
-            needle=_PASTE_BODY,
+            needle=_PASTE_NEEDLE,
         )
         read_pty_until_idle(session.master_fd, idle_seconds=4.0, overall_timeout=90.0)
     finally:
@@ -1280,22 +1324,28 @@ def _drive_background_task_notification(
     )
     try:
         read_pty_until_idle(session.master_fd)
+        # Captured BEFORE the trigger prompt: the notification can land while
+        # the trigger turn is still settling, so a marker taken after it
+        # races the very line this row asserts on (athenaeum#2161 live run).
+        before = _max_seq(paths.promptwitness_dir)
         submit_and_confirm(
             session,
             paths.claude_config_dir,
             _BACKGROUND_TASK_TRIGGER_PROMPT,
             needle=_BACKGROUND_NEEDLE,
         )
-        read_pty_until_idle(session.master_fd, idle_seconds=3.0)
-        before = _max_seq(paths.promptwitness_dir)
         # Give the background task time to finish and push its
         # task-notification back into the session.
-        read_pty_until_idle(session.master_fd, idle_seconds=6.0, overall_timeout=30.0)
+        read_pty_until_idle(session.master_fd, idle_seconds=6.0, overall_timeout=45.0)
     finally:
         session.close()
     lines = _ledger_lines_since(paths.promptwitness_dir, before)
-    assert len(lines) >= 1, "expected the background task's completion to fire the hook"
-    return lines[-1]
+    notifications = [ln for ln in lines if ln.prompt_kind == "task-notification"]
+    assert notifications, (
+        "expected the background task's completion to fire the hook; "
+        f"saw prompt kinds {[ln.prompt_kind for ln in lines]}"
+    )
+    return notifications[-1]
 
 
 def _drive_launch_argument(paths: _LiveHarnessPaths, tmp_path: Path) -> ledger.WitnessLine:
@@ -1339,6 +1389,16 @@ _DRIVERS: dict[str, Callable[[_LiveHarnessPaths, Path], ledger.WitnessLine | Non
 # ---------------------------------------------------------------------------
 # The parametrized test
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_child_written_ledger_protection(tmp_path: Path) -> Any:
+    """The hook runs in a CHILD process, so this process's append-only
+    registry never sees the ledger it writes; clear the flag under this
+    case's tmp dir at teardown or the append-only guard (athenaeum#2335)
+    errors every live row."""
+    yield
+    ledger.clear_append_only_protection_under(tmp_path)
 
 
 @pytest.mark.parametrize("case", ENTRY_PATH_CASES, ids=[c.id for c in ENTRY_PATH_CASES])
@@ -1409,7 +1469,16 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     # prompt_digest parity with the transcript record").
     assert line.prompt_id == fields["prompt_id"]
     expected_digest = canon.digest(canon.normalize(fields["matched_record_text"]))
-    if line.prompt_kind in ("human", "slash-command") and fields["matched_record_text"]:
+    # Not for slash commands: the hook sees the raw ``/name args`` line while
+    # the transcript holds the expanded ``<command-*>`` text, so the two
+    # digests differ by construction (athenaeum#2161). Not for the queued row
+    # either: it shares the earlier prompt's id, so the id resolves to the
+    # wrong record.
+    if (
+        line.prompt_kind == "human"
+        and fields["matched_record_text"]
+        and case.intake_miss_reason_prefix != "digest-mismatch"
+    ):
         assert line.prompt_digest == expected_digest
 
     if case.id == "interactive-typed":

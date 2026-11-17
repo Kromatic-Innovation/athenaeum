@@ -14,6 +14,16 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Claude Code witness hook now classifies real interactive prompts. A live
+  run against claude 2.1.326 showed that `CLAUDE_CODE_CHILD_SESSION=1` is set in
+  every hook environment, which made every interactive prompt classify as
+  `unknown`; it is no longer a classifier input. Raw `/name args` slash lines
+  are recognised as slash commands with a `slash-args` segment, and a
+  `claude "<prompt>"` or `claude -p "<prompt>"` launch prompt is now detected
+  when it contains spaces (athenaeum#2161).
+
 ## [0.26.0] - 2026-11-16
 
 **Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian

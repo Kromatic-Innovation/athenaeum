@@ -177,9 +177,9 @@ each prompt itself:
 
 Channels: `bridge` when `CLAUDE_CODE_BRIDGE_SESSION_ID` is set (ruling 8,
 never human, checked first); `interactive` requires
-`CLAUDE_CODE_ENTRYPOINT == "cli"`, `CLAUDE_CODE_SESSION_ATTENDED == "1"`, a
-controlling tty on the `CLAUDE_PID` process, and `CLAUDE_CODE_CHILD_SESSION`
-not `"1"`; `headless` when the entrypoint starts with `sdk` or attended is
+`CLAUDE_CODE_ENTRYPOINT == "cli"`, `CLAUDE_CODE_SESSION_ATTENDED == "1"`, and a controlling tty on the `CLAUDE_PID` process (`CLAUDE_CODE_CHILD_SESSION`
+is recorded in `signals` but is not an input: claude sets it to `"1"` in every
+hook env, top-level typed prompts included, athenaeum#2161); `headless` when the entrypoint starts with `sdk` or attended is
 `"0"`; anything else is `unknown`. Raw values always go in `signals`. An
 optional `signals["launcher"]` (sanitised free text, capped at 64 chars,
 set from `PROMPTWITNESS_LAUNCHER` when non-empty) lets a caller that starts

@@ -59,6 +59,13 @@ _PASTE_OPEN_RE = re.compile(r'<pasted_content\s+id=["\']?([^"\'>\s]+)["\']?[^>]*
 _PASTE_CLOSE = "</pasted_content>"
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
 
+#: The raw line a live ``UserPromptSubmit`` hook receives for a slash command
+#: (athenaeum#2161): ``/<name>`` optionally followed by whitespace and the
+#: args, BEFORE claude expands it into ``<command-name>`` wrapper text. The
+#: name stops at the first character outside the set, so a path-like typed
+#: prompt such as ``/usr/bin is missing`` does not match.
+_RAW_SLASH_RE = re.compile(r"/[A-Za-z][A-Za-z0-9_:.-]*(?:\s+(.*))?\Z", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Prompt kind
@@ -110,6 +117,8 @@ def classify_prompt_kind(
     if agent_id or (transcript_path is not None and "/subagents/" in transcript_path):
         return "subagent", False
     stripped = prompt.lstrip()
+    if _RAW_SLASH_RE.match(stripped):
+        return "slash-command", True
     if not stripped.startswith("<"):
         return "human", True
     for rule in WRAPPERS:
@@ -192,7 +201,15 @@ def slash_args_segment(prompt: str) -> Segment | None:
     slash command with no args records none)."""
     match = _COMMAND_ARGS_RE.search(prompt)
     if match is None:
-        return None
+        match = _RAW_SLASH_RE.match(prompt.lstrip())
+        if match is None or match.group(1) is None:
+            return None
+        offset = len(prompt) - len(prompt.lstrip())
+        start, end = offset + match.start(1), offset + match.end(1)
+        content = prompt[start:end]
+        if not content.strip():
+            return None
+        return Segment(kind="slash-args", start=start, end=end, digest=canon.digest(content))
     start, end = match.start(1), match.end(1)
     content = prompt[start:end]
     if not content.strip():
@@ -291,7 +308,12 @@ def detect_channel(
         # Checked first: a bridge session still owns a TTY, so the
         # interactive check below would otherwise misclassify it.
         return "bridge", signals
-    if entrypoint == "cli" and attended == "1" and has_tty is True and child_session != "1":
+    # ``child_session`` is recorded in ``signals`` but is NOT a classifier
+    # input: a live claude 2.1.326 sets ``CLAUDE_CODE_CHILD_SESSION=1`` in the
+    # env of EVERY hook it spawns, a top-level typed prompt included
+    # (athenaeum#2161), so it cannot tell a child from a top-level session.
+    # Sub-agent prompts are told apart by ``agent_id`` in the hook stdin.
+    if entrypoint == "cli" and attended == "1" and has_tty is True:
         return "interactive", signals
     if (entrypoint or "").startswith("sdk") or attended == "0":
         return "headless", signals
@@ -320,6 +342,11 @@ def _probe_argv(pid: str | None) -> str | None:
     return out or None
 
 
+#: Longest run of words tried when matching a launch prompt inside ``ps``
+#: output; bounds the work on a very long command line.
+_MAX_LAUNCH_ARG_WORDS = 400
+
+
 def _is_launch_argument(
     raw_digest: str,
     *,
@@ -337,11 +364,19 @@ def _is_launch_argument(
     args_line = probe(pid)
     if not args_line:
         return False
+    # ``ps`` joins argv with single spaces and no quoting, so a multi-word
+    # prompt arrives as several tokens (athenaeum#2161, live run). Besides the
+    # shell-split tokens, match every contiguous run of space-split words.
+    candidates: set[str] = set()
     try:
-        tokens = shlex.split(args_line)
+        candidates.update(shlex.split(args_line))
     except ValueError:
-        return False
-    return any(canon.digest(token) == raw_digest for token in tokens)
+        pass
+    words = args_line.split(" ")
+    for start in range(len(words)):
+        for end in range(start + 1, min(len(words), start + _MAX_LAUNCH_ARG_WORDS) + 1):
+            candidates.add(" ".join(words[start:end]))
+    return any(canon.digest(candidate) == raw_digest for candidate in candidates)
 
 
 # ---------------------------------------------------------------------------
