@@ -90,7 +90,7 @@ def test_true_no_match(tmp_path: Path) -> None:
 def test_near_miss_domain_does_not_match(tmp_path: Path) -> None:
     _page(tmp_path, "aaaa0007", "Flo Near", body="flo@example.com")
     _build(tmp_path)
-    assert _recall(tmp_path, "flo@example.co")["reason"] == "no-match"
+    assert _recall(tmp_path, "flo@example.net")["reason"] == "no-match"
 
 
 def test_absent_sidecar_degrades_to_no_match(tmp_path: Path) -> None:
