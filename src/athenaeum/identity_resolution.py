@@ -265,7 +265,7 @@ def _walk_email_handle(
         index = pii.ExcludedRecordIndex(contacts_root)
     records = index.all_by_identifier(value)
     if not records:
-        return _Walk(kind="unresolvable", reason="no-match")
+        return _walk_email_fallback(knowledge_root, value)
 
     uids: list[str] = []
     for record in records:
@@ -278,6 +278,28 @@ def _walk_email_handle(
     if len(uids) > 1:
         return _Walk(kind="unresolvable", reason="ambiguous", candidate_uids=tuple(sorted(uids)))
     return _Walk(kind="resolved", uid=uids[0])
+
+
+def _walk_email_fallback(knowledge_root: Path, value: str) -> _Walk:
+    """Contact store had no match: registry handles, then page-body addresses.
+
+    Registry handles first (``registry.json``, any source-handle key), then
+    the build-time body-address sidecar (:func:`athenaeum.registry.lookup_body_email`
+    — O(1), no per-query body scan; absent sidecar means no body match).
+    Resolved only on a single uid; several uids is ``ambiguous`` with
+    ``candidate_uids``; neither source matching keeps ``no-match`` (athenaeum#2714).
+    The caller's ``_finish`` then gates audience/``recallable``/``with_pii``
+    exactly as for a contact-store hit.
+    """
+    from athenaeum import corrections
+    from athenaeum.registry import lookup_body_email
+
+    uids = _registry_handle_matches(corrections.load_registry(knowledge_root), value)
+    if not uids:
+        uids = lookup_body_email(knowledge_root, value)
+    if not uids:
+        return _Walk(kind="unresolvable", reason="no-match")
+    return _walk_registry_handle(uids)
 
 
 def _walk_registry_handle(uids: list[str]) -> _Walk:

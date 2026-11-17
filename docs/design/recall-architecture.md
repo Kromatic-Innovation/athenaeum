@@ -448,6 +448,21 @@ query, or the whole query (framing stripped) exactly matching an existing
 through to the pipeline above completely unchanged — same output as if this
 feature did not exist.
 
+An email-shaped query is looked up in the excluded contact store first. When
+the store holds no record for the address, the walk falls back to
+`registry.json` handle values, then to addresses in the bodies of
+`type: person` pages (athenaeum#2714). A company or meeting page that only
+mentions an address never resolves it.
+Body addresses come from `registry-body-emails.json`, a sidecar that
+`athenaeum registry` writes beside `registry.json` in the same build: it maps
+a sha256 of the lowercased address to `[uid, filename]` pairs, so it stores
+no raw address and a query never scans page bodies. Each candidate page is
+re-read to confirm it still carries the address. One matching page resolves;
+several return `candidate_uids` with `reason: ambiguous`; none keeps
+`reason: no-match`. A corpus without the sidecar (never rebuilt since it was
+introduced) answers exactly as before. Matching is exact; `.co` and `.com`
+are different addresses.
+
 The response is a JSON document (`json.dumps(..., indent=2, sort_keys=True)`,
 nothing else) carrying the person's `uid`, `display_name`, `entity_class`, and
 per-value fact fields — usage/provenance classification, bounce history,

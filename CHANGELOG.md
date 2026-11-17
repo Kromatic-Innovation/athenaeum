@@ -23,6 +23,15 @@ kept as they were written.
   at once. Reinstalling over a live schedule keeps its stamp. The manual step
   in the 0.26.0 "Upgrading from 0.25.0" notes (step 2, deleting the stamp by
   hand before reinstalling) is no longer needed.
+- An email-shaped `recall` query that finds nothing in the contact store now
+  falls back to registry handles and then to addresses in person-page bodies, instead of
+  reporting `no-match` for a person whose address lives only in a page body or
+  registry handle set (athenaeum#2714). A single matching page resolves;
+  several return `candidate_uids` with `resolved: false`. Body addresses are
+  read from a digest-keyed `registry-body-emails.json` sidecar that
+  `athenaeum registry` writes beside `registry.json`, so no query scans page
+  bodies. Re-run `athenaeum registry` to build it; a corpus without the
+  sidecar behaves as before. `with_pii` gating is unchanged.
 
 ## [0.26.0] - 2026-11-16
 
