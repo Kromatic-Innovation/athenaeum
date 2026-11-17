@@ -168,18 +168,35 @@ each prompt itself:
 | plain text (not `<`) | `human` | yes |
 | `<pasted_content` | `human` (typed/pasted segments recorded) | yes |
 | `<command-message` / `<command-name` | `slash-command` | the `<command-args>` span only, tagged `slash-args` (ruling 4) |
+| raw `/name args` line (what the live interactive hook sees) | `slash-command` | the text after the name only, tagged `slash-args` |
 | `<task-notification` | `task-notification` | no |
 | `<local-command-` | `local-command` | no |
 | `<system-reminder` | `system` | no |
 | any other `<tag` (including unconfirmed `peer`) | `unknown` | no (default-deny) |
 | any text, stdin `agent_id` present or `transcript_path` contains `/subagents/` | `subagent` | no (overrides all) |
-| any text, first turn, digest equals a `claude` argv positional | `launch-argument` | no (overrides all) |
+| any text, first turn, equals a `claude` argv positional after whitespace normalisation, or one cannot be ruled out (see below) | `launch-argument` | no (overrides all) |
+
+A raw slash line is `/` + one name segment of letters, digits and `_:.-`,
+then whitespace and the args, so a multi-segment path such as
+`/usr/bin is missing` stays `human`. A single-segment path (`/tmp`,
+`/etc is broken`) is indistinguishable from a command name and classifies as
+`slash-command`: a documented false miss that is still counted.
+
+Launch-argument matching is linear in argv size. Where `/proc` exists the
+hook reads `/proc/<pid>/cmdline` (exact, NUL-separated argv) and compares the
+prompt to each whole argument, whitespace-normalised, so multi-line and long
+prompts match. Elsewhere it falls back to `ps -o args=`, which loses argument
+boundaries and renders a newline as `?` (Linux procps) or `\012` (macOS); the
+fallback matches shell-split tokens and word runs of exactly the prompt's
+length. It fails closed: when `ps` yields no match but a positional argument
+remains that cannot be ruled out, the turn is `launch-argument`. A probe that
+returns nothing is no evidence, and the turn is classified from its text.
 
 Channels: `bridge` when `CLAUDE_CODE_BRIDGE_SESSION_ID` is set (ruling 8,
 never human, checked first); `interactive` requires
-`CLAUDE_CODE_ENTRYPOINT == "cli"`, `CLAUDE_CODE_SESSION_ATTENDED == "1"`, a
-controlling tty on the `CLAUDE_PID` process, and `CLAUDE_CODE_CHILD_SESSION`
-not `"1"`; `headless` when the entrypoint starts with `sdk` or attended is
+`CLAUDE_CODE_ENTRYPOINT == "cli"`, `CLAUDE_CODE_SESSION_ATTENDED == "1"`, and a controlling tty on the `CLAUDE_PID` process (`CLAUDE_CODE_CHILD_SESSION`
+is recorded in `signals` but is not an input: claude sets it to `"1"` in every
+hook env, top-level typed prompts included, athenaeum#2161); `headless` when the entrypoint starts with `sdk` or attended is
 `"0"`; anything else is `unknown`. Raw values always go in `signals`. An
 optional `signals["launcher"]` (sanitised free text, capped at 64 chars,
 set from `PROMPTWITNESS_LAUNCHER` when non-empty) lets a caller that starts

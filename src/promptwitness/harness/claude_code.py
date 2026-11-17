@@ -59,6 +59,13 @@ _PASTE_OPEN_RE = re.compile(r'<pasted_content\s+id=["\']?([^"\'>\s]+)["\']?[^>]*
 _PASTE_CLOSE = "</pasted_content>"
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
 
+#: The raw line a live ``UserPromptSubmit`` hook receives for a slash command
+#: (athenaeum#2161): ``/<name>`` optionally followed by whitespace and the
+#: args, BEFORE claude expands it into ``<command-name>`` wrapper text. The
+#: name stops at the first character outside the set, so a path-like typed
+#: prompt such as ``/usr/bin is missing`` does not match.
+_RAW_SLASH_RE = re.compile(r"/[A-Za-z][A-Za-z0-9_:.-]*(?:\s+(.*))?\Z", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Prompt kind
@@ -100,16 +107,20 @@ def classify_prompt_kind(
     """Classify *prompt* into ``(prompt_kind, is_human)``.
 
     Precedence, highest first (each overrides every row below it, per the
-    issue's table): ``launch-argument`` > ``subagent`` > the
-    :data:`WRAPPERS` rows, in order > the two prefix-less defaults (``human``
-    for plain text, ``unknown`` -- non-human, default-deny -- for an
-    unrecognized ``<tag``).
+    issue's table): ``launch-argument`` > ``subagent`` > a raw ``/name args``
+    line (``slash-command``, human; the name is one segment, so ``/tmp`` or
+    ``/etc is broken`` also match -- a documented false miss that is still
+    counted) > the :data:`WRAPPERS` rows, in order > the two prefix-less
+    defaults (``human`` for plain text, ``unknown`` -- non-human,
+    default-deny -- for an unrecognized ``<tag``).
     """
     if is_launch_argument:
         return "launch-argument", False
     if agent_id or (transcript_path is not None and "/subagents/" in transcript_path):
         return "subagent", False
     stripped = prompt.lstrip()
+    if _RAW_SLASH_RE.match(stripped):
+        return "slash-command", True
     if not stripped.startswith("<"):
         return "human", True
     for rule in WRAPPERS:
@@ -186,13 +197,24 @@ def pasted_segments(prompt: str) -> tuple[list[Segment], bool]:
 
 
 def slash_args_segment(prompt: str) -> Segment | None:
-    """The ``<command-args>...</command-args>`` span as one ``slash-args``
-    :class:`~promptwitness.ledger.Segment`, or ``None`` when the tag is
-    absent or its content is empty/whitespace-only (operator ruling 4: a
-    slash command with no args records none)."""
+    """The slash-command arguments as one ``slash-args``
+    :class:`~promptwitness.ledger.Segment`: the
+    ``<command-args>...</command-args>`` span when the wrapper is present,
+    else the text after the command name of a raw ``/name args`` line (the
+    interactive form, which carries no wrapper). ``None`` when there is no
+    such span or it is empty/whitespace-only (operator ruling 4: a slash
+    command with no args records none)."""
     match = _COMMAND_ARGS_RE.search(prompt)
     if match is None:
-        return None
+        match = _RAW_SLASH_RE.match(prompt.lstrip())
+        if match is None or match.group(1) is None:
+            return None
+        offset = len(prompt) - len(prompt.lstrip())
+        start, end = offset + match.start(1), offset + match.end(1)
+        content = prompt[start:end]
+        if not content.strip():
+            return None
+        return Segment(kind="slash-args", start=start, end=end, digest=canon.digest(content))
     start, end = match.start(1), match.end(1)
     content = prompt[start:end]
     if not content.strip():
@@ -291,7 +313,12 @@ def detect_channel(
         # Checked first: a bridge session still owns a TTY, so the
         # interactive check below would otherwise misclassify it.
         return "bridge", signals
-    if entrypoint == "cli" and attended == "1" and has_tty is True and child_session != "1":
+    # ``child_session`` is recorded in ``signals`` but is NOT a classifier
+    # input: a live claude 2.1.326 sets ``CLAUDE_CODE_CHILD_SESSION=1`` in the
+    # env of EVERY hook it spawns, a top-level typed prompt included
+    # (athenaeum#2161), so it cannot tell a child from a top-level session.
+    # Sub-agent prompts are told apart by ``agent_id`` in the hook stdin.
+    if entrypoint == "cli" and attended == "1" and has_tty is True:
         return "interactive", signals
     if (entrypoint or "").startswith("sdk") or attended == "0":
         return "headless", signals
@@ -303,9 +330,29 @@ def detect_channel(
 # ---------------------------------------------------------------------------
 
 
+def _probe_proc_cmdline(pid: str) -> str | None:
+    """Exact argv from ``/proc/<pid>/cmdline`` (NUL-separated), or ``None``
+    where ``/proc`` is unavailable or unreadable (macOS, a gone process)."""
+    if not pid.isdigit():
+        return None
+    try:
+        data = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    return text if text.strip("\0") else None
+
+
 def _probe_argv(pid: str | None) -> str | None:
+    """Raw command line of *pid*. Exact (NUL-separated argv) from ``/proc``
+    when available; otherwise the lossy ``ps -o args=`` rendering, which has
+    no argument boundaries and mangles a newline in argv (``?`` on Linux
+    procps, ``\\012`` on macOS)."""
     if not pid:
         return None
+    exact = _probe_proc_cmdline(str(pid))
+    if exact is not None:
+        return exact
     try:
         proc = subprocess.run(
             ["ps", "-o", "args=", "-p", str(pid)],
@@ -320,28 +367,75 @@ def _probe_argv(pid: str | None) -> str | None:
     return out or None
 
 
+def _ps_tokens(args_line: str) -> list[str]:
+    try:
+        return shlex.split(args_line)
+    except ValueError:
+        return args_line.split()
+
+
+def _ps_has_positional(tokens: list[str]) -> bool:
+    """Whether the ps-rendered command line has a positional (prompt) token
+    after the executable. A token directly after a ``-flag`` is assumed to be
+    that flag's value; ``ps`` carries no flag schema, so this errs toward
+    reporting a positional."""
+    after_flag = False
+    for token in tokens[1:]:
+        if token.startswith("-"):
+            after_flag = "=" not in token
+        elif after_flag:
+            after_flag = False
+        else:
+            return True
+    return False
+
+
 def _is_launch_argument(
-    raw_digest: str,
+    prompt: str,
     *,
     pid: str | None,
     is_first_turn: bool,
     argv_probe: Callable[[str | None], str | None] | None = None,
 ) -> bool:
-    """``True`` only on the session's first turn, when *raw_digest* equals
-    the digest of some positional argument in ``ps -o args= -p $CLAUDE_PID``
-    -- covers a ``claude "<prompt>"`` TTY launch. Never stores or returns the
-    matched argv text itself, only the boolean."""
+    """``True`` only on the session's first turn, when *prompt* is a
+    positional launch argument of ``$CLAUDE_PID`` (``claude "<prompt>"``).
+    Never stores or returns argv text, only the boolean.
+
+    Comparison is whitespace-normalised and linear in argv size:
+
+    * exact argv (``/proc/<pid>/cmdline``, NUL-separated): whole arguments
+      only; an argument that matches or does not is certain.
+    * ``ps`` fallback (no argument boundaries; ``\\012``/``?`` for newlines):
+      whole shell-split tokens, plus runs of exactly the prompt's word
+      count. Fails closed: with no match, a positional token that cannot be
+      ruled out (multi-line or long prompt mangled by ``ps``, unparsable
+      quoting) counts as a launch argument.
+
+    No probe output at all means no evidence either way and returns False.
+    """
     if not is_first_turn or not pid:
+        return False
+    target = " ".join(prompt.split())
+    if not target:
         return False
     probe = argv_probe or _probe_argv
     args_line = probe(pid)
     if not args_line:
         return False
-    try:
-        tokens = shlex.split(args_line)
-    except ValueError:
-        return False
-    return any(canon.digest(token) == raw_digest for token in tokens)
+    if "\0" in args_line:
+        return any(" ".join(arg.split()) == target for arg in args_line.split("\0")[1:])
+    args_line = args_line.replace("\\012", " ")
+    tokens = _ps_tokens(args_line)
+    if any(" ".join(token.split()) == target for token in tokens[1:]):
+        return True
+    words = args_line.split()
+    target_words = target.split(" ")
+    size = len(target_words)
+    first = target_words[0]
+    for start in range(len(words) - size + 1):
+        if words[start] == first and words[start : start + size] == target_words:
+            return True
+    return _ps_has_positional(tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +531,7 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     prompt_digest = canon.digest(canon.normalize(prompt))
 
     is_launch_argument = _is_launch_argument(
-        raw_digest, pid=claude_pid, is_first_turn=is_first_turn
+        prompt, pid=claude_pid, is_first_turn=is_first_turn
     )
     prompt_kind, _is_human = classify_prompt_kind(
         prompt,
