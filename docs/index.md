@@ -166,6 +166,7 @@ does not answer.
 Evidence, kept out of the reading path.
 
 - [Evals inventory](measurements/evals-inventory.md)
+- [`import-memory` first real-login run](measurements/import-memory-real-login-run-2026-11-17.md) — one supervised compile on a real Claude Code login with invented memory: the cost estimate was about 38 times too low, recall worked, and a resume after the cap stop did not finish when files were held.
 - [Eval-gate FIRE replay over merged PRs](measurements/eval-fire-replay-2026-10-30.md) — replays the symbol-level eval trigger over every PR merged to `develop` in the 30
   days to 2026-10-30: of the 68 that tripped the old whole-file gate, 34 would not
   trip the symbol-level one at all.
