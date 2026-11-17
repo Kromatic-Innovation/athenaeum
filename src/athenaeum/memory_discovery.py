@@ -47,15 +47,29 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-#: Rough, deliberately conservative bytes-per-token ratio for an UNREAD
-#: markdown memory file (issue athenaeum#2316 ruling 2). English markdown
-#: prose averages well under 4 bytes/token for most tokenizers, so this
-#: errs toward OVER-estimating tokens (and therefore cost) rather than
-#: under-estimating it — the safe direction for a figure shown to a user
-#: immediately before they agree to spend their plan quota. Explicitly a
-#: rough figure until athenaeum#2323 measures real usage against a live
-#: compile.
+#: Rough bytes-per-token ratio for the SIZE-DEPENDENT part of the estimate
+#: only: a file's own text is sent in each of its classify calls
+#: (:data:`CALLS_PER_FILE`). English markdown prose averages well under 4
+#: bytes/token for most tokenizers, so this errs toward OVER-estimating.
 BYTES_PER_TOKEN_ESTIMATE = 4
+
+#: API calls one imported file costs: one claim-kind and one decay-bucket
+#: classify call (athenaeum#2733; measured 20 calls for 10 files in the
+#: athenaeum#2323 real-login run).
+CALLS_PER_FILE = 2
+
+#: Measured per-file cost on the claude-cli classify path, from the
+#: athenaeum#2323 real-login run (``docs/measurements/import-memory-real-login-run-
+#: 2026-11-17.md``): 28,086 tokens over 10 files of 243 to 359 bytes, about
+#: 2,800 per file. Each call carries a fixed prompt of about 780 tokens and
+#: produces about 500 to 700 output tokens, so the figure follows the FILE
+#: COUNT, not the bytes. Split input/output so the metered ``api`` path can
+#: price the two at their own rates. How the cost scales for LARGE files is
+#: unmeasured; the bytes term in :func:`estimate_cost` is an assumption, not
+#: a measurement.
+PER_FILE_INPUT_TOKENS = 1_560
+PER_FILE_OUTPUT_TOKENS = 1_250
+PER_FILE_TOKENS = PER_FILE_INPUT_TOKENS + PER_FILE_OUTPUT_TOKENS
 
 
 @dataclass(frozen=True)
@@ -141,12 +155,15 @@ def discover_project_memories(projects_root: Path | None = None) -> list[Project
 
 @dataclass(frozen=True)
 class CostEstimate:
-    """A pre-read cost estimate (issue athenaeum#2316 ruling 2).
+    """A pre-read cost estimate for ONE run (issue athenaeum#2316 ruling 2,
+    reworked by athenaeum#2733).
 
-    ``estimated_cost_usd`` is ``None`` on the ``claude-cli`` (subscription)
-    path — mirroring :mod:`athenaeum.spend`'s provider split exactly: a
-    subscription figure is reported in tokens only, never blended into a
-    dollar total. It is populated only when *provider* is the metered
+    ``file_count`` is the files THIS run will process (after the file and
+    call caps); ``total_pending`` is every pending file, so a capped run can
+    name both. ``estimated_cost_usd`` is ``None`` on the ``claude-cli``
+    (subscription) path — mirroring :mod:`athenaeum.spend`'s provider split
+    exactly: a subscription figure is reported in tokens only, never blended
+    into a dollar total. It is populated only when *provider* is the metered
     ``api`` path.
     """
 
@@ -154,16 +171,26 @@ class CostEstimate:
     project_count: int
     estimated_tokens: int
     estimated_cost_usd: float | None
+    estimated_api_calls: int = 0
+    total_pending: int = 0
 
 
 def estimate_cost(
-    files: Iterable[MemoryFile], *, project_count: int, provider: str
+    files: Iterable[MemoryFile],
+    *,
+    project_count: int,
+    provider: str,
+    total_pending: int | None = None,
 ) -> CostEstimate:
     """Estimate the cost of compiling *files*, from metadata already in hand.
 
-    Never touches the filesystem — *files* is whatever the caller already
-    discovered (typically the PENDING subset after a resumed run's state
-    exclusion). *provider* is an :func:`athenaeum.provider.resolve_provider`
+    *files* is the batch THIS run will process — the caller applies
+    ``--max-files`` and the call cap first; *total_pending* (default: the
+    batch size) is every pending file, for the "N more wait" line. Cost is
+    per FILE (:data:`PER_FILE_TOKENS` times the files, over
+    :data:`CALLS_PER_FILE` calls each), plus a size term from the files'
+    bytes: each file's text rides in each of its calls. Never touches the
+    filesystem. *provider* is an :func:`athenaeum.provider.resolve_provider`
     value: ``"claude-cli"`` reports tokens only (``estimated_cost_usd=None``,
     the subscription path); anything else (the metered ``api`` path) also
     reports a dollar figure, priced at the ACTIVE blended fallback rate
@@ -172,15 +199,23 @@ def estimate_cost(
     """
     files = list(files)
     total_bytes = sum(f.size_bytes for f in files)
-    tokens = total_bytes // BYTES_PER_TOKEN_ESTIMATE
+    size_tokens = (total_bytes // BYTES_PER_TOKEN_ESTIMATE) * CALLS_PER_FILE
+    input_tokens = len(files) * PER_FILE_INPUT_TOKENS + size_tokens
+    output_tokens = len(files) * PER_FILE_OUTPUT_TOKENS
+    tokens = input_tokens + output_tokens
     cost_usd: float | None = None
     if provider != "claude-cli":
         from athenaeum.models import cost_for_token_bucket
 
-        cost_usd = round(cost_for_token_bucket(None, {"input": tokens}), 2)
+        cost_usd = round(
+            cost_for_token_bucket(None, {"input": input_tokens, "output": output_tokens}),
+            2,
+        )
     return CostEstimate(
         file_count=len(files),
         project_count=project_count,
         estimated_tokens=tokens,
         estimated_cost_usd=cost_usd,
+        estimated_api_calls=len(files) * CALLS_PER_FILE,
+        total_pending=len(files) if total_pending is None else total_pending,
     )

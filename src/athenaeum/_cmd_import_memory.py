@@ -13,10 +13,15 @@ decisions the kickback named):
    print line in :func:`athenaeum._cmd_lifecycle.cmd_init`) and never runs
    it.
 2. **Cost estimate.** Matches the provider — tokens on ``claude-cli``,
-   dollars added on ``api`` — sized from file METADATA ONLY via
-   :mod:`athenaeum.memory_discovery`, before any file content is read. The
-   prompt says the figure is rough until athenaeum#2323 measures real usage.
-3. **Run cap.** 20 files and 100 API calls per run (:data:`DEFAULT_MAX_FILES`
+   dollars added on ``api`` — computed before any file content is read, via
+   :mod:`athenaeum.memory_discovery`. Per FILE, not per byte (athenaeum#2733:
+   the athenaeum#2323 real-login run measured about 2,800 tokens per file over
+   two classify calls, 38x the old bytes/4 figure), for the files THIS run
+   will process after ``--max-files`` and the call cap; a capped run also
+   names the total pending. Large-file scaling is unmeasured and the prompt
+   says so.
+3. **Run cap.** 20 files and 100 API calls per run (a file costs two calls,
+   so the call cap also bounds the batch) (:data:`DEFAULT_MAX_FILES`
    / :data:`DEFAULT_MAX_CALLS`, matching athenaeum#2307's cap), raised via
    ``--max-files``/``--max-calls``. Resumable: a cap-stopped run's remaining
    work is reported, and a plain re-run picks it up (:func:`run_import`'s
@@ -126,6 +131,7 @@ from athenaeum._cli_shared import (
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config, resolve_cache_dir
 from athenaeum.memory_discovery import (
+    CALLS_PER_FILE,
     CostEstimate,
     MemoryFile,
     ProjectMemory,
@@ -686,16 +692,23 @@ def _print_summary(
         + (f" ({held_done} of those held for the comparator)" if held_done else ""),
         file=out,
     )
-    if cost.estimated_cost_usd is not None:
+    login = (
+        f"(~${cost.estimated_cost_usd:.2f})"
+        if cost.estimated_cost_usd is not None
+        else "on your Claude Code login"
+    )
+    print(
+        f"  Estimated cost for this run: ~{cost.estimated_tokens:,} tokens {login} "
+        f"for {cost.file_count} file(s), about {cost.estimated_api_calls} API calls "
+        "— rough: about 2,800 tokens per file, measured on small files; larger "
+        "files cost more (not yet measured).",
+        file=out,
+    )
+    if cost.total_pending > cost.file_count:
         print(
-            f"  Estimated cost: ~{cost.estimated_tokens} tokens (~${cost.estimated_cost_usd:.2f}) "
-            "— rough, from file size only; not yet measured against a real compile.",
-            file=out,
-        )
-    else:
-        print(
-            f"  Estimated cost: ~{cost.estimated_tokens} tokens on your Claude Code login "
-            "— rough, from file size only; not yet measured against a real compile.",
+            f"  This run covers {cost.file_count} of {cost.total_pending} pending "
+            f"file(s); the other {cost.total_pending - cost.file_count} wait for "
+            "later runs (file/call cap).",
             file=out,
         )
     print(f"  Run cap: {max_files} files, {max_calls} API calls this run.", file=out)
@@ -755,8 +768,15 @@ def run_import(
         and "held" in state["imported"][_record_key(project.scope, file.path.name)]
     )
 
+    # Files this run will actually process: the file cap AND the call cap
+    # (each file costs CALLS_PER_FILE classify calls). The cost line prices
+    # exactly this batch, not every pending file (athenaeum#2733).
+    batch_size = min(max_files, max(1, max_calls // CALLS_PER_FILE))
     cost = estimate_cost(
-        (file for _, file in pending), project_count=len(selected), provider=provider
+        (file for _, file in pending[:batch_size]),
+        project_count=len(selected),
+        provider=provider,
+        total_pending=len(pending),
     )
     _print_summary(
         selected,
@@ -792,7 +812,7 @@ def run_import(
             return lock
 
     try:
-        batch = pending[:max_files]
+        batch = pending[:batch_size]
         left_after_cap = len(pending) - len(batch)
 
         for project, file in batch:
