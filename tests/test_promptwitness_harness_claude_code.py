@@ -589,6 +589,103 @@ class TestResumeDetection:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#2744 — a resumed session re-runs the launch-argument check on the
+# first hook call of the resuming process, whether or not session state
+# exists, and only on that call.
+# ---------------------------------------------------------------------------
+
+
+class TestResumedSessionLaunchArgument:
+    SESSION = "resumed-sess"
+    SCRIPTED = "continue the nightly sweep from where it stopped"
+
+    def _raw(self, prompt: str) -> str:
+        return f'{{"prompt": "{prompt}", "session_id": "{self.SESSION}"}}'
+
+    def _seed_prior_process(self, monkeypatch: pytest.MonkeyPatch) -> ledger.WitnessLine:
+        """A first, earlier process on the session: a typed prompt, so the
+        session has state before the resume."""
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: "claude")
+        line = claude_code.record_turn(
+            self._raw("typed in the first process"), {"CLAUDE_PID": "111"}
+        )
+        assert line.prompt_kind == "human"
+        return line
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            f'claude --resume {SESSION} "{SCRIPTED}"',
+            f'claude -r {SESSION} "{SCRIPTED}"',
+            f'claude -c "{SCRIPTED}"',
+            f'claude --continue "{SCRIPTED}"',
+            f"claude\0--resume\0{SESSION}\0{SCRIPTED}\0",
+            f"claude\0-c\0{SCRIPTED}\0",
+        ],
+        ids=["resume-ps", "r-ps", "c-ps", "continue-ps", "resume-proc", "c-proc"],
+    )
+    def test_scripted_resume_prompt_is_a_launch_argument(
+        self, argv: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        self._seed_prior_process(monkeypatch)
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid, a=argv: a)
+        line = claude_code.record_turn(self._raw(self.SCRIPTED), {"CLAUDE_PID": "222"})
+        assert line.resumed is True
+        assert line.turn == 2
+        assert line.prompt_kind == "launch-argument"
+        assert ledger.LedgerIndex.is_witnessable_human(line) is False
+
+    def test_resume_without_prior_state_is_still_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No state file (pruned cache, or a session begun before the hook was
+        installed): the first call is checked as before."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: f'claude -c "{self.SCRIPTED}"')
+        line = claude_code.record_turn(self._raw(self.SCRIPTED), {"CLAUDE_PID": "222"})
+        assert line.prompt_kind == "launch-argument"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [f"claude --resume {SESSION}", "claude -c", "claude --continue", "claude"],
+    )
+    def test_resume_with_no_positional_prompt_and_typed_first_prompt_is_human(
+        self, argv: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        self._seed_prior_process(monkeypatch)
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid, a=argv: a)
+        line = claude_code.record_turn(self._raw("typed after the resume"), {"CLAUDE_PID": "222"})
+        assert line.resumed is True
+        assert line.prompt_kind == "human"
+
+    def test_second_turn_after_resume_is_not_rechecked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The argv below would fail closed for any unmatched typed prompt
+        (an unruled-out positional), so a ``human`` second turn proves the
+        check did not run again."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        self._seed_prior_process(monkeypatch)
+        calls: list[str | None] = []
+
+        def probe(pid: str | None) -> str:
+            calls.append(pid)
+            return f'claude -c "{self.SCRIPTED}"'
+
+        monkeypatch.setattr(claude_code, "_probe_argv", probe)
+        first = claude_code.record_turn(self._raw(self.SCRIPTED), {"CLAUDE_PID": "222"})
+        second = claude_code.record_turn(
+            self._raw("typed on the second turn"), {"CLAUDE_PID": "222"}
+        )
+        assert first.prompt_kind == "launch-argument"
+        assert second.prompt_kind == "human"
+        assert second.resumed is False
+        assert calls == ["222"]
+
+
+# ---------------------------------------------------------------------------
 # AC — record_turn end to end: digests present, no prompt text anywhere.
 # ---------------------------------------------------------------------------
 

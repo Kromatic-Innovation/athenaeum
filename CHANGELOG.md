@@ -25,6 +25,11 @@ kept as they were written.
   when it contains spaces, including multi-line and very long prompts; where
   the launch prompt cannot be ruled out the turn is classed `launch-argument`
   (athenaeum#2161).
+- The Claude Code witness hook now checks the first prompt of a resumed
+  session for a launch argument. `claude --resume <id> "<prompt>"` and
+  `claude -c "<prompt>"` from a script were counted as human, because the check
+  ran only when the session had no cached state; it now runs on the first hook
+  call of each claude process (athenaeum#2744).
 - On the systemd backend, `athenaeum schedule install` now deletes a leftover
   `stamp-athenaeum-run.timer` before it enables the timer, when no athenaeum
   unit file is installed (athenaeum#2721). A schedule removed with 0.25.0 or
