@@ -76,7 +76,7 @@ reported by `athenaeum spend`: 29k tokens, 16 calls.
 **Does the estimate need correcting? Yes.** The estimate is bytes divided by
 4. The measured cost does not follow bytes: it is two classify calls per file
 (claim kind and decay bucket), each carrying a roughly 780-token fixed prompt
-and producing about 500 output tokens. That is about 2,800 tokens per file
+and producing about 500 to 700 output tokens. That is about 2,800 tokens per file
 (28,086 / 10) whether the file is 243 or 359 bytes. For files this small the
 estimate should be per-file, roughly 2,500 to 3,000 tokens per file on the
 Haiku-class classify path, not per-byte. This run could not measure how the
