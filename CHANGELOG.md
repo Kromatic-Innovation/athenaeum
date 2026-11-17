@@ -36,6 +36,13 @@ kept as they were written.
   is now a temp directory instead of the tracked repo-root
   `calibration-summary.json`, so a test run leaves the working tree clean
   (athenaeum#2729).
+- `athenaeum import-memory` re-runs now finish when a file sits in a
+  multi-member cluster that the comparator hold keeps queued. Such a file's
+  content already reached a compiled page, so it is recorded in the
+  import-memory state file as held and is no longer restaged or reclassified
+  (each re-run used to spend about 8k tokens and import nothing). A run that
+  imports nothing because every pending file is held now says so in one line
+  with the held count instead of "Imported 0 file(s)" (athenaeum#2734).
 - `athenaeum import-memory` now stops before reading any file when the
   configured provider cannot run. On `claude-cli` it checks the binary and
   `claude auth status` (no billed call) and, with no login, exits non-zero with
