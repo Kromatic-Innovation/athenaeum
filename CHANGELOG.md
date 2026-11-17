@@ -14,6 +14,10 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Changed
+
+- Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
+
 ### Fixed
 
 - Full-echo Tier-3 merge replies whose `ADDS_NEW_CLAIM:` line carries trailing

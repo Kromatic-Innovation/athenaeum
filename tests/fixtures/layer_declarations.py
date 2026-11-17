@@ -190,6 +190,7 @@ MODULE_LAYER: dict[str, int] = {
     "hook_status": 3,
     "prompt_registry": 3,
     "prompt_safety": 3,
+    "schema_text": 3,  # issue athenaeum#2731: leaf reader split out of tiers
     "provider": 3,
     "push_metrics": 3,
     "query_topics": 3,
@@ -362,6 +363,7 @@ MODULE_LAYER: dict[str, int] = {
     "subject_population": 4,
     "surface_divergence": 4,
     "tiers": 4,
+    "type_guidance": 4,  # issue athenaeum#2731: split out of tiers (same L4 domain layer)
     "unfold": 4,
     "verdict_effects": 4,
     "wiki_dedupe": 4,
