@@ -335,6 +335,13 @@ the `calibration-recorded-fixtures` artifact (30-day retention)
 unconditionally (`if: always()`), so a failed or timed-out sweep still
 leaves replayable fixtures instead of losing them with the runner.
 
+**Where the summary goes (athenaeum#2729):** by default the sweep writes its
+JSON summary (`calibration-summary.json`) into a fresh temporary directory and
+prints the path at session end, so a local run never modifies the tracked
+`calibration-summary.json` at the repo root. To keep a copy deliberately, pass
+`--calibration-summary=<path>` (CI's "Run calibration sweep" step does exactly
+that, with `calibration-summary.json`).
+
 The sanctioned way to run it in CI is a dispatch with `suite=calibration`.
 That runs ONLY the `calibration` job and skips the default `eval` job:
 

@@ -42,6 +42,13 @@ What the suite assumes:
   the tests fail inside the fixture rather than in the code under test.
   `tests/conftest.py`'s `_git_identity` fixture supplies one for the suite's own
   subprocesses.
+- **No git-config setup of your own.** The suite isolates git config itself:
+  an autouse fixture in `tests/conftest.py` points `GIT_CONFIG_GLOBAL` at an
+  empty-hooks config, sets `GIT_CONFIG_NOSYSTEM=1`, and strips
+  `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`, so a
+  global `core.hooksPath` or a hook manager cannot reach fixture commits. A test
+  that must see your real git config opts out with
+  `@pytest.mark.real_git_config`.
 - **No outbound network.** The default selection is offline *by enforcement*,
   not by convention: `tests/conftest.py` blocks every non-loopback socket
   connection, and routes chromadb's model-downloading embedding function

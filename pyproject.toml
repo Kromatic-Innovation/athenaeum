@@ -430,5 +430,6 @@ markers = [
     "rollout: costs tokens — constructs a live LLM client, spawns the real claude binary, or is gated on ANTHROPIC_API_KEY/ATHENAEUM_LIVE_TESTS; deselected by default (athenaeum#1521, split from token-free siblings in athenaeum#1742)",
     "calibration: operator-run live-API calibration sweep (millions of tokens); never marked eval, deselected by default, runs only via evals.yml's suite=calibration dispatch under its own CALIBRATION_TOKEN_CEILING (athenaeum#2287)",
     "nightly: token-free but slow or measurement-only (full-corpus sweeps, printed tables); deselected by default, runs in nightly.yml via -m nightly. A small default-suite test must still pin the property it covers",
+    "real_git_config: opt out of the autouse git-config isolation in tests/conftest.py (athenaeum#2729) -- the test sees the ambient GIT_CONFIG_* / global and system git config, e.g. because it deliberately exercises a real hook manager",
     "reads_live_knowledge_tree: declared opt-in for a test whose documented purpose is reading the real default knowledge root or cache dir (tests/fixtures/default_root_guard.py, athenaeum#2183) -- every other test is forbidden from touching either",
 ]

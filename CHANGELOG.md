@@ -27,7 +27,15 @@ kept as they were written.
   body that is neither an explicit `false` nor `ESCALATE:` is logged under
   `tier3-merge-malformed-reply` and counted as `malformed_merges` in the run
   summary. The append-mode parser tolerates the same trailing prose
-  (athenaeum#2739)
+  (athenaeum#2739).
+- The test suite now isolates git config itself: an autouse fixture points
+  `GIT_CONFIG_GLOBAL` at an empty-hooks config, sets `GIT_CONFIG_NOSYSTEM=1` and
+  strips `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, so a contributor's global
+  `core.hooksPath` or hook manager no longer fails fixture commits (opt out with
+  `@pytest.mark.real_git_config`). The calibration sweep's default summary path
+  is now a temp directory instead of the tracked repo-root
+  `calibration-summary.json`, so a test run leaves the working tree clean
+  (athenaeum#2729).
 - `athenaeum init` no longer prints a Python traceback when `git init`,
   `git add .` or a non-identity `git commit` failure (for example a rejecting
   pre-commit hook) stops it. It exits with a short message naming the failing

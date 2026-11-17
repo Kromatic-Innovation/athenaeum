@@ -31,7 +31,7 @@ eval would depend on instead of ``eval_session``.
 
 And a third, ``calibration_session`` (issue athenaeum#2287), for the
 operator-run ``pytest.mark.calibration`` sweep: same shape again, its own
-summary (``--calibration-summary``, default ``calibration-summary.json``)
+summary (``--calibration-summary``, default ``calibration-summary.json`` in a temp dir)
 and its own :data:`tests.evals.harness.CALIBRATION_TOKEN_CEILING`, so a
 multi-million-token sweep never trips -- or forces a raise of --
 ``EVAL_TOKEN_CEILING``.
@@ -40,6 +40,7 @@ multi-million-token sweep never trips -- or forces a raise of --
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help=(
             "Override the calibration-session JSON summary output path "
-            "(default: calibration-summary.json at repo root)."
+            "(default: calibration-summary.json under a fresh temp directory, "
+            "never the repo tree; the path is printed at session end)."
         ),
     )
 
@@ -162,8 +164,10 @@ def calibration_session(request: pytest.FixtureRequest) -> Any:
     A SEPARATE :class:`EvalSession` from ``eval_session`` -- the
     ``pytest.mark.calibration`` sweep spends ~3.7M tokens per run, so its
     usage must never land in ``EVAL_TOKEN_CEILING``'s teardown assert. Emits
-    its own summary (default ``calibration-summary.json`` at repo root,
-    overridable via ``--calibration-summary``) BEFORE asserting its own
+    its own summary (default ``calibration-summary.json`` under a fresh temp
+    directory -- never inside the repo, so a run cannot dirty the tracked
+    ``calibration-summary.json`` at the repo root (athenaeum#2729);
+    ``--calibration-summary`` keeps a copy deliberately) BEFORE asserting its own
     :data:`CALIBRATION_TOKEN_CEILING`, so a run over budget still leaves
     its per-case results on disk.
     """
@@ -173,9 +177,10 @@ def calibration_session(request: pytest.FixtureRequest) -> Any:
     summary_path = (
         Path(summary_path_opt)
         if summary_path_opt
-        else REPO_ROOT / "calibration-summary.json"
+        else Path(tempfile.mkdtemp(prefix="athenaeum-calibration-")) / "calibration-summary.json"
     )
     session.emit_summary(summary_path)
+    print(f"\ncalibration summary written to {summary_path}")
     total_tokens = session.input_tokens + session.output_tokens
     assert total_tokens <= CALIBRATION_TOKEN_CEILING, (
         f"calibration sweep exceeded its token ceiling "
