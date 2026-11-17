@@ -7,11 +7,9 @@ fragments (issue athenaeum#2590) that the Tier-3 create and merge builders
 inject. Split out of :mod:`athenaeum.tiers` (issue athenaeum#2731) as a pure
 move; every name here is still importable from ``athenaeum.tiers``.
 
-The fragment reader :func:`athenaeum.tiers._load_schema_text` (size cap and
-``<user_document>`` defanging) is shared with the global schema fragments, so
-it stays in ``tiers`` and is reached through :func:`_tiers`, a deferred
-import that breaks the otherwise circular module dependency and keeps a
-``monkeypatch`` of ``tiers._load_schema_text`` effective here.
+The fragment reader (size cap and ``<user_document>`` defanging) is
+:func:`athenaeum.schema_text._load_schema_text`, shared with the global schema
+fragments in ``tiers``.
 """
 
 from __future__ import annotations
@@ -21,19 +19,13 @@ import importlib.resources
 import logging
 import re
 from pathlib import Path
-from types import ModuleType
 from typing import NamedTuple
 
 from athenaeum.models import load_schema_list
+from athenaeum.schema_text import _load_schema_text
 
 log = logging.getLogger(__name__)
 
-
-def _tiers() -> ModuleType:
-    """Return :mod:`athenaeum.tiers` (deferred: it imports this module)."""
-    from athenaeum import tiers
-
-    return tiers
 
 #: Filename prefix of an operator-authored per-type guidance fragment,
 #: ``wiki/_schema/_type-guidance-<type>.md``. Flat and underscore-prefixed on
@@ -115,8 +107,8 @@ def resolve_type_guidance(wiki_root: Path | None, entity_type: str | None) -> Ty
         )
         return _NO_TYPE_GUIDANCE
     return TypeGuidance(
-        guidance=_tiers()._load_schema_text(wiki_root, f"{TYPE_GUIDANCE_PREFIX}{entity_type}.md"),
-        template=_tiers()._load_schema_text(wiki_root, f"{TYPE_TEMPLATE_PREFIX}{entity_type}.md"),
+        guidance=_load_schema_text(wiki_root, f"{TYPE_GUIDANCE_PREFIX}{entity_type}.md"),
+        template=_load_schema_text(wiki_root, f"{TYPE_TEMPLATE_PREFIX}{entity_type}.md"),
     )
 
 
