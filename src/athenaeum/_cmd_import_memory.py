@@ -56,10 +56,10 @@ second raw member for the same source. State entries are written ONLY when
 :func:`_default_compile_batch` (or its test substitute) returns exit code
 ``0`` AND the staged file is actually gone afterward (see
 :func:`run_import`'s post-compile reconciliation) — a crash, a raised
-exception (the catch-all AC8 names, which is also what a missing/expired
-login surfaces as — this module has no separate login probe, since any
-interruption gets the identical honest "did not complete; nothing marked
-imported; rerun to resume" treatment), a nonzero/degraded exit, OR a file
+exception (the catch-all AC8 names), a nonzero/degraded exit, a run in which
+EVERY classify call failed (:class:`_ClassifyTally`; the classify steps
+fail open, so without this a missing login looked like a clean run,
+athenaeum#2735), OR a file
 intake silently dropped despite an overall exit ``0`` (``MEMORY.md``, a
 name+frontmatter intake does not recognise, an ephemeral-classified file)
 leaves that file PENDING again. Re-running is safe either way: re-staging
@@ -67,6 +67,13 @@ overwrites the same path,
 and the underlying compile pipeline's own incremental/hash-stamped dedup
 (the same one ``athenaeum ingest`` already relies on) makes recompiling an
 already-fully-compiled raw member a no-op rather than a duplicate page.
+
+**Login probe (athenaeum#2735).** Before any file is staged or read,
+:func:`check_provider_usable` confirms the configured provider can run. On
+``claude-cli`` that is the binary's presence
+(:func:`athenaeum.provider.preflight_provider`) plus ``claude auth status``,
+which reports the login locally and bills nothing. A missing login stops the
+run with one line naming the fix; nothing is staged or marked imported.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser``.
@@ -83,9 +90,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -124,6 +134,11 @@ STATE_FILENAME = "import_memory_state.json"
 #: constant so a future split (mirroring EXIT_LOCK_HELD's own history) has
 #: one call site to change.
 EXIT_INCOMPLETE = 1
+
+#: Seconds allowed for ``claude auth status`` (a local read, no model call).
+_LOGIN_PROBE_TIMEOUT = 20
+
+_CLASSIFY_LOGGERS = ("athenaeum.claim_kind", "athenaeum.decay_bucket")
 
 
 def add_import_memory_subparser(subparsers: "argparse._SubParsersAction") -> None:
@@ -274,6 +289,98 @@ def _confirm(prompt_fn: Callable[[str], str] = input) -> bool:
     except EOFError:
         answer = ""
     return answer.strip().lower() in ("y", "yes")
+
+
+# ---------------------------------------------------------------------------
+# Provider usability (athenaeum#2735)
+# ---------------------------------------------------------------------------
+
+
+def check_provider_usable(provider: str) -> str | None:
+    """Return a one-line stop message when *provider* cannot run, else ``None``.
+
+    Runs before any file is read. ``claude-cli``: the binary must exist
+    (:func:`athenaeum.provider.preflight_provider`) and ``claude auth status``
+    must report a login — a local read, never a billed model call. A probe
+    that cannot answer (timeout, spawn error, unparseable output) is treated
+    as usable: the all-classify-calls-failed check in :func:`run_import` is
+    the backstop, and a flaky probe must not block a working login.
+    """
+    from athenaeum.provider import preflight_provider
+
+    error = preflight_provider(provider)
+    if error is not None:
+        return error
+    if provider != "claude-cli":
+        return None
+    binary = os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
+    fix = (
+        "claude-cli provider selected but Claude Code is not logged in. "
+        "Run `claude auth login`, then re-run athenaeum import-memory."
+    )
+    try:
+        proc = subprocess.run(
+            [binary, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_LOGIN_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return fix
+    try:
+        status = json.loads(proc.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    if isinstance(status, dict) and status.get("loggedIn") is False:
+        return fix
+    return None
+
+
+class _ClassifyTally(logging.Handler):
+    """Counts classify outcomes during one compile.
+
+    ``claim_kind`` / ``decay_bucket`` fail open: a failed call logs a warning
+    and leaves the file unclassified, so the compile still exits 0. This
+    handler reads those two loggers' own records (a failure warning, a
+    ``stamped`` info line) so the caller can tell "every classify call
+    failed" from a healthy run (athenaeum#2735).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.failed = 0
+        self.succeeded = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "classify call failed" in message:
+            self.failed += 1
+        elif ": stamped " in message:
+            self.succeeded += 1
+
+    @property
+    def all_failed(self) -> bool:
+        return self.failed > 0 and self.succeeded == 0
+
+
+@contextmanager
+def _tally_classify_outcomes() -> Iterator[_ClassifyTally]:
+    tally = _ClassifyTally()
+    loggers = [logging.getLogger(name) for name in _CLASSIFY_LOGGERS]
+    saved = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(tally)
+        if lg.getEffectiveLevel() > logging.INFO:
+            lg.setLevel(logging.INFO)
+    try:
+        yield tally
+    finally:
+        for lg, level in zip(loggers, saved):
+            lg.removeHandler(tally)
+            lg.setLevel(level)
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +614,7 @@ def run_import(
     confirm: Callable[[], bool] | None = None,
     acquire_lock: Callable[[], "RunLock | int"] | None = None,
     compile_fn: Callable[..., int] | None = None,
+    provider_check: Callable[[str], str | None] | None = None,
     out: Any = sys.stdout,
 ) -> int:
     """Orchestrate selection, the cost/cap prompt, and a capped compile batch.
@@ -516,7 +624,10 @@ def run_import(
     function touches the outside world (stdin, the run lock, the LLM
     pipeline), so a test can substitute every one of them and exercise the
     whole selection/cap/resume contract with zero real reads, zero real
-    locks, and zero real compile calls.
+    locks, and zero real compile calls. *provider_check* (default: none —
+    :func:`_cmd_import_memory` passes :func:`check_provider_usable`) returns a
+    one-line stop message when the provider cannot run; it fires before the
+    prompt and before any file is staged (athenaeum#2735).
     """
     selected, unknown = select_projects(discovered, cli_projects, picker=picker)
     if unknown:
@@ -553,6 +664,12 @@ def run_import(
         print("Nothing left to import for the selected projects.", file=out)
         return 0
 
+    if provider_check is not None:
+        problem = provider_check(provider)
+        if problem is not None:
+            print(f"import-memory: {problem} Nothing was read.", file=sys.stderr)
+            return EXIT_INCOMPLETE
+
     if not auto_yes:
         confirmed = (confirm or _confirm)()
         if not confirmed:
@@ -574,9 +691,10 @@ def run_import(
 
         compile = compile_fn or _default_compile_batch
         try:
-            exit_code = compile(
-                knowledge_root, max_files=len(batch), max_api_calls=max_calls
-            )
+            with _tally_classify_outcomes() as tally:
+                exit_code = compile(
+                    knowledge_root, max_files=len(batch), max_api_calls=max_calls
+                )
         except Exception as exc:  # noqa: BLE001 — AC8: report, never crash opaque
             print(
                 f"import-memory: run did not complete ({type(exc).__name__}: {exc}). "
@@ -591,6 +709,16 @@ def run_import(
             print(
                 f"import-memory: compile exited {exit_code}; {len(batch)} file(s) "
                 "were not marked imported. Rerun athenaeum import-memory to resume.",
+                file=sys.stderr,
+            )
+            return EXIT_INCOMPLETE
+
+        if tally.all_failed:
+            print(
+                f"import-memory: every classify call failed ({tally.failed}); the "
+                "LLM provider is not answering (for claude-cli, check `claude auth "
+                f"status`). {len(batch)} file(s) were not marked imported; fix the "
+                "provider and rerun athenaeum import-memory to retry them.",
                 file=sys.stderr,
             )
             return EXIT_INCOMPLETE
@@ -700,4 +828,5 @@ def _cmd_import_memory(args: argparse.Namespace) -> int:
         max_files=args.max_files,
         max_calls=args.max_calls,
         acquire_lock=_do_acquire,
+        provider_check=check_provider_usable,
     )

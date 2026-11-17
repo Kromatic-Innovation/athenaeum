@@ -36,6 +36,13 @@ kept as they were written.
   is now a temp directory instead of the tracked repo-root
   `calibration-summary.json`, so a test run leaves the working tree clean
   (athenaeum#2729).
+- `athenaeum import-memory` now stops before reading any file when the
+  configured provider cannot run. On `claude-cli` it checks the binary and
+  `claude auth status` (no billed call) and, with no login, exits non-zero with
+  one line naming `claude auth login`. A run in which every classify call
+  failed also exits non-zero and marks nothing imported, so a re-run retries
+  those files instead of leaving unclassified pages behind a success message
+  (athenaeum#2735).
 - `athenaeum init` no longer prints a Python traceback when `git init`,
   `git add .` or a non-identity `git commit` failure (for example a rejecting
   pre-commit hook) stops it. It exits with a short message naming the failing
