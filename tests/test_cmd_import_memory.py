@@ -850,3 +850,140 @@ class TestAllClassifyCallsFailed:
         before = logging.getLogger("athenaeum.claim_kind").level
         self._run(tmp_path, _retire_everything)
         assert logging.getLogger("athenaeum.claim_kind").level == before
+
+
+class TestHeldButCompiledFilesConverge:
+    """A file held in a multi-member cluster is recorded, not restaged forever
+    (athenaeum#2734)."""
+
+    PAIR = ("pair-1.md", "pair-2.md")
+
+    def _compile_factory(self, calls: list[list[str]]):  # type: ignore[no-untyped-def]
+        """A fake compile that mimics the real pipeline: every staged file is
+        compiled and retired EXCEPT the two-member cluster, which the retire
+        pass holds (raw kept) while its merged page is written."""
+
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            staged = sorted(
+                (knowledge_root / "raw" / "auto-memory").rglob("*.md")
+            )
+            # The real pipeline classifies a staged file once and stamps the
+            # result into it, so a leftover stamped file costs no call; a
+            # restage overwrites the file and loses the stamp. Model that.
+            unstamped = [
+                p for p in staged if "classified-stamp" not in p.read_text("utf-8")
+            ]
+            calls.append([p.name for p in unstamped])
+            for p in unstamped:
+                p.write_text(p.read_text("utf-8") + "\nclassified-stamp\n", "utf-8")
+            held = [p for p in staged if p.name in self.PAIR]
+            if len(held) == len(self.PAIR):
+                wiki = knowledge_root / "wiki"
+                wiki.mkdir(parents=True, exist_ok=True)
+                body = "\n\n".join(
+                    f"## From `{p.parent.name}/{p.name}`\n\nfact {p.name}\n"
+                    for p in held
+                )
+                (wiki / "auto-pair.md").write_text(
+                    "---\nname: pair\n---\n\n" + body, encoding="utf-8"
+                )
+            for p in staged:
+                if p not in held:
+                    p.unlink()
+            return 0
+
+        return _compile
+
+    def _run(
+        self, tmp_path: Path, calls: list[list[str]], max_files: int
+    ) -> tuple[int, str]:
+        root = tmp_path / "claude-projects"
+        if not root.exists():  # write the sources once so mtimes stay stable
+            _discover(tmp_path, {"proj-a": [*self.PAIR, "solo-1.md", "solo-2.md"]})
+        discovered = discover_project_memories(root)
+        out = io.StringIO()
+        rc = run_import(
+            knowledge_root=tmp_path / "knowledge",
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=max_files,
+            max_calls=100,
+            compile_fn=self._compile_factory(calls),
+            out=out,
+        )
+        return rc, out.getvalue()
+
+    def test_two_file_cluster_after_cap_stop_is_never_restaged(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "knowledge" / "raw" / "auto-memory").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        # Run 1: cap stop with the cluster in the batch; both files held.
+        rc, out = self._run(tmp_path, calls, max_files=2)
+        assert rc == 0
+        assert calls == [list(self.PAIR)]
+        # AC3: one line naming the held count, not "Imported 0 file(s)".
+        assert "Imported 0 file(s)" not in out
+        assert "all 2 pending file(s) are held" in out
+        assert "2 file(s) left for the next run" in out
+        records = load_state(tmp_path / "cache")["imported"]
+        assert set(records) == {f"proj-a/{n}" for n in self.PAIR}
+        assert all("held" in r for r in records.values())
+
+        # Run 2 finishes the rest; the held pair is not staged again.
+        rc, out = self._run(tmp_path, calls, max_files=20)
+        assert rc == 0
+        assert len(calls) == 2
+        assert not set(calls[1]) & set(self.PAIR)
+        assert "2 already imported" in out
+        assert "2 of those held for the comparator" in out
+
+        # Runs 3 and 4: no staging, no compile (so no classify) calls at all,
+        # and the pair is reported as already imported.
+        for _ in range(2):
+            rc, out = self._run(tmp_path, calls, max_files=20)
+            assert rc == 0
+            assert len(calls) == 2
+            assert "4 already imported" in out
+            assert "Nothing left to import" in out
+
+    def test_changed_source_of_a_held_file_is_pending_again(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "knowledge" / "raw" / "auto-memory").mkdir(parents=True)
+        calls: list[list[str]] = []
+        self._run(tmp_path, calls, max_files=2)
+        source = tmp_path / "claude-projects" / "proj-a" / "memory" / self.PAIR[0]
+        source.write_text("edited content, now longer", encoding="utf-8")
+        os.utime(source, (time.time() + 60, time.time() + 60))
+        self._run(tmp_path, calls, max_files=2)
+        assert self.PAIR[0] in calls[-1]
+
+    def test_staged_file_no_page_cites_is_still_not_imported(
+        self, tmp_path: Path
+    ) -> None:
+        """A file intake dropped (no page names it) must NOT be recorded as held."""
+        discovered = _discover(tmp_path, {"proj-a": ["dropped.md"]})
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        (knowledge_root / "wiki").mkdir()
+        (knowledge_root / "wiki" / "auto-other.md").write_text(
+            "## From `proj-a/other.md`\n", encoding="utf-8"
+        )
+        run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=lambda *a, **k: 0,
+            out=io.StringIO(),
+        )
+        assert load_state(tmp_path / "cache")["imported"] == {}

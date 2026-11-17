@@ -41,9 +41,10 @@ fixture-proven counter-example AC6 requires.
 
 **Resumable, not duplicating (AC3/AC8).** :func:`load_state`/:func:`save_state`
 persist a ``<cache_dir>/import_memory_state.json`` map of
-``"<scope>/<filename>" -> {size_bytes, mtime, imported_at[, refused]}`` (``refused``
-holds the relevance-policy reason when the gate refused the file,
-athenaeum#2645). A file is
+``"<scope>/<filename>" -> {size_bytes, mtime, imported_at[, refused][, held]}``
+(``refused`` holds the relevance-policy reason when the gate refused the file,
+athenaeum#2645; ``held`` says the content reached a compiled page while the
+librarian kept the raw file queued, athenaeum#2734). A file is
 PENDING only when no recorded entry matches its CURRENT source size+mtime
 (:func:`_pending_files`) — so a changed source file is treated as new again,
 and an already-imported, unchanged one is skipped on every later run, cap or
@@ -75,6 +76,19 @@ already-fully-compiled raw member a no-op rather than a duplicate page.
 which reports the login locally and bills nothing. A missing login stops the
 run with one line naming the fix; nothing is staged or marked imported.
 
+**Held-but-compiled files (athenaeum#2734).** ``retire.py`` keeps a raw file
+in the staging queue when its cluster is held (every multi-member cluster is,
+until the comparator lane has a live caller, athenaeum#1946), so by presence
+alone a held file looks "not compiled". But its content already reached a
+``wiki/auto-*.md`` page, whose body carries a ``## From `<scope>/<file>```
+header per member. :func:`_compiled_member_refs` reads those headers; a
+staged file that remains AND is named there is recorded in the state file with
+a ``held`` reason, so it is never restaged or reclassified. The state file is
+the place (rather than the librarian) because "which source files has the user
+asked import-memory to handle" is this command's own bookkeeping: the
+librarian knows clusters, not import-memory's source files, and the comparator
+hold stays exactly as it is.
+
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser``.
 
@@ -92,6 +106,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator
@@ -441,6 +456,7 @@ def _mark_imported(
     *,
     imported_at: str,
     refused_reason: str | None = None,
+    held_reason: str | None = None,
 ) -> None:
     record: dict[str, Any] = {
         "size_bytes": file.size_bytes,
@@ -451,6 +467,10 @@ def _mark_imported(
         # athenaeum#2645: handled because the relevance gate refused it, not
         # because it compiled. The reason names the deciding rule.
         record["refused"] = refused_reason
+    if held_reason is not None:
+        # athenaeum#2734: the content reached a compiled page, but the
+        # librarian keeps the raw file queued (comparator hold).
+        record["held"] = held_reason
     state["imported"][_record_key(scope, file.path.name)] = record
 
 
@@ -468,6 +488,31 @@ def _relevance_refusal(staged: Path, policy: Any) -> str | None:
 
     _kept, refused = filter_relevance_never([_Staged], policy)
     return refused[0][1].reason if refused else None
+
+
+#: Merged-page section header :func:`athenaeum.merge.synthesize_body` writes
+#: per member: ``## From `<scope>/<filename>```.
+_MEMBER_HEADER_RE = re.compile(r"^## From `([^`\n]+)`", re.MULTILINE)
+
+#: Recorded on a held-but-compiled file's state entry (athenaeum#2734).
+HELD_REASON = (
+    "content compiled into a wiki page; raw file kept queued by the "
+    "comparator hold (athenaeum#1946)"
+)
+
+
+def _compiled_member_refs(wiki_root: Path) -> set[str]:
+    """``<scope>/<filename>`` of every member a compiled ``auto-*`` page cites."""
+    from athenaeum.merge import AUTO_WIKI_PREFIX
+
+    refs: set[str] = set()
+    for page in wiki_root.glob(f"{AUTO_WIKI_PREFIX}*.md"):
+        try:
+            text = page.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        refs.update(_MEMBER_HEADER_RE.findall(text))
+    return refs
 
 
 def _pending_files(
@@ -573,6 +618,7 @@ def _print_summary(
     pending_count: int,
     already_done: int,
     cost: CostEstimate,
+    held_done: int = 0,
     *,
     max_files: int,
     max_calls: int,
@@ -582,7 +628,8 @@ def _print_summary(
     print(f"Selected projects: {names}", file=out)
     print(
         f"  {cost.project_count} project(s), {pending_count} file(s) pending"
-        + (f" ({already_done} already imported)" if already_done else ""),
+        + (f" ({already_done} already imported)" if already_done else "")
+        + (f" ({held_done} of those held for the comparator)" if held_done else ""),
         file=out,
     )
     if cost.estimated_cost_usd is not None:
@@ -646,6 +693,13 @@ def run_import(
     pending = _pending_files(selected, state)
     total_files = sum(p.file_count for p in selected)
     already_done = total_files - len(pending)
+    held_done = sum(
+        1
+        for project in selected
+        for file in project.files
+        if _is_imported(state, project.scope, file)
+        and "held" in state["imported"][_record_key(project.scope, file.path.name)]
+    )
 
     cost = estimate_cost(
         (file for _, file in pending), project_count=len(selected), provider=provider
@@ -655,6 +709,7 @@ def run_import(
         len(pending),
         already_done,
         cost,
+        held_done,
         max_files=max_files,
         max_calls=max_calls,
         out=out,
@@ -758,11 +813,25 @@ def run_import(
         skipped: list[tuple[ProjectMemory, MemoryFile]] = []
         refused_count = 0
         processed_count = 0
+        held_count = 0
+        compiled_refs: set[str] | None = None
         for project, file in batch:
             staged = _staged_path(knowledge_root, project, file)
             if staged.exists():
                 reason = _relevance_refusal(staged, relevance_policy)
                 if reason is None:
+                    if compiled_refs is None:
+                        compiled_refs = _compiled_member_refs(knowledge_root / "wiki")
+                    if _record_key(project.scope, file.path.name) in compiled_refs:
+                        _mark_imported(
+                            state,
+                            project.scope,
+                            file,
+                            imported_at=imported_at,
+                            held_reason=HELD_REASON,
+                        )
+                        held_count += 1
+                        continue
                     skipped.append((project, file))
                     continue
                 _mark_imported(
@@ -779,7 +848,21 @@ def run_import(
         save_state(cache_dir, state)
 
         remaining = left_after_cap
-        print(f"Imported {processed_count} file(s).", file=out)
+        if processed_count == 0 and held_count and not (refused_count or skipped):
+            print(
+                f"Nothing new imported: all {held_count} pending file(s) are held "
+                "for the comparator (already compiled into a page); recorded so "
+                "they are not restaged.",
+                file=out,
+            )
+        else:
+            print(f"Imported {processed_count} file(s).", file=out)
+            if held_count:
+                print(
+                    f"{held_count} file(s) held for the comparator (already "
+                    "compiled into a page); recorded so they are not restaged.",
+                    file=out,
+                )
         if refused_count:
             print(
                 f"{refused_count} file(s) refused by the relevance policy; "
