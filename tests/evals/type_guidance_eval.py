@@ -19,7 +19,7 @@ Two measurements, both against the live WRITE model:
 
 Arms (the guidance variable):
 
-- ``off``              no guidance file -- the byte-identical pre-#2590 prompt.
+- ``off``              no guidance file -- the byte-identical pre-athenaeum#2590 prompt.
 - ``benign``           a realistic operator fragment (one bullet per rule,
                        escalate observations about other people).
 - ``adversarial``      a fragment that asks the model to tidy / reword the
