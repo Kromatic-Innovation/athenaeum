@@ -34,6 +34,7 @@ from athenaeum.tiers import (
     MERGE_FALLBACK_LOG_PREFIX,
     MERGE_FULL_GUARD_REFUSED_LOG_PREFIX,
     MERGE_FULL_NOOP_LOG_PREFIX,
+    MERGE_MALFORMED_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
     MERGE_PARSE_FAIL_SHAPE,
@@ -54,6 +55,7 @@ from athenaeum.tiers import (
     parse_merge_ops_response,
     parse_tier2_entities,
     parse_tier3_merge,
+    parse_tier3_merge_append,
     resolve_type_gate_allowed_types,
     resolve_type_gate_excluded_keys,
     strip_planning_preamble,
@@ -3098,6 +3100,139 @@ class TestTier3MergeAddsNewClaim:
             self._EXISTING_BODY,
             "sessions/new.md",
             client,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert usage.citation_only_merges == 1
+
+    # -- athenaeum#2739: trailing prose on the ADDS_NEW_CLAIM line ---------
+
+    def test_full_echo_false_with_trailing_prose_is_citation_only(self) -> None:
+        """Recorded athenaeum#2715 eval reply: prose after the verdict and no
+        body used to parse to an empty body (a silent drop)."""
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            "ADDS_NEW_CLAIM: false -- re-confirmation only",
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert usage.citation_only_merges == 1
+        assert usage.malformed_merges == 0
+
+    def test_full_echo_true_with_trailing_prose_keeps_the_body(self) -> None:
+        response = (
+            "ADDS_NEW_CLAIM: true -- adds a new role\n"
+            + self._EXISTING_BODY
+            + " New info.[^2]"
+        )
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body == self._EXISTING_BODY + " New info.[^2]"
+        assert usage.full_merges == 1
+        assert usage.malformed_merges == 0
+
+    def test_full_echo_verdict_word_must_not_be_a_prefix_of_another_word(
+        self,
+    ) -> None:
+        usage = TokenUsage()
+
+        body, _esc = parse_tier3_merge(
+            "ADDS_NEW_CLAIM: falsely claimed\n" + self._EXISTING_BODY + " X.",
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert body is not None and body.endswith(" X.")
+        assert usage.citation_only_merges == 0
+
+    def test_full_echo_true_with_prose_and_no_body_is_counted_malformed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        usage = TokenUsage()
+
+        with caplog.at_level("WARNING", logger="athenaeum.tiers"):
+            body, esc = parse_tier3_merge(
+                "ADDS_NEW_CLAIM: true -- adds a new role",
+                self._ACTION,
+                "sessions/new.md",
+                self._EXISTING_BODY,
+                usage=usage,
+            )
+
+        assert body is None
+        assert esc is None
+        assert usage.malformed_merges == 1
+        assert usage.full_merges == 0
+        assert MERGE_MALFORMED_LOG_PREFIX in caplog.text
+
+    def test_full_echo_empty_reply_is_counted_malformed(self) -> None:
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            "", self._ACTION, "sessions/new.md", self._EXISTING_BODY, usage=usage
+        )
+
+        assert (body, esc) == (None, None)
+        assert usage.malformed_merges == 1
+
+    def test_full_echo_escalate_is_not_malformed(self) -> None:
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            "ADDS_NEW_CLAIM: true\nESCALATE: conflicting employer",
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert body is None
+        assert esc is not None and esc.description == "conflicting employer"
+        assert usage.malformed_merges == 0
+
+    def test_full_echo_malformed_end_to_end_via_tier3_merge_full(self) -> None:
+        client = _mock_client("ADDS_NEW_CLAIM: true -- adds a new role")
+        usage = TokenUsage()
+
+        body, esc = tier3_merge_full(
+            self._ACTION,
+            self._EXISTING_BODY,
+            "sessions/new.md",
+            client,
+            usage=usage,
+        )
+
+        assert not body
+        assert esc is None
+        assert usage.malformed_merges == 1
+
+    def test_append_false_with_trailing_prose_is_citation_only(self) -> None:
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge_append(
+            "ADDS_NEW_CLAIM: false -- re-confirmation only",
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
             usage=usage,
         )
 
