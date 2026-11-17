@@ -374,20 +374,210 @@ def _ps_tokens(args_line: str) -> list[str]:
         return args_line.split()
 
 
-def _ps_has_positional(tokens: list[str]) -> bool:
-    """Whether the ps-rendered command line has a positional (prompt) token
-    after the executable. A token directly after a ``-flag`` is assumed to be
-    that flag's value; ``ps`` carries no flag schema, so this errs toward
-    reporting a positional."""
-    after_flag = False
-    for token in tokens[1:]:
-        if token.startswith("-"):
-            after_flag = "=" not in token
-        elif after_flag:
-            after_flag = False
+_PS_ESCAPE_RE = re.compile(r"\\(\\|[0-7]{3})")
+
+
+def _decode_ps_escapes(args_line: str) -> str:
+    """Decode the octal escapes macOS ``ps`` writes for non-printing argv
+    bytes (``\\012`` newline, ``\\011`` tab, ...) and its ``\\\\`` for a
+    backslash, so a launch prompt containing them still matches
+    (athenaeum#2745)."""
+
+    def _one(match: re.Match[str]) -> str:
+        body = match.group(1)
+        return "\\" if body == "\\" else chr(int(body, 8))
+
+    return _PS_ESCAPE_RE.sub(_one, args_line)
+
+
+def _executable_end(words: list[str]) -> int:
+    """Index just past the ``claude`` executable in a ``ps`` word list: the
+    first word whose basename is ``claude``, so an interpreter
+    (``node /x/claude``) or an unquoted path with spaces
+    (``/Apps/My Tools/claude``) is not read as positional arguments
+    (athenaeum#2745). ``1`` when no such word exists."""
+    for idx, word in enumerate(words):
+        if word.rsplit("/", 1)[-1] in ("claude", "claude.exe"):
+            return idx + 1
+    return 1
+
+
+#: claude CLI flags (claude 2.1.325 ``--help``) taking several values: every
+#: following non-flag token is a value, as claude itself parses them.
+_VARIADIC_FLAGS = frozenset(
+    {
+        "--add-dir",
+        "--allowedTools",
+        "--allowed-tools",
+        "--betas",
+        "--disallowedTools",
+        "--disallowed-tools",
+        "--file",
+        "--mcp-config",
+        "--tools",
+    }
+)
+
+#: claude CLI flags taking exactly one required value.
+_VALUE_FLAGS = frozenset(
+    {
+        "--agent",
+        "--agents",
+        "--append-system-prompt",
+        "--autocompact",
+        "--debug-file",
+        "--effort",
+        "--environment",
+        "--fallback-model",
+        "--input-format",
+        "--json-schema",
+        "--max-budget-usd",
+        "--model",
+        "-n",
+        "--name",
+        "--output-format",
+        "--permission-mode",
+        "--permission-prompts",
+        "--plugin-dir",
+        "--plugin-url",
+        "--remote-control-session-name-prefix",
+        "--session-id",
+        "--setting-sources",
+        "--settings",
+        "--system-prompt",
+        "--system-prompt-snapshot",
+    }
+)
+
+#: claude CLI flags taking no value: the token after one is positional.
+_BOOLEAN_FLAGS = frozenset(
+    {
+        "--allow-dangerously-skip-permissions",
+        "--ax-screen-reader",
+        "--bg",
+        "--background",
+        "--bare",
+        "--brief",
+        "--chrome",
+        "-c",
+        "--continue",
+        "--dangerously-skip-permissions",
+        "--desktop",
+        "--disable-slash-commands",
+        "--exclude-dynamic-system-prompt-sections",
+        "--fork-session",
+        "--forward-subagent-text",
+        "-h",
+        "--help",
+        "--ide",
+        "--include-hook-events",
+        "--include-partial-messages",
+        "--no-chrome",
+        "--no-session-persistence",
+        "-p",
+        "--print",
+        "--replay-user-messages",
+        "--restricted",
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--tmux",
+        "--verbose",
+        "-v",
+        "--version",
+    }
+)
+
+
+def _ps_positional_mask(tokens: list[str]) -> list[str]:
+    """Classify each token after the executable as ``"flag"``, ``"value"``
+    (certainly a flag's value: after a :data:`_VALUE_FLAGS` or
+    :data:`_VARIADIC_FLAGS` flag), ``"maybe-value"`` (directly after a flag
+    whose arity is unknown or optional, such as ``--resume [id]``) or
+    ``"positional"``. After ``--`` every token is positional."""
+    mask: list[str] = []
+    pending = ""  # "one", "many", "maybe" or ""
+    rest_positional = False
+    for token in tokens:
+        if rest_positional:
+            mask.append("positional")
+        elif token == "--":
+            mask.append("flag")
+            rest_positional = True
+            pending = ""
+        elif token.startswith("-") and len(token) > 1:
+            mask.append("flag")
+            name, has_eq, _ = token.partition("=")
+            if has_eq:
+                pending = "many" if name in _VARIADIC_FLAGS else ""
+            elif name in _VARIADIC_FLAGS:
+                pending = "many"
+            elif name in _VALUE_FLAGS:
+                pending = "one"
+            elif name in _BOOLEAN_FLAGS:
+                pending = ""
+            else:
+                pending = "maybe"
+        elif pending in ("one", "many"):
+            mask.append("value")
+            if pending == "one":
+                pending = ""
+        elif pending == "maybe":
+            mask.append("maybe-value")
+            pending = ""
         else:
-            return True
-    return False
+            mask.append("positional")
+    return mask
+
+
+def _launch_argument_check(
+    prompt: str,
+    *,
+    pid: str | None,
+    is_first_turn: bool,
+    argv_probe: Callable[[str | None], str | None] | None = None,
+) -> tuple[bool, str | None]:
+    """:func:`_is_launch_argument` plus the ``signals["argv_probe"]`` value:
+    ``None`` when no check ran (a later turn, an empty prompt), ``"exact"``
+    or ``"ps"`` for the source that was read, ``"failed"`` when no argv was
+    available (no ``CLAUDE_PID``, or an empty probe result)."""
+    if not is_first_turn:
+        return False, None
+    target = " ".join(prompt.split())
+    if not target:
+        return False, None
+    if not pid:
+        # No process to probe: no evidence either way, classified from text.
+        return False, "failed"
+    probe = argv_probe or _probe_argv
+    args_line = probe(pid)
+    if not args_line:
+        # CLAUDE_PID names a claude process, so a launch prompt may exist and
+        # cannot be ruled out: fail closed (athenaeum#2745).
+        return True, "failed"
+    if "\0" in args_line:
+        found = any(" ".join(arg.split()) == target for arg in args_line.split("\0")[1:])
+        return found, "exact"
+    args_line = _decode_ps_escapes(args_line)
+    tokens = _ps_tokens(args_line)
+    tokens = tokens[_executable_end(tokens) :]
+    mask = _ps_positional_mask(tokens)
+    if any(
+        kind != "value" and " ".join(token.split()) == target
+        for token, kind in zip(tokens, mask, strict=True)
+    ):
+        return True, "ps"
+    words = args_line.split()
+    words = words[_executable_end(words) :]
+    target_words = target.split(" ")
+    size = len(target_words)
+    if size > 1:
+        # A one-word prompt is fully covered by the token match above, which
+        # skips flag values; a word run would match a value such as `opus`.
+        first = target_words[0]
+        for start in range(len(words) - size + 1):
+            if words[start] == first and words[start : start + size] == target_words:
+                return True, "ps"
+    return "positional" in mask, "ps"
 
 
 def _is_launch_argument(
@@ -407,37 +597,21 @@ def _is_launch_argument(
 
     * exact argv (``/proc/<pid>/cmdline``, NUL-separated): whole arguments
       only; an argument that matches or does not is certain.
-    * ``ps`` fallback (no argument boundaries; ``\\012``/``?`` for newlines):
-      whole shell-split tokens, plus runs of exactly the prompt's word
-      count. Fails closed: with no match, a positional token that cannot be
-      ruled out (multi-line or long prompt mangled by ``ps``, unparsable
+    * ``ps`` fallback (no argument boundaries): octal escapes such as
+      ``\\012``/``\\011`` are decoded, words up to the ``claude`` executable
+      are skipped, then whole shell-split tokens that are not a known flag's
+      value are compared, plus (for a multi-word prompt) runs of exactly the
+      prompt's word count. Fails closed: with no match, a positional token
+      that cannot be ruled out (a prompt mangled by ``ps``, unparsable
       quoting) counts as a launch argument.
 
-    No probe output at all means no evidence either way and returns False.
+    Also fails closed when ``CLAUDE_PID`` is set but the probe returns
+    nothing. With no ``CLAUDE_PID`` there is no evidence and this is False.
     """
-    if not is_first_turn or not pid:
-        return False
-    target = " ".join(prompt.split())
-    if not target:
-        return False
-    probe = argv_probe or _probe_argv
-    args_line = probe(pid)
-    if not args_line:
-        return False
-    if "\0" in args_line:
-        return any(" ".join(arg.split()) == target for arg in args_line.split("\0")[1:])
-    args_line = args_line.replace("\\012", " ")
-    tokens = _ps_tokens(args_line)
-    if any(" ".join(token.split()) == target for token in tokens[1:]):
-        return True
-    words = args_line.split()
-    target_words = target.split(" ")
-    size = len(target_words)
-    first = target_words[0]
-    for start in range(len(words) - size + 1):
-        if words[start] == first and words[start : start + size] == target_words:
-            return True
-    return _ps_has_positional(tokens)
+    found, _status = _launch_argument_check(
+        prompt, pid=pid, is_first_turn=is_first_turn, argv_probe=argv_probe
+    )
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +669,7 @@ def _sanitise_launcher(raw: str | None) -> str | None:
     return cleaned or None
 
 
-def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
+def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine | None:
     """Parse one ``UserPromptSubmit`` hook stdin payload and append a
     ``kind="turn"`` witness line.
 
@@ -505,6 +679,10 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     unexpected bug). See the module docstring's "Caller contract": the
     silent no-op guard around THIS call is the caller's job, not this
     function's.
+
+    Returns ``None``, writing nothing, when ``ledger.lock`` is not taken
+    within :data:`promptwitness.ledger.HOOK_LOCK_TIMEOUT` seconds: a stuck
+    lock holder must not block the prompt (athenaeum#2745).
     """
     try:
         payload: dict[str, Any] = json.loads(raw) if raw.strip() else {}
@@ -541,7 +719,9 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     raw_digest = canon.digest(prompt)
     prompt_digest = canon.digest(canon.normalize(prompt))
 
-    is_launch_argument = _is_launch_argument(prompt, pid=claude_pid, is_first_turn=is_first_turn)
+    is_launch_argument, argv_probe_status = _launch_argument_check(
+        prompt, pid=claude_pid, is_first_turn=is_first_turn
+    )
     prompt_kind, _is_human = classify_prompt_kind(
         prompt,
         agent_id=agent_id,
@@ -567,8 +747,10 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
         signals["launcher"] = launcher
     if truncated:
         signals["segments_truncated"] = True
+    if argv_probe_status is not None:
+        signals["argv_probe"] = argv_probe_status
 
-    line = ledger.append_line(
+    line = ledger.try_append_line(
         ledger_dir,
         kind="turn",
         harness="claude-code",
@@ -587,6 +769,8 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
         signals=signals,
     )
 
+    if line is None:
+        return None
     _save_state(ledger_dir, session, {"turn": turn, "claude_pid": claude_pid, "last_seq": line.seq})
     return line
 
@@ -600,7 +784,8 @@ def session_close(env: Mapping[str, str]) -> ledger.WitnessLine | None:
     non-Claude-Code callers that have no such session to close. ``turns``,
     ``last_seq`` and ``turns_witnessed`` are derived by scanning the ledger
     (the chain is authoritative; there is no per-session cache for these
-    SessionEnd-only counts).
+    SessionEnd-only counts). Also ``None`` when ``ledger.lock`` is not taken
+    within :data:`promptwitness.ledger.HOOK_LOCK_TIMEOUT` seconds.
     """
     session = env.get("CLAUDE_CODE_SESSION_ID")
     if not session:
@@ -617,7 +802,7 @@ def session_close(env: Mapping[str, str]) -> ledger.WitnessLine | None:
             last_seq = line.seq
         if ledger.LedgerIndex.is_witnessable_human(line):
             turns_witnessed += 1
-    return ledger.append_line(
+    return ledger.try_append_line(
         ledger_dir,
         kind="session-close",
         harness="claude-code",

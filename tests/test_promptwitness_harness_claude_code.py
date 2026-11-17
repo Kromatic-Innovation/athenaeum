@@ -7,6 +7,7 @@ One test class per acceptance criterion in the issue, mirroring
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -829,7 +830,7 @@ class TestLaunchArgumentFromPsOutput:
                 argv_probe=lambda _pid, r=rendered: f"claude --settings /x/s.json {r}",
             )
 
-    def test_over_400_word_prompt_is_a_launch_argument(self) -> None:
+    def test_very_long_ps_prompt_is_a_launch_argument(self) -> None:
         prompt = " ".join(f"w{i}" for i in range(450))
         assert claude_code._is_launch_argument(
             prompt,
@@ -921,3 +922,161 @@ class TestLaunchArgumentFromPsOutput:
             )
         assert time.monotonic() - start < 2.0
 
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2745 — review follow-ups to the launch-prompt check: an empty
+# probe fails closed, ps octal escapes decode, and typed prompts are not
+# misread as launch arguments on macOS-shaped ps lines.
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyArgvProbe:
+    def test_empty_probe_with_claude_pid_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: None)
+        raw = '{"prompt": "typed or launched, who knows", "session_id": "s-empty"}'
+        line = claude_code.record_turn(raw, {"CLAUDE_PID": "999"})
+        assert line is not None
+        assert line.prompt_kind == "launch-argument"
+        assert line.signals["argv_probe"] == "failed"
+        assert ledger.LedgerIndex.is_witnessable_human(line) is False
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_empty_probe_helper_fails_closed(self, empty: str | None) -> None:
+        assert claude_code._launch_argument_check(
+            "hello", pid="1", is_first_turn=True, argv_probe=lambda _pid, e=empty: e
+        ) == (True, "failed")
+
+    def test_no_claude_pid_keeps_text_classification_and_records_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = '{"prompt": "typed by hand", "session_id": "s-nopid"}'
+        line = claude_code.record_turn(raw, {})
+        assert line is not None
+        assert line.prompt_kind == "human"
+        assert line.signals["argv_probe"] == "failed"
+
+    def test_successful_probe_records_its_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: "claude --verbose")
+        raw = '{"prompt": "typed by hand", "session_id": "s-ps"}'
+        first = claude_code.record_turn(raw, {"CLAUDE_PID": "999"})
+        second = claude_code.record_turn(raw, {"CLAUDE_PID": "999"})
+        assert first is not None and second is not None
+        assert first.prompt_kind == "human"
+        assert first.signals["argv_probe"] == "ps"
+        # Later turns are not checked, so they carry no probe signal.
+        assert "argv_probe" not in second.signals
+
+
+class TestPsOctalEscapes:
+    def test_tab_and_newline_escapes_match_without_fail_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_fallback(_mask: object) -> bool:
+            raise AssertionError("fell through to the fail-closed rule")
+
+        prompt = "col1\tcol2\nsecond line"
+        rendered = "claude --settings /x/s.json col1\\011col2\\012second line"
+        # Proof the match is a real match: the fail-closed fallback is the
+        # only path that reads `"positional" in mask`, and a list subclass
+        # makes that path raise.
+        real_mask = claude_code._ps_positional_mask
+
+        class _NoContains(list[str]):
+            def __contains__(self, item: object) -> bool:
+                return no_fallback(item)
+
+        monkeypatch.setattr(
+            claude_code, "_ps_positional_mask", lambda tokens: _NoContains(real_mask(tokens))
+        )
+        assert claude_code._launch_argument_check(
+            prompt, pid="1", is_first_turn=True, argv_probe=lambda _pid: rendered
+        ) == (True, "ps")
+
+    def test_decode_ps_escapes(self) -> None:
+        assert claude_code._decode_ps_escapes("a\\011b\\012c\\\\d") == "a\tb\nc\\d"
+
+
+class TestMacOsPsFalseMisses:
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "node /x/claude",
+            "node /x/claude --verbose",
+            "/Applications/My Tools/claude",
+            "/Applications/My Tools/claude --model opus",
+            "claude --add-dir /a /b",
+            "claude --add-dir /a /b --verbose",
+            "node /opt/My Tools/claude --add-dir /a /b /c",
+        ],
+    )
+    def test_typed_first_prompt_is_human(self, line: str) -> None:
+        assert not claude_code._is_launch_argument(
+            "typed by hand", pid="1", is_first_turn=True, argv_probe=lambda _pid, ln=line: ln
+        )
+
+    @pytest.mark.parametrize(
+        ("line", "typed"),
+        [("claude --model opus", "opus"), ("claude --add-dir /a /b", "/b")],
+    )
+    def test_one_word_prompt_equal_to_a_flag_value_is_human(self, line: str, typed: str) -> None:
+        assert not claude_code._is_launch_argument(
+            typed, pid="1", is_first_turn=True, argv_probe=lambda _pid, ln=line: ln
+        )
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'node /x/claude "launch me now"',
+            "/Applications/My Tools/claude launch me now",
+            "claude --add-dir /a /b -- launch me now",
+            "claude -p launch me now",
+            "claude --verbose launch me now",
+        ],
+    )
+    def test_launch_prompt_still_matches(self, line: str) -> None:
+        assert claude_code._is_launch_argument(
+            "launch me now", pid="1", is_first_turn=True, argv_probe=lambda _pid, ln=line: ln
+        )
+
+    def test_unmatched_positional_after_boolean_flag_fails_closed(self) -> None:
+        # `-p` takes no value, so the word after it is a prompt that does not
+        # match the typed one: it cannot be ruled out.
+        assert claude_code._is_launch_argument(
+            "typed by hand",
+            pid="1",
+            is_first_turn=True,
+            argv_probe=lambda _pid: "claude -p something else",
+        )
+
+
+class TestRecordTurnLedgerLockDeadline:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock holder")
+    def test_held_lock_skips_the_witness_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fcntl
+        import os
+
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(ledger, "HOOK_LOCK_TIMEOUT", 0.1)
+        monkeypatch.setattr(claude_code, "_probe_argv", lambda pid: "claude")
+        raw = '{"prompt": "typed by hand", "session_id": "s-locked"}'
+        fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            assert claude_code.record_turn(raw, {"CLAUDE_PID": "999"}) is None
+            assert claude_code.session_close({"CLAUDE_CODE_SESSION_ID": "s-locked"}) is None
+        finally:
+            os.close(fd)
+        assert list(ledger.iter_lines(tmp_path)) == []
+        # No state was cached for the skipped turn, so the next one is turn 1.
+        line = claude_code.record_turn(raw, {"CLAUDE_PID": "999"})
+        assert line is not None and line.turn == 1

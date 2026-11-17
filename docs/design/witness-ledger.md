@@ -150,8 +150,11 @@ month's last line — the chain is continuous across partition boundaries, not
 reset per month. Appends take an exclusive file lock (`fcntl.flock` on POSIX,
 `msvcrt.locking` on Windows), write a `gap` line after a torn tail (a file not
 ending in `\n`) rather than chaining onto the torn line, then `O_APPEND` +
-fsync. Schema `v` bumps are additive-only within major version 1; readers
-ignore unknown fields.
+fsync. The per-prompt hook (`record_turn`, `session_close`) waits at most
+`HOOK_LOCK_TIMEOUT` (2s) for the lock, polling it without blocking; if it is
+not taken in time the hook writes no line and returns, so a stuck lock holder
+never blocks a prompt. Other appenders wait for the lock. Schema `v` bumps are
+additive-only within major version 1; readers ignore unknown fields.
 
 A genesis line's `ledger_meta` records the best-effort `chflags uappnd` /
 `chattr +a` outcome on the partition file — defence against accidents, not
@@ -186,11 +189,24 @@ Launch-argument matching is linear in argv size. Where `/proc` exists the
 hook reads `/proc/<pid>/cmdline` (exact, NUL-separated argv) and compares the
 prompt to each whole argument, whitespace-normalised, so multi-line and long
 prompts match. Elsewhere it falls back to `ps -o args=`, which loses argument
-boundaries and renders a newline as `?` (Linux procps) or `\012` (macOS); the
-fallback matches shell-split tokens and word runs of exactly the prompt's
+boundaries and renders a newline as `?` (Linux procps) or an octal escape such
+as `\012` (macOS). The fallback decodes every octal escape, skips the words up
+to the first one whose basename is `claude` (so `node /x/claude` or an
+unquoted path with spaces is not read as arguments), and uses the claude CLI's
+flag arity: the values of a flag that takes one value (`--model opus`) or
+several (`--add-dir /a /b`) are never prompts, and the word after a flag that
+takes none (`-p`, `-c`) is. It then matches shell-split tokens that are not a
+flag value, and, for a multi-word prompt, word runs of exactly the prompt's
 length. It fails closed: when `ps` yields no match but a positional argument
-remains that cannot be ruled out, the turn is `launch-argument`. A probe that
-returns nothing is no evidence, and the turn is classified from its text.
+remains that cannot be ruled out, the turn is `launch-argument`. The word
+after a flag the table does not know, or whose value is optional
+(`--resume [id]`), may be its value: it can still match, but it does not
+trigger the fail-closed rule. When `CLAUDE_PID` is set
+but the probe returns nothing, a launch prompt cannot be ruled out and the turn
+is `launch-argument`; with no `CLAUDE_PID` there is nothing to probe and the
+turn is classified from its text. Either way the line records
+`signals["argv_probe"] = "failed"`; a probe that ran records `"exact"` or
+`"ps"`.
 
 "First turn" means the first hook call of each claude process, not only of
 each session. A resumed session (`claude --resume <id> "<prompt>"`,

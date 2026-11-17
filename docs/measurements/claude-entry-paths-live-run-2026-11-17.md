@@ -98,7 +98,7 @@ On claude 2.1.326, Linux:
 | A slash command's transcript record carries `promptSource` | **false**: absent, so intake cannot attest it today |
 | claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` | still assumed, not observable here |
 | `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | consistent across this run (`1` interactive, `0` headless) |
-| The first prompt of a `claude "<prompt>"` launch is distinguishable | **confirmed live for a single-line prompt** once the `ps` matching was fixed. Multi-line and long (over 400 words) prompts are covered by unit tests only; they were not run live |
+| The first prompt of a `claude "<prompt>"` launch is distinguishable | **confirmed live for a single-line prompt** once the `ps` matching was fixed. Multi-line and very long prompts are covered by unit tests only; they were not run live |
 
 Also observed: `harness_version` is an empty string on every written line,
 because the hook environment carries no `CLAUDE_CODE_VERSION`. The version
