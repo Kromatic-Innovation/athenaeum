@@ -247,6 +247,66 @@ def fake_llm_client() -> Callable[..., FakeLLMClient]:
     return FakeLLMClient
 
 
+def strip_git_config_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy of *env* (default ``os.environ``) minus env-injected git config.
+
+    Drops ``GIT_CONFIG_COUNT`` and every ``GIT_CONFIG_KEY_<n>`` /
+    ``GIT_CONFIG_VALUE_<n>``. Env-based git config outranks a repo's own
+    ``.git/config``, so some containerized dev environments use it to force a
+    workspace-wide ``core.hooksPath``; left in place it would make fixture
+    ``git commit`` calls run (and fail in) a hook that has nothing to do with
+    the code under test. Shared by the autouse ``_isolate_git_config`` fixture
+    below and by tests that build a subprocess env by hand.
+    """
+    source = os.environ if env is None else env
+    return {
+        k: v
+        for k, v in source.items()
+        if k != "GIT_CONFIG_COUNT"
+        and not k.startswith("GIT_CONFIG_KEY_")
+        and not k.startswith("GIT_CONFIG_VALUE_")
+    }
+
+
+@pytest.fixture(scope="session")
+def _isolated_git_config_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A global git config whose only setting points ``core.hooksPath`` at an empty dir."""
+    root = tmp_path_factory.mktemp("isolated-git-config")
+    hooks = root / "no-hooks"
+    hooks.mkdir()
+    cfg = root / "gitconfig"
+    cfg.write_text(f"[core]\n\thooksPath = {hooks}\n")
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_git_config_file: Path,
+) -> None:
+    """Keep fixture ``git`` calls independent of the contributor's git config (athenaeum#2729).
+
+    Without this, a global ``core.hooksPath`` (a hook manager), a
+    ``GIT_CONFIG_SYSTEM`` file, or ``GIT_CONFIG_COUNT``/``KEY_n``/``VALUE_n``
+    in the environment makes fixture commits run foreign hooks and the suite
+    fail at scale. This points ``GIT_CONFIG_GLOBAL`` at :func:`_isolated_git_config_file`
+    (hooks disabled), sets ``GIT_CONFIG_NOSYSTEM=1``, and strips the
+    ``GIT_CONFIG_COUNT`` family.
+
+    It runs before the test body, so a test that deliberately wants its own
+    ``GIT_CONFIG_*`` (e.g. an injected failing hook) just ``monkeypatch.setenv``s
+    it in the body and wins. A test that wants the ambient config untouched
+    carries ``@pytest.mark.real_git_config``.
+    """
+    if request.node.get_closest_marker("real_git_config"):
+        return
+    for key in set(os.environ) - set(strip_git_config_env()):
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_isolated_git_config_file))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure git identity is available for tests that run git commit."""

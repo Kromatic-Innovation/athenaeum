@@ -16,6 +16,14 @@ kept as they were written.
 
 ### Fixed
 
+- The test suite now isolates git config itself: an autouse fixture points
+  `GIT_CONFIG_GLOBAL` at an empty-hooks config, sets `GIT_CONFIG_NOSYSTEM=1` and
+  strips `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, so a contributor's global
+  `core.hooksPath` or hook manager no longer fails fixture commits (opt out with
+  `@pytest.mark.real_git_config`). The calibration sweep's default summary path
+  is now a temp directory instead of the tracked repo-root
+  `calibration-summary.json`, so a test run leaves the working tree clean
+  (athenaeum#2729).
 - The Claude Code witness hook now classifies real interactive prompts. A live
   run against claude 2.1.326 showed that `CLAUDE_CODE_CHILD_SESSION=1` is set in
   every hook environment, which made every interactive prompt classify as
