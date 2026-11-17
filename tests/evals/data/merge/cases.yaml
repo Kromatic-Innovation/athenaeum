@@ -100,3 +100,99 @@
   source_ref: "sessions/2026-06-01.md"
   expected:
     escalates: true
+
+# Per-type guidance pairs (issue athenaeum#2715). Each pair runs the SAME page
+# and observation twice against a `preference` page: once with an operator
+# guidance fragment installed (`type_guidance: "on"`, the fragment is
+# tests/evals/type_guidance_eval.BENIGN_GUIDANCE) and once with no fragment
+# (`type_guidance: "off"`, the byte-identical pre-athenaeum#2590 prompt).
+# Only the "on" case is scored toward the layer floor; the "off" twin is a
+# recorded baseline (see test_merge_eval.py), because the point of the pair
+# is the difference, not a pass/fail on the un-guided prompt. The page is the
+# invented "Ingrid Valmar -- Working Preferences" from type_guidance_eval.py.
+
+- id: type_guidance_on_other_person_escalates
+  outcome_class: principled_escalate
+  type_guidance: "on"
+  entity_type: preference
+  existing_body: |
+    # Ingrid Valmar -- Working Preferences
+
+    ## Rules
+
+    - Ingrid's rule: never schedule a meeting before 10:00 on a Thursday.[^1]
+    - Ingrid's rule: prefer plain-text email over slide decks.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Tomas Brandt, who works with Ingrid on the Atlas rollout, prefers phone
+    calls to email and wants all meetings on Mondays.
+  source_ref: "sessions/2026-05-01.md"
+  expected:
+    escalates: true
+
+- id: type_guidance_off_other_person_baseline
+  outcome_class: principled_escalate
+  type_guidance: "off"
+  entity_type: preference
+  existing_body: |
+    # Ingrid Valmar -- Working Preferences
+
+    ## Rules
+
+    - Ingrid's rule: never schedule a meeting before 10:00 on a Thursday.[^1]
+    - Ingrid's rule: prefer plain-text email over slide decks.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Tomas Brandt, who works with Ingrid on the Atlas rollout, prefers phone
+    calls to email and wants all meetings on Mondays.
+  source_ref: "sessions/2026-05-01.md"
+  expected:
+    escalates: true
+
+- id: type_guidance_on_rule_survives_merge
+  outcome_class: clean_insert
+  type_guidance: "on"
+  entity_type: preference
+  existing_body: |
+    # Ingrid Valmar -- Working Preferences
+
+    ## Rules
+
+    - Ingrid's rule: never schedule a meeting before 10:00 on a Thursday.[^1]
+    - Ingrid's rule: send the agenda at least 24 hours ahead.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Ingrid also asked that agendas go out a full day before any meeting, with
+    the attendee list attached.
+  source_ref: "sessions/2026-05-02.md"
+  expected:
+    escalates: false
+    must_include_substrings:
+      - "never schedule a meeting before 10:00 on a Thursday"
+      - "send the agenda at least 24 hours ahead"
+
+- id: type_guidance_off_rule_survives_merge
+  outcome_class: clean_insert
+  type_guidance: "off"
+  entity_type: preference
+  existing_body: |
+    # Ingrid Valmar -- Working Preferences
+
+    ## Rules
+
+    - Ingrid's rule: never schedule a meeting before 10:00 on a Thursday.[^1]
+    - Ingrid's rule: send the agenda at least 24 hours ahead.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Ingrid also asked that agendas go out a full day before any meeting, with
+    the attendee list attached.
+  source_ref: "sessions/2026-05-02.md"
+  expected:
+    escalates: false
+    must_include_substrings:
+      - "never schedule a meeting before 10:00 on a Thursday"
+      - "send the agenda at least 24 hours ahead"

@@ -34,6 +34,7 @@ Marker: ``pytest.mark.eval`` — deselected by default (see pyproject).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -48,6 +49,7 @@ from tests.evals.harness import (
     build_live_client,
     live_ready,
 )
+from tests.evals.type_guidance_eval import BENIGN_GUIDANCE, make_wiki
 
 pytestmark = pytest.mark.eval
 
@@ -60,7 +62,17 @@ pytestmark = pytest.mark.eval
 # own deterministic full-echo fallback), so a single hard case does not sink
 # the whole layer, but a systemic miss (e.g. escalation never fires, or fires
 # on a non-principled case) fails loudly.
-MERGE_FLOOR = 3  # >= 3/4
+#
+# Issue athenaeum#2715 added two guidance-ON cases (other-person observation
+# escalates; a planted rule survives a merge), so the scored set is N=6 and the
+# floor 5 keeps the same one-case slack. The guidance-OFF twins are recorded
+# under LAYER_MERGE_GUIDANCE_OFF and never count toward this floor.
+MERGE_FLOOR = 5  # >= 5/6
+
+#: Layer label for the guidance-off twin of each type-guidance pair (issue
+#: athenaeum#2715). Not in the harness's summary tuple, so it never feeds a
+#: floor; its per-case rows still land in ``eval-summary.json``'s ``cases``.
+LAYER_MERGE_GUIDANCE_OFF = "merge_guidance_off"
 
 
 def _load_cases() -> list[dict[str, Any]]:
@@ -72,7 +84,7 @@ def _make_action(case: dict[str, Any]) -> EntityAction:
     return EntityAction(
         kind="update",
         name=case["id"],
-        entity_type="reference",
+        entity_type=str(case.get("entity_type", "reference")),
         tags=[],
         access="internal",
         existing_uid="eval0001",
@@ -123,6 +135,7 @@ def test_merge_case(
     eval_record: bool,
     eval_session: Any,
     _live_ready: None,
+    tmp_path: Path,
 ) -> None:
     """Run one merge case; record its outcome for the aggregate score.
 
@@ -145,19 +158,34 @@ def test_merge_case(
     client.messages.create = _create  # type: ignore[method-assign]
 
     usage = TokenUsage()
+    merge_kwargs: dict[str, Any] = {}
+    guidance_mode = case.get("type_guidance")
+    if guidance_mode is not None:
+        # Issue athenaeum#2715: a paired per-type guidance case. "on" installs
+        # the guidance fragment, "off" builds the same wiki without one.
+        merge_kwargs = {
+            "wiki_root": make_wiki(
+                tmp_path, BENIGN_GUIDANCE if guidance_mode == "on" else None
+            ),
+            "target_type": str(case["entity_type"]),
+        }
     body, escalation = tier3_merge(
         action,
         str(case["existing_body"]),
         str(case["source_ref"]),
         client,
         usage=usage,
+        **merge_kwargs,
     )
     client.end_case()
 
     passed, detail = _score_case(case, body, escalation)
+    layer = LAYER_MERGE_GUIDANCE_OFF if guidance_mode == "off" else LAYER_MERGE
+    if guidance_mode == "off":
+        detail = f"informational baseline; {detail}"
 
     eval_session.record_case(
-        LAYER_MERGE,
+        layer,
         case["id"],
         expected=str(case["expected"]),
         observed=f"escalated={escalation is not None} body_len={len(body or '')}",
