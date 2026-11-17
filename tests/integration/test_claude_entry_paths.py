@@ -911,6 +911,9 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
     # id, finds the first prompt's text, and reports a clean
     # ``digest-mismatch`` miss -- never a false "witnessed". The row pins that
     # safe miss; flip it to a hit once the adapter can attest a shared id.
+    # ``LedgerIndex`` keeps the LAST line per ``prompt_id``, so the queued
+    # line also displaces the earlier typed prompt's line: that earlier
+    # prompt loses attestation too (a second safe miss, not a false hit).
     EntryPathCase(
         id="queued-while-turn-runs",
         description="queued (typed while a turn runs)",
@@ -935,7 +938,7 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         expected_segment_kinds=("slash-args",),
         expect_resumed=False,
         intake_hit=False,
-        intake_miss_reason_prefix="transcript-promptsource",
+        intake_miss_reason_prefix="transcript-promptsource:absent",
     ),
     EntryPathCase(
         id="pasted-content",
@@ -1178,6 +1181,9 @@ def _drive_queued_while_turn_runs(paths: _LiveHarnessPaths, tmp_path: Path) -> l
     assert len(lines) == 2, f"expected two turn lines (initial + queued), got {len(lines)}"
     queued = lines[1]
     assert queued.prompt_id, "the queued turn is expected to carry a prompt_id"
+    assert lines[0].prompt_id == queued.prompt_id, (
+        "the queued turn is expected to share the earlier turn's prompt_id"
+    )
     return queued
 
 
@@ -1455,6 +1461,11 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     assert line.channel == case.expected_channel
     assert tuple(segment.kind for segment in line.segments) == case.expected_segment_kinds
     assert line.resumed is case.expect_resumed
+    if case.id == "interactive-typed":
+        # The live hook env carries CLAUDE_CODE_CHILD_SESSION=1 even in a
+        # top-level interactive session, which is why it is not a classifier
+        # input (athenaeum#2161).
+        assert line.signals["child_session"] == "1"
 
     outcome, fields = _attest_line(paths, line)
     assert outcome.hit is case.intake_hit
@@ -1462,7 +1473,13 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
         assert outcome.miss_reason is None
     else:
         assert outcome.miss_reason is not None
-        assert outcome.miss_reason.split(":", 1)[0] == case.intake_miss_reason_prefix
+        expected_reason = case.intake_miss_reason_prefix
+        assert expected_reason is not None
+        if ":" in expected_reason:
+            # A full reason (e.g. ``transcript-promptsource:absent``): exact.
+            assert outcome.miss_reason == expected_reason
+        else:
+            assert outcome.miss_reason.split(":", 1)[0] == expected_reason
 
     # prompt_id / prompt_digest parity against the transcript record (issue
     # AC: "prompt_id joined to the transcript record's promptId, and

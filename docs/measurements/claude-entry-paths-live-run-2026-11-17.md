@@ -58,11 +58,13 @@ Adapter fixes (in this branch, with unit tests):
    `<command-name>`/`<command-args>` wrapper text. The adapter now recognises
    that form (a name made of letters, digits and `_:.-`, then whitespace and
    the args) and records the args as the `slash-args` segment. A path-like
-   typed prompt such as `/usr/bin is missing` stays `human`.
+   typed prompt such as `/usr/bin is missing` stays `human`; a single-segment
+   path such as `/tmp` is treated as a slash command (a counted false miss).
 3. **`ps -o args=` does not preserve argv boundaries**, so a multi-word
    launch prompt never matched a single token and `claude "<prompt>"` and
-   `claude -p "<prompt>"` were never detected. The check now also matches
-   every contiguous run of words.
+   `claude -p "<prompt>"` were never detected. The check now reads exact argv
+   from `/proc` where available and compares whole arguments; the `ps`
+   fallback matches word runs of the prompt's length and fails closed.
 4. Local built-in slash commands such as `/compact` **do not fire the hook at
    all**; only a command that expands into a model prompt does. The harness
    row now uses a custom command written into the isolated config dir.
@@ -96,7 +98,7 @@ On claude 2.1.326, Linux:
 | A slash command's transcript record carries `promptSource` | **false**: absent, so intake cannot attest it today |
 | claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` | still assumed, not observable here |
 | `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | consistent across this run (`1` interactive, `0` headless) |
-| The first prompt of a `claude "<prompt>"` launch is distinguishable | **confirmed** once the `ps` matching was fixed |
+| The first prompt of a `claude "<prompt>"` launch is distinguishable | **confirmed live for a single-line prompt** once the `ps` matching was fixed. Multi-line and long (over 400 words) prompts are covered by unit tests only; they were not run live |
 
 Also observed: `harness_version` is an empty string on every written line,
 because the hook environment carries no `CLAUDE_CODE_VERSION`. The version
@@ -110,7 +112,8 @@ false attestation, and the harness rows pin that outcome.
 
 - **Queued prompts share the previous prompt's `prompt_id`.** Intake joins on
   that id and so compares against the wrong transcript record. Needs a join
-  that does not rely on the id being unique per prompt.
+  that does not rely on the id being unique per prompt. `LedgerIndex` keeps the
+  last line per `prompt_id`, so the earlier typed prompt also loses attestation.
 - **A slash command's transcript record has no `promptSource`.** Intake
   requires `typed` or `queued`, so no slash command can be attested. Needs a
   decision on whether `origin.kind: human` alone is enough for that kind.
@@ -133,6 +136,9 @@ the resulting ledger line.
 configuration and re-installs its package, which is deployment state, not
 engine code. The acceptance criteria that depend on it (enable the ledger,
 then read `athenaeum receipts attest-readout` after the first nightly) remain
-with the operator. The evidence they were gated on is now in place:
-classification is correct for every interactive path except the unrun bridge
-row, and the two intake gaps above only ever produce misses.
+with the operator. This run supplies part of the evidence they were gated on:
+classification was correct on the interactive paths run here (not the bridge
+row, and not multi-line or long launch prompts, which only unit tests cover),
+and the two intake gaps above produced misses in this run, not false
+attestations. Whether that is enough to enable the ledger is the operator's
+call.

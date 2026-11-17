@@ -22,7 +22,9 @@ kept as they were written.
   `unknown`; it is no longer a classifier input. Raw `/name args` slash lines
   are recognised as slash commands with a `slash-args` segment, and a
   `claude "<prompt>"` or `claude -p "<prompt>"` launch prompt is now detected
-  when it contains spaces (athenaeum#2161).
+  when it contains spaces, including multi-line and very long prompts; where
+  the launch prompt cannot be ruled out the turn is classed `launch-argument`
+  (athenaeum#2161).
 
 ## [0.26.0] - 2026-11-16
 
