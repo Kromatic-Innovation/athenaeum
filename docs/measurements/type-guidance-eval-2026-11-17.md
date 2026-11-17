@@ -164,7 +164,12 @@ For:
   6 of 32 (batches, no-clause: 3/8, 1/10, 2/14; clause: 0/8, 0/9, 0/12;
   two-sided Fisher exact p about 0.025). Chains whose body came back empty
   (the side finding above; 2 no-clause, 5 clause) are excluded from both
-  arms. The pooled figure includes two batches run before the harness bug was
+  arms. (This is why the full-echo `adversarial` clause arm has 14 chains in
+  the results table but 12 here: the two empty-body chains in that batch are
+  excluded, conservatively. Counting them as chains with no loss gives 0/14
+  versus 2/14 for that batch. The pooled 29 is 34 chains minus the five
+  empty-body chains across all batches.)
+  The pooled figure includes two batches run before the harness bug was
   found; the bug only affected chains with an empty body, which are the
   excluded ones. The fresh re-run on its own is 2/14 versus 0/12
   (p about 0.48): consistent with the effect, not evidence for it alone. The

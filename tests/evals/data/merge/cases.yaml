@@ -148,8 +148,11 @@
     Tomas Brandt, who works with Ingrid on the Atlas rollout, prefers phone
     calls to email and wants all meetings on Mondays.
   source_ref: "sessions/2026-05-01.md"
+  # Measured baseline (docs/measurements/type-guidance-eval-2026-11-17.md): the
+  # un-guided prompt never escalated this observation (0/20), so that is the
+  # expectation here. Informational only; never scored toward the merge floor.
   expected:
-    escalates: true
+    escalates: false
 
 - id: type_guidance_on_rule_survives_merge
   outcome_class: clean_insert
