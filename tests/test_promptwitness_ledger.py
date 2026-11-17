@@ -394,6 +394,69 @@ class TestEightConcurrentAppenders:
 
 
 # ---------------------------------------------------------------------------
+# Lock deadline (athenaeum#2745): a held ledger.lock skips the append
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock holder")
+class TestLockDeadline:
+    def _kwargs(self) -> dict[str, object]:
+        return {
+            "kind": "gap",
+            "harness": "test",
+            "harness_version": "1",
+            "hook_version": "t",
+            "reason": "x",
+        }
+
+    def test_held_lock_returns_none_without_writing_or_raising(self, tmp_path: Path) -> None:
+        import fcntl
+
+        fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            started = time.monotonic()
+            result = ledger.try_append_line(tmp_path, lock_timeout=0.2, **self._kwargs())
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(fd)
+        assert result is None
+        assert 0.2 <= elapsed < 2.0
+        assert list(ledger.iter_lines(tmp_path)) == []
+        assert ledger.list_partitions(tmp_path) == []
+
+    def test_append_line_with_deadline_raises_ledger_locked(self, tmp_path: Path) -> None:
+        import fcntl
+
+        fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with pytest.raises(ledger.LedgerLocked):
+                ledger.append_line(tmp_path, lock_timeout=0.05, **self._kwargs())
+        finally:
+            os.close(fd)
+
+    def test_free_lock_appends_normally(self, tmp_path: Path) -> None:
+        line = ledger.try_append_line(tmp_path, lock_timeout=0.2, **self._kwargs())
+        assert line is not None and line.seq == 1
+        # The lock was released: a blocking append still goes through.
+        assert ledger.append_line(tmp_path, **self._kwargs()).seq == 2
+
+    def test_lock_released_by_holder_within_deadline_is_taken(self, tmp_path: Path) -> None:
+        import fcntl
+
+        fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        timer = threading.Timer(0.1, os.close, args=(fd,))
+        timer.start()
+        try:
+            line = ledger.try_append_line(tmp_path, lock_timeout=2.0, **self._kwargs())
+        finally:
+            timer.join()
+        assert line is not None and line.seq == 1
+
+
+# ---------------------------------------------------------------------------
 # Windows lock path (mocked -- no real Windows needed)
 # ---------------------------------------------------------------------------
 
@@ -424,6 +487,36 @@ class TestWindowsLockPathMocked:
                 sys.modules.pop("msvcrt", None)
 
         assert calls == [(fd, 1, 1), (fd, 0, 1)]
+
+    def test_try_lock_uses_non_blocking_msvcrt_mode(self, tmp_path: Path) -> None:
+        """athenaeum#2745: the deadline path polls with ``LK_NBLCK``, and a
+        held lock (``OSError``) reports ``False`` rather than raising."""
+        calls: list[int] = []
+        held = {"value": True}
+
+        def locking(fd: int, mode: int, nbytes: int) -> None:
+            calls.append(mode)
+            if held["value"]:
+                raise OSError("locked")
+
+        fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, LK_NBLCK=2, locking=locking)
+        real_msvcrt = sys.modules.get("msvcrt")
+        sys.modules["msvcrt"] = fake_msvcrt
+        try:
+            fd = os.open(tmp_path / "ledger.lock", os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                with mock.patch.object(ledger.sys, "platform", "win32"):
+                    assert ledger._try_lock_exclusive(fd) is False
+                    held["value"] = False
+                    assert ledger._try_lock_exclusive(fd) is True
+            finally:
+                os.close(fd)
+        finally:
+            if real_msvcrt is not None:
+                sys.modules["msvcrt"] = real_msvcrt
+            else:
+                sys.modules.pop("msvcrt", None)
+        assert calls == [2, 2]
 
 
 # ---------------------------------------------------------------------------

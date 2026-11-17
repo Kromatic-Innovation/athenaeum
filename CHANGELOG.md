@@ -30,6 +30,17 @@ kept as they were written.
   `claude -c "<prompt>"` from a script were counted as human, because the check
   ran only when the session had no cached state; it now runs on the first hook
   call of each claude process (athenaeum#2744).
+- The Claude Code witness hook's launch-prompt check no longer counts a typed
+  first prompt as a launch argument when macOS `ps` shows `node /path/claude`,
+  an unquoted install path with spaces, or a flag with several values
+  (`--add-dir /a /b`), or when a one-word prompt equals a flag value. Every
+  `ps` octal escape is decoded, not only `\012`. When `CLAUDE_PID` is set but
+  the command line cannot be read, the first turn is now classed
+  `launch-argument` instead of human, and the line records
+  `signals.argv_probe` (athenaeum#2745).
+- The witness hook no longer waits indefinitely for the ledger lock. After 2
+  seconds it skips the witness line and lets the prompt through
+  (athenaeum#2745).
 - On the systemd backend, `athenaeum schedule install` now deletes a leftover
   `stamp-athenaeum-run.timer` before it enables the timer, when no athenaeum
   unit file is installed (athenaeum#2721). A schedule removed with 0.25.0 or

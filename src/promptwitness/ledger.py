@@ -58,6 +58,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -79,6 +80,9 @@ __all__ = [
     "LedgerIndex",
     "resolve_ledger_dir",
     "append_line",
+    "try_append_line",
+    "LedgerLocked",
+    "HOOK_LOCK_TIMEOUT",
     "iter_lines",
     "verify_chain",
     "find_oversized_fields",
@@ -172,19 +176,67 @@ def _unlock_exclusive(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _try_lock_exclusive(fd: int) -> bool:
+    """Non-blocking :func:`_lock_exclusive`: ``True`` when the lock was
+    taken, ``False`` when another descriptor holds it."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+#: Seconds the per-prompt hook waits for ``ledger.lock`` before it skips the
+#: witness line (athenaeum#2745). A witness must never block a prompt, and an
+#: append holds the lock only for a tail read, one write and an fsync, so a
+#: wait this long means a stuck holder, not ordinary contention.
+HOOK_LOCK_TIMEOUT = 2.0
+
+_LOCK_POLL_INTERVAL = 0.02
+
+
+class LedgerLocked(TimeoutError):
+    """``ledger.lock`` could not be taken within the caller's deadline."""
+
+
 @contextlib.contextmanager
-def _exclusive_lock(lock_path: Path) -> Iterator[None]:
+def _exclusive_lock(lock_path: Path, timeout: float | None = None) -> Iterator[None]:
     """Hold an exclusive lock on *lock_path* for the duration of the block.
 
     Required because concurrent sessions append to one chain (unlike
     ``athenaeum.store.append_line_durable``'s single-appender assumption) —
     see ``tests/test_promptwitness_ledger.py``'s eight-concurrent-appenders
     test.
+
+    ``timeout=None`` waits indefinitely. Otherwise the lock is polled
+    without blocking until *timeout* seconds have passed, and
+    :class:`LedgerLocked` is raised if it was never taken (athenaeum#2745).
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        _lock_exclusive(fd)
+        if timeout is None:
+            _lock_exclusive(fd)
+        else:
+            deadline = time.monotonic() + timeout
+            while not _try_lock_exclusive(fd):
+                if time.monotonic() >= deadline:
+                    raise LedgerLocked(f"{lock_path} not acquired within {timeout:g}s")
+                time.sleep(_LOCK_POLL_INTERVAL)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
         yield
     finally:
         _unlock_exclusive(fd)
@@ -1013,6 +1065,7 @@ def append_line(
     reason: str | None = None,
     extra: Mapping[str, Any] | None = None,
     extra_signers: Mapping[str, KeyProviderLike] | None = None,
+    lock_timeout: float | None = None,
 ) -> WitnessLine:
     """Append one witness line to the ledger under *ledger_dir*.
 
@@ -1033,6 +1086,11 @@ def append_line(
     :func:`promptwitness.signing.append_key_rotate_line`, the only caller
     that passes this. ``None`` for every other caller, with zero behaviour
     change.
+
+    *lock_timeout*: ``None`` (the default) waits for ``ledger.lock``
+    indefinitely; a number of seconds raises :class:`LedgerLocked`, with
+    nothing written, if the lock is not taken in time. See
+    :func:`try_append_line` for the non-raising form the hook uses.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown ledger line kind {kind!r}; must be one of {sorted(KINDS)}")
@@ -1079,7 +1137,7 @@ def append_line(
     partition_path = ledger_dir_p / partition_name
     lock_path = ledger_dir_p / "ledger.lock"
 
-    with _exclusive_lock(lock_path):
+    with _exclusive_lock(lock_path, timeout=lock_timeout):
         tail = _tail_state_before(ledger_dir_p, ledger_id, partition_name)
         seq = tail.last_seq + 1
 
@@ -1137,6 +1195,25 @@ def append_line(
         _write_line_bytes(partition_path, line)
 
     return WitnessLine.from_dict(line)
+
+
+def try_append_line(
+    ledger_dir: str | os.PathLike[str],
+    *,
+    lock_timeout: float | None = None,
+    **fields: Any,
+) -> WitnessLine | None:
+    """:func:`append_line` with a deadline on ``ledger.lock``: returns
+    ``None``, writing nothing and raising nothing, when the lock is not
+    taken within *lock_timeout* seconds (default :data:`HOOK_LOCK_TIMEOUT`,
+    read at call time; athenaeum#2745). Every other failure still raises.
+    *fields* are :func:`append_line`'s keyword arguments.
+    """
+    timeout = HOOK_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
+    try:
+        return append_line(ledger_dir, lock_timeout=timeout, **fields)
+    except LedgerLocked:
+        return None
 
 
 # ---------------------------------------------------------------------------
