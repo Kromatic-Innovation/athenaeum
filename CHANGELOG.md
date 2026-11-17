@@ -23,7 +23,6 @@ kept as they were written.
   failed also exits non-zero and marks nothing imported, so a re-run retries
   those files instead of leaving unclassified pages behind a success message
   (athenaeum#2735).
-
 - `athenaeum init` no longer prints a Python traceback when `git init`,
   `git add .` or a non-identity `git commit` failure (for example a rejecting
   pre-commit hook) stops it. It exits with a short message naming the failing
