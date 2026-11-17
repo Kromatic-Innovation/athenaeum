@@ -457,7 +457,13 @@ def cmd_registry(args: argparse.Namespace) -> int:
     seed lands later and must not gate the builder).
     """
     from athenaeum.atomic_io import atomic_write_text
-    from athenaeum.registry import build_registry, render_registry
+    from athenaeum.registry import (
+        BODY_EMAIL_INDEX_NAME,
+        build_body_email_index,
+        build_registry,
+        render_body_email_index,
+        render_registry,
+    )
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -474,6 +480,12 @@ def cmd_registry(args: argparse.Namespace) -> int:
         else knowledge_root / "registry.json"
     )
     atomic_write_text(out_path, text)
+    # athenaeum#2714: page-body address sidecar, built in the same pass so an
+    # email-shaped recall can fall back to it without scanning bodies per query.
+    atomic_write_text(
+        out_path.parent / BODY_EMAIL_INDEX_NAME,
+        render_body_email_index(build_body_email_index(wiki_root)),
+    )
     print(
         f"Wrote {registry['entity_count']} entit"
         f"{'y' if registry['entity_count'] == 1 else 'ies'} with source handles "

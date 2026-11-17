@@ -31,7 +31,9 @@ the adapter that consumes it.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -235,3 +237,93 @@ def build_registry(wiki_root: Path) -> dict[str, Any]:
 def render_registry(registry: dict[str, Any]) -> str:
     """Serialize a registry dict to canonical JSON text (trailing newline)."""
     return json.dumps(registry, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
+
+
+#: File name of the body-address sidecar, written beside ``registry.json`` by
+#: the same ``athenaeum registry`` build (athenaeum#2714).
+BODY_EMAIL_INDEX_NAME = "registry-body-emails.json"
+
+#: Same shape :mod:`athenaeum.identity_resolution` uses to detect an address.
+_BODY_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def body_email_key(address: str) -> str:
+    """Sidecar key for *address*: sha256 of its casefolded, stripped form.
+
+    Keyed by digest so the sidecar never stores a raw address — a query hashes
+    its own address and does an O(1) lookup.
+    """
+    return hashlib.sha256(address.strip().lower().encode("utf-8")).hexdigest()
+
+
+def build_body_email_index(wiki_root: Path) -> dict[str, Any]:
+    """Compile ``address digest -> [[uid, filename], ...]`` from page BODIES.
+
+    One pass over ``wiki_root/*.md`` at build time (athenaeum#2714), so a
+    recall query never scans page bodies. Only pages with a non-empty ``uid``
+    are indexed; frontmatter addresses are not (they belong to the registry
+    handle set / excluded store). Deterministic: sorted keys and entries.
+    """
+    index: dict[str, set[tuple[str, str]]] = {}
+    if wiki_root.is_dir():
+        for path in sorted(wiki_root.glob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            meta, body = parse_frontmatter(text)
+            uid = _clean_scalar(meta.get("uid")) if meta else ""
+            if not uid:
+                continue
+            for address in _BODY_EMAIL_RE.findall(body):
+                index.setdefault(body_email_key(address), set()).add((uid, path.name))
+    return {
+        "version": REGISTRY_VERSION,
+        "addresses": {k: [list(e) for e in sorted(index[k])] for k in sorted(index)},
+    }
+
+
+def render_body_email_index(index: dict[str, Any]) -> str:
+    """Compact JSON text for the sidecar (read whole on every lookup, so no indent)."""
+    return json.dumps(index, separators=(",", ":"), sort_keys=True) + "\n"
+
+
+def lookup_body_email(knowledge_root: Path, address: str) -> list[str]:
+    """Sorted uids of pages whose body carried *address* at the last build.
+
+    O(1) after one JSON load of the sidecar. Each hit is re-verified against
+    its page (one file read per candidate, never a corpus scan), so a page
+    edited since the build cannot resolve on an address it no longer carries.
+    Missing/unreadable/malformed sidecar (a corpus never rebuilt since the
+    sidecar existed) returns ``[]`` — the caller reports plain ``no-match``.
+    """
+    try:
+        raw = json.loads(
+            (knowledge_root / BODY_EMAIL_INDEX_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    addresses = raw.get("addresses") if isinstance(raw, dict) else None
+    entries = addresses.get(body_email_key(address)) if isinstance(addresses, dict) else None
+    if not isinstance(entries, list):
+        return []
+    wanted = address.strip().lower()
+    uids: set[str] = set()
+    for entry in entries:
+        if not (isinstance(entry, list) and len(entry) == 2):
+            continue
+        uid, filename = entry
+        if not (isinstance(uid, str) and isinstance(filename, str)) or "/" in filename:
+            continue
+        try:
+            text = (knowledge_root / "wiki" / filename).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        if _clean_scalar(meta.get("uid") if meta else "") != uid:
+            continue
+        if any(a.lower() == wanted for a in _BODY_EMAIL_RE.findall(body)):
+            uids.add(uid)
+    return sorted(uids)
