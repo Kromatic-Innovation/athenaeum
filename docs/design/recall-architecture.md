@@ -450,7 +450,9 @@ feature did not exist.
 
 An email-shaped query is looked up in the excluded contact store first. When
 the store holds no record for the address, the walk falls back to
-`registry.json` handle values, then to page-body addresses (athenaeum#2714).
+`registry.json` handle values, then to addresses in the bodies of
+`type: person` pages (athenaeum#2714). A company or meeting page that only
+mentions an address never resolves it.
 Body addresses come from `registry-body-emails.json`, a sidecar that
 `athenaeum registry` writes beside `registry.json` in the same build: it maps
 a sha256 of the lowercased address to `[uid, filename]` pairs, so it stores

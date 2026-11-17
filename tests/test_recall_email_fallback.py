@@ -15,11 +15,18 @@ from athenaeum.registry import BODY_EMAIL_INDEX_NAME
 CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
 
 
-def _page(knowledge: Path, uid: str, name: str, body: str = "", extra: str = "") -> None:
+def _page(
+    knowledge: Path,
+    uid: str,
+    name: str,
+    body: str = "",
+    extra: str = "",
+    page_type: str = "person",
+) -> None:
     wiki = knowledge / "wiki"
     wiki.mkdir(parents=True, exist_ok=True)
     (wiki / f"{uid}-page.md").write_text(
-        f"---\nuid: {uid}\nname: {name}\ntype: person\n{extra}---\n\n{name}. {body}\n",
+        f"---\nuid: {uid}\nname: {name}\ntype: {page_type}\n{extra}---\n\n{name}. {body}\n",
         encoding="utf-8",
     )
 
@@ -146,3 +153,34 @@ def test_with_pii_gating_on_body_resolved_hit(tmp_path: Path) -> None:
     on = _recall(tmp_path, "jo.old@example.org", with_pii=True)
     assert on["resolved"] is True and on["redactions"] == []
     assert [v["identifier"] for v in on["contact_values"]] == ["jo@example.net"]
+
+
+def test_non_person_page_mentioning_an_address_does_not_own_it(tmp_path: Path) -> None:
+    _page(
+        tmp_path,
+        "aaaa0020",
+        "Widget Works",
+        body="Sales contact: kim@example.org",
+        page_type="company",
+    )
+    _build(tmp_path)
+    payload = _recall(tmp_path, "kim@example.org")
+    assert payload["resolved"] is False
+    assert payload["reason"] == "no-match"
+
+
+def test_person_page_wins_over_a_company_page_that_mentions_the_address(
+    tmp_path: Path,
+) -> None:
+    _page(tmp_path, "aaaa0021", "Kim Lever", body="kim@example.org")
+    _page(
+        tmp_path,
+        "aaaa0022",
+        "Widget Works",
+        body="Sales contact: kim@example.org",
+        page_type="company",
+    )
+    _build(tmp_path)
+    payload = _recall(tmp_path, "kim@example.org")
+    assert payload["resolved"] is True
+    assert payload["uid"] == "aaaa0021"

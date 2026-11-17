@@ -256,13 +256,25 @@ def body_email_key(address: str) -> str:
     return hashlib.sha256(address.strip().lower().encode("utf-8")).hexdigest()
 
 
+def _is_person_page(meta: dict[str, Any] | None) -> bool:
+    """True when *meta* declares ``type: person``.
+
+    Only person pages own an address for the body fallback (athenaeum#2714):
+    a company, project or meeting page that MENTIONS someone's address in its
+    body must not resolve that address to itself.
+    """
+    return bool(meta) and _clean_scalar(meta.get("type") if meta else "") == "person"
+
+
 def build_body_email_index(wiki_root: Path) -> dict[str, Any]:
     """Compile ``address digest -> [[uid, filename], ...]`` from page BODIES.
 
     One pass over ``wiki_root/*.md`` at build time (athenaeum#2714), so a
     recall query never scans page bodies. Only pages with a non-empty ``uid``
     are indexed; frontmatter addresses are not (they belong to the registry
-    handle set / excluded store). Deterministic: sorted keys and entries.
+    handle set / excluded store). Only ``type: person`` pages are indexed, so
+    an address a non-person page merely mentions never resolves to that page.
+    Deterministic: sorted keys and entries.
     """
     index: dict[str, set[tuple[str, str]]] = {}
     if wiki_root.is_dir():
@@ -275,7 +287,7 @@ def build_body_email_index(wiki_root: Path) -> dict[str, Any]:
                 continue
             meta, body = parse_frontmatter(text)
             uid = _clean_scalar(meta.get("uid")) if meta else ""
-            if not uid:
+            if not uid or not _is_person_page(meta):
                 continue
             for address in _BODY_EMAIL_RE.findall(body):
                 index.setdefault(body_email_key(address), set()).add((uid, path.name))
@@ -322,7 +334,7 @@ def lookup_body_email(knowledge_root: Path, address: str) -> list[str]:
         except (OSError, UnicodeDecodeError):
             continue
         meta, body = parse_frontmatter(text)
-        if _clean_scalar(meta.get("uid") if meta else "") != uid:
+        if _clean_scalar(meta.get("uid") if meta else "") != uid or not _is_person_page(meta):
             continue
         if any(a.lower() == wanted for a in _BODY_EMAIL_RE.findall(body)):
             uids.add(uid)
