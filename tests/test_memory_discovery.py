@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from athenaeum.memory_discovery import (
+    CALLS_PER_FILE,
+    PER_FILE_TOKENS,
     MemoryFile,
     discover_project_memories,
     estimate_cost,
@@ -94,12 +96,14 @@ class TestEstimateCost:
 
     def test_subscription_path_reports_tokens_only(self) -> None:
         cost = estimate_cost([self._file(400)], project_count=1, provider="claude-cli")
-        assert cost.estimated_tokens == 100
+        # Per file, not per byte: one file is ~2,800 tokens plus a small size term.
+        assert PER_FILE_TOKENS <= cost.estimated_tokens < PER_FILE_TOKENS + 500
         assert cost.estimated_cost_usd is None
 
     def test_api_path_also_reports_dollars(self) -> None:
         cost = estimate_cost([self._file(4_000_000)], project_count=1, provider="api")
-        assert cost.estimated_tokens == 1_000_000
+        # The size term still scales with bytes: 4 MB / 4 bytes, over 2 calls.
+        assert cost.estimated_tokens > 2_000_000
         assert cost.estimated_cost_usd is not None
         assert cost.estimated_cost_usd > 0
 
@@ -109,6 +113,18 @@ class TestEstimateCost:
         )
         assert cost.file_count == 2
         assert cost.project_count == 2
+        assert cost.estimated_api_calls == 2 * CALLS_PER_FILE
+        assert cost.total_pending == 2
+
+    def test_total_pending_is_carried_separately(self) -> None:
+        cost = estimate_cost(
+            [self._file(300)] * 4,
+            project_count=1,
+            provider="claude-cli",
+            total_pending=10,
+        )
+        assert cost.file_count == 4
+        assert cost.total_pending == 10
 
     def test_empty_files_is_zero_cost(self) -> None:
         cost = estimate_cost([], project_count=0, provider="api")

@@ -14,6 +14,16 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Changed
+
+- `athenaeum import-memory` now estimates cost per file instead of from file
+  bytes. The first real-login run measured about 2,800 tokens per file (two
+  classify calls each) against an estimate about 38 times too low. The prompt
+  prices only the files the run will process after `--max-files` and the call
+  cap (a file costs two calls, so the call cap bounds the batch), names the
+  expected API call count, names the total pending when the cap cuts the batch,
+  and says large-file cost is not yet measured (athenaeum#2733).
+
 ### Fixed
 
 - `athenaeum import-memory` re-runs now finish when a file sits in a

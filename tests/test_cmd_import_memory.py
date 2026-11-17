@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -987,3 +988,105 @@ class TestHeldButCompiledFilesConverge:
             out=io.StringIO(),
         )
         assert load_state(tmp_path / "cache")["imported"] == {}
+
+
+#: Per-file figure the athenaeum#2323 real-login run measured: 28,086 tokens
+#: over 10 files (docs/measurements/import-memory-real-login-run-2026-11-17.md).
+MEASURED_TOKENS_PER_FILE = 28_086 / 10
+
+
+class TestCostEstimateIsPerFileAndPerBatch:
+    """The cost line follows file count and this run's batch (athenaeum#2733)."""
+
+    def _prompt(
+        self,
+        tmp_path: Path,
+        *,
+        n_files: int,
+        max_files: int,
+        max_calls: int = 100,
+        provider: str = "claude-cli",
+    ) -> str:
+        names = [f"note-{i:02d}.md" for i in range(n_files)]
+        discovered = _discover(tmp_path, {"proj-a": names})
+        out = io.StringIO()
+        run_import(
+            knowledge_root=tmp_path / "knowledge",
+            cache_dir=tmp_path / "cache",
+            provider=provider,
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=False,
+            max_files=max_files,
+            max_calls=max_calls,
+            confirm=lambda: False,  # decline: only the summary matters
+            out=out,
+        )
+        return out.getvalue()
+
+    @staticmethod
+    def _tokens(text: str) -> int:
+        match = re.search(r"Estimated cost for this run: ~([\d,]+) tokens", text)
+        assert match, text
+        return int(match.group(1).replace(",", ""))
+
+    def test_capped_small_file_batch_is_within_2x_of_the_measured_figure(
+        self, tmp_path: Path
+    ) -> None:
+        # The report's shape: 10 small files pending, --max-files 4.
+        text = self._prompt(tmp_path, n_files=10, max_files=4)
+        measured_for_batch = 4 * MEASURED_TOKENS_PER_FILE
+        estimate = self._tokens(text)
+        assert measured_for_batch / 2 <= estimate <= measured_for_batch * 2
+        # The old figure (bytes / 4 over all ten files) was ~38x too low.
+        assert estimate > 30 * (10 * len("content of note-00.md") // 4)
+
+    def test_capped_batch_names_total_pending_and_call_count(
+        self, tmp_path: Path
+    ) -> None:
+        text = self._prompt(tmp_path, n_files=10, max_files=4)
+        assert "for 4 file(s), about 8 API calls" in text
+        assert "covers 4 of 10 pending file(s)" in text
+
+    def test_call_cap_bounds_the_batch(self, tmp_path: Path) -> None:
+        text = self._prompt(tmp_path, n_files=10, max_files=20, max_calls=6)
+        assert "for 3 file(s), about 6 API calls" in text
+        assert "covers 3 of 10 pending file(s)" in text
+
+    def test_uncapped_run_has_no_cap_line(self, tmp_path: Path) -> None:
+        text = self._prompt(tmp_path, n_files=3, max_files=20)
+        assert "for 3 file(s)" in text
+        assert "pending file(s); the other" not in text
+
+    def test_text_no_longer_claims_file_size_only(self, tmp_path: Path) -> None:
+        text = self._prompt(tmp_path, n_files=2, max_files=20)
+        assert "from file size only" not in text
+        assert "per file" in text
+
+    def test_api_provider_adds_dollars(self, tmp_path: Path) -> None:
+        text = self._prompt(tmp_path, n_files=2, max_files=20, provider="api")
+        assert "(~$" in text
+
+    def test_run_stages_only_the_call_capped_batch(self, tmp_path: Path) -> None:
+        discovered = _discover(tmp_path, {"proj-a": [f"n{i}.md" for i in range(6)]})
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        staged_counts: list[int] = []
+
+        def _compile(root: Path, **_: object) -> int:
+            staged_counts.append(len(list((root / "raw" / "auto-memory").rglob("*.md"))))
+            return _retire_everything(root)
+
+        run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=4,
+            compile_fn=_compile,
+            out=io.StringIO(),
+        )
+        assert staged_counts == [2]
