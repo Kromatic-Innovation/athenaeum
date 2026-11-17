@@ -30,7 +30,11 @@ kept as they were written.
   failed also exits non-zero and marks nothing imported, so a re-run retries
   those files instead of leaving unclassified pages behind a success message
   (athenaeum#2735).
-
+- `athenaeum init` no longer prints a Python traceback when `git init`,
+  `git add .` or a non-identity `git commit` failure (for example a rejecting
+  pre-commit hook) stops it. It exits with a short message naming the failing
+  git command and git's own error, and still removes everything it created
+  (athenaeum#2730).
 - The Claude Code witness hook now classifies real interactive prompts. A live
   run against claude 2.1.326 showed that `CLAUDE_CODE_CHILD_SESSION=1` is set in
   every hook environment, which made every interactive prompt classify as

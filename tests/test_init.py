@@ -199,13 +199,87 @@ def test_failed_init_preserves_preexisting_content(
     (target / "raw").mkdir(parents=True)
     (target / "raw" / "keep.md").write_text("mine")
     (target / "notes.txt").write_text("mine")
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(SystemExit, match="boom"):
         init_knowledge_dir(target)
     assert (target / "raw" / "keep.md").read_text() == "mine"
     assert (target / "notes.txt").read_text() == "mine"
     assert not (target / "wiki").exists()
     assert not (target / ".git").exists()
     assert not (target / "athenaeum.yaml").exists()
+
+
+def _snapshot(root: Path) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def _assert_clean_git_failure(
+    capsys: pytest.CaptureFixture[str], target: Path, command: str, detail: str
+) -> None:
+    from athenaeum.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["init", "--path", str(target)])
+    message = str(excinfo.value.code)
+    assert command in message and detail in message
+    assert len(message.strip().splitlines()) <= 3
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    assert "CalledProcessError" not in captured.out + captured.err
+
+
+def test_non_identity_commit_failure_is_a_clean_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """athenaeum#2730: a rejecting pre-commit hook -> short message, rollback."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'hook says no' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    # Env config overrides any global core.hooksPath set by test isolation.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hooks))
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "T")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "T")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+
+    target = tmp_path / "knowledge"
+    target.mkdir()
+    (target / "keep.txt").write_text("mine")
+    before = _snapshot(target)
+    _assert_clean_git_failure(capsys, target, "git commit", "hook says no")
+    assert _snapshot(target) == before
+    assert (target / "keep.txt").read_text() == "mine"
+
+
+def test_git_add_failure_is_a_clean_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """athenaeum#2730: a failing ``git add`` -> short message, rollback."""
+    import shutil
+
+    real_git = shutil.which("git")
+    assert real_git
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    wrapper = bindir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = add ]; then echo "fatal: simulated add failure" >&2; exit 1; fi\n'
+        f'exec "{real_git}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ['PATH']}")
+
+    target = tmp_path / "knowledge"
+    _assert_clean_git_failure(capsys, target, "git add .", "simulated add failure")
+    assert not target.exists()
 
 
 def test_force_help_mentions_no_backup(capsys: pytest.CaptureFixture[str]) -> None:
