@@ -14,6 +14,16 @@ kept as they were written.
 
 ## [Unreleased]
 
+### Fixed
+
+- On the systemd backend, `athenaeum schedule install` now deletes a leftover
+  `stamp-athenaeum-run.timer` before it enables the timer, when no athenaeum
+  unit file is installed (athenaeum#2721). A schedule removed with 0.25.0 or
+  earlier left that stamp behind, and a fresh install fired a "missed" compile
+  at once. Reinstalling over a live schedule keeps its stamp. The manual step
+  in the 0.26.0 "Upgrading from 0.25.0" notes (step 2, deleting the stamp by
+  hand before reinstalling) is no longer needed.
+
 ## [0.26.0] - 2026-11-16
 
 **Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian
