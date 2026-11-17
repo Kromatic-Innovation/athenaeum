@@ -362,6 +362,7 @@ MODULE_LAYER: dict[str, int] = {
     "subject_population": 4,
     "surface_divergence": 4,
     "tiers": 4,
+    "type_guidance": 4,  # issue athenaeum#2731: split out of tiers (same L4 domain layer)
     "unfold": 4,
     "verdict_effects": 4,
     "wiki_dedupe": 4,

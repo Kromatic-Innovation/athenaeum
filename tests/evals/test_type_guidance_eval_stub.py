@@ -9,7 +9,7 @@ imports. It pins the harness invariants a live run depends on.
 
 from __future__ import annotations
 
-from athenaeum import tiers
+from athenaeum import tiers, type_guidance
 from tests.conftest import FakeLLMClient
 from tests.evals import type_guidance_eval as T
 
@@ -30,7 +30,7 @@ def test_guidance_reaches_the_prompt_only_when_the_fragment_exists(tmp_path) -> 
 
 
 def test_noclause_arm_blanks_the_precedence_clause_and_restores_it() -> None:
-    original = tiers.TYPE_GUIDANCE_PROMPT
+    original = type_guidance.TYPE_GUIDANCE_PROMPT
     seen: list[str] = []
 
     def responder(**params):
@@ -46,7 +46,7 @@ def test_noclause_arm_blanks_the_precedence_clause_and_restores_it() -> None:
         escalate_reps=1,
         workers=1,
     )
-    assert tiers.TYPE_GUIDANCE_PROMPT == original
+    assert type_guidance.TYPE_GUIDANCE_PROMPT == original
     with_clause = [s for s in seen if "subordinate to the rules above" in s]
     assert with_clause and len(with_clause) < len(seen)
 

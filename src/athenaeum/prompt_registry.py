@@ -160,7 +160,7 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     # `_type-guidance-<type>.md` exists. Largest budget of the templates it
     # renders into (merge_full).
     (
-        "tiers.type_guidance_prompt",
+        "type_guidance.type_guidance_prompt",
         "TYPE_GUIDANCE_PROMPT",
         "write",
         12288,
