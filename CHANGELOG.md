@@ -20,6 +20,19 @@ kept as they were written.
 
 ### Fixed
 
+- Full-echo Tier-3 merge replies whose `ADDS_NEW_CLAIM:` line carries trailing
+  prose no longer drop the observation silently. `ADDS_NEW_CLAIM: false --
+  re-confirmation only` now parses as `false` (citation-only), and `true` with
+  trailing prose followed by a body keeps that body. A reply with no usable
+  body that is neither an explicit `false` nor `ESCALATE:` is logged under
+  `tier3-merge-malformed-reply` and counted as `malformed_merges` in the run
+  summary. The append-mode parser tolerates the same trailing prose
+  (athenaeum#2739)
+- `athenaeum init` no longer prints a Python traceback when `git init`,
+  `git add .` or a non-identity `git commit` failure (for example a rejecting
+  pre-commit hook) stops it. It exits with a short message naming the failing
+  git command and git's own error, and still removes everything it created
+  (athenaeum#2730).
 - The Claude Code witness hook now classifies real interactive prompts. A live
   run against claude 2.1.326 showed that `CLAUDE_CODE_CHILD_SESSION=1` is set in
   every hook environment, which made every interactive prompt classify as

@@ -5303,6 +5303,22 @@ def tier3_merge_append_params(
     }
 
 
+_ADDS_NEW_CLAIM_VERDICT_RE = re.compile(r"(true|false)(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def _adds_new_claim_verdict(first_line: str) -> str:
+    """Return ``"true"``/``"false"``/``""`` for an ``ADDS_NEW_CLAIM:`` line.
+
+    Issue athenaeum#2739: the verdict is the LEADING word after the colon;
+    anything the model writes after it on the same line (``false -- a
+    re-confirmation``) is prose, not part of the verdict. ``""`` means the
+    value did not start with ``true``/``false`` (unparseable).
+    """
+    value = first_line.split(":", 1)[1].strip()
+    m = _ADDS_NEW_CLAIM_VERDICT_RE.match(value)
+    return m.group(1).lower() if m else ""
+
+
 def parse_tier3_merge_append(
     text: str,
     action: EntityAction,
@@ -5339,7 +5355,7 @@ def parse_tier3_merge_append(
 
     first_line, _sep, rest = text.partition("\n")
     if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
-        verdict = first_line.split(":", 1)[1].strip().lower()
+        verdict = _adds_new_claim_verdict(first_line)
         text = rest.strip()
         if verdict == "false":
             if usage is not None:
@@ -5856,6 +5872,10 @@ def _append_source_citation(existing_body: str, source_ref: str) -> str:
 #: this fires for any source, never gated on adapter name, source type, or
 #: page title.
 MERGE_CITATION_ONLY_LOG_PREFIX = "tier3-merge-citation-only"
+
+#: Log prefix for a full-echo merge reply with no usable body that is neither
+#: an explicit ``ADDS_NEW_CLAIM: false`` nor ``ESCALATE:`` (athenaeum#2739).
+MERGE_MALFORMED_LOG_PREFIX = "tier3-merge-malformed-reply"
 
 #: Stable, greppable log prefix for the hint-derived subject-mismatch
 #: decision (issue athenaeum#1866): a merge verify for an
@@ -6844,7 +6864,7 @@ def parse_tier3_merge(
     # today's behaviour, unchanged.
     first_line, _sep, rest = text.partition("\n")
     if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
-        verdict = first_line.split(":", 1)[1].strip().lower()
+        verdict = _adds_new_claim_verdict(first_line)
         # Strip the sentinel line regardless of verdict — even an
         # unparseable value must not leave "ADDS_NEW_CLAIM: ..." glued onto
         # what the NO_MERGE:/ESCALATE:/plausible-echo checks below treat as
@@ -6890,6 +6910,23 @@ def parse_tier3_merge(
             text = parts[1].strip()
         else:
             return None, escalation
+
+    # Issue athenaeum#2739: no body left at all (e.g. a bare ``ADDS_NEW_CLAIM:
+    # true`` line) and not an explicit false / NO_MERGE / ESCALATE-only reply.
+    # Callers treat a falsy body as "no write", so say so loudly instead of
+    # letting the dropped observation look like a redundant merge.
+    if not text.strip():
+        if usage is not None:
+            usage.malformed_merges += 1
+        log.warning(
+            "%s page=%s source=%s — full-echo reply has no usable page body "
+            "and is neither ADDS_NEW_CLAIM: false nor ESCALATE:; existing "
+            "page left unchanged, observation not recorded",
+            MERGE_MALFORMED_LOG_PREFIX,
+            action.name,
+            source_ref,
+        )
+        return None, escalation
 
     # AC2: independent of whether the model used either sentinel above —
     # catches a response that ignores both and just writes prose (the exact

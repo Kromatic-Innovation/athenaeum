@@ -53,12 +53,12 @@ def test_noclause_arm_blanks_the_precedence_clause_and_restores_it() -> None:
 
 def test_empty_full_echo_body_does_not_wipe_the_chain_state() -> None:
     # A full-echo reply whose ADDS_NEW_CLAIM line carries trailing prose and no
-    # body parses to "" (callers treat a falsy body as "no write"); the chain
-    # must keep the previous body, not replace the page with "".
+    # body used to parse to "" (athenaeum#2739); it now parses as an explicit
+    # false (citation-only), so the chain keeps its body and never sees "".
     client = FakeLLMClient(text="ADDS_NEW_CLAIM: false -- re-confirmation only")
     rec = T.run_chain(client, "full", "off", 0)
     assert all(all(s["retained"]) for s in rec["steps"])
-    assert all(s["empty_body"] for s in rec["steps"])
+    assert not any(s["empty_body"] for s in rec["steps"])
 
 
 def test_wilson_interval_is_clamped_and_ordered() -> None:
