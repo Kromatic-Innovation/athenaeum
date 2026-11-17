@@ -174,7 +174,7 @@ each prompt itself:
 | `<system-reminder` | `system` | no |
 | any other `<tag` (including unconfirmed `peer`) | `unknown` | no (default-deny) |
 | any text, stdin `agent_id` present or `transcript_path` contains `/subagents/` | `subagent` | no (overrides all) |
-| any text, first turn, equals a `claude` argv positional after whitespace normalisation, or one cannot be ruled out (see below) | `launch-argument` | no (overrides all) |
+| any text, first turn of the claude process, equals a `claude` argv positional after whitespace normalisation, or one cannot be ruled out (see below) | `launch-argument` | no (overrides all) |
 
 A raw slash line is `/` + one name segment of letters, digits and `_:.-`,
 then whitespace and the args, so a multi-segment path such as
@@ -191,6 +191,13 @@ fallback matches shell-split tokens and word runs of exactly the prompt's
 length. It fails closed: when `ps` yields no match but a positional argument
 remains that cannot be ruled out, the turn is `launch-argument`. A probe that
 returns nothing is no evidence, and the turn is classified from its text.
+
+"First turn" means the first hook call of each claude process, not only of
+each session. A resumed session (`claude --resume <id> "<prompt>"`,
+`claude -c "<prompt>"`) already has state, but its first prompt can still be a
+launch argument, so the check runs again whenever the session's cached
+`claude_pid` differs from the current `CLAUDE_PID` (or no state exists). Later
+turns of the same process are never re-checked.
 
 Channels: `bridge` when `CLAUDE_CODE_BRIDGE_SESSION_ID` is set (ruling 8,
 never human, checked first); `interactive` requires

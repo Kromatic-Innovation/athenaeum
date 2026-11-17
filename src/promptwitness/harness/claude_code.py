@@ -397,8 +397,10 @@ def _is_launch_argument(
     is_first_turn: bool,
     argv_probe: Callable[[str | None], str | None] | None = None,
 ) -> bool:
-    """``True`` only on the session's first turn, when *prompt* is a
-    positional launch argument of ``$CLAUDE_PID`` (``claude "<prompt>"``).
+    """``True`` only on a claude process's first turn (a new session, or the
+    first turn after ``--resume``/``--continue``, athenaeum#2744), when
+    *prompt* is a positional launch argument of ``$CLAUDE_PID``
+    (``claude "<prompt>"``, ``claude --resume <id> "<prompt>"``).
     Never stores or returns argv text, only the boolean.
 
     Comparison is whitespace-normalised and linear in argv size:
@@ -520,9 +522,18 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
 
     ledger_dir = ledger.resolve_ledger_dir("claude-code")
     state = _load_state(ledger_dir, session)
-    is_first_turn = state is None
     claude_pid = env.get("CLAUDE_PID")
     prior_pid = state.get("claude_pid") if state else None
+    # The launch-argument check runs on the first hook call of each claude
+    # PROCESS, not only of each session (athenaeum#2744): `claude --resume
+    # <id> "prompt"` and `claude -c "prompt"` start a new process on a session
+    # that already has state, and their scripted first prompt is a launch
+    # argument exactly as on a new session. A process is told apart by
+    # `CLAUDE_PID`, which the cache records on every line; a different (or
+    # newly present) pid means this is that process's first turn. The resume
+    # flags in argv are not consulted: the pid change covers every resume
+    # form, and argv alone cannot say whether this is the process's first turn.
+    is_first_turn = state is None or prior_pid != claude_pid
     resumed = bool(state is not None and prior_pid and claude_pid and prior_pid != claude_pid)
     prior_turn = int(state.get("turn", 0)) if state else 0
     turn = prior_turn + 1
@@ -530,9 +541,7 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     raw_digest = canon.digest(prompt)
     prompt_digest = canon.digest(canon.normalize(prompt))
 
-    is_launch_argument = _is_launch_argument(
-        prompt, pid=claude_pid, is_first_turn=is_first_turn
-    )
+    is_launch_argument = _is_launch_argument(prompt, pid=claude_pid, is_first_turn=is_first_turn)
     prompt_kind, _is_human = classify_prompt_kind(
         prompt,
         agent_id=agent_id,
