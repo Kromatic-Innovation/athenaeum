@@ -10835,6 +10835,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         if ctx.usage.full_merges
                         else {}
                     ),
+                    # athenaeum#2739: full-echo replies with no usable body.
+                    **(
+                        {"malformed_merges": ctx.usage.malformed_merges}
+                        if ctx.usage.malformed_merges
+                        else {}
+                    ),
                     # athenaeum#1196: NEW entity writes the write-boundary type guard
                     # refused (type outside declared ∪ KNOWN_TYPES). Only
                     # rendered when non-zero, mirroring degraded/truncated —
