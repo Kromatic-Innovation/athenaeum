@@ -16,6 +16,7 @@ kept as they were written.
 
 ### Fixed
 
+<<<<<<< HEAD
 - The Claude Code witness hook now classifies real interactive prompts. A live
   run against claude 2.1.326 showed that `CLAUDE_CODE_CHILD_SESSION=1` is set in
   every hook environment, which made every interactive prompt classify as
@@ -25,6 +26,15 @@ kept as they were written.
   when it contains spaces, including multi-line and very long prompts; where
   the launch prompt cannot be ruled out the turn is classed `launch-argument`
   (athenaeum#2161).
+=======
+- On the systemd backend, `athenaeum schedule install` now deletes a leftover
+  `stamp-athenaeum-run.timer` before it enables the timer, when no athenaeum
+  unit file is installed (athenaeum#2721). A schedule removed with 0.25.0 or
+  earlier left that stamp behind, and a fresh install fired a "missed" compile
+  at once. Reinstalling over a live schedule keeps its stamp. The manual step
+  in the 0.26.0 "Upgrading from 0.25.0" notes (step 2, deleting the stamp by
+  hand before reinstalling) is no longer needed.
+>>>>>>> origin/develop
 
 ## [0.26.0] - 2026-11-16
 
