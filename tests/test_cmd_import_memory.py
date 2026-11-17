@@ -15,8 +15,10 @@ recording/sentinel-detecting stand-in, never a real compile call.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -25,9 +27,11 @@ import pytest
 
 from athenaeum._cmd_import_memory import (
     EXIT_INCOMPLETE,
+    _cmd_import_memory,
     _default_compile_batch,
     _is_imported,
     _pending_files,
+    check_provider_usable,
     load_state,
     run_import,
     save_state,
@@ -700,3 +704,149 @@ class TestDefaultCompileBatch:
         assert (knowledge_root / "raw" / "touched.marker").exists()
         assert not sentinel_raw.exists()
         assert not sentinel_wiki.exists()
+
+
+def _stub_claude(bin_dir: Path, body: str = "exit 1") -> Path:
+    """A stand-in ``claude`` on PATH (via *bin_dir*) running shell *body*."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "claude"
+    stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+class TestProviderUsable:
+    """A missing login stops the run before any file is read (athenaeum#2735)."""
+
+    @pytest.fixture(autouse=True)
+    def _path_only_the_stub(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_CLAUDE_CLI_BIN", raising=False)
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+        monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}/usr/bin:/bin")
+
+    def test_logged_out_stub_gives_a_one_line_fix(self, tmp_path: Path) -> None:
+        _stub_claude(tmp_path / "bin", "exit 1")
+        message = check_provider_usable("claude-cli")
+        assert message is not None
+        assert "\n" not in message
+        assert "claude auth login" in message
+
+    def test_logged_out_json_status_is_caught(self, tmp_path: Path) -> None:
+        _stub_claude(tmp_path / "bin", "echo '{\"loggedIn\": false}'")
+        assert check_provider_usable("claude-cli") is not None
+
+    def test_logged_in_stub_is_usable(self, tmp_path: Path) -> None:
+        _stub_claude(tmp_path / "bin", "echo '{\"loggedIn\": true}'")
+        assert check_provider_usable("claude-cli") is None
+
+    def test_missing_binary_is_reported(self, tmp_path: Path) -> None:
+        assert check_provider_usable("claude-cli") is not None
+
+    def test_cli_entrypoint_stops_before_staging_or_state(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Wired through ``_cmd_import_memory``, not only the helper."""
+        _stub_claude(tmp_path / "bin", "exit 1")
+        projects_root = tmp_path / "claude-projects"
+        _write(projects_root / "proj-a" / "memory" / "note.md", "a fact")
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        cache_dir = tmp_path / "cache"
+        args = argparse.Namespace(
+            path=knowledge_root,
+            projects=["proj-a"],
+            yes=True,
+            max_files=20,
+            max_calls=100,
+            projects_root=projects_root,
+            cache_dir=cache_dir,
+        )
+        rc = _cmd_import_memory(args)
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "claude auth login" in err
+        assert len(err.strip().splitlines()) == 1
+        assert not (knowledge_root / "raw" / "auto-memory" / "proj-a").exists()
+        assert load_state(cache_dir)["imported"] == {}
+
+    def test_run_import_never_stages_when_check_fails(self, tmp_path: Path) -> None:
+        discovered = _discover(tmp_path, {"proj-a": ["note.md"]})
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        compile_calls: list[object] = []
+        rc = run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=lambda *a, **k: compile_calls.append(a) or 0,
+            provider_check=lambda _p: "not logged in.",
+        )
+        assert rc == EXIT_INCOMPLETE
+        assert compile_calls == []
+        assert not (knowledge_root / "raw" / "auto-memory" / "proj-a").exists()
+
+
+class TestAllClassifyCallsFailed:
+    """Fail-open classify steps must not read as a clean import (athenaeum#2735)."""
+
+    def _run(self, tmp_path: Path, compile_fn: object) -> tuple[int, Path, Path]:
+        discovered = _discover(tmp_path, {"proj-a": ["one.md", "two.md"]})
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True)
+        cache_dir = tmp_path / "cache"
+        rc = run_import(
+            knowledge_root=knowledge_root,
+            cache_dir=cache_dir,
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=["proj-a"],
+            auto_yes=True,
+            max_files=20,
+            max_calls=100,
+            compile_fn=compile_fn,  # type: ignore[arg-type]
+        )
+        return rc, knowledge_root, cache_dir
+
+    def test_every_call_failing_exits_nonzero_and_marks_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            for name in ("claim_kind", "decay_bucket"):
+                logging.getLogger(f"athenaeum.{name}").warning(
+                    "%s: classify call failed (%s); unclassified",
+                    name,
+                    "claude CLI exited 1: (no stderr)",
+                )
+            return _retire_everything(knowledge_root)
+
+        rc, _root, cache_dir = self._run(tmp_path, _compile)
+        assert rc == EXIT_INCOMPLETE
+        assert load_state(cache_dir)["imported"] == {}
+        err = capsys.readouterr().err
+        assert "every classify call failed" in err
+
+    def test_some_calls_succeeding_is_not_all_failed(self, tmp_path: Path) -> None:
+        def _compile(knowledge_root: Path, **_: object) -> int:
+            logging.getLogger("athenaeum.claim_kind").warning(
+                "claim_kind: classify call failed (x); unclassified"
+            )
+            logging.getLogger("athenaeum.decay_bucket").info(
+                "decay_bucket: stamped durable on one.md"
+            )
+            return _retire_everything(knowledge_root)
+
+        rc, _root, cache_dir = self._run(tmp_path, _compile)
+        assert rc == 0
+        assert len(load_state(cache_dir)["imported"]) == 2
+
+    def test_logger_levels_are_restored(self, tmp_path: Path) -> None:
+        before = logging.getLogger("athenaeum.claim_kind").level
+        self._run(tmp_path, _retire_everything)
+        assert logging.getLogger("athenaeum.claim_kind").level == before
