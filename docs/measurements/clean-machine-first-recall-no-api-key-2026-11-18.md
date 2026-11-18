@@ -3,7 +3,7 @@
 # First recall without an API key, clean-machine run, 2026-11-18
 
 Issue athenaeum#2307 (epic athenaeum#2296). Result: **FAIL on two of five
-acceptance criteria, one partial.** The core loop works: with no
+acceptance criteria, one partial (AC2).** The core loop works: with no
 `ANTHROPIC_API_KEY` and a Claude Code login, a fact told in one `claude -p`
 process was compiled by the default `claude-cli` provider and returned by
 `recall` in a separate process. The counter-example (no login) and the
@@ -74,7 +74,7 @@ first contaminated attempt (see Method notes).
 - Repeated with a second fact (a person who plays an instrument): control
   UNKNOWN before, `remember`, compile, recall hit, control UNKNOWN after.
 
-### AC2. Dated report with measured plan usage per compile. PASS (this report)
+### AC2. Dated report with measured plan usage per compile. PARTIAL (tokens and notional cost measured, plan share not measurable)
 
 Plan usage per compile, from the librarian spend ledger
 (`~/.cache/athenaeum/spend.jsonl`, `billing_mode: subscription`). Three
@@ -87,7 +87,7 @@ compiles were run, covering seven notes saved through the `remember` tool.
 | 3 | 5 | 13 | 8,189 | 11,244 | 19,433 | 16,634 / 7,105 | 139 s | 0.1536 |
 
 - Per remembered note: about **3,900 tokens in plus out** (3,843 to 4,410 for a
-  single-note compile), **2.6 to 4 model calls**, **about 28 to 36 s**, about
+  single-note compile), **3 to 4 model calls per single-note compile (about 2.6 per note when batched)**, **about 28 to 36 s**, about
   **0.04 to 0.06 notional USD**. Batching five notes cost about 3,900 tokens per
   note, so there was no visible batching discount on the subscription path.
 - Models used: a small model for the classify step (about 85 percent of the
@@ -102,7 +102,7 @@ compiles were run, covering seven notes saved through the `remember` tool.
   50k to 90k cache-read tokens, 8 to 12 fresh input tokens, 300 to 600 output
   tokens). A compile of one note is comparable to one chat turn pair.
 
-**Does the docs' disclosure need correcting?** The sentence in `athenaeum init`
+**Does the docs' disclosure need correcting?** (tracked as athenaeum#2766) The sentence in `athenaeum init`
 output and `docs/guides/install.md` ("compiles draw on your Claude Code plan's
 usage limits") is true. It needs adding to, not correcting:
 
@@ -132,12 +132,13 @@ usage limits") is true. It needs adding to, not correcting:
   `athenaeum session-end` was returned by `athenaeum recall` before any
   compile, so the roots mechanism itself works.
 - Net: the documented promise ("a saved fact surfaces labelled `[uncompiled]`
-  until a compile can run") fails in the common model-driven case. Draft issue
-  recorded for the lane owner.
+  until a compile can run") fails in the common model-driven case. Tracked as athenaeum#2764.
 
 ### AC4. Counter-example: neither key nor login, setup says what is missing. FAIL
 
-Container B (claude installed, no login, no key).
+Container B (claude installed, no login, no key). With no login no `claude -p` tell can run there, so the raw note was written by hand into `raw/claude-session/` (invented content, same frontmatter the `remember` tool writes) to give `athenaeum run` something to compile.
+
+The false login check and the missing-credential messages are tracked as athenaeum#2762, and the dropped `claude` error as athenaeum#2763.
 
 | Step | Observed |
 | --- | --- |
@@ -172,6 +173,11 @@ included; paths are those of the throwaway container.
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`) for the remaining runs. This is model
   behaviour, not an athenaeum defect, but a user with auto memory on will see
   it.
+- The per-turn recall hook (`UserPromptSubmit`) was not wired in either
+  container (`doctor` `hooks` FAIL). That is why the after-compile control
+  (recall tool disallowed, answer UNKNOWN) is clean. With the hook installed,
+  recalled context would be injected even with the tool disallowed, and the
+  same control would need a different design.
 - The session-end step printed a one-time warning that `search_backend: vector`
   needs chromadb and fell back to fts5. Recall worked on fts5 (the fix for
   athenaeum#2592 holds).
@@ -182,7 +188,8 @@ included; paths are those of the throwaway container.
 
 - Not every criterion passed, so athenaeum#2307 stays open. The part that works:
   the default no-key login path, end to end, with measured usage.
-- Findings for follow-up: the credential check lies about a missing login;
-  the compile error drops the real message; `remember` with a model-chosen
-  `source` lands outside the recall roots; the README quick start and
-  disclosure need the edits listed under AC2.
+- Findings for follow-up: the credential check lies about a missing login
+  (athenaeum#2762); the compile error drops the real message
+  (athenaeum#2763); `remember` with a model-chosen `source` lands outside the
+  recall roots (athenaeum#2764); the README quick start and disclosure need
+  the edits listed under AC2 (athenaeum#2766).

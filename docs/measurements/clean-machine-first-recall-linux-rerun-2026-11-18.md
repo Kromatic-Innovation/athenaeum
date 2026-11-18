@@ -4,8 +4,8 @@
 
 Issue athenaeum#2319 (epic athenaeum#2296). Re-run of
 [the 2026-11-14 Linux run](clean-machine-first-recall-linux-2026-11-14.md),
-which failed, against the published 0.26.0 wheel and the fixes athenaeum#2592
-and athenaeum#2594. Result for the Linux leg: **CONDITIONAL PASS.** The
+which failed, against the published 0.26.0 wheel and the fixes athenaeum#2592,
+athenaeum#2593 and athenaeum#2594. Result for the Linux leg: **CONDITIONAL PASS.** The
 README quick start now works end to end from PyPI on a stock image, through a
 real Claude session, with no hand edits. Two parts of the README's own promises
 still fail (the `doctor` "comes back clean" claim, and recall of a note before
@@ -45,7 +45,11 @@ removed afterward.
 ## Steps
 
 The README quick start for 0.26.0, verbatim, after installing Claude Code and
-uv (full command list, token redacted, is in the sibling report):
+uv. The container setup commands (token redacted) are in the sibling report;
+the steps below are the complete Linux sequence. Set
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for every `claude -p`: without it the model
+may write to Claude Code's own memory instead of calling `remember`, which
+contaminates the controls (see the sibling report's Method notes).
 
 ```bash
 uv tool install --python 3.13 'athenaeum[mcp]==0.26.0'
@@ -53,12 +57,19 @@ athenaeum init
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 athenaeum doctor
 athenaeum test-mcp
-# round trip
+# round trip, each claude -p a separate process
+export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+claude -p "<question>; answer exactly UNKNOWN if you do not know" --disallowedTools mcp__athenaeum__recall </dev/null   # control before
 claude -p "Please remember this using your remember tool: <fact>" --allowedTools mcp__athenaeum__remember </dev/null
 athenaeum run
 athenaeum session-end
 claude -p "<question>; use your athenaeum recall tool" --allowedTools mcp__athenaeum__recall </dev/null
+claude -p "<question>; answer exactly UNKNOWN if you do not know" --disallowedTools mcp__athenaeum__recall </dev/null   # control after
 ```
+
+The per-turn recall hook is not wired by the quick start, which is why the
+after-compile control stays clean; with the hook installed, recalled context
+would be injected even with the tool disallowed.
 
 ## Results
 
@@ -104,23 +115,25 @@ the fact recalled in a new session, plus the counter-example. Marked per part:
 1. **`doctor` cannot come back clean after the quick start.** `hooks` fails until
    the optional sidecar hook is wired, which the quick start does not do, so the
    README's "should come back clean" is untrue as written. `search_index` also
-   keeps failing ("no vector index found under .../wiki-vectors") even after
+   keeps failing ("no vector index found" under the cache directory) even after
    `session-end` built the fts5 index that recall is actually using. The fix text
    it prints (`athenaeum reindex`) cannot clear it, because the backend falls
    back to fts5 whenever chromadb is absent. The fts5 branch of the check exists
    but is selected only when `search_backend: fts5` is set explicitly.
+   Tracked as athenaeum#2765.
 2. **`remember` through a real model lands outside the recall roots.** The tool
    docstring uses `"manual"` as the example `source`; in 6 of 7 calls the model
    passed it. `raw/manual/` is not in `recall.extra_intake_roots`, so the note
    was invisible to `recall` until its compile and the documented `[uncompiled]`
-   behaviour never appeared. (Detail in the sibling report, criterion 3.)
+   behaviour never appeared. (Detail in the sibling report, criterion 3. Tracked as athenaeum#2764.)
 3. **Compile with an unusable login: false `key_mode` OK and an opaque error.**
    Sibling report, criterion 4. Not a quick-start regression, but a first-session
-   trap for anyone whose login has expired.
+   trap for anyone whose login has expired. Tracked as athenaeum#2762 and
+   athenaeum#2763.
 4. **README quick start still tells the user to `export ANTHROPIC_API_KEY=...`
    before `athenaeum run`**, with "or configure the claude-cli backend" as an
    aside, although `init` has already selected `claude-cli` on a machine with a
-   logged-in `claude`.
+   logged-in `claude`. Tracked as athenaeum#2766.
 
 ## CI
 
@@ -135,4 +148,5 @@ on a `[mcp]`-only install).
 
 The Linux PyPI quick start now passes. athenaeum#2319 stays open for macOS and
 the plugin path, and the quick-start docs claim in finding 1 needs either a
-code fix or a wording change before the directory submission.
+code fix or a wording change before the directory submission
+(athenaeum#2765).
