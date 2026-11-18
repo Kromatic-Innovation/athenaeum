@@ -776,6 +776,155 @@ class TestSessionClose:
         assert close_line.last_seq == 2
 
 
+# ---------------------------------------------------------------------------
+# athenaeum#2760 -- harness_version from the hook environment.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveHarnessVersion:
+    _EXEC = "/opt/example/claude/versions/2.4.0"
+
+    def test_direct_variable(self) -> None:
+        assert claude_code.resolve_harness_version({"CLAUDE_CODE_VERSION": "2.4.0"}) == (
+            "2.4.0",
+            "env:CLAUDE_CODE_VERSION",
+        )
+
+    def test_direct_variable_wins_over_the_others(self) -> None:
+        env = {
+            "CLAUDE_CODE_VERSION": "2.4.0",
+            "AI_AGENT": "claude-code_9-9-9_agent",
+            "CLAUDE_CODE_EXECPATH": "/opt/example/claude/versions/8.8.8",
+        }
+        assert claude_code.resolve_harness_version(env) == ("2.4.0", "env:CLAUDE_CODE_VERSION")
+
+    def test_ai_agent_alone(self) -> None:
+        assert claude_code.resolve_harness_version({"AI_AGENT": "claude-code_2-4-0_agent"}) == (
+            "2.4.0",
+            "env:AI_AGENT",
+        )
+
+    def test_ai_agent_without_suffix(self) -> None:
+        assert claude_code.resolve_harness_version({"AI_AGENT": "claude-code_2-4-0"}) == (
+            "2.4.0",
+            "env:AI_AGENT",
+        )
+
+    def test_execpath_alone(self) -> None:
+        assert claude_code.resolve_harness_version({"CLAUDE_CODE_EXECPATH": self._EXEC}) == (
+            "2.4.0",
+            "env:CLAUDE_CODE_EXECPATH",
+        )
+
+    def test_other_tool_ai_agent_is_rejected(self) -> None:
+        assert claude_code.resolve_harness_version({"AI_AGENT": "other-tool_2-4-0"}) == ("", None)
+
+    def test_ai_agent_with_trailing_junk_is_rejected(self) -> None:
+        assert claude_code.resolve_harness_version({"AI_AGENT": "claude-code_2-4-0x"}) == ("", None)
+
+    def test_execpath_node_binary_is_rejected(self) -> None:
+        assert claude_code.resolve_harness_version(
+            {"CLAUDE_CODE_EXECPATH": "/opt/example/bin/node"}
+        ) == ("", None)
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["2.4.0\nrm -rf", "2.4.0\n", "9" * 200 + ".1.1", "2.4", "v2.4.0", "2.4.0-" + "a" * 50, ""],
+    )
+    def test_malformed_direct_variable_falls_through(self, bad: str) -> None:
+        env = {"CLAUDE_CODE_VERSION": bad, "AI_AGENT": "claude-code_1-2-3_agent"}
+        assert claude_code.resolve_harness_version(env) == ("1.2.3", "env:AI_AGENT")
+
+    def test_prerelease_suffix_accepted(self) -> None:
+        assert claude_code.resolve_harness_version({"CLAUDE_CODE_VERSION": "2.4.0-beta.1"})[0] == (
+            "2.4.0-beta.1"
+        )
+
+    def test_empty_env(self) -> None:
+        assert claude_code.resolve_harness_version({}) == ("", None)
+
+    def test_starts_no_subprocess_and_opens_no_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import builtins
+        import os
+        import subprocess
+
+        def boom(*_a: object, **_k: object) -> None:
+            raise AssertionError("resolve_harness_version must not spawn or open anything")
+
+        monkeypatch.setattr(subprocess, "Popen", boom)
+        monkeypatch.setattr(subprocess, "run", boom)
+        monkeypatch.setattr(builtins, "open", boom)
+        monkeypatch.setattr(os, "open", boom)
+        monkeypatch.setattr(Path, "open", boom)
+        monkeypatch.setattr(Path, "read_text", boom)
+        for env in (
+            {"CLAUDE_CODE_VERSION": "2.4.0"},
+            {"AI_AGENT": "claude-code_2-4-0_agent"},
+            {"CLAUDE_CODE_EXECPATH": self._EXEC},
+            {"CLAUDE_CODE_EXECPATH": "/opt/example/bin/node"},
+            {},
+        ):
+            claude_code.resolve_harness_version(env)
+
+
+class TestHarnessVersionOnTheLine:
+    def test_record_turn_writes_version_and_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        env = {"AI_AGENT": "claude-code_2-4-0_agent"}
+        line = claude_code.record_turn('{"prompt": "hi", "session_id": "hv-1"}', env)
+        assert line is not None
+        assert line.harness_version == "2.4.0"
+        assert line.signals["harness_version_source"] == "env:AI_AGENT"
+
+    def test_execpath_never_reaches_the_written_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        env = {"CLAUDE_CODE_EXECPATH": "/opt/example/bin/node"}
+        line = claude_code.record_turn('{"prompt": "hi", "session_id": "hv-2"}', env)
+        assert line is not None
+        assert line.harness_version == ""
+        names = ledger.list_partitions(tmp_path)
+        on_disk = "".join((tmp_path / name).read_text(encoding="utf-8") for name in names)
+        assert "/opt/example" not in on_disk
+        assert "node" not in on_disk
+
+    def test_empty_env_still_writes_without_source_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        line = claude_code.record_turn('{"prompt": "hi", "session_id": "hv-3"}', {})
+        assert line is not None
+        assert line.harness_version == ""
+        assert "harness_version_source" not in line.signals
+
+    def test_session_close_writes_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        env = {"CLAUDE_CODE_SESSION_ID": "hv-4", "CLAUDE_CODE_VERSION": "2.4.0"}
+        line = claude_code.session_close(env)
+        assert line is not None
+        assert line.harness_version == "2.4.0"
+
+    def test_chain_verifies_across_empty_then_valued_versions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        first = claude_code.record_turn('{"prompt": "a", "session_id": "hv-5"}', {})
+        assert first is not None and first.harness_version == ""
+        before = {n: (tmp_path / n).read_bytes() for n in ledger.list_partitions(tmp_path)}
+        second = claude_code.record_turn(
+            '{"prompt": "b", "session_id": "hv-5"}', {"CLAUDE_CODE_VERSION": "2.4.0"}
+        )
+        assert second is not None and second.harness_version == "2.4.0"
+        for name, content in before.items():
+            assert (tmp_path / name).read_bytes().startswith(content)
+        assert ledger.verify_chain(tmp_path).ok
+
+
 class TestLaunchArgumentFromPsOutput:
     """``ps -o args=`` joins argv with single spaces and no quoting
     (athenaeum#2161), so a multi-word launch prompt spans several tokens."""

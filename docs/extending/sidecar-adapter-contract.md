@@ -367,6 +367,7 @@ own):
 | Pasted content is expanded inline in stdin `prompt` | **verified for a large paste**, which arrives wrapped in `<pasted_content>`; a short paste arrives as plain text (athenaeum#2161) |
 | Queued prompts fire the hook with their own `prompt_id` | **false** (claude 2.1.326): the queued prompt reuses the previous prompt's id. The ledger index keeps every line per id and resolves a shared id by digest, so both prompts attest (athenaeum#2759). A queued slash command still ends in a clean `no-entry` miss. |
 | Slash-command stdin carries `<command-args>` inline | **false** (claude 2.1.326): the hook gets the raw `/name args` line |
+| The hook env carries the running Claude Code version in `CLAUDE_CODE_VERSION`, `AI_AGENT` (`claude-code_<a>-<b>-<c>_agent`) or a bare-version last component of `CLAUDE_CODE_EXECPATH` | assumed for the hook environment (the first two, and the last on a native install only, were seen in a tool environment of claude 2.1.325). The hook tries them in that order and records the winner in `signals.harness_version_source`; when none is usable `harness_version` stays empty. It never runs `claude --version` (athenaeum#2760) |
 | claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` in the hook env | assumed |
 | `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | assumed (undocumented) |
 

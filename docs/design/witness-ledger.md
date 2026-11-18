@@ -129,7 +129,7 @@ One `canonical_json` object per line, UTF-8, `\n`-terminated. Common fields:
 `kind == "turn"`): `session`, `turn`, `prompt_id`, `prompt_kind`,
 `prompt_digest`, `raw_digest`, `prompt_chars`, `segments` (list of
 `{kind: typed|pasted|slash-args, start, end, digest, paste_id?}`), `channel`,
-`resumed`, `signals`. Kinds: `turn`, `session-close` (carries `turns`,
+`resumed`, `signals`. `harness_version` is filled from the hook's own environment (`CLAUDE_CODE_VERSION`, else `AI_AGENT`, else the last path component of `CLAUDE_CODE_EXECPATH`, each only when it is a valid version) and `signals.harness_version_source` names the variable that supplied it; lines written before athenaeum#2760 keep an empty `harness_version` (the chain forbids rewriting them). Kinds: `turn`, `session-close` (carries `turns`,
 `last_seq`, `turns_witnessed`), `anchor`, `key-rotate`, `gap` (carries
 `reason`).
 
