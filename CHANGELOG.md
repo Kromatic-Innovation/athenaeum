@@ -48,6 +48,17 @@ kept as they were written.
   leaves the record for the next tick. Pass `--apply deferred` (or
   `apply="deferred"`) for the previous record-only behaviour. No answer-record
   fields were added.
+- The decision queue can push. A librarian run now runs a user-configured
+  command with the decision digest JSON on stdin, so a host that cannot poll
+  still hears that something needs a decision (athenaeum#2533, design
+  athenaeum#2489). Push is off unless the per-user `notify.yaml` sets
+  `decisions.attention` to `push` or `both`. Core ships one notifier,
+  `command` (argv, never a shell); `trigger`, `quiet_hours`,
+  `min_interval_minutes` and `payload: counts` are honoured, sends are
+  deduplicated on `digest_id`, and a failing command is logged and backed off,
+  not retried in a loop. Settings are read only from the per-user file; a
+  `decisions.notify` block in a knowledge base's `athenaeum.yaml` is refused
+  with a warning and never run.
 - The decision queue has a digest, the poll surface a host reads to learn what
   needs a human decision now (athenaeum#2529). `athenaeum decisions digest
   [--json]`, the `queue_digest` MCP tool and `athenaeum.decision_digest.queue_digest`
