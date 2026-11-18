@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum import doctor
 from tests.test_doctor import _run_healthy, healthy_install  # noqa: F401
 
 _README = Path(__file__).resolve().parent.parent / "README.md"
