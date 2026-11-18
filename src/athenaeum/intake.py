@@ -586,6 +586,7 @@ def discover_auto_memory_files(
     config: dict[str, object] | None = None,
     projects_root: Path | None = None,
     lock: RunLock | None = None,
+    staged_import: bool = False,
 ) -> list[AutoMemoryFile]:
     """Find all auto-memory intake files under ``raw/auto-memory/<scope>/``.
 
@@ -662,6 +663,13 @@ def discover_auto_memory_files(
     other per-file read) but NOT with respect to a caller-supplied lock that
     is not actually acquired -- that is a caller bug and is allowed to raise
     (see :func:`persist_recovered_origin_session_id`).
+
+    ``staged_import`` (issue athenaeum#2736) is True for a run whose intake was
+    staged by ``athenaeum import-memory``. Those files are verbatim copies of
+    native memory files and have no originating session transcript in this
+    run's scope, so an unrecovered one is expected, not a recovery failure:
+    it is left out of the recovery-yield denominator (``uncited``). A
+    RECOVERED one still counts, so a genuine recovery is still credited.
     """
     if knowledge_root is None:
         knowledge_root = Path.home() / "knowledge"
@@ -806,13 +814,16 @@ def discover_auto_memory_files(
                 # unremarkable: ``None`` leaves the record exactly as it was
                 # before this existed.
                 if origin_session_id is None and not sources:
-                    uncited += 1
+                    if not staged_import:
+                        uncited += 1
                     recovered = recoverer.recover(
                         fpath,
                         scope,
                         written_at=written_at_from_frontmatter(meta),
                     )
                     if recovered is not None:
+                        if staged_import:
+                            uncited += 1  # athenaeum#2736: credit a real recovery
                         origin_session_id = recovered.session_id
                         # ``origin_turn`` stays None on purpose: the native
                         # writer stamps no turn and inventing an index would

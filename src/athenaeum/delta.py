@@ -54,6 +54,7 @@ embedding fetch is needed.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections import deque
 from collections.abc import Sequence
@@ -227,7 +228,16 @@ def compute_affected_clusters(
         # missed chromadb, the recall index is stale for a file we expected to
         # be embedded → its neighbours are untrustworthy (D3).
         if is_live and rp not in hit_relpaths:
-            log.warning(
+            # Issue athenaeum#2736: with no vector backend installed there is no
+            # chromadb index to be stale -- every known file "misses" by
+            # construction, so the warning is noise. The full-compile
+            # fallback below still applies either way.
+            _log_d3 = (
+                log.warning
+                if importlib.util.find_spec("chromadb") is not None
+                else log.debug
+            )
+            _log_d3(
                 "delta: changed file %s is not in the chromadb index (D3) — "
                 "full compile",
                 rp,
