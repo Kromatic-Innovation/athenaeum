@@ -45,6 +45,13 @@ kept as they were written.
 
 ### Fixed
 
+- The `remember` tool no longer suggests `source: "manual"` or describes a
+  session directory, and tells callers to omit `source`. A `source` a caller
+  still supplies is now filed under the transport default (`claude-session`
+  under stdio, `remote-session` under HTTP) instead of an invented directory
+  such as `raw/manual/` that `recall` could not see until the next compile, so
+  the note is returned by a pre-compile `recall`, labelled `[uncompiled]`
+  (athenaeum#2764).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no
