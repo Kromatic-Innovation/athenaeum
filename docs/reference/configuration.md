@@ -168,6 +168,39 @@ accident.
 ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
 two horizon families to resolve), not a value read out of *config*.
 
+## `decisions`
+
+### `resolve_decisions_digest_batch_size`
+
+- **YAML path:** `decisions.digest_batch_size`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `4`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve how many items the digest's ``actionable_now`` offers at once.
+
+Read from ``decisions.digest_batch_size``. The default of ``4`` matches
+the most options a single host question prompt can carry. Boolean,
+non-integer and ``<= 0`` values fall through to the default.
+
+### `resolve_decisions_surface_caps`
+
+- **YAML path:** `decisions.surface_caps`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{'audit': 3}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the digest's per-type daily surfacing caps.
+
+Read from ``decisions.surface_caps``, a mapping of decision item type to
+the number of items of that type the digest will OFFER per day. A cap
+limits what is offered, never what may be answered. Entries override the
+built-in default (``audit: 3``); a type with no entry is uncapped, and
+``0`` offers none of that type. Non-integer, negative and boolean values
+are ignored (the built-in default for that type applies, if any).
+
 ## `dedupe`
 
 ### `resolve_google_contact_keys`

@@ -111,6 +111,7 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
     "list_pending_decisions": {"properties": ["limit", "offset"], "required": []},
     "list_pending_merges": {"properties": ["full_body"], "required": []},
     "list_pending_questions": {"properties": ["limit", "offset"], "required": []},
+    "queue_digest": {"properties": [], "required": []},
     "raise_decision": {
         "properties": [
             "alternative",

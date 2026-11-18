@@ -1314,6 +1314,64 @@ def list_pending_decisions(
     page. For a bounded call that also reports a total count, next-offset,
     and the effective limit, see :func:`list_pending_decisions_page`.
     """
+    decisions = collect_unframed_decisions(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+        caller_audience=caller_audience,
+    )
+    # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
+    # point every item passes through, so no item can enter the queue unframed
+    # or carrying an over-cap context bundle. Because this is downstream of
+    # every per-type builder, it is also the correct seam for the cap to be
+    # checked AFTER any future batching rather than before it.
+    #
+    # Issue athenaeum#2528 (design athenaeum#2489 section 2.1): the
+    # presentation each item carries is STORED. A stored entry is used only
+    # for its exact (id, state_digest); an unframed or changed item gets the
+    # deterministic template framing in-process and that is persisted here,
+    # on the read, fail-soft (same posture as the queue store sync above).
+    stored = load_presentations(wiki_root)
+    fresh: dict[str, dict] = {}
+    framed_items: list[dict] = []
+    for d in decisions:
+        digest = state_digest_for(d)
+        known = stored_presentation(stored, d.get("id"), digest)
+        framed = frame_decision(
+            d, max_context_tokens=max_item_context_tokens, stored_presentation=known
+        )
+        if known is None and isinstance(d.get("id"), str):
+            fresh[d["id"]] = {"state_digest": digest, "presentation": framed["presentation"]}
+        framed_items.append(framed)
+    decisions = framed_items
+    # Pruning needs the whole queue; a restricted caller sees a subset.
+    save_presentations(
+        wiki_root,
+        stored,
+        fresh,
+        prune=caller_audience is None,
+        live_ids={d["id"] for d in decisions if isinstance(d.get("id"), str)},
+    )
+    decisions.sort(key=lambda d: d["created_at"] or "")
+
+    return paginate(decisions, offset=offset, limit=limit)["items"]
+
+
+def collect_unframed_decisions(
+    wiki_root: Path,
+    *,
+    with_proposal: bool = False,
+    max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+    caller_audience: set[str] | None = None,
+) -> list[dict]:
+    """Every pending decision item BEFORE framing, audience-filtered, unsorted.
+
+    The assembly half of :func:`list_pending_decisions`, split out (issue
+    athenaeum#2529) so the digest can count and rank the queue without
+    calling :func:`athenaeum.decision_framing.frame_decision`. See
+    :func:`list_pending_decisions` for the per-type sources and the
+    audience rules; this performs the same legacy-queue store sync.
+    """
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
     knowledge_root = wiki_root.parent
@@ -1456,41 +1514,7 @@ def list_pending_decisions(
             page_recompile_plan_to_decision(rec, resolver=resolver)
             for rec in list_pending_page_recompile_plans(wiki_root)
         ]
-    # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
-    # point every item passes through, so no item can enter the queue unframed
-    # or carrying an over-cap context bundle. Because this is downstream of
-    # every per-type builder, it is also the correct seam for the cap to be
-    # checked AFTER any future batching rather than before it.
-    #
-    # Issue athenaeum#2528 (design athenaeum#2489 section 2.1): the
-    # presentation each item carries is STORED. A stored entry is used only
-    # for its exact (id, state_digest); an unframed or changed item gets the
-    # deterministic template framing in-process and that is persisted here,
-    # on the read, fail-soft (same posture as the queue store sync above).
-    stored = load_presentations(wiki_root)
-    fresh: dict[str, dict] = {}
-    framed_items: list[dict] = []
-    for d in decisions:
-        digest = state_digest_for(d)
-        known = stored_presentation(stored, d.get("id"), digest)
-        framed = frame_decision(
-            d, max_context_tokens=max_item_context_tokens, stored_presentation=known
-        )
-        if known is None and isinstance(d.get("id"), str):
-            fresh[d["id"]] = {"state_digest": digest, "presentation": framed["presentation"]}
-        framed_items.append(framed)
-    decisions = framed_items
-    # Pruning needs the whole queue; a restricted caller sees a subset.
-    save_presentations(
-        wiki_root,
-        stored,
-        fresh,
-        prune=caller_audience is None,
-        live_ids={d["id"] for d in decisions if isinstance(d.get("id"), str)},
-    )
-    decisions.sort(key=lambda d: d["created_at"] or "")
-
-    return paginate(decisions, offset=offset, limit=limit)["items"]
+    return decisions
 
 
 def list_pending_decisions_page(

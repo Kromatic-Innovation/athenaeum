@@ -28,6 +28,21 @@ kept as they were written.
   project, before asking to proceed. A project with more than five files in
   the run shows the first five and a count of the rest (athenaeum#2737).
 
+### Added
+
+- The decision queue has a digest, the poll surface a host reads to learn what
+  needs a human decision now (athenaeum#2529). `athenaeum decisions digest
+  [--json]`, the `queue_digest` MCP tool and `athenaeum.decision_digest.queue_digest`
+  return pending and held counts, counts by type and routing, the page-recompile
+  backlog (`backlog.page_recompile`), a per-type daily surfacing budget, up to
+  `decisions.digest_batch_size` (default 4) decisions to offer now, and a
+  one-line headline. Only pending, answerable items are offered: held items
+  never are, and types no answer path accepts yet are counted in
+  `unanswerable_total` only. `digest_id` changes only when the offered set
+  changes. Per-type caps in `decisions.surface_caps` (default `audit: 3`) limit
+  what is offered, never what may be answered; a cap is spent by that type's
+  answers today. Building a digest makes no model call.
+
 ### Fixed
 
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
