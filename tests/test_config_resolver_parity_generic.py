@@ -217,6 +217,9 @@ _STRUCTURED_CONTAINER_VALUE = frozenset(
         # Issue athenaeum#2197: double-nested (page_type -> group_name ->
         # field list), covered directly instead — see module docstring.
         "resolve_page_type_field_groups",
+        # Issue athenaeum#2529: a type -> cap mapping; a sentinel scalar is
+        # ignored. Covered directly in tests/test_decision_digest.py.
+        "resolve_decisions_surface_caps",
     }
 )
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,

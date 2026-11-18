@@ -290,3 +290,15 @@ def test_mcp_tool_queue_digest(tmp_path: Path) -> None:
     payload = asyncio.run(_run())
     assert set(payload) == SHAPE_KEYS
     assert payload["pending_total"] == 1 and len(payload["actionable_now"]) == 1
+
+
+def test_surface_caps_resolver_defaults_overrides_and_junk() -> None:
+    from athenaeum.config import resolve_decisions_surface_caps as caps
+
+    assert caps(None) == {"audit": 3}
+    assert caps({"decisions": {"surface_caps": {"audit": 5, "merge": 2}}}) == {
+        "audit": 5,
+        "merge": 2,
+    }
+    junk = {"decisions": {"surface_caps": {"audit": True, "merge": -1, "question": "x"}}}
+    assert caps(junk) == {"audit": 3}
