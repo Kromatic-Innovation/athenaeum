@@ -5,7 +5,7 @@
 **Status:** DESIGN, not built (Vitruvius Specify, 2026-11-18). The design note
 athenaeum#2626 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
-operator's rulings on its five questions (§15), with one question still open.
+operator's rulings on its six questions (§15). None is still open.
 
 Code anchors are `path:symbol` on `develop` at `759e3b64`.
 
@@ -530,7 +530,7 @@ every raise, whoever makes it:
 | The raiser holds, on the target | The message is written to | Who can fetch it there |
 |---|---|---|
 | compile, and the target has a bench | The bench, under `raise/` | The compile role |
-| compile, and the target has no bench (one compiling install, no stewards) | That install's own state, in the place athenaeum#2625 gives intake that waits locally | That install |
+| compile, and the target has no bench (one compiling install, no stewards) | That install's own state, in the local waiting place athenaeum#2625 defines, `raw/_stores/<store_id>/` | That install |
 | propose only | The target's inbox, under `raise/`. The proposer's own inbox where proposers have separate ones (athenaeum#2623, operator ruling 1). | The compile role, and whoever may fetch that inbox |
 
 In every row the message waits where only the target's compile role acts on
@@ -613,8 +613,10 @@ correction is a retract followed by a new `propose-fact`. The raiser pass does
 one thing for a fact row: when the personal page that holds the sender's copy
 is removed or erased, it emits a retract with the matching reason.
 
-Whether a retract for privacy erasure of a compiled fact can be automatic is
-the one question still open (§15).
+**A retract for privacy erasure of a compiled fact is not automatic.** No rule
+can tell which words on a page came from the fact. The decision is marked
+urgent and placed at the head of the store's decision queue, and a person
+removes the sentence. That is operator ruling 6 (§15).
 
 The file name rule, the three requirements of athenaeum#2624 §8.1 and the
 waiting places of §6.2 apply unchanged. Nothing in the message is read from
@@ -1100,7 +1102,7 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | **S3** | The `raised_from` block: parse and validate it, leave it out of `verdicts.py:content_hash`, accept `raise` as a source type, and a lint for a page whose `raised_from` is malformed. No behaviour change. | none |
 | **S4** | The raise ledger: record shape, parser, registry entry, kept in the install's own state. | S1 |
 | **S5** | The acceptance ledger: record shape (including an adjustment of type and tags, and the page uids written for a fact), parser, registry entry, kept in the install's own state. | S2 |
-| **S6** | Push, on one install: `athenaeum store raise`; the grant checks of §4.1, including compile role on the origin, the implicit declaration of an undeclared store and minting its `store_id`; the courtesy `intake` check; the ledger row; and the message written to the install's own state. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 S5 (the `intake` accept check), and athenaeum#2625 for the place intake waits locally, which that note has not yet given a slice |
+| **S6** | Push, on one install: `athenaeum store raise`; the grant checks of §4.1, including compile role on the origin, the implicit declaration of an undeclared store and minting its `store_id`; the courtesy `intake` check; the ledger row; and the message written to the install's own state. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 S5 (the `intake` accept check), and S15 (the local waiting place `raw/_stores/<store_id>/`) |
 | **S7a** | Acceptance, asking every time: the rule checks of §4.4, the store's `intake` rules, the `raise` decision kind, the adjustment of type and tags and its ledger record, creating the copy at its derived uid with `raised_from`, and the `Athenaeum-Raise` commit line. | S3, S5; athenaeum#2623 S7 (the per-store decision queue); athenaeum#2625 S5 |
 | **S7b** | Rejection and holds: reject with a reason code, drop later messages for a rejected `raise_id`, the taken-uid hold, and the decision for a message that fails a check. | S7a |
 | **S8** | The `raise:` block in the declaration, with the higher declaration `version` it arrives under: `raise.accept`, `raise.always_ask`, and acceptance without asking. | S7a; athenaeum#2623 S1; athenaeum#2624 S10 (the always-ask list and its type matching, shared by both lists); athenaeum#2772 (an unsupported `version` leaves the store read-only); ruling 2 |
@@ -1115,7 +1117,7 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | **S17** | `raise.max_silence` and the `attest` message. | S14, S16 |
 | **S18** | A three-store test harness that proves a retract travels two hops, one per run. | S9, S11; athenaeum#2624 S6a (the two-clone harness) |
 | **S19** | A guide: raising between stores, and what a reader sees on a copy. Docs only. | S14, S15 |
-| **S20** | The single routed fact (§6.3): the entry point intake calls with an item, its suggested type and tags and a `store_id`, which writes the `propose-fact` message and the sender's ledger row; the acceptance ledger row that records the pages compiled from it; a retract that withdraws a waiting fact or raises a decision for a compiled one; and the fact row in the raiser pass. | S2, S4, S5, S11 |
+| **S20** | The single routed fact (§6.3): the entry point intake calls with an item, its suggested type and tags and a `store_id`, which writes the `propose-fact` message and the sender's ledger row; the acceptance ledger row that records the pages compiled from it; a retract that withdraws a waiting fact or raises a decision for a compiled one, urgent and at the head of the queue when the reason is erasure; and the fact row in the raiser pass. | S2, S4, S5, S11 |
 
 **Who owns what at the two hand-offs.**
 
@@ -1139,10 +1141,10 @@ nothing from athenaeum#2624 except the pure page merge.
 
 ## 15. Open questions for the operator
 
-The note first put five questions. The operator accepted the recommended
-answer to each on 2026-11-18, recorded on athenaeum#2631. They are stated
-below as rulings, with the options that were not chosen kept for the record.
-One question raised since is still open and comes last.
+No question is open. The note put five questions, and a sixth after review.
+The operator accepted the recommended answer to each, recorded on
+athenaeum#2631. They are stated below as rulings, with the options that were
+not chosen kept for the record.
 
 ### Ruling 1. A copy names the proposer as the receiving store's access list does
 
@@ -1181,24 +1183,16 @@ declares against that origin, and only where the origin's grant says
 hand. The access note takes a one-line amendment to match, in athenaeum#2772.
 Not chosen: any reader may raise; and no reviewers at all.
 
-### Open question. A person withdraws, for privacy, a single fact that was already compiled
+### Ruling 6. Privacy erasure of a single compiled fact is an urgent decision
 
 Ruling 3 makes privacy erasure automatic for a copy, because a copy is a page
 of its own that can be removed whole. A single fact sent to a store (§6.3) is
 different. Once the receiving store has compiled it, the fact may be one
 sentence on a page that holds other things, and no rule can tell which words
-came from it.
-
-- **Raise it as a decision marked urgent, at the head of the store's decision
-  queue (recommended).** A person in the receiving store removes the sentence.
-  Nothing else on the page is lost. Cost: the fact stays readable until that
-  person acts.
-- **Remove every page the fact was compiled into, automatically.** The fact is
-  gone at once. Cost: unrelated content on those pages goes with it, and is
-  recoverable only from history.
-- **Compile every single fact onto a page of its own, so that it can always be
-  removed whole.** Erasure becomes automatic and exact. Cost: the receiving
-  store fills with one-sentence pages, and its librarian may not merge them
-  into the pages they belong on.
-
-The design above is written to the recommended answer.
+came from it. So the retract becomes a decision marked urgent, at the head of
+the receiving store's decision queue, and a person there removes the
+sentence. Nothing else on the page is lost; the fact stays readable until
+that person acts. Not chosen: automatically removing every page the fact was
+compiled into, which takes unrelated content with it; and compiling every
+single fact onto a page of its own, which fills the store with one-sentence
+pages.
