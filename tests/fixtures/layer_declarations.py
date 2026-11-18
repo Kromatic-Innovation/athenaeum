@@ -251,6 +251,8 @@ MODULE_LAYER: dict[str, int] = {
     # module's own docstring for the import-cycle this avoids.
     "decision_budget": 4,
     "decision_digest": 4,
+    # Issue athenaeum#2533: user-configured command notifier; imports decision_digest.
+    "decision_notify": 4,
     "decisions": 4,
     "contact_record_repair": 4,
     # Issue athenaeum#2218: read-only contact-surface lint + attribution

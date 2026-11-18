@@ -382,6 +382,8 @@ class TestPendingAnswersCli:
                 "coordinate",
                 "--answer",
                 json.dumps({"verdict": payload}),
+                "--apply",
+                "deferred",
             ]
         )
         assert rc == 0
@@ -424,6 +426,8 @@ class TestPendingAnswersCli:
                 "coordinate",
                 "--answer",
                 json.dumps({"verdict": payload}),
+                "--apply",
+                "deferred",
             ]
         )
 

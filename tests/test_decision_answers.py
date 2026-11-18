@@ -980,6 +980,7 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
             [
                 "decisions", "answer", "--path", str(store), "--id", decision_id,
                 "--type", "confirmation", "--answer", f'{{"verdict": "{verdict}"}}',
+                "--apply", "deferred",
             ]
         )
 
@@ -2587,7 +2588,7 @@ class TestMutatorsDefer:
 
         server = self._server(tmp_path, wiki=wiki, raw=raw)
         result = self._call(
-            server, "resolve_question", lambda fn: fn(qid, "Series B.")
+            server, "resolve_question", lambda fn: fn(qid, "Series B.", apply="deferred")
         )
 
         assert result["ok"] is True
@@ -2636,7 +2637,7 @@ class TestMutatorsDefer:
 
         server = self._server(tmp_path, wiki=wiki, raw=raw)
         result = self._call(
-            server, "resolve_merge", lambda fn: fn(mid, "approve", "note text")
+            server, "resolve_merge", lambda fn: fn(mid, "approve", "note text", apply="deferred")
         )
 
         assert result["ok"] is True
@@ -2676,7 +2677,7 @@ class TestMutatorsDefer:
 
         server = self._server(tmp_path, wiki=wiki, raw=raw)
         result = self._call(
-            server, "review_audit_item", lambda fn: fn(audit_id, "approve")
+            server, "review_audit_item", lambda fn: fn(audit_id, "approve", apply="deferred")
         )
 
         assert result["ok"] is True

@@ -21,6 +21,7 @@ ship without a deprecation period. See the
 ### Changed
 
 - Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
+- README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
 - Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file
   bytes. The first real-login run measured about 2,800 tokens per file (two
@@ -35,6 +36,35 @@ ship without a deprecation period. See the
 
 ### Added
 
+- Answering a decision now applies it straight away by default
+  (athenaeum#2531, part of athenaeum#2489). `athenaeum decisions answer`
+  and the `resolve_question`, `resolve_merge` and `review_audit_item` MCP
+  tools take `apply: immediate | deferred` (CLI: `--apply`, default
+  `immediate`). Immediate writes the `raw/answers` record first, then applies
+  only that one file through the new
+  `athenaeum.decision_answers.apply_decision_answer_file`, so other unapplied
+  answer files stay for the next `ingest-answers` tick. The result reports the
+  outcome synchronously: `applied`, `refused` (with the applier's error code;
+  the CLI exits 1, the MCP tools return `ok: false`), or `held`. An answer
+  that needs the run lock (coordinate, an approved page-recompile, and a merge
+  when the verdict ledger is on) waits up to `--wait SECONDS` (MCP: `wait`;
+  default `ATHENAEUM_LOCK_TIMEOUT` / `librarian.lock_timeout`, else 0) like
+  `ingest-answers`; if the lock is still held, the answer is recorded, falls
+  back to deferred and says so, and does not fail. An applier that raises
+  leaves the record for the next tick. Pass `--apply deferred` (or
+  `apply="deferred"`) for the previous record-only behaviour. No answer-record
+  fields were added.
+- The decision queue can push. A librarian run now runs a user-configured
+  command with the decision digest JSON on stdin, so a host that cannot poll
+  still hears that something needs a decision (athenaeum#2533, design
+  athenaeum#2489). Push is off unless the per-user `notify.yaml` sets
+  `decisions.attention` to `push` or `both`. Core ships one notifier,
+  `command` (argv, never a shell); `trigger`, `quiet_hours`,
+  `min_interval_minutes` and `payload: counts` are honoured, sends are
+  deduplicated on `digest_id`, and a failing command is logged and backed off,
+  not retried in a loop. Settings are read only from the per-user file; a
+  `decisions.notify` block in a knowledge base's `athenaeum.yaml` is refused
+  with a warning and never run.
 - The decision queue has a digest, the poll surface a host reads to learn what
   needs a human decision now (athenaeum#2529). `athenaeum decisions digest
   [--json]`, the `queue_digest` MCP tool and `athenaeum.decision_digest.queue_digest`
@@ -169,7 +199,7 @@ athenaeum test-mcp             # smoke-test remember/recall, no API key needed
 ```
 
 The per-merge Added / Fixed entries are in
-[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.26.0-build-notes.md).
+[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.26.0/docs/changelog/0.26.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Added
@@ -240,7 +270,7 @@ athenaeum relevance-policy     # show the active capture rules, if any
 ```
 
 The per-merge Added / Changed / Fixed entries are in
-[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.25.0-build-notes.md).
+[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.25.0/docs/changelog/0.25.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Changed
@@ -472,7 +502,7 @@ athenaeum recompile list       # see what page recompile has planned or applied
 ```
 
 The per-merge Added / Changed / Fixed / Removed entries are in
-[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.24.0-build-notes.md).
+[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.24.0/docs/changelog/0.24.0-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.23.5] - 2026-11-12
@@ -556,7 +586,7 @@ announced as the removal release for `athenaeum merges` and `athenaeum questions
 
 The full release digest, the per-merge Added / Changed / Fixed / Internal entries
 and the never-published 0.23.0 build notes are in
-[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.23.5-build-notes.md).
+[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.23.5/docs/changelog/0.23.5-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.22.43] - 2026-10-25
