@@ -168,6 +168,10 @@ does not answer.
   built: how several installs write one shared store, syncing its pages, bench and inbox,
   which conflicts merge by rule, how a librarian adjudicates the rest, and wider uids for
   new pages.
+- [Federation: raise and retract](design/federation-raise-retract.md) — design, not
+  built: how a page is copied from one store to another with provenance and no link back,
+  where proposals wait, how a retraction or a newer version follows the copy, and what
+  happens to a copy whose origin can no longer be watched.
 
 ## Measurements
 
