@@ -148,6 +148,10 @@ does not answer.
 - [Eval trigger surface](design/eval-trigger-surface.md) — when a change must carry a paid
   eval receipt: the symbol-level reasoning surface, the structural fingerprint, and the
   structured exemption line.
+- [Federation: multi-writer sync](design/federation-multi-writer-sync.md) (design, not built) — how
+  several installs write one shared git-backed store: the fetch, integrate, compile, push and
+  retry sequence, which conflicts merge by rule, how a librarian adjudicates the rest, and
+  wider uids for new pages.
 - [Trust graph](design/trust-graph.md) (experimental; design under reconsideration, do not build on it) — domain-scoped source trust edges as an override
   layer over the 9-tier precedence ladder: the evidence-kind vocabulary, the three decision
   seams, and the resolved open questions.
