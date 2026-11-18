@@ -290,6 +290,46 @@ def _cmd_budget(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_digest(digest: dict) -> str:
+    """Plain-text rendering of :func:`athenaeum.decision_digest.queue_digest`."""
+    lines = [
+        digest["headline"],
+        f"  pending {digest['pending_total']}  held {digest['held_total']}  "
+        f"unanswerable {digest['unanswerable_total']}  "
+        f"oldest {digest['oldest_age_days']}d  answered today "
+        f"{digest['budget']['answered_today']}",
+    ]
+    if digest["by_type"]:
+        lines.append("  by type: " + ", ".join(f"{t} {n}" for t, n in digest["by_type"].items()))
+    for t, b in digest["budget"]["per_type_daily"].items():
+        lines.append(
+            f"  cap {t}: {b['surfaced_today']}/{b['cap']} today, {b['remaining']} remaining"
+        )
+    for name, n in digest.get("backlog", {}).items():
+        lines.append(f"  backlog {name}: {n}")
+    for item in digest["actionable_now"]:
+        lines.append(f"  - [{item['type']}] {item['id']} ({item['age_days']}d): {item['summary']}")
+    return "\n".join(lines)
+
+
+def _cmd_digest(args: argparse.Namespace) -> int:
+    """``athenaeum decisions digest`` -- the poll surface (issue athenaeum#2529).
+
+    One cheap read of the queue: counts, per-type surfacing budget and the
+    few items worth the operator's attention now. No model call.
+    """
+    from athenaeum.decision_digest import queue_digest
+
+    wiki_root = _resolve_wiki_root(args)
+    config = load_config(_resolve_knowledge_root(args))
+    digest = queue_digest(wiki_root, config=config)
+    if args.json:
+        sys.stdout.write(json.dumps(digest) + "\n")
+        return 0
+    print(_format_digest(digest))
+    return 0
+
+
 def _cmd_challenge_coordinate(args: argparse.Namespace) -> int:
     """``athenaeum decisions challenge-coordinate`` — revoke a previously
     answered coordinate decision (issue athenaeum#1994, athenaeum#717 AC
@@ -410,6 +450,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "answer",
         "pending-answers",
         "budget",
+        "digest",
         "challenge-coordinate",
         "migrate",
         "revalidate",
@@ -422,7 +463,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         print(
             "usage: athenaeum decisions "
             "{list,next,count,scan-retractions,raise-confirmation,answer,"
-            "pending-answers,budget,"
+            "pending-answers,budget,digest,"
             "challenge-coordinate,migrate,revalidate,recompare,scrub-pii,"
             "propose-fold,revoke-merge-rejection,provenance} [...]",
             file=sys.stderr,
@@ -446,6 +487,8 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "budget":
         return _cmd_budget(args)
+    if sub == "digest":
+        return _cmd_digest(args)
 
     if sub == "migrate":
         return _cmd_migrate(args)
@@ -860,7 +903,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "AND merges, each tagged by type, every item framed with its "
             "reversibility class, proposed default and response schema. "
             "Modes: list, next, count, scan-retractions, raise-confirmation, "
-            "answer, budget, challenge-coordinate, migrate, revalidate, "
+            "answer, budget, digest, challenge-coordinate, migrate, revalidate, "
             "recompare, scrub-pii, propose-fold, provenance."
         ),
     )
@@ -1008,6 +1051,16 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_common(budget_p, with_proposal=False)
+
+    digest_p = d_sub.add_parser(
+        "digest",
+        help=(
+            "One-screen poll surface: pending/held counts, per-type surfacing "
+            "caps and the few decisions worth answering now. Makes no model "
+            "call (issue athenaeum#2529)."
+        ),
+    )
+    _add_common(digest_p, with_proposal=False)
 
     challenge_p = d_sub.add_parser(
         "challenge-coordinate",

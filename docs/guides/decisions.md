@@ -14,6 +14,22 @@ athenaeum decisions list --json      # both queues, each tagged type, oldest fir
 athenaeum decisions next             # the single oldest decision
 ```
 
+To see only what is worth your attention right now, ask for the digest:
+
+```bash
+athenaeum decisions digest           # "3 decisions need you — 2 audits, 1 merge"
+athenaeum decisions digest --json    # the same, machine-readable
+```
+
+The digest counts everything pending and held, offers at most four decisions
+at a time (`decisions.digest_batch_size`), and never offers a held decision or
+one of a type that cannot yet be answered (those are counted as
+`unanswerable_total`). Per-type daily caps in `decisions.surface_caps` (audit
+items default to three a day) limit what is offered, never what you may answer;
+a cap is spent by that type's answers today. Its `digest_id` changes only when
+the offered decisions change, so a host can notify only on change. The MCP tool
+`queue_digest` returns the same digest.
+
 `athenaeum decisions` unifies the two human-decision queues Athenaeum
 accumulates — **questions** (contradiction detector) and **merges**
 (resolver merge proposals) — so there's one place to look instead of two.

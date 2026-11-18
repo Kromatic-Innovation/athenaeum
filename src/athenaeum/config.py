@@ -3280,6 +3280,49 @@ def resolve_decisions_budget_items_per_day_max(config: dict[str, Any] | None) ->
     )
 
 
+#: Per-type daily surfacing caps applied when ``decisions.surface_caps`` does
+#: not name the type. Audit items are a sampling exercise, so the prior
+#: ruling is three offered per day; every other type is uncapped.
+_DEFAULT_DECISIONS_SURFACE_CAPS: dict[str, int] = {"audit": 3}
+
+
+def resolve_decisions_surface_caps(config: dict[str, Any] | None) -> dict[str, int]:
+    """Resolve the digest's per-type daily surfacing caps (issue athenaeum#2529).
+
+    Read from ``decisions.surface_caps``, a mapping of decision item type to
+    the number of items of that type the digest will OFFER per day. A cap
+    limits what is offered, never what may be answered. Entries override the
+    built-in default (``audit: 3``); a type with no entry is uncapped, and
+    ``0`` offers none of that type. Non-integer, negative and boolean values
+    are ignored (the built-in default for that type applies, if any).
+    """
+    caps = dict(_DEFAULT_DECISIONS_SURFACE_CAPS)
+    if isinstance(config, dict):
+        section = config.get("decisions")
+        raw = section.get("surface_caps") if isinstance(section, dict) else None
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
+                    if value >= 0:
+                        caps[key] = value
+    return caps
+
+
+def resolve_decisions_digest_batch_size(config: dict[str, Any] | None) -> int:
+    """Resolve how many items the digest's ``actionable_now`` offers at once (issue athenaeum#2529).
+
+    Read from ``decisions.digest_batch_size``. The default of ``4`` matches
+    the most options a single host question prompt can carry. Boolean,
+    non-integer and ``<= 0`` values fall through to the default.
+    """
+    if isinstance(config, dict):
+        section = config.get("decisions")
+        raw = section.get("digest_batch_size") if isinstance(section, dict) else None
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return raw
+    return 4
+
+
 def resolve_decisions_budget_decision_minutes_p50_max(config: dict[str, Any] | None) -> int:
     """Resolve the decision queue's p50 decision-time effort bound, in
     minutes (issue athenaeum#1990).

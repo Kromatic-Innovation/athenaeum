@@ -10,7 +10,7 @@ the generalized ENUMERATION primitive — a distinct code path from ``recall``,
 not an argument on it, because it takes no query text and never routes through
 relevance ranking):
 
-  Reads:  recall, list_pending_questions, list_pending_merges,
+  Reads:  recall, list_pending_questions, list_pending_merges, queue_digest,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
           calibration_summary, read_entity, entity_schema,
           enumerate_entities
@@ -5140,6 +5140,35 @@ def create_server(
             caller_audience=caller_audience,
             offset=offset,
             limit=limit,
+        )
+
+    @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
+    def queue_digest() -> dict:
+        """Poll the decision queue: what needs a human decision right now.
+
+        A small, cheap summary a host can read on every session start or
+        timer tick (no model call). Returns ``contract_version``,
+        ``digest_id`` (changes only when the set of offered decisions
+        changes, so notify only on change), ``generated_at``,
+        ``pending_total``, ``held_total``, ``unanswerable_total`` (pending
+        items of a type no answer path accepts yet; counted, never offered),
+        ``by_type``, ``by_routing``, ``backlog`` (non-decision backlog
+        counts, e.g. ``page_recompile``), ``budget`` (per-type daily
+        surfacing caps and ``answered_today``), ``actionable_now`` (at most a
+        few ``{id, type, summary, age_days, reversibility, priority,
+        framed}`` items, held and unanswerable items never included),
+        ``oldest_age_days`` and ``headline`` (one line to show verbatim).
+
+        Caps limit what is offered here, never what may be answered. Fetch a
+        full item and its options with ``list_pending_decisions``.
+        """
+        from athenaeum.config import load_config
+        from athenaeum.decision_digest import queue_digest as _queue_digest
+
+        return _queue_digest(
+            wiki_root,
+            caller_audience=caller_audience,
+            config=load_config(wiki_root.parent),
         )
 
     def read_entity(

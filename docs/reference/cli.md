@@ -36,11 +36,12 @@ python scripts/gen_cli_reference.py
 - [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page, or drop a whole ## section by its section_id. Default is APPLY: every bullet/section id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
 - [`athenaeum corrections-trust-dryrun`](#athenaeum-corrections-trust-dryrun) (command) — Experimental (may change or be removed without a deprecation cycle; the trust-graph design is under reconsideration). Read-only: list every tier-0 field correction whose verdict would change if librarian.source_trust_edges were enabled (TG3). Never mutates the store; works with the flag off.
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
-- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
+- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, digest, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
 - [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
 - [`athenaeum decisions budget`](#athenaeum-decisions-budget) (command) — Report the five effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 - [`athenaeum decisions challenge-coordinate`](#athenaeum-decisions-challenge-coordinate) (command) — Challenge/revoke a previously answered coordinate decision: stale-marks every verdict whose basis names the given answer id, so it is re-compared next time.
 - [`athenaeum decisions count`](#athenaeum-decisions-count) (command) — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
+- [`athenaeum decisions digest`](#athenaeum-decisions-digest) (command) — One-screen poll surface: pending/held counts, per-type surfacing caps and the few decisions worth answering now. Makes no model call.
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions migrate`](#athenaeum-decisions-migrate) (command) — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
@@ -481,7 +482,7 @@ Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + 
 
 ## `athenaeum decisions`
 
-One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
+One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, digest, challenge-coordinate, migrate, revalidate, recompare, scrub-pii, propose-fold, provenance.
 
 Subcommands:
 
@@ -489,6 +490,7 @@ Subcommands:
 - `athenaeum decisions budget` — Report the five effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 - `athenaeum decisions challenge-coordinate` — Challenge/revoke a previously answered coordinate decision: stale-marks every verdict whose basis names the given answer id, so it is re-compared next time.
 - `athenaeum decisions count` — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
+- `athenaeum decisions digest` — One-screen poll surface: pending/held counts, per-type surfacing caps and the few decisions worth answering now. Makes no model call.
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions migrate` — Materialize every pending-merge and pending-question record (resolved and unresolved alike) into the unified-schema mirror, id and disposition unchanged. Idempotent; never touches the legacy files or approves/rejects/answers anything.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
@@ -542,6 +544,15 @@ Challenge/revoke a previously answered coordinate decision: stale-marks every ve
 ## `athenaeum decisions count`
 
 Print `N decisions pending (Q questions, M merges; oldest Xd)`.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decisions digest`
+
+One-screen poll surface: pending/held counts, per-type surfacing caps and the few decisions worth answering now. Makes no model call.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
