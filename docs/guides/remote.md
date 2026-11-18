@@ -521,9 +521,18 @@ Two details specific to remote mode:
 
 - **A remote `remember` lands in `raw/remote-session/`**, not `raw/claude-session/`.
   `athenaeum init` creates it and registers it as a `recall.extra_intake_roots`
-  default, so a note written there is recallable in the same session as the write.
-  If you are scheduling against an older store, confirm that root exists before
-  assuming a remote write is being picked up.
+  default, so the note is indexed and recallable by the next `recall` once the
+  index has refreshed. If you are scheduling against an older store, confirm that
+  root exists before assuming a remote write is being picked up.
+- **A remote `remember` is stamped with the server's pinned audience.** Under
+  `--audience ops` the saved note carries `audience: [ops]`, so the caller that
+  wrote it, and everyone else holding the `ops` role, can recall it. It is not
+  visible to a server pinned to a different role. These saves are visible to the
+  caller's whole audience **without review**: nothing screens or approves the note
+  before it is recallable. The stamp comes from the server-side pin, never from a
+  `remember` argument, and replaces any `audience:` written in the note itself; a
+  note's own `access: open` is dropped. Under `--audience owner` nothing is
+  stamped, because the owner reads every page already.
 - **Wiki-level sources default to `remote:inferred`** under `--transport http`, not
   `claude:inferred`. That is the string to select on when you want to know what
   arrived over the remote endpoint.

@@ -2953,6 +2953,7 @@ def remember_write(
     stamp_env_provenance: bool = True,
     explicit_request: bool = False,
     audit_transport: str = "stdio",
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -3068,6 +3069,13 @@ def remember_write(
             never dropped by a ``never`` rule.
         audit_transport: Client transport (``stdio`` / ``http``) recorded in
             the override audit record. This function does not branch on it.
+        pinned_audience: The caller's server-side pinned read audience
+            (athenaeum#2779). When non-empty, the written raw is stamped
+            ``audience: [<roles>]`` — REPLACING any ``audience:`` in *content*
+            and dropping a caller-written ``access: open`` — so a restricted
+            caller can recall its own write. ``None`` (default) stamps
+            nothing. Never a tool argument: the MCP ``remember`` tool passes
+            the server's pin, under ``--transport http`` only.
 
     When *wiki_root* is given and the final raw carries the explicit-remember
     marker (stamped by *explicit_request* or already in *content*'s own
@@ -3172,7 +3180,12 @@ def remember_write(
         return f"Error: invalid `screening` config: {exc}"
 
     final_content = _inject_provenance_frontmatter(
-        content, wiki_source, field_sources_map, extras, screened_access=screened_access
+        content,
+        wiki_source,
+        field_sources_map,
+        extras,
+        screened_access=screened_access,
+        pinned_audience=pinned_audience,
     )
     if wiki_root is not None:
         override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
@@ -3221,6 +3234,7 @@ def _inject_provenance_frontmatter(
     field_sources_map: dict | None,
     extras: dict | None = None,
     screened_access: str | None = None,
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -3242,6 +3256,7 @@ def _inject_provenance_frontmatter(
         and field_sources_map is None
         and not extras
         and not screened_access
+        and not pinned_audience
     ):
         return content
 
@@ -3264,6 +3279,14 @@ def _inject_provenance_frontmatter(
         existing_access = meta.get("access")
         existing = existing_access if isinstance(existing_access, str) else ""
         meta["access"] = more_restrictive(existing, screened_access)
+    if pinned_audience:
+        # athenaeum#2779: the server-side pin is authoritative. Overwrite (never
+        # merge with) a caller-written `audience:`, and drop `access: open`,
+        # which would make the note world-readable and so widen the stamp.
+        meta["audience"] = sorted(pinned_audience)
+        access_value = meta.get("access")
+        if isinstance(access_value, str) and access_value.strip().lower() == "open":
+            del meta["access"]
 
     if has_frontmatter:
         return render_frontmatter(meta) + body
@@ -4747,6 +4770,12 @@ def create_server(
             stamp_env_provenance=_transport_defaults.env_session_attribution,
             explicit_request=explicit_request,
             audit_transport="http" if transport == "http" else "stdio",
+            # athenaeum#2779: a remote write is stamped with the server-side
+            # pin so the caller's own audience can recall it. Stdio and an
+            # owner (unpinned) server stamp nothing.
+            pinned_audience=(
+                caller_audience if transport == "http" and caller_audience else None
+            ),
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(
