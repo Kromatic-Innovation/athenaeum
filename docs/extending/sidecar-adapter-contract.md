@@ -365,7 +365,7 @@ own):
 | The first prompt of a `claude "<prompt>"` TTY launch is distinguishable | **verified live for a single-line prompt** (claude 2.1.326). Multi-line and very long prompts are covered by unit tests only, not run live. |
 | Interactive hook stdin has the same keys | **verified** (claude 2.1.326) |
 | Pasted content is expanded inline in stdin `prompt` | **verified for a large paste**, which arrives wrapped in `<pasted_content>`; a short paste arrives as plain text (athenaeum#2161) |
-| Queued prompts fire the hook with their own `prompt_id` | **false** (claude 2.1.326): the queued prompt reuses the previous prompt's id |
+| Queued prompts fire the hook with their own `prompt_id` | **false** (claude 2.1.326): the queued prompt reuses the previous prompt's id. The ledger index keeps every line per id and resolves a shared id by digest, so both prompts attest (athenaeum#2759). A queued slash command still ends in a clean `no-entry` miss. |
 | Slash-command stdin carries `<command-args>` inline | **false** (claude 2.1.326): the hook gets the raw `/name args` line |
 | claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` in the hook env | assumed |
 | `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | assumed (undocumented) |
