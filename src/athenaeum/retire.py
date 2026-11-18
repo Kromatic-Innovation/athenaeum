@@ -983,6 +983,13 @@ def run_retire_pass(
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
     _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
+    # Issue athenaeum#2736: ``git rm`` prunes every directory it leaves empty --
+    # including the configured intake root itself (``raw/auto-memory``) once its
+    # last scope is retired. A missing root then reads as a misconfiguration
+    # ("extra_intake_root not found") on the very next resolve. The root is
+    # operator-configured, not a by-product of a file, so put it back.
+    for _root in extra_roots:
+        _root.mkdir(parents=True, exist_ok=True)
 
     # Issue athenaeum#388/#682: rewrite each retired member's sibling ``MEMORY.md`` in the
     # SAME commit as the deletion, so the always-on index never keeps a pointer

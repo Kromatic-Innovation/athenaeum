@@ -665,6 +665,8 @@ def _default_compile_batch(
         knowledge_root=knowledge_root,
         max_files=max_files,
         max_api_calls=max_api_calls,
+        # athenaeum#2736: the staged copies have no originating transcript.
+        staged_import=True,
     )
 
 

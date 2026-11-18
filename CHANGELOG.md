@@ -30,6 +30,17 @@ kept as they were written.
 
 ### Fixed
 
+- A healthy `athenaeum import-memory` run no longer prints warnings that read
+  like a failure. Files staged by import-memory are left out of the
+  origin-recovery-yield denominator (they are verbatim copies with no
+  transcript of their own, so "recovered 0 of N" was true by construction),
+  and the librarian now counts the auto-memory files it retires toward
+  `files_processed`, so the zero-yield alarm and the spend ledger row no
+  longer report `0` for a run that wrote pages. The retire pass recreates the
+  configured intake root (`raw/auto-memory`) that `git rm` prunes when it
+  empties, so `extra_intake_root not found` no longer prints, and the D3
+  "not in the chromadb index" message is silent when the vector backend is not
+  installed (the full-compile fallback is unchanged) (athenaeum#2736).
 - Full-echo Tier-3 merge replies whose `ADDS_NEW_CLAIM:` line carries trailing
   prose no longer drop the observation silently. `ADDS_NEW_CLAIM: false --
   re-confirmation only` now parses as `false` (citation-only), and `true` with

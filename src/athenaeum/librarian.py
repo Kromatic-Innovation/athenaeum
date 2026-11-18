@@ -5715,6 +5715,13 @@ class RunContext:
     #: test suite -- constructed before this field existed -- keep working
     #: without every one of them threading it explicitly.
     live_session_guard: bool | None = None
+    #: Issue athenaeum#2736: True when the auto-memory intake this run drains was
+    #: STAGED by ``athenaeum import-memory`` (a verbatim copy of a native
+    #: memory file, with no originating session transcript of its own).
+    #: Threaded to :func:`athenaeum.intake.discover_auto_memory_files` so those
+    #: files do not count as origin-recovery failures. Default False: every
+    #: other run is unchanged.
+    staged_import: bool = False
     api_key: str | None = None
     config: dict[str, Any] | None = None
     provider: str = "api"
@@ -6035,6 +6042,11 @@ class RunContext:
 
     # --- finalize-phase handoff --------------------------------------------
     files_processed_count: int = 0
+    #: Issue athenaeum#2736: auto-memory raw files this run actually drained
+    #: (moved into a wiki page and retired). They live under the
+    #: ``raw/auto-memory`` intake, NOT in ``raw_files`` (the entity-tier
+    #: queue), so ``files_processed_count`` could never see them.
+    auto_memory_drained_count: int = 0
     # Issue athenaeum#899: the zero-yield predicate's verdict for THIS run and the
     # persisted consecutive-zero-yield count as of this run (post-update).
     # Both stay ``None`` until ``_run_finalize_phase`` evaluates the
@@ -8915,6 +8927,8 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             projects_root=ctx.projects_root,
             live_session_guard=ctx.live_session_guard,
         )
+        if _retire_report is not None and not ctx.dry_run:
+            ctx.auto_memory_drained_count += len(_retire_report.moved)
         # Issue athenaeum#682: surface MEMORY.md pointer pruning in the run-summary.
         # Issue athenaeum#1728: also surface how many holds were live-session-guard
         # holds specifically, distinct from the undifferentiated ``held`` count.
@@ -11228,6 +11242,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         config=ctx.config,
         projects_root=ctx.projects_root,  # issue athenaeum#1452
         lock=ctx.lock,  # issue athenaeum#2038: persist a recovered origin session
+        staged_import=ctx.staged_import,  # issue athenaeum#2736
     )
     if not auto_memory_files:
         return None
@@ -11549,6 +11564,8 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             projects_root=ctx.projects_root,
             live_session_guard=ctx.live_session_guard,
         )
+        if _retire_report is not None and not ctx.dry_run:
+            ctx.auto_memory_drained_count += len(_retire_report.moved)
         ctx.run_profile.append(
             (
                 "retire",
@@ -11928,7 +11945,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         - len(ctx.deferred_refs)
         - len(ctx.failed_files)
         - len(ctx.in_flight_refs),
-    ) + len(ctx.collected_refs)
+    ) + len(ctx.collected_refs) + ctx.auto_memory_drained_count
 
     # Issue athenaeum#1283: evaluate the athenaeum#1135 zero-progress-refusal
     # predicate ONCE, here — ``entity_exit_reason`` and ``files_processed_count``
@@ -12326,6 +12343,7 @@ def run(
     lock: Any = None,
     allow_degraded: bool = False,
     run_type: str | None = None,
+    staged_import: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
@@ -12501,6 +12519,7 @@ def run(
         batch_mode=batch_mode,
         retire=retire,
         live_session_guard=live_session_guard,
+        staged_import=staged_import,
         push_after_run=push_after_run,
         pull_before_run=pull_before_run,
         projects_root=projects_root,
