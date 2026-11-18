@@ -1460,7 +1460,8 @@ class LedgerIndex:
     """
 
     def __init__(self) -> None:
-        self._by_prompt_id: dict[str, WitnessLine] = {}
+        self._by_prompt_id: dict[str, list[WitnessLine]] = {}
+        self._turn_lines: list[WitnessLine] = []
         self._by_session_digest: dict[tuple[str, str], list[WitnessLine]] = {}
         self.chain_verification: ChainVerification | None = None
 
@@ -1470,8 +1471,9 @@ class LedgerIndex:
         for line in iter_lines(ledger_dir):
             if line.kind != "turn":
                 continue
+            idx._turn_lines.append(line)
             if line.prompt_id:
-                idx._by_prompt_id[line.prompt_id] = line
+                idx._by_prompt_id.setdefault(line.prompt_id, []).append(line)
             if line.session and line.prompt_digest:
                 key = (line.session, line.prompt_digest)
                 idx._by_session_digest.setdefault(key, []).append(line)
@@ -1479,7 +1481,41 @@ class LedgerIndex:
         return idx
 
     def by_prompt_id(self, prompt_id: str) -> WitnessLine | None:
-        return self._by_prompt_id.get(prompt_id)
+        """The LAST line written for *prompt_id*, or ``None``.
+
+        The id is a hint, not a key: the harness hands the hook the previous
+        prompt's id when a prompt is typed while a turn is still running, so
+        several lines can share one id. Use :meth:`resolve` to pick among
+        them by digest.
+        """
+        lines = self._by_prompt_id.get(prompt_id)
+        return lines[-1] if lines else None
+
+    def resolve(
+        self, prompt_id: str | None, session: str | None, prompt_digest: str
+    ) -> WitnessLine | None:
+        """The one lookup rule shared by intake and ``promptwitness verify``.
+
+        * no line for the id (or no id): the first ``(session, prompt_digest)``
+          match, else ``None``;
+        * exactly one line for the id: that line (an edited prompt still
+          reports a digest mismatch downstream);
+        * several lines for the id: the first whose ``prompt_digest`` equals
+          *prompt_digest*; if none does, the last line.
+        """
+        lines = self._by_prompt_id.get(prompt_id) if prompt_id else None
+        if lines:
+            if len(lines) == 1:
+                return lines[0]
+            for line in lines:
+                if line.prompt_digest == prompt_digest:
+                    return line
+            return lines[-1]
+        if session:
+            matches = self._by_session_digest.get((session, prompt_digest))
+            if matches:
+                return matches[0]
+        return None
 
     def by_session_digest(self, session: str, prompt_digest: str) -> list[WitnessLine]:
         return list(self._by_session_digest.get((session, prompt_digest), ()))
@@ -1499,4 +1535,4 @@ class LedgerIndex:
         )
 
     def human_lines(self) -> list[WitnessLine]:
-        return [line for line in self._by_prompt_id.values() if self.is_witnessable_human(line)]
+        return [line for line in self._turn_lines if self.is_witnessable_human(line)]
