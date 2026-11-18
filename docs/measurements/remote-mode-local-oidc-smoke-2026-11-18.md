@@ -3,8 +3,9 @@
 # Remote mode end-to-end smoke against a local OIDC provider, 2026-11-18
 
 Part of athenaeum#2389 (epic athenaeum#2199). Result: **PASS on every check that a
-local run can reach; a public-host run still remains** for the four things listed
-under [What this run does not prove](#what-this-run-does-not-prove).
+local run can reach; a public-host run still remains** for the four checks in the
+[Recommendation](#recommendation); [What this run does not prove](#what-this-run-does-not-prove)
+lists the wider set of things this run leaves untested.
 
 Athenaeum#2389 asks for a live run on a real host with a real identity provider. This
 run substitutes a throwaway local stack for the host, the domain and the tenant, and
@@ -43,14 +44,14 @@ removed after the run.
 | --- | --- | --- |
 | Unauthenticated `tools/list` gets `401` with `WWW-Authenticate` | **PASS** | `401`; header `Bearer scope="athenaeum:read athenaeum:write", resource_metadata="https://memory.smoke.test/.well-known/oauth-protected-resource/mcp"` |
 | RFC 9728 metadata resolves through the proxy | **PASS** | the path-scoped URL returns the protected-resource JSON naming the resource, the provider as `authorization_servers`, and both scopes; the bare `/.well-known/oauth-protected-resource` is `404`, as the guide says |
-| Full OAuth flow completes and lists tools | **PASS (scripted client, not MCP Inspector)** | discovery from the `401` challenge, to the protected-resource metadata, to the provider metadata, then authorization-code + PKCE `S256` with `resource=`, a token exchange, and `tools/list` over streamable HTTP through the proxy. The token carried the right `iss`, `aud`, `scope` and a verified email |
+| Full OAuth flow completes and lists tools | **Not met (substituted by a scripted PKCE client)** | discovery from the `401` challenge, to the protected-resource metadata, to the provider metadata, then authorization-code + PKCE `S256` with `resource=`, a token exchange, and `tools/list` over streamable HTTP through the proxy. The token carried the right `iss`, `aud`, `scope` and a verified email |
 | Remote profile hides `resolve_question`, `resolve_merge`, `review_audit_item` | **PASS** | 14 tools served; the three are absent, and `call_tool("resolve_merge")` returns `Unknown tool`. The `[remote-policy]` startup line names the same three |
 | Token for an identity not on the allowlist gets `401` | **PASS** | a valid, correctly signed, correct-audience token for the non-allowlisted user gets `401` with the same `invalid_token` challenge a bad signature gets; the audit log records `reason: identity_not_allowlisted` for the operator only |
 | `recall` returns results from the invented corpus | **PASS** | three pages for `kiln calibration`; the `confidential` page never appears under `--audience ops` |
 | `recall(with_pii=True)` returns no excluded value | **PASS** | the result renders the page and the "excluded fields withheld" notice; neither the invented email nor the invented phone number appears. Control: the same call against the same corpus with no remote pin returns both values, so the pin is what withholds them |
-| One `remember` lands under the remote source with host-neutral provenance | **PASS** | the file landed at `raw/remote-session/<timestamp>-<id>.md` with `source: remote:inferred`, not `claude:inferred`. See finding 2 for whether it was then recallable |
-| First-call latency from a cold process | **PASS, measured** | see below |
-| Findings summarized on athenaeum#2199 | **not done by this lane** | left to the operator; the findings are below and in the draft issue bodies |
+| One `remember` lands under the remote source with host-neutral provenance | **PASS** | the file landed at `raw/remote-session/<timestamp>-<id>.md` with `source: remote:inferred`, not `claude:inferred`. See finding 2 (athenaeum#2779) for whether it was then recallable |
+| First-call latency from a cold process | **Measured** | see below |
+| Findings summarized on athenaeum#2199 | **not done by this lane** | left to the operator; the findings are below, filed as athenaeum#2778, athenaeum#2779, athenaeum#2780, athenaeum#2781 and athenaeum#2782 |
 
 ### MCP Inspector
 
@@ -82,12 +83,12 @@ not the latency a remote host will see on a large store over the public internet
 ## Findings
 
 Each of these is a bug or a gap against the guide, found by following it verbatim. None
-blocked the run. Draft issue bodies exist for each; none has been filed.
+blocked the run. Each is filed as its own issue, cited below.
 
 1. **`athenaeum init` dies with a raw traceback when no `git` binary is present.** A
    slim server image has none. The prerequisites in the guide and the install page do not
    list it, and the failure is a `FileNotFoundError: 'git'` stack trace with no recovery
-   hint.
+   hint. (athenaeum#2778)
 2. **A remote `remember` is invisible to every remote caller under the required
    `--audience` pin.** The guide says a note written under `raw/remote-session/` "is
    recallable in the same session as the write". With `--audience ops` (which the remote
@@ -95,26 +96,27 @@ blocked the run. Draft issue bodies exist for each; none has been filed.
    never returned to the allowlisted writer. Restarting with `--audience owner` returned
    it. The `remember` tool takes no `access` or `audience` argument, so a remote caller
    has no way to make its own write readable. The guide's claim is true only for
-   `owner`.
+   `owner`. (athenaeum#2779, where the operator ruled that remote saves are stamped with
+   the caller's pinned audience.)
 3. **The startup `search_backend=vector but no index` warning is misleading when
    `chromadb` is not installed.** `reindex` fell back to FTS5 and `recall` worked, but
    `serve` still warned that recall would return nothing and told the operator to run the
    reindex that had already run. The guide's install route (the `mcp` extra) does not
    include the vector extra, so this is the default experience of a guide-following
-   install.
+   install. (athenaeum#2780)
 4. **`remember` returns an absolute server filesystem path to the remote caller**
-   (`Saved to /opt/knowledge/raw/remote-session/...`). The guide's own premise is that
+   (`Saved to <knowledge root>/raw/remote-session/...`). The guide's own premise is that
    every returned value is egress to the host provider; this one discloses the server's
-   layout for no benefit to the caller.
+   layout for no benefit to the caller. (athenaeum#2781)
 5. **The guide does not mention that `athenaeum serve` makes an outbound request to
    PyPI on startup** (the fastmcp update check, one `GET` visible in the startup log).
    For a deployment run with restricted egress it is a surprise. fastmcp documents
    `FASTMCP_CHECK_FOR_UPDATES` as the switch; this run did not test that it suppresses the
-   request.
+   request. (athenaeum#2782)
 
 Not defects, but worth knowing:
 
-- The guide's `curl` verification lines need `curl`, which a slim image also lacks.
+- The guide's `curl` verification lines need `curl`, which a slim image also lacks. (athenaeum#2782)
 - The guide's sample bind is `127.0.0.1` with the proxy on the same host. This run put the
   proxy in a separate container, so athenaeum bound `0.0.0.0` on a private container
   network, which the configured issuer permits. A same-host deployment, which is what the
@@ -144,6 +146,18 @@ Not defects, but worth knowing:
   one client, no network path longer than a container hop.
 - **MCP Inspector itself.** See above.
 - **A same-host proxy with a loopback bind**, the exact shape the guide recommends.
+- **The guide's off-host `curl` pair.** The checks were run from a container on the same
+  private network as the server, not from a network outside the host.
+- **Scope enforcement.** Both athenaeum scopes were default client scopes, so every token
+  carried both. No token lacking `athenaeum:write` was tried against `remember`.
+- **Token expiry, refresh and key rotation in a running process.** The key set is fetched
+  once at startup and every token was fresh. Expiry of a live token, a refresh, and a
+  signing-key rotation while the server runs were not exercised.
+- **Whether `FASTMCP_CHECK_FOR_UPDATES` suppresses the startup PyPI request.** Untested
+  (athenaeum#2782).
+- **The guide's "recallable in the same session" claim under a non-owner audience.** Not
+  merely unproven: finding 2 shows it false under `--audience ops`. The fix is ruled on
+  athenaeum#2779 and is not part of this run.
 
 ## Recommendation
 
