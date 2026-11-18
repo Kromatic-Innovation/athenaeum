@@ -275,7 +275,7 @@ class TestResolveThroughExistingPath:
         res = _call(
             server,
             "resolve_question",
-            lambda fn: fn(decision_id, "Yes — stricter reading confirmed."),
+            lambda fn: fn(decision_id, "Yes — stricter reading confirmed.", apply="deferred"),
         )
         assert res["ok"] is True
         assert res["deferred"] is True  # athenaeum#908: applied on the next tick, not now
@@ -499,7 +499,9 @@ class TestConfirmationResolvesThroughExistingPath:
         res = _call(
             server,
             "resolve_question",
-            lambda fn: fn(decision_id, "Confirmed — extension approach is correct."),
+            lambda fn: fn(
+                decision_id, "Confirmed — extension approach is correct.", apply="deferred"
+            ),
         )
         assert res["ok"] is True
         assert res["deferred"] is True

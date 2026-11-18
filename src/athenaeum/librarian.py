@@ -12062,6 +12062,14 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     _zy_alert_threshold,
                 )
 
+    # Issue athenaeum#2533: optional decision-queue push (per-user command
+    # notifier; off unless the user's notify config opts in). After every
+    # phase that can change the queue; never raises, skipped on dry-run.
+    if not ctx.dry_run:
+        from athenaeum.decision_notify import maybe_notify
+
+        maybe_notify(ctx.wiki_root, ctx.config)
+
     # Issue athenaeum#2040: witness anchoring + off-machine mirror, BEFORE the
     # push so this run's own records are what gets pushed.
     _maybe_run_nightly_anchor(ctx)

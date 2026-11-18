@@ -34,6 +34,10 @@ ALLOWED_HEADINGS = ("Removed", "Changed", "Added", "Fixed", "Security")
 # Bold paragraph openers the contract keeps: the summary and the upgrade steps.
 ALLOWED_BOLD_OPENERS = ("**Summary.**", "**Upgrading from ")
 
+# A build-notes link through the moving ``main`` branch drifts from the release
+# it describes; tagged releases pin the tag instead (athenaeum#2727).
+_BUILD_NOTES_MAIN_RE = re.compile(r"blob/main/docs/changelog/[^\s)]*-build-notes\.md")
+
 _RELEASE_RE = re.compile(r"^## \[(\d+)\.(\d+)\.(\d+)\]", re.MULTILINE)
 _UNRELEASED_LINK_RE = re.compile(r"^\[Unreleased\]:\s*(\S+)\s*$", re.MULTILINE)
 
@@ -144,6 +148,15 @@ def footer_violations(text: str) -> list[str]:
     return problems
 
 
+def build_notes_main_links(text: str) -> list[str]:
+    """Lines that link a ``*-build-notes.md`` file through ``blob/main/``."""
+    return [
+        f"line {n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), start=1)
+        if _BUILD_NOTES_MAIN_RE.search(line)
+    ]
+
+
 @pytest.fixture(scope="module")
 def changelog_text() -> str:
     return CHANGELOG.read_text(encoding="utf-8")
@@ -173,6 +186,10 @@ def test_changelog_follows_heading_contract(changelog_text: str) -> None:
 
 def test_changelog_footer_links_are_current(changelog_text: str) -> None:
     assert footer_violations(changelog_text) == []
+
+
+def test_build_notes_links_are_tag_pinned(changelog_text: str) -> None:
+    assert build_notes_main_links(changelog_text) == []
 
 
 def test_systemd_fix_is_under_fixed_in_0_26_0(changelog_text: str) -> None:
@@ -293,3 +310,16 @@ def test_fails_on_wrong_compare_range() -> None:
     problems = footer_violations(_changelog(_GOOD_BODY, footer=footer))
     assert len(problems) == 1
     assert "expected" in problems[0]
+
+
+def test_fails_on_build_notes_link_through_blob_main() -> None:
+    text = (
+        "- Notes: [docs/changelog/1.0.0-build-notes.md]"
+        f"({REPO_URL}/blob/main/docs/changelog/1.0.0-build-notes.md).\n"
+    )
+    assert len(build_notes_main_links(text)) == 1
+
+
+def test_build_notes_link_pinned_to_a_tag_passes() -> None:
+    text = f"[notes]({REPO_URL}/blob/v1.0.0/docs/changelog/1.0.0-build-notes.md)\n"
+    assert build_notes_main_links(text) == []

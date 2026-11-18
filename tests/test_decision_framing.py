@@ -686,6 +686,7 @@ class TestAnswerCommandRefusals:
             [
                 "decisions", "answer", "--path", str(store), "--id", "abc",
                 "--type", "merge", "--answer", '{"verdict": "approve", "note": "ok"}',
+                "--apply", "deferred",
             ]
         )
 
@@ -701,6 +702,7 @@ class TestAnswerCommandRefusals:
             [
                 "decisions", "answer", "--path", str(store), "--id", "abc",
                 "--type", "confirmation", "--answer", '{"verdict": "approve"}',
+                "--apply", "deferred",
             ]
         )
 
