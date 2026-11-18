@@ -5,7 +5,7 @@
 **Status:** DESIGN, not built (Vitruvius Specify, 2026-11-18). The design note
 athenaeum#2626 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
-questions only the operator can answer (§15).
+operator's rulings on its five questions (§15), with one question still open.
 
 Code anchors are `path:symbol` on `develop` at `759e3b64`.
 
@@ -20,9 +20,10 @@ Code anchors are `path:symbol` on `develop` at `759e3b64`.
 
 **Does not decide:**
 
-- **Which store a fact goes to at intake**, and where raw intake for a store
-  waits (athenaeum#2625, written in parallel). This note says where it depends
-  on that one and specifies nothing of it.
+- **Which store a fact goes to at intake**, a store's `intake` rules and the
+  proposer's notice (athenaeum#2625, the intake routing note, written in
+  parallel). This note says where it depends on that one and specifies nothing
+  of it. It does supply the message that note's propose path sends (§6.3).
 - **Which facts deserve raising.** That is the review criteria file of
   athenaeum#2623 §8 for a scheduled review, and a person's choice otherwise.
 - **Trust and poisoning across writers** (athenaeum#2628) and **routing a
@@ -40,13 +41,21 @@ Code anchors are `path:symbol` on `develop` at `759e3b64`.
    store, strips everything that points back into the origin, and sends the
    result to the *target* store as a proposal. If the target's compile role
    accepts it, the target gains a new page with its own uid.
-2. **The copy carries a provenance record and no link.** The record names the
-   origin store by its opaque `store_id`, the proposer as the target's own
-   declaration names them, a hash of the copied content, and the day. None of
-   those tells a reader of the target anything they could not already see (§5).
-3. **Only the raiser can connect the copy to its source.** It keeps a *raise
-   ledger* that maps an opaque `raise_id` to the source page. The target never
-   receives the source's uid, path or revision.
+2. **The copy carries a provenance record and no link.** The part on the copy
+   names the origin store by its opaque `store_id`, the proposer as the
+   target's own declaration names them, a hash of the copied content, and the
+   day. None of those tells a reader of the target anything they could not
+   already see. The proposer's own identity and the exact time are the other
+   part of the record, kept where only the target's compile role can fetch
+   them (§5).
+3. **The source page's uid is held in one place: the raise ledger.** The
+   raiser keeps it, and it maps an opaque `raise_id` to the source page. No
+   message and no page in the target carries the source's uid, path or
+   revision. For a raise the origin decided, the ledger is on the origin's
+   bench or in the raiser's own state. For a review it sits beside the review
+   cursor, which can be the target's bench; there the target's compile role
+   can fetch a row that names an origin page by `store_id` and uid, and
+   readers of the target cannot (§4.3).
 4. **Retract and supersede are messages from the raiser**, sent by the same
    route as the raise. Each names the `raise_id` and nothing else about the
    origin. The target finds the copy from the `raise_id` alone, with no index
@@ -118,12 +127,18 @@ This note adds:
 | **Origin** | The store a raised page is copied from. |
 | **Target** | The store that receives the copy. |
 | **Raiser** | The install that raises. It holds read on the origin and propose or compile on the target. |
-| **Payload** | The content that travels: one page of the origin after the projection in §4.2. |
+| **Projection** | The deterministic function of §4.2 that reduces a page to what a raise carries. It is applied to the source page, and again to the copy. |
+| **Payload** | The content that travels: the projection of one page of the origin. |
+| **Payload hash** | The hash of a projection (§4.2). |
 | **Copy** | The page the target creates from an accepted payload. |
 | **`raise_id`** | An opaque random id for one raise, minted by the raiser. It is the only name the two sides share. |
 | **Raise ledger** | The raiser's record of what it raised: `raise_id`, source page, target, and the hash it last sent. |
 | **Acceptance ledger** | The target compile role's record of what arrived and what it did with it. |
-| **Message** | One file in the format of §6: a raise, a supersede, a retract, a lapse or an attest. |
+| **Message** | One file in the format of §6: a raise, a propose-fact, a supersede, a retract, a lapse or an attest. |
+
+"Personal store" and "item" are used as athenaeum#2625 defines them: the
+install's own default surface, whose only reader is its owner, and one fact
+inside a raw note.
 
 "Raise" does not imply a direction. Access is storage RBAC and not a hierarchy
 (athenaeum#2631), so a raise goes from any store to any store where the grants
@@ -137,23 +152,51 @@ of §4.1 hold.
 
 | On | The raiser's principal needs | Why |
 |---|---|---|
-| The **origin** | Read, and either membership of its compile role or a read grant declared with `purpose: review` | See below. |
+| The **origin**, for a raise a member makes by hand | Membership of its compile role | Operator ruling 5 (§15). |
+| The **origin**, for a raise made by a review | A read grant declared with `purpose: review`, and the review must be one the **target** declares with `source` equal to this origin | Operator ruling 5 (§15). |
 | The **target** | Propose or compile | The raise is a proposal to the target (athenaeum#2623 §4). |
 
 Read alone lets a person copy text out of a store by hand, and nothing in
-athenaeum can stop that. The question is what the engine will do for them.
-This note's answer is that the engine raises out of a store only for its
-compile role, or for a reader the store itself declared as a reviewer. That is
-§15 question 5.
+athenaeum can stop that. The question is what the engine will do for them. The
+ruling is that the engine raises out of a store only for its compile role, and
+for a reviewer the store itself declared.
 
-This is the one place this note asks code to read the `purpose` key of
-athenaeum#2623 §8. The grant itself allows exactly what it allowed before: the
-host hands over the same bytes. The rule narrows what athenaeum will do with
-them, and every athenaeum-side rule only narrows (athenaeum#2623 §1).
+**The reviewer exemption is narrow.** It covers only the output of a review
+that the target's declaration lists, against this origin. A principal who
+holds a `purpose: review` grant cannot use it to raise a page by hand: a grant
+that a store's members were told is for review does not become a way to
+publish their pages one at a time.
 
-A raiser needs no read on the target. Propose does not imply read
+**This needs one line in the access note.** athenaeum#2623 §8 says
+`purpose: review` "changes nothing about what the grant allows", and its S10
+checks only that a read grant exists. Left as it is, a source that grants a
+reviewer plain read would have its review run, select pages and then raise
+nothing. athenaeum#2772 carries the amendment: a review's output is raised
+only when the source's grant says `purpose: review`, and S10 checks it. The
+host still hands over the same bytes either way. The rule narrows what
+athenaeum does with them, and every athenaeum-side rule only narrows
+(athenaeum#2623 §1).
+
+**A store with no declaration** has an implicit one: the install that writes
+it is its sole reader and its whole compile role. The personal store is the
+usual case. Its owner's install may therefore raise from it, which is what the
+smallest case in §9.1 and the propose path of athenaeum#2625 both do. An
+install that mounts an undeclared store `read_only` is a reader of it and may
+not raise from it; that is the local flag deciding, as athenaeum#2623 §5
+says it does. An undeclared store has no `store_id`, so the install mints one
+the first time it raises from the store and keeps it in its own state. A
+declaration committed later carries that same id.
+
+**A raiser needs no read on the target.** Propose does not imply read
 (athenaeum#2623 §4), and the protocol never asks the raiser to look at the
-target.
+target's pages. A propose-only raiser therefore cannot read the target's
+declaration either. It learns the two things it needs, the target's `store_id`
+and its `intake` rules, from the proposer's notices athenaeum#2625 defines:
+append-only files `_store/propose/notice-<n>.yaml` in the inbox, written by
+the compile role, of which the newest wins. A propose-only install with no
+notice it can parse sends nothing to that store. Whether it really holds
+propose is the host's answer when it pushes, and the compile role's check when
+it accepts (§4.4).
 
 ### 4.2 The unit and the projection
 
@@ -161,10 +204,10 @@ target.
 page splits the page, in the same way a group that wants to share half a store
 splits the store (athenaeum#2623 §3).
 
-The payload is a deterministic projection of the source page. No model takes
-part, and no text is written that is not already on the source page.
+The payload is a deterministic **projection** of the source page. No model
+takes part, and no text is written that is not already on the source page.
 
-| Part of the source page | In the payload |
+| Part of the page | In the projection |
 |---|---|
 | `type`, `name`, `description`, `aliases`, `tags` | Copied. |
 | `access`, `audience` | Copied. Sync never widens or narrows them (athenaeum#2624 §5.1), and neither does a raise. |
@@ -172,7 +215,7 @@ part, and no text is written that is not already on the source page.
 | `uid` | Dropped. The target derives its own (§4.4). |
 | `sources` | Dropped. They name raw files and sessions inside the origin. |
 | `parent`, and every `related` row | Dropped. They name origin pages by uid. |
-| `created`, `updated`, and every other key | Dropped. The copy's dates are the target's. |
+| `created`, `updated`, the `raised_from` block, and every other key | Dropped. The copy's dates are the target's. |
 | A `[[wikilink]]` or markdown link to another page | Replaced by its label as plain text. |
 
 Dropping the links is what "no link back down" means in practice. The existing
@@ -180,8 +223,25 @@ write guard (`src/athenaeum/store_links.py:guard_entity_store_links`) stays in
 place behind it as defence in depth. The target's own compile may later link
 the copy to target pages; that is ordinary work inside one store.
 
-The **content hash** of a payload is `src/athenaeum/verdicts.py:content_hash`
-over the payload.
+**The payload hash.** The projection is rendered as a page that holds only the
+kept keys and the body, and the payload hash is
+`src/athenaeum/verdicts.py:content_hash` over that rendering.
+
+The hash is never taken over a whole page. `content_hash` leaves out only the
+system metadata keys, so it includes `uid`, `sources`, `created` and
+`updated`. A copy has all four and a payload has none, so a hash of the whole
+copy could never equal the hash that travelled.
+
+**The same projection is applied to the copy.** To ask whether the target has
+changed a copy, the target projects the copy as it stands now and compares the
+payload hash with the one recorded at acceptance (§7.4). The projection drops
+`uid`, `sources`, `created`, `updated` and `raised_from` on that side as well,
+so a copy nobody has edited compares equal. S1 pins this with a test: a
+payload, accepted into a copy and projected again, gives the same hash.
+
+One consequence is deliberate. Links and `related` rows are not part of the
+projection, so a target that links the copy to its own pages has not edited it
+in this sense.
 
 ### 4.3 What the raiser records
 
@@ -227,10 +287,14 @@ are dropped by rule.
 
 **Accept.** The target creates a new page:
 
-- **Content:** the payload, unchanged. A raise is accepted whole or not at
-  all. Editing, merging with an existing target page and de-duplication happen
-  afterwards, through the target's ordinary compile and its ordinary merge
-  proposals, which never cross a store.
+- **Content:** the payload's body, unchanged, and its keys. The body is
+  accepted whole or not at all. The compile role may adjust two keys as it
+  accepts, the `type` and the `tags`, because a type vocabulary belongs to a
+  store (athenaeum#2625 §4.4). The adjustment is recorded in the acceptance
+  ledger and applied again to every later payload for the same `raise_id`.
+  Any other editing, merging with an existing target page and de-duplication
+  happen afterwards, through the target's ordinary compile and its ordinary
+  merge proposals, which never cross a store.
 - **Uid:** derived, not minted at random:
   `sha256("athenaeum-raise-v1" ‖ target store_id ‖ raise_id)`, first 16 hex
   characters. Two reasons. Two compiling installs that accept the same
@@ -245,12 +309,15 @@ are dropped by rule.
 - **A uid that is already taken** by a page with a different `raise_id`, or
   with none, is never overwritten. The proposal is held and a decision is
   raised.
-- **Provenance:** the `raised_from` block of §5.
+- **Provenance:** the `raised_from` block of §5. Its `content_hash` is the
+  payload hash of the copy as accepted, that is, after any adjustment of type
+  and tags.
 - **Record:** the commit that creates the copy carries one line,
   `Athenaeum-Raise: <raise_id> seq=<n> accept`, with ids only. The acceptance
   ledger gets a row with the same ids, the proposer's own identity, the
-  location the message arrived through, the exact time and the blob id of the
-  accepted version.
+  location the message arrived through, the exact time, the payload hash as it
+  arrived, any adjustment of type and tags, and the blob id of the accepted
+  version.
 
 **Checks made by rule before anyone is asked.** The message parses; its
 `target` is this store; the proposer holds propose or compile in the target's
@@ -260,6 +327,20 @@ declaration at the time the compile role acts; the payload has no link, no
 message that fails is not applied. It is recorded with a reason code and, for
 anything other than a duplicate, raised as a decision.
 
+**The store's `intake` rules are applied here too.** athenaeum#2625 §7 gives a
+store ordered accept and refuse rules over type and tags, and asks that they
+apply to a raised copy, so that a store has one statement of what it takes
+whichever way a fact arrives. The check is that note's pure accept function,
+run on the payload's type and tags:
+
+- under `auto` (below), a payload the rules refuse is rejected with reason
+  `store_refuses`. Nothing is adjusted without a person;
+- under `ask`, the person may adjust the type and tags to something the rules
+  accept, or reject.
+
+The compiling member's own relevance policy is never applied to a waiting
+message (athenaeum#2625 §4.5).
+
 **Whether a person is asked.** The store declares it, once, in its
 declaration (athenaeum#2623 §5):
 
@@ -268,21 +349,44 @@ raise:
   accept:
     review: auto        # raises made by a review this store declares
     proposer: ask       # raises sent by a member
+  always_ask: [person]  # page types that are always shown to a person
   max_silence: 60d      # optional; see §10.4
 ```
 
 `auto` means a raise that passes the checks above is accepted by the compiling
 install without a decision. `ask` means it becomes a decision of a new kind,
-`raise`, in the store's decision queue, showing the payload. Page types listed
-in the store's `sync.always_ask` (athenaeum#2624 §3.3) are always asked,
-whatever the route, so "always ask a person about this type" is stated once
-per store. The defaults shown are §15 question 2.
+`raise`, in the store's decision queue, showing the payload. A page type
+listed in `raise.always_ask` is always asked, whatever the route. The defaults
+shown are operator ruling 2 (§15).
+
+`raise.always_ask` is its own list. It does not reuse `sync.always_ask`: the
+operator's ruling on that list (athenaeum#2624, question 2) is about settling
+conflicts between writers, and a store may want different types watched for
+the two purposes. The two lists have the same shape and are read by the same
+code.
 
 A store with no `raise:` block asks for everything.
+
+**`raise:` is a new top-level key of the declaration.** New top-level keys
+arrive only with a higher `version`; an install that does not support that
+version treats the store as read-only. That is what the declaration parser
+already does with a version it does not know (athenaeum#2772), so an older
+install can never accept a raise under rules it cannot read.
 
 ---
 
 ## 5. The provenance record
+
+**The provenance record has two parts**, split by who may see each.
+
+| Part | Where | Who can fetch it | Holds |
+|---|---|---|---|
+| **On the copy** | The `raised_from` block in the copy's frontmatter | Every reader of the target | The origin `store_id`, the proposer as the target's declaration names them, the payload hash, the day |
+| **In the acceptance ledger** | The bench, or the single compiling install's own state (§6.2) | The target's compile role only | The proposer's own identity, the exact time, the location the message arrived through, any adjustment of type and tags |
+
+Together they record the origin store id, the proposer's identity, the content
+hash and the time, which is what athenaeum#2626 asks for. The split is what
+lets the published part disclose nothing new.
 
 ### 5.1 What the copy carries
 
@@ -302,9 +406,9 @@ raised_from:
   watch: active                 # active | lapsed | ended (§10)
 ```
 
-`raised_from` is system metadata. It is left out of
-`src/athenaeum/verdicts.py:content_hash`, so stamping or updating it does not
-change the page's content hash. The `sources` entry uses the existing typed
+`raised_from` is system metadata. It is left out of the projection (§4.2), and
+S3 also leaves it out of `src/athenaeum/verdicts.py:content_hash`, so stamping
+or updating it changes neither hash. The `sources` entry uses the existing typed
 form (`src/athenaeum/provenance.py:SourceRef`) with a new type, `raise`.
 
 ### 5.2 Why each field discloses nothing new
@@ -318,7 +422,7 @@ nothing else, already see this?
 | `origin` | The origin's `store_id` | athenaeum#2623 §5 makes it opaque, random and never reused. It is not a name, a URL or a path. For a review it already appears in the target's own declaration, which every reader can see (operator ruling, athenaeum#2631). |
 | `proposer` | **The entry in the target's declaration through which the proposer held the grant**: a principal if the declaration names the principal, otherwise `group:<name>` | It is copied from the declaration, which every reader of the target can already see. |
 | `via` | `proposer`, or the name of a review | A review's name is in the target's declaration. |
-| `content_hash` | The hash of the content the target accepted | It is the hash of a version of this page that is in the target's own history, which a reader holds. It is **not** a hash of the source page. |
+| `content_hash` | The payload hash of the copy as the target accepted it | A reader can compute it themselves: it is the hash of the projection (§4.2) of the version of this page that the accepting commit created, and that version is in the target's own history. It is **not** a hash of the source page. |
 | `raised_on` | The day on the proposal | It is a day, not a time, and it is the proposal's day, not a date from the source page. |
 | `seq`, `watch` | Protocol state | They describe the copy. |
 
@@ -330,12 +434,12 @@ Three choices in that table are deliberate, and each closes a leak.
   proposer cannot read the store. Printing the individual on the published
   page would tell every reader what the separate inboxes were built to keep
   apart. The individual's identity is kept in the acceptance ledger, which
-  only the compile role can fetch. Whether to print it anyway is §15
-  question 1.
+  only the compile role can fetch. This is operator ruling 1 (§15).
 - **The hash is of the accepted content, never of the source.** A hash of a
   source page would let a reader test guesses about text they cannot read. The
-  payload is the accepted content, so the two hashes are equal for a raise
-  accepted whole, and a raise is always accepted whole (§4.4).
+  hash on the copy covers only what the copy held when it was created. When
+  the compile role adjusted the type or tags, the hash of the payload as it
+  arrived differs, and it stays in the acceptance ledger.
 - **The day, not the second.** The exact time stays in the acceptance ledger.
 
 **What the record deliberately leaves out:** the source page's uid, path,
@@ -366,7 +470,7 @@ text travels as text.
 ```markdown
 ---
 athenaeum_raise: 1
-kind: raise                       # raise | supersede | retract | lapse | attest
+kind: raise                       # raise | propose-fact | supersede | retract | lapse | attest
 raise_id: rs_k3v9t2hq8m4xw7pd5n6b
 seq: 1
 message_id: rm_7d2c9w4kq8t3h6vx5pnb
@@ -389,7 +493,8 @@ Every employee files a PTO usage report by 31 December. …
 
 | Kind | Carries | Meaning |
 |---|---|---|
-| `raise` | A payload, `seq: 1` | Propose a new copy. |
+| `raise` | A payload, `seq: 1` | Propose a new copy of a whole page. |
+| `propose-fact` | One item, with a suggested type and tags, `seq: 1` | Propose a single routed fact (§6.3). |
 | `supersede` | A payload and a higher `seq`; or `successor: <raise_id>` and no payload | The raised content has a newer version (§7.1). |
 | `retract` | A `reason` code, and no payload | The raise is withdrawn. |
 | `lapse` | No payload | "I can no longer watch the source of this raise." The copy stands (§10). |
@@ -415,11 +520,7 @@ Rules of the format:
 - **Nothing in any message names the source page.** No uid, path, revision or
   source hash crosses.
 
-The envelope has a `kind` key so that another note can add a kind. A fact
-routed to a shared store at intake (athenaeum#2625) is not a raise: it has no
-source page, no ledger and nothing to retract. Whether it uses this envelope
-is that note's call. If it uses the inbox, the three requirements above apply
-to it as well.
+The envelope has a `kind` key so that a later note can add a kind.
 
 ### 6.2 Where a message waits
 
@@ -429,7 +530,7 @@ every raise, whoever makes it:
 | The raiser holds, on the target | The message is written to | Who can fetch it there |
 |---|---|---|
 | compile, and the target has a bench | The bench, under `raise/` | The compile role |
-| compile, and the target has no bench (one compiling install, no stewards) | That install's own raw intake for the target store, at the place athenaeum#2625 defines | That install |
+| compile, and the target has no bench (one compiling install, no stewards) | That install's own state, in the place athenaeum#2625 gives intake that waits locally | That install |
 | propose only | The target's inbox, under `raise/`. The proposer's own inbox where proposers have separate ones (athenaeum#2623, operator ruling 1). | The compile role, and whoever may fetch that inbox |
 
 In every row the message waits where only the target's compile role acts on
@@ -455,6 +556,70 @@ raiser that also reads the target can compute the copy's uid (§4.4) and look.
 A raiser that cannot read the target is told nothing about it, which is what
 "propose does not imply read" requires.
 
+### 6.3 A single routed fact: `propose-fact`
+
+athenaeum#2625 routes each new fact to a store. When the install holds only
+propose on the destination, or is a steward of it, intake hands this note
+three things: the item, its suggested type and tags, and the destination
+`store_id`. The message that carries them is `propose-fact`.
+
+It is not a whole-page raise, and must not be sent as one. Under the
+operator's ruling on athenaeum#2625 the sender keeps the fact in their
+personal store as well, where it may be one line on a page that holds other
+personal facts. Raising that page would send all of them.
+
+```markdown
+---
+athenaeum_raise: 1
+kind: propose-fact
+raise_id: rs_p8d3m6wq2t9hx4vk7c5n
+seq: 1
+message_id: rm_4h8t2k9wq6d3x7vp5cnb
+origin: st_b6t3kd9wq2mx
+target: st_q7m2xk4vwz9d
+proposer: {iss: "https://git.example.net", sub: "1318"}
+via: intake
+sent_at: 2026-11-18T10:05:00Z
+content_hash: "sha256:…"
+fact:
+  type: person            # a suggestion; the compile role fixes the type
+  tags: [hr]
+---
+Sam Ortega moves to the Leeds office on 1 December.
+```
+
+| Aspect | A `raise` | A `propose-fact` |
+|---|---|---|
+| Carries | The projection of a whole page | One item's text, and a suggested type and tags |
+| Type | The page's, adjustable on acceptance (§4.4) | A suggestion. The compile role fixes it (athenaeum#2625 §4.4). |
+| What the target makes of it | A new page at a derived uid, with `raised_from` | Whatever its ordinary compile makes: a new page, or an addition to an existing page of that store |
+| Provenance on the result | The `raised_from` block | A `raise:<raise_id>` entry in `sources`. The page is the target's own page, not a copy. |
+| Acceptance ledger | The copy's uid follows from the `raise_id` | The row records the uids of the pages the compile wrote for it |
+| Raise ledger row | The source page's uid and the payload hash | The uid of the personal page that holds the sender's copy, and the hash of the item sent |
+| `intake` rules | Applied at acceptance (§4.4) | Applied by the sender before it leaves and by the compile role when it arrives (athenaeum#2625 §7) |
+
+**It has a `raise_id` and a ledger row so that the sender can withdraw it.**
+The sender's install writes the row to its raise ledger in its own state, and
+a later `retract` names the `raise_id` like any other.
+
+| A retract for a `propose-fact` arrives when | Action |
+|---|---|
+| The fact is still waiting | Both files are removed. Nothing was compiled. |
+| The fact has been compiled | Nothing is removed by rule. The fact is now part of the target's own pages, possibly one sentence among others. One `retraction` decision names the pages the acceptance ledger recorded and the reason code. |
+
+**No supersede is emitted by rule for a fact.** The raiser pass (§7.1)
+compares whole pages, and a single fact has no page of its own to compare. A
+correction is a retract followed by a new `propose-fact`. The raiser pass does
+one thing for a fact row: when the personal page that holds the sender's copy
+is removed or erased, it emits a retract with the matching reason.
+
+Whether a retract for privacy erasure of a compiled fact can be automatic is
+the one question still open (§15).
+
+The file name rule, the three requirements of athenaeum#2624 §8.1 and the
+waiting places of §6.2 apply unchanged. Nothing in the message is read from
+the sender's index.
+
 ---
 
 ## 7. Retract and supersede
@@ -462,7 +627,7 @@ A raiser that cannot read the target is told nothing about it, which is what
 ### 7.1 Who emits them, and when
 
 **The raiser emits both.** It is the only party that can: the mapping from
-`raise_id` to source page exists in its raise ledger and nowhere else.
+`raise_id` to source page exists in the raise ledger and nowhere else (§4.3).
 
 The check is part of the raiser's ordinary librarian run. No scheduler is
 added. For a review, it runs with the review (§9.2). For each live ledger row
@@ -525,8 +690,11 @@ ordinary later commit restores.
 
 ### 7.4 Applying a message to the copy
 
-The target first asks whether it has changed the copy since it accepted it:
-does the copy's current `content_hash` equal `raised_from.content_hash`?
+The target first asks whether it has changed the copy since it accepted it.
+It projects the copy as it stands now (§4.2) and compares that payload hash
+with `raised_from.content_hash`. Equal means untouched. The comparison is
+never made with a hash of the whole page, which would differ from the moment
+of acceptance.
 
 **Retract.**
 
@@ -536,13 +704,14 @@ does the copy's current `content_hash` equal `raised_from.content_hash`?
 | Edited in the target | Not removed by rule. A decision asks the compile role to remove it or to keep it as the target's own page. Kept, its `watch` becomes `ended` and later messages for the `raise_id` are recorded and ignored. |
 | Any, and the reason is `erasure` | Removed by rule, edited or not, and the removal commit also carries `Athenaeum-Erasure: <uid>`. Erasure always wins (athenaeum#2624 §5.1). |
 
-The first two rows are §15 question 3.
+These rows are operator ruling 3 (§15). They apply to a copy. A compiled
+`propose-fact` is §6.3.
 
 **Supersede with a payload.**
 
 | The copy is | Action |
 |---|---|
-| Untouched | Its content is replaced by the new payload, and `content_hash` and `seq` are updated. Whether a person is asked first follows the same `raise.accept` setting as the original raise (§4.4). |
+| Untouched | Its content is replaced by the new payload, with the recorded adjustment of type and tags applied again (§4.4), and `content_hash` and `seq` are updated. Whether a person is asked first follows the same `raise.accept` setting as the original raise (§4.4). |
 | Edited in the target | A three-way page merge (athenaeum#2624 §5.1), with the last accepted version as the common ancestor, the target's current page as one side and the new payload as the other. The ancestor is read through the store seam by the blob id in the acceptance ledger. Units the merge settles by rule are applied. Any contested unit holds the page: the published version stays, and a decision is raised (athenaeum#2624 §6.4). |
 | Any, and `access` or `audience` differ between the new payload and the copy | Held for a person. Neither a rule nor a model may widen or narrow who sees a page (athenaeum#2624 §5.1). |
 
@@ -605,8 +774,12 @@ the ledger of §4.3. They differ in who decides what to raise.
 A person, or an agent acting for them, names a page and a target:
 `athenaeum store raise <uid> --to <store>`.
 
-1. The install checks the grants of §4.1 against both declarations. A failure
-   stops here with the reason.
+1. The install checks the grants of §4.1. For the origin it reads the
+   declaration, or uses the implicit one of an undeclared store. For the
+   target it reads the declaration when it holds the pages, and the newest
+   proposer's notice when it only proposes. It also applies the target's
+   `intake` rules to the payload, as a courtesy that keeps a refused page from
+   leaving. A failure stops here with the reason.
 2. It builds the payload (§4.2), mints a `raise_id`, and writes the ledger row
    and the message.
 3. It syncs the location the message went to (athenaeum#2624 §8). For a
@@ -615,8 +788,9 @@ A person, or an agent acting for them, names a page and a target:
 
 The smallest case needs no shared location at all. One person raises from
 their personal store to a team store that the same install compiles alone: the
-message goes to that install's own raw intake for the team store, and the next
-run accepts it.
+message waits in that install's own state, and the next run accepts it. The
+personal store has no declaration, and §4.1 says what that means: its owner's
+install is its compile role.
 
 The epic's worked example is a push. Dana Whitlock, HR manager at Acme Corp,
 sets the rule that every employee files a PTO usage report at year end. It is
@@ -634,8 +808,10 @@ librarian run when it is due. This note supplies what it writes.
 
 1. The review reads the source's changes since its cursor and judges them
    against its criteria file. Its output is a **selection**: page uids. It
-   writes no page text. The frame prompt, its file and its registry entry are
-   athenaeum#2623 S11.
+   writes no page text. Everything up to and including the selection is
+   athenaeum#2623 S11: the model call, the frame prompt, its file and its
+   registry entry. Everything after it is this note's S15: turning the
+   selection into messages and ledger rows.
 2. For each selected page, the run builds the payload, mints a `raise_id` and
    writes the ledger row beside the cursor (§4.3) and the message to the place
    §6.2 names.
@@ -683,7 +859,7 @@ the reader already holds.
 
 | Cause | Who notices | How |
 |---|---|---|
-| **The raiser lost read on the origin.** The source's declaration no longer grants it, so the install stops mounting the store (athenaeum#2623 S4). | The raiser | Its ledger rows for that origin can no longer be checked. It still reaches the target, so it sends one `lapse` message per row, by the usual route. |
+| **The raiser lost read on the origin.** | The raiser | It cannot learn this from the declaration: once revoked it can no longer pull the origin, so it never sees the declaration that removed it, and a failed pull keeps the last good copy (athenaeum#2623 §9). The trigger is therefore one of two events on the raiser's side. Either the host **refuses** the fetch of the origin, as distinct from being unreachable, or the origin is unmounted because its declared `max_offline` passed (athenaeum#2623 S6). On either, the raiser stops checking its stale copy. It still reaches the target, so it sends one `lapse` message per ledger row, by the usual route. |
 | **A review was removed from the target's declaration**, or its source no longer declares the reader. | The target's compile role | The review no longer runs (athenaeum#2623 §8). Copies whose `via` names that review lapse. |
 | **The proposer lost propose on the target.** | The target's compile role | The declaration no longer resolves the proposer recorded in the acceptance ledger. Their copies lapse. The host also refuses their pushes, so no further message can arrive. |
 | **The origin store, or the raiser's install, is gone.** Nothing announces this. | The target's compile role, only if the store declared `max_silence` | §10.4. |
@@ -694,7 +870,7 @@ the reader already holds.
 By rule: the copy stays, its `watch` becomes `lapsed`, and **one decision per
 origin** is raised in the target's decision queue. It lists the copies, by
 uid, and asks the compile role to keep them or withdraw them. No copy is
-removed because a grant changed. That default is §15 question 4.
+removed because a grant changed. That is operator ruling 4 (§15).
 
 Two narrower rules cover messages caught in between:
 
@@ -772,13 +948,13 @@ Requirements this note places on athenaeum#2627:
 | Component | Owns | Does not own |
 |---|---|---|
 | **Raise projection** (new, pure) | Page to payload, the payload hash, the derived uid. No I/O. | Choosing what to raise. |
-| **Message codec** (new, pure) | Parse, validate and render the five message kinds. | Where a message is written. |
+| **Message codec** (new, pure) | Parse, validate and render the six message kinds. | Where a message is written. |
 | **Raise ledger and acceptance ledger** (new) | Their record shapes and parsers, registered in `src/athenaeum/store.py:ARTIFACT_REGISTRY` so record merge has a rule for them. | Sync. athenaeum#2624 owns it. |
 | **Raiser pass** (new, in the run) | The source check of §7.1 and emitting messages. | Reading the target. |
 | **Acceptance pass** (new, in the run) | The checks of §4.4, applying messages, the dependent decision. | Judging whether content is true or fits. |
 | **Store access** (athenaeum#2623) | Who holds which grant, the three locations, the review and its criteria. | Message contents. |
 | **Sync** (athenaeum#2624) | Moving the inbox, the bench and the pages between installs; the page merge. | What a message means. |
-| **Intake routing** (athenaeum#2625) | Which store a fact goes to, and where raw intake for a store waits. | Raises. |
+| **Intake routing** (athenaeum#2625) | Which store a fact goes to, a store's `intake` rules and their accept check, the proposer's notices, and compiling a received `propose-fact`. | The message format, the ledgers and retraction. |
 
 Data flows one way: source page → projection → message → the target's waiting
 place → acceptance pass → copy. Nothing flows back except through the raiser's
@@ -805,7 +981,12 @@ sibling service shares this construct.
 | The target edited the copy, then a retract arrives | A decision, unless the reason is erasure (§7.4). |
 | The copy was folded into another target page | The tombstone is found by uid; the absorbing page is listed as a dependent (§8). |
 | The raiser's own state is lost, and the ledger was kept there | Its copies can no longer be retracted by message. They lapse through `max_silence` if the store declared it. Otherwise they stay `active` and unmaintained. Keeping the ledger on a bench avoids this. |
-| The raiser lost read on the origin, or propose on the target | Copies lapse; one decision per origin (§10). |
+| The raiser lost read on the origin, or propose on the target | Copies lapse; one decision per origin (§10). The raiser notices a lost read from a refused fetch or the `max_offline` unmount, not from a declaration it can no longer pull. |
+| An untouched copy is compared with a hash of the whole page | Cannot happen: the comparison is defined over the projection on both sides (§4.2), and S1 pins it with a test. |
+| The target's `intake` rules refuse a payload | Rejected with `store_refuses` under `auto`; a person may adjust type and tags under `ask` (§4.4). |
+| A propose-only raiser has no proposer's notice, or cannot parse it | It sends nothing to that store (§4.1). |
+| An install meets a declaration with a `version` it does not support | It treats the store as read-only and accepts no raise (§4.4). |
+| A retract arrives for a fact already compiled into the target's pages | A decision naming the pages; nothing is removed by rule (§6.3). |
 | The origin is erased | A retract with reason `erasure` removes the copy by rule and marks the commit. |
 | A proposer in a shared inbox retracts another proposer's raise | Applied only if the message names the same proposer. A false claim is not detected. Bounded by an ordinary revert; owned by athenaeum#2628 (§7.3). |
 | A hostile source page steers a review into selecting it | Contained to a proposal that waits for the target's compile role. Anything further is athenaeum#2628. |
@@ -902,7 +1083,7 @@ promotion is "a coordinate edit, never a file move".
 9. **Removing every copy when its raiser loses a grant.** Rejected as the
    default: the target accepted the content when it was properly offered, and
    a change of staffing would silently delete knowledge. It remains an option
-   in §15 question 4.
+   the operator considered and did not choose (§15, ruling 4).
 
 ---
 
@@ -910,134 +1091,114 @@ promotion is "a coordinate edit, never a file move".
 
 Each is one pull request. S1 to S5 depend on nothing outside this note and can
 start now. A dependency written `athenaeum#2623 S7` is a slice of that note's
-build table, and `athenaeum#2624 S13` of that one's.
+build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 
 | Slice | What it delivers | Needs |
 |---|---|---|
-| **S1** | The pure raise projection: page to payload by the table in §4.2, the payload hash, `raise_id` and `message_id` minting, and the derived uid. No I/O. | none |
-| **S2** | The message codec: parse, validate and render `raise`, `supersede`, `retract`, `lapse` and `attest`, the file name rule and the fixed reason codes. Fails closed. | S1 |
+| **S1** | The pure raise projection: page to projection by the table in §4.2, its rendering, the payload hash, `raise_id` and `message_id` minting, and the derived uid. No I/O. Includes the test that a payload accepted into a copy and projected again gives the same hash. | none |
+| **S2** | The message codec: parse, validate and render `raise`, `propose-fact`, `supersede`, `retract`, `lapse` and `attest`, the file name rule and the fixed reason codes. Fails closed. | S1 |
 | **S3** | The `raised_from` block: parse and validate it, leave it out of `verdicts.py:content_hash`, accept `raise` as a source type, and a lint for a page whose `raised_from` is malformed. No behaviour change. | none |
 | **S4** | The raise ledger: record shape, parser, registry entry, kept in the install's own state. | S1 |
-| **S5** | The acceptance ledger: record shape, parser, registry entry, kept in the install's own state. | S2 |
-| **S6** | Push, on one install: `athenaeum store raise`, the grant checks of §4.1 on both declarations, the ledger row, and the message written to the install's own raw intake for the target. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 for where raw intake for a store waits |
-| **S7** | Acceptance, asking every time: the rule checks of §4.4, the `raise` decision kind, creating the copy at its derived uid with `raised_from`, the `Athenaeum-Raise` commit line, reject, and the taken-uid hold. | S3, S5; athenaeum#2623 S7 (the per-store decision queue) |
-| **S8** | The `raise.accept` block in the declaration and acceptance without asking, honouring `sync.always_ask`. | S7; athenaeum#2623 S1; §15 question 2 |
+| **S5** | The acceptance ledger: record shape (including an adjustment of type and tags, and the page uids written for a fact), parser, registry entry, kept in the install's own state. | S2 |
+| **S6** | Push, on one install: `athenaeum store raise`; the grant checks of §4.1, including compile role on the origin, the implicit declaration of an undeclared store and minting its `store_id`; the courtesy `intake` check; the ledger row; and the message written to the install's own state. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 S5 (the `intake` accept check), and athenaeum#2625 for the place intake waits locally, which that note has not yet given a slice |
+| **S7a** | Acceptance, asking every time: the rule checks of §4.4, the store's `intake` rules, the `raise` decision kind, the adjustment of type and tags and its ledger record, creating the copy at its derived uid with `raised_from`, and the `Athenaeum-Raise` commit line. | S3, S5; athenaeum#2623 S7 (the per-store decision queue); athenaeum#2625 S5 |
+| **S7b** | Rejection and holds: reject with a reason code, drop later messages for a rejected `raise_id`, the taken-uid hold, and the decision for a message that fails a check. | S7a |
+| **S8** | The `raise:` block in the declaration, with the higher declaration `version` it arrives under: `raise.accept`, `raise.always_ask`, and acceptance without asking. | S7a; athenaeum#2623 S1; athenaeum#2624 S10 (the always-ask list and its type matching, shared by both lists); athenaeum#2772 (an unsupported `version` leaves the store read-only); ruling 2 |
 | **S9** | The raiser pass: for each live ledger row, read the source through the store seam, classify it by the table in §7.1, and emit `supersede` or `retract`. Erasure is left to S10. | S2, S4, S6 |
 | **S10** | Erasure: recognise a source removed by a commit carrying `Athenaeum-Erasure`, emit `retract` with that reason, and mark the target's removal commit. | S9, S11; athenaeum#2624 S5a (history read) and S16 (the erasure mark) |
-| **S11** | Apply a retract in the target: find the copy by derived uid, follow a tombstone, remove an untouched copy with the retirement mechanics, raise a decision for an edited one, set `watch: ended` when kept. | S7; §15 question 3 |
+| **S11** | Apply a retract in the target: find the copy by derived uid, follow a tombstone, compare by projection, remove an untouched copy with the retirement mechanics, raise a decision for an edited one, set `watch: ended` when kept. | S7a; ruling 3 |
 | **S12** | Dependents: the one `retraction` decision per affected copy, listing pages found by the four reference shapes and by the tombstone, and the cascade extension for a merge that absorbed a copy. | S11 |
-| **S13** | Apply a supersede in the target: replace an untouched copy; three-way merge for an edited one, with contested units held; the `access` and `audience` hold; the successor form. | S7; athenaeum#2624 S3 (the page merge) and S5a (read a file at a revision) |
-| **S14** | Shared locations: write messages to the target's inbox or bench, keep both ledgers on a bench where one exists, remove a message once recorded, and apply the same-location rule of §7.3. | S6, S7; athenaeum#2623 S8 (mounting the bench and inbox); athenaeum#2624 S4 (record merge) and S13 (bench and inbox sync) |
-| **S15** | Pull: a review's selection becomes raises, the ledger sits beside the cursor, the raiser pass runs with the review, and `no_longer_selected` is emitted. | S9; athenaeum#2623 S10 and S11; S14 for a bench or an inbox |
-| **S16** | Lapse: emit and apply the `lapse` message, set `watch: lapsed` for the causes of §10.2, raise one decision per origin, always apply a delivered retract or lapse, and never apply a raise or supersede from a principal without propose. | S11, S13; athenaeum#2623 S2 and S4; §15 question 4 |
+| **S13** | Apply a supersede in the target: replace an untouched copy, applying the recorded adjustment again; three-way merge for an edited one, with contested units held; the `access` and `audience` hold; the successor form. | S7a; athenaeum#2624 S3 (the page merge) and S5a (read a file at a revision) |
+| **S14** | Shared locations: write messages to the target's inbox or bench, keep both ledgers on a bench where one exists, remove a message once recorded, apply the same-location rule of §7.3, and have a propose-only raiser read the target's `store_id` and `intake` rules from the newest proposer's notice. | S6, S7a; athenaeum#2623 S8 (mounting the bench and inbox); athenaeum#2624 S4 (record merge) and S13 (bench and inbox sync); athenaeum#2625 S7 (the proposer's notices) |
+| **S15** | Pull, from the selection onward: take the list of page uids a review selected and turn each into a message and a ledger row beside the cursor, run the raiser pass with the review, and emit `no_longer_selected`. It makes no model call. | S9; athenaeum#2623 S10, with the `purpose: review` check athenaeum#2772 adds, and S11 (the review run that produces the selection); S14 for a bench or an inbox |
+| **S16** | Lapse: emit and apply the `lapse` message; detect a lost read from a refused fetch or the `max_offline` unmount; set `watch: lapsed` for the causes of §10.2; raise one decision per origin; always apply a delivered retract or lapse; never apply a raise or supersede from a principal without propose. | S11, S13; athenaeum#2623 S2, S4 and S6; ruling 4 |
 | **S17** | `raise.max_silence` and the `attest` message. | S14, S16 |
 | **S18** | A three-store test harness that proves a retract travels two hops, one per run. | S9, S11; athenaeum#2624 S6a (the two-clone harness) |
 | **S19** | A guide: raising between stores, and what a reader sees on a copy. Docs only. | S14, S15 |
+| **S20** | The single routed fact (§6.3): the entry point intake calls with an item, its suggested type and tags and a `store_id`, which writes the `propose-fact` message and the sender's ledger row; the acceptance ledger row that records the pages compiled from it; a retract that withdraws a waiting fact or raises a decision for a compiled one; and the fact row in the raiser pass. | S2, S4, S5, S11 |
 
-**What athenaeum#2623 needs from here.** Its S11 (the review run) writes
-proposals in this format. It needs S1, S2 and S4, and S14 for a target with a
-bench or an inbox.
+**Who owns what at the two hand-offs.**
 
-S6, S7, S9, S11 and S13 together give one install a working raise, retract and
-supersede between two stores it holds, with no shared location and nothing
-from athenaeum#2624 except the pure page merge.
+- **With athenaeum#2623 S11 (the review run).** That slice owns the model
+  call: the frame prompt, the criteria file and the selection it returns. S15
+  here owns everything after the selection: the messages, the ledger rows and
+  the watch. Neither writes the other's part. athenaeum#2623 S11 lists this
+  note as a dependency; what it needs is S15's input, a list of page uids, and
+  S1, S2 and S4 underneath it.
+- **With athenaeum#2625 S8 and S9 (the propose path).** That note's S8 decides
+  that a fact goes to a store this install only proposes to, and calls S20
+  here. Its S9 compiles a received `propose-fact` into the store's pages and
+  applies the `intake` rules. S20 here owns the message, both ledger rows and
+  the retract.
+
+S6, S7a, S7b, S9, S11 and S13 together give one install a working raise,
+retract and supersede between two stores it holds, with no shared location and
+nothing from athenaeum#2624 except the pure page merge.
 
 ---
 
 ## 15. Open questions for the operator
 
-Only calls that depend on what the operator values. Each has a recommended
-answer, listed first, and the design above is written to that answer.
+The note first put five questions. The operator accepted the recommended
+answer to each on 2026-11-18, recorded on athenaeum#2631. They are stated
+below as rulings, with the options that were not chosen kept for the record.
+One question raised since is still open and comes last.
 
-### 1. Who is named as the proposer on a published copy?
+### Ruling 1. A copy names the proposer as the receiving store's access list does
 
-Every copy says who proposed it, and everyone who can read the store sees
-that. Some stores let a person send in a fact without being able to read the
-store, and give each such person a private inbox so that other proposers
-cannot see who sent what.
+A person if the list names people, a group if it names groups. Where it is a
+group, the individual is kept in the acceptance ledger, which only the people
+who compile the store can see (§5). Not chosen: always naming the individual,
+which would tell every reader who reported something; and naming nobody.
 
-- **The name the store's own access list uses (recommended).** If the list
-  names the person, the copy names the person. If the list names a group, the
-  copy names the group, and the person's identity is kept where only the
-  people who compile the store can see it. Nothing is shown that readers could
-  not already look up. Cost: on a store that grants by group, a reader cannot
-  tell which member raised a fact.
-- **Always the individual.** The most accountable. Cost: it tells every reader
-  who reported something, which is what the private inboxes were meant to
-  prevent.
-- **Never anyone; show only the origin store.** The most private. Cost: the
-  ruling asked for the proposer to be recorded, and readers lose any sense of
-  who stands behind a fact.
+### Ruling 2. Acceptance depends on how the raise arrived
 
-### 2. When a raise arrives, does the store accept it without asking a person?
+A raise selected by a scheduled review that the receiving store itself set up
+is accepted automatically. A raise sent by a member is shown to a person, and
+so is any page type the store lists under `raise.always_ask` (§4.4). Each
+store can change either setting. Not chosen: always asking, and never asking.
 
-A raise that passes the automatic checks (well formed, from someone allowed to
-propose, no links back to the origin) still has to be accepted before it
-becomes a page.
+### Ruling 3. Untouched copies are removed automatically; edited copies ask
 
-- **It depends on how it arrived (recommended).** A raise made by a scheduled
-  review that the store itself set up is accepted automatically, because the
-  store's own criteria already chose it. A raise sent by a member is shown to
-  a person. Page types the store marked "always ask" are always shown. Each
-  store can change either setting. Cost: a badly written review criteria file
-  publishes pages with nobody looking.
-- **Always ask a person.** Nothing is published unseen. Cost: a weekly review
-  produces a queue of approvals, which is the load scheduled raising was meant
-  to remove.
-- **Never ask.** The least work. Cost: anyone allowed to propose can publish
-  to every reader of the store, which removes the difference between proposing
-  and compiling.
+When the origin withdraws a fact, a copy nobody has edited is removed and a
+person is told which other pages referred to it. An edited copy stays until a
+person decides. Removal for privacy erasure is always automatic (§7.4). Not
+chosen: always asking, and always removing.
 
-### 3. When the origin withdraws a fact, does the copy disappear by itself?
+### Ruling 4. A copy that can no longer be kept current stays, marked
 
-The store that a fact came from has retired it, merged it away or replaced it.
-The copy in the receiving store may be exactly as it arrived, or people there
-may have edited it since.
+It is marked as no longer watched, and one decision per origin store asks the
+people who compile the receiving store whether to keep or withdraw the
+affected copies (§10.3). Not chosen: withdrawing automatically, and keeping
+silently.
 
-- **Untouched copies are removed automatically; edited copies ask
-  (recommended).** A copy nobody changed is removed, and a person is told
-  which other pages referred to it. A copy that was edited is kept until a
-  person decides to remove it or keep it as the store's own page. Removal for
-  privacy erasure is always automatic. Cost: a withdrawn fact can stay visible
-  on an edited copy until someone answers.
-- **Always ask.** Nothing leaves a store without a person agreeing. Cost:
-  withdrawn facts stay published until someone gets to them, and the queue
-  grows with every correction upstream.
-- **Always remove.** Withdrawal is immediate everywhere. Cost: work that
-  people in the receiving store added to the copy is removed with it, and is
+### Ruling 5. Only a store's compile role, and reviewers it declares, may raise its pages
+
+A member raising by hand must be in the origin's compile role. A reviewer's
+exemption covers only the output of a review that the receiving store
+declares against that origin, and only where the origin's grant says
+`purpose: review` (§4.1). A reviewer cannot use that grant to raise a page by
+hand. The access note takes a one-line amendment to match, in athenaeum#2772.
+Not chosen: any reader may raise; and no reviewers at all.
+
+### Open question. A person withdraws, for privacy, a single fact that was already compiled
+
+Ruling 3 makes privacy erasure automatic for a copy, because a copy is a page
+of its own that can be removed whole. A single fact sent to a store (§6.3) is
+different. Once the receiving store has compiled it, the fact may be one
+sentence on a page that holds other things, and no rule can tell which words
+came from it.
+
+- **Raise it as a decision marked urgent, at the head of the store's decision
+  queue (recommended).** A person in the receiving store removes the sentence.
+  Nothing else on the page is lost. Cost: the fact stays readable until that
+  person acts.
+- **Remove every page the fact was compiled into, automatically.** The fact is
+  gone at once. Cost: unrelated content on those pages goes with it, and is
   recoverable only from history.
+- **Compile every single fact onto a page of its own, so that it can always be
+  removed whole.** Erasure becomes automatic and exact. Cost: the receiving
+  store fills with one-sentence pages, and its librarian may not merge them
+  into the pages they belong on.
 
-### 4. When a copy can no longer be kept up to date, what happens to it?
-
-A copy stays current only while the librarian that raised it can still read
-the original and still reach the receiving store. That stops when the person
-leaves a team, a review is switched off, or the original store goes away.
-
-- **Keep it, mark it as no longer watched, and ask once (recommended).** The
-  copy stays readable and carries a visible mark. One question per origin
-  store asks the people who compile the receiving store whether to keep or
-  withdraw the affected copies. Cost: an out-of-date fact can remain, though
-  marked.
-- **Withdraw it automatically.** Nothing unmaintained stays published. Cost: a
-  change of staffing silently deletes knowledge that was properly shared, and
-  that was correct when it was shared.
-- **Keep it and say nothing.** The least machinery. Cost: readers cannot tell
-  a maintained copy from an abandoned one.
-
-### 5. Who may raise a page out of a store?
-
-Anyone who can read a store can copy its text by hand, and no software stops
-that. The question is whether athenaeum will do it for them, with one command,
-into a store that more people read.
-
-- **The people who compile the store, and reviewers the store has declared
-  (recommended).** A team's own librarians can raise its pages, and so can a
-  reviewing librarian that the team's access list names as a reviewer. An
-  ordinary reader cannot. Cost: a reader who spots something worth sharing has
-  to ask a compiler to raise it.
-- **Any reader.** The most fluid. Cost: one reader of a private store can
-  publish its pages to a wider audience, and the store's owners learn about it
-  only if they also read the destination.
-- **Only the people who compile the store; no reviewers.** The tightest. Cost:
-  it removes scheduled review by another store's librarian, which the operator
-  ruled in.
+The design above is written to the recommended answer.
