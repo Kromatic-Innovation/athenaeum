@@ -232,6 +232,8 @@ They are reference material; this section is the release.
 
 ### Security
 
+- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
+
 - No security-relevant changes. The new guidance files are operator-authored
   prompt input: they are size-capped and defanged like the other
   `wiki/_schema/` fragments, and a fixed precedence clause stops guidance from
