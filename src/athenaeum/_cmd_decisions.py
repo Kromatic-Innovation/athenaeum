@@ -637,7 +637,7 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     from athenaeum.decision_answers import (
         CoordinateAnswerRefused,
         check_pending_conflicts,
-        write_decision_answer,
+        write_and_apply_decision_answer,
     )
     from athenaeum.decision_framing import (
         ANSWERABLE_AS,
@@ -742,8 +742,12 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             )
 
     try:
-        path = write_decision_answer(
+        result = write_and_apply_decision_answer(
             raw_root,
+            wiki_root,
+            apply=getattr(args, "apply", "immediate"),
+            wait=getattr(args, "wait", None),
+            client_factory=lambda: _answer_classify_client(config),
             decision_id=args.id,
             decision_type=applier_type,
             verdict=str(parsed["verdict"]),
@@ -766,7 +770,6 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             # _apply_merge_answer`); harmless metadata for every other type.
             actor="unattributed",
             config=config,
-            wiki_root=wiki_root,
         )
     except CoordinateAnswerRefused as exc:
         return _answer_refusal(
@@ -778,22 +781,53 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             errors=[exc.message],
         )
 
+    path = result.path
+    ok = result.status != "refused"
     if as_json:
         sys.stdout.write(
             json.dumps(
                 {
-                    "ok": True,
+                    "ok": ok,
                     "decision_id": args.id,
                     "decision_type": decision_type,
                     "answer_file": str(path),
+                    # Issue athenaeum#2531: the applier's outcome, synchronously.
+                    "apply_status": result.status,
+                    "applied": result.status == "applied",
+                    "deferred": result.deferred,
+                    "error_code": result.error_code,
+                    "message": result.message,
                 }
             )
             + "\n"
         )
     else:
         print(f"answer recorded for {args.id} ({decision_type}): {path}")
-        print("Run `athenaeum ingest-answers` to apply it.")
-    return 0
+        if result.status == "applied":
+            print(f"applied: {result.message}")
+        elif result.status == "refused":
+            print(
+                f"refused by the applier ({result.error_code}): {result.message}",
+                file=sys.stderr,
+            )
+        elif result.status == "deferred":
+            print("Run `athenaeum ingest-answers` to apply it.")
+        else:
+            print(f"not applied now ({result.status}): {result.message}")
+    return 0 if ok else 1
+
+
+def _answer_classify_client(config: dict):
+    """Best-effort ``classify``-knob client for an immediate coordinate answer
+    (issue athenaeum#2531) -- built the way ``ingest-answers`` builds its own
+    (fail open to ``None``, so the scope-sameness judge is deterministically
+    unavailable rather than the answer failing)."""
+    from athenaeum.provider import build_llm_client
+
+    try:
+        return build_llm_client(config, knob="classify")
+    except Exception:  # noqa: BLE001 - same offline fallback as ingest-answers
+        return None
 
 
 def _cmd_pending_answers(args: argparse.Namespace) -> int:
@@ -996,6 +1030,31 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             'The answer as a JSON object, e.g. \'{"verdict": "approve"}\'. '
             "Must satisfy the item's response_schema."
+        ),
+    )
+    answer_p.add_argument(
+        "--apply",
+        choices=("immediate", "deferred"),
+        default="immediate",
+        help=(
+            "immediate (default): after writing the answer record, apply "
+            "ONLY that one answer file now and report the outcome "
+            "(applied / refused with an error code / held). deferred: only "
+            "write the record; the next `athenaeum ingest-answers` tick "
+            "applies it (issue athenaeum#2531)."
+        ),
+    )
+    answer_p.add_argument(
+        "--wait",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "For an immediate answer that needs the run lock (coordinate): "
+            "block up to SECONDS for it, like `ingest-answers --wait`. If "
+            "the lock is still held the answer falls back to deferred and "
+            "says so. Default: ATHENAEUM_LOCK_TIMEOUT env, then "
+            "librarian.lock_timeout, then 0 (fail fast)."
         ),
     )
     answer_p.add_argument(
