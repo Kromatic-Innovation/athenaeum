@@ -16,6 +16,7 @@ kept as they were written.
 
 ### Changed
 
+- README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
 - Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file
   bytes. The first real-login run measured about 2,800 tokens per file (two
@@ -164,7 +165,7 @@ athenaeum test-mcp             # smoke-test remember/recall, no API key needed
 ```
 
 The per-merge Added / Fixed entries are in
-[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.26.0-build-notes.md).
+[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.26.0/docs/changelog/0.26.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Added
@@ -235,7 +236,7 @@ athenaeum relevance-policy     # show the active capture rules, if any
 ```
 
 The per-merge Added / Changed / Fixed entries are in
-[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.25.0-build-notes.md).
+[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.25.0/docs/changelog/0.25.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Changed
@@ -467,7 +468,7 @@ athenaeum recompile list       # see what page recompile has planned or applied
 ```
 
 The per-merge Added / Changed / Fixed / Removed entries are in
-[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.24.0-build-notes.md).
+[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.24.0/docs/changelog/0.24.0-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.23.5] - 2026-11-12
@@ -551,7 +552,7 @@ announced as the removal release for `athenaeum merges` and `athenaeum questions
 
 The full release digest, the per-merge Added / Changed / Fixed / Internal entries
 and the never-published 0.23.0 build notes are in
-[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.23.5-build-notes.md).
+[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.23.5/docs/changelog/0.23.5-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.22.43] - 2026-10-25
