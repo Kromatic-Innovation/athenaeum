@@ -204,6 +204,8 @@ Evidence, kept out of the reading path.
   [artifact manifest, higher tier](measurements/routed-section-arm-2026-11-06/manifest-sonnet.md),
   [artifact manifest, Haiku](measurements/routed-section-arm-2026-11-06/manifest-haiku.md).
 - [Clean-machine first-recall test (Linux, PyPI quick start)](measurements/clean-machine-first-recall-linux-2026-11-14.md) — fresh-container run of the README quick start; the fact compiled but a new session could not recall it until the search backend was changed by hand.
+- [Clean-machine first-recall test, Linux re-run (0.26.0 from PyPI)](measurements/clean-machine-first-recall-linux-rerun-2026-11-18.md) — the README quick start now passes end to end through a real Claude session; `doctor` still cannot come back clean and a saved note is not recallable before compile.
+- [First recall without an API key (claude-cli login, measured plan usage)](measurements/clean-machine-first-recall-no-api-key-2026-11-18.md) — default no-key compile measured at about 4,000 tokens per note; the no-login counter-example fails (false login-detected check, opaque error).
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
