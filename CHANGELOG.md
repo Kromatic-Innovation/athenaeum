@@ -45,6 +45,7 @@ kept as they were written.
 
 ### Fixed
 
+- `athenaeum doctor` `search_index` no longer FAILs on an `[mcp]`-only install after `session-end`. With `search_backend: vector` and chromadb absent, an existing fts5 index is accepted as OK, with a detail naming the fts5 fallback and the missing `[vector]` extra; before any index exists it still FAILs. The README now says what `doctor` shows after the quick start (`hooks` is the one FAIL left, since the recall hook is optional), and a test pins that sentence to `doctor`'s output over a stock install (athenaeum#2765).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no
