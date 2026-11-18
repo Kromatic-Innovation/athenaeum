@@ -3202,8 +3202,9 @@ def apply_decision_answer_file(
 def answer_needs_run_lock(answer: DecisionAnswer, config: dict | None) -> bool:
     """Whether applying *answer* needs the run lock held (issue athenaeum#2531).
 
-    ``coordinate`` always does (``lock_required`` otherwise); an approving
-    ``page-recompile`` does (it writes pages); a ``merge`` does only when the
+    ``coordinate`` always does (``lock_required`` otherwise); a
+    ``page-recompile`` that is not a reject does (every approving verdict
+    writes pages); a ``merge`` does only when the
     verdict ledger is on, because the ledger append is single-appender and
     skipping it at an immediate apply would lose that entry for good (the
     file is then already applied, so no tick would add it).
@@ -3211,7 +3212,11 @@ def answer_needs_run_lock(answer: DecisionAnswer, config: dict | None) -> bool:
     if answer.decision_type == "coordinate":
         return True
     if answer.decision_type == "page-recompile":
-        return answer.verdict.strip().lower() == "approve"
+        # Every approving verdict (``approve`` and ``approve-structure-only``)
+        # writes pages; only ``reject`` is lock-free. An unknown verdict is
+        # refused by the applier before it reaches the lock check, so
+        # treating it as lock-needing only costs it a lock acquisition.
+        return answer.verdict.strip().lower() != "reject"
     if answer.decision_type == "merge":
         from athenaeum.config import resolve_verdict_ledger_enabled
 

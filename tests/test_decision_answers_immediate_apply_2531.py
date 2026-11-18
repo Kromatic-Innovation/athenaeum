@@ -282,6 +282,19 @@ class TestRunLock:
         assert da.answer_needs_run_lock(c, None) is True
         assert da.answer_needs_run_lock(q, None) is False
 
+    @pytest.mark.parametrize(
+        ("verdict", "needs"),
+        [("approve", True), ("approve-structure-only", True), ("reject", False)],
+    )
+    def test_page_recompile_lock_follows_the_verdict(
+        self, kroot: Path, verdict: str, needs: bool
+    ) -> None:
+        a = da.DecisionAnswer(
+            decision_id="p", decision_type="page-recompile", verdict=verdict,
+            note="", resolved_at="", path=kroot,
+        )  # fmt: skip
+        assert da.answer_needs_run_lock(a, None) is needs
+
     def test_lock_free_coordinate_applies_and_releases(self, kroot: Path) -> None:
         cid = self._coord(kroot)
         result = write_and_apply_decision_answer(
