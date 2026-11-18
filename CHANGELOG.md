@@ -16,6 +16,7 @@ kept as they were written.
 
 ### Changed
 
+- The plan-usage disclosure in `athenaeum init` and `docs/guides/install.md` now carries magnitude: measured 2026-11-18 on 0.26.0, one note compiles in about 3 to 4 model calls, 3,800 to 4,400 tokens (in plus out) and 28 to 36 s; five notes in one run took 13 calls, 19,433 tokens and 139 s. It also states the per-run caps that exist (`athenaeum run` 50 files / 800 API calls, `athenaeum session-end` 20 files / 100 API calls); no separate first-run cap ships. The README compile step no longer tells a `claude-cli` user to export an API key first (athenaeum#2766).
 - Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file
   bytes. The first real-login run measured about 2,800 tokens per file (two

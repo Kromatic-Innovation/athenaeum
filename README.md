@@ -110,10 +110,16 @@ the compiled wiki. A round-trip looks like this:
 Nothing is in the wiki yet — `remember` only appends. Compile it:
 
 ```bash
-export ANTHROPIC_API_KEY=...     # or configure the claude-cli backend
 athenaeum run                    # add --dry-run to inspect without writing
 athenaeum status
 ```
+
+`athenaeum init` already chose the compile provider and printed it. If it
+found a logged-in `claude` CLI it selected `claude-cli`, and compiles use that
+login with no key (they draw on your Claude Code plan's usage limits; about
+3,800 to 4,400 tokens and 30 s per note, see [Install](docs/guides/install.md)).
+An Anthropic API key is the alternative: `export ANTHROPIC_API_KEY=...` before
+`athenaeum run` if `init` told you no login was found.
 
 The librarian creates or updates Jordan's entity page, creates Priya's, and links them.
 A later session asking *"who is Priya?"* gets the compiled page back from `recall`.

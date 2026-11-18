@@ -61,7 +61,14 @@ written `athenaeum.yaml` selected and what it draws on:
   binary already on `PATH` — the config selects `llm.provider: claude-cli`,
   and `init` says so: compiles run on your Claude Code plan's subscription
   login, so they draw on that plan's usage limits rather than a metered
-  API bill.
+  API bill. For scale, measured on 0.26.0 on 2026-11-18: compiling one
+  note took about 3 to 4 model calls, 3,800 to 4,400 tokens (input plus
+  output) and 28 to 36 seconds; five notes in one run took 13 calls,
+  19,433 tokens and 139 seconds. The CLI reports no percentage of the plan's
+  limit, so the share of your plan this uses is not known. There is no
+  separate first-run cap; the ordinary per-run caps apply: `athenaeum run`
+  stops at 50 files or 800 API calls, and `athenaeum session-end` at 20 files
+  or 100 API calls.
 - `ANTHROPIC_API_KEY` set — unchanged: the config selects `llm.provider:
   api`, and compiles draw on your Anthropic API usage/billing.
 - Neither a key nor a usable `claude` binary — the config still defaults to
