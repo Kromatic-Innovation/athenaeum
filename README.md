@@ -12,6 +12,85 @@ uv tool install --python 3.13 'athenaeum[mcp]'
 
 Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 
+## Quick start
+
+**Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
+`PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
+check against if `athenaeum --version` ever looks stale. `git` must be
+installed; no git identity is needed (`init` sets a repo-local one if you have none).
+Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
+current release is supported; see the [support policy](docs/guides/install.md#support-policy).
+Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
+
+**Before the first compile** (`athenaeum run`, below) you need either
+`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI.
+
+The `[mcp]` extra in the install command is required by `athenaeum serve` and
+`athenaeum test-mcp`.
+
+```bash
+# Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
+uv tool install --python 3.13 'athenaeum[mcp]'
+# ...or, into an activated Python 3.13+ environment:
+pip install 'athenaeum[mcp]'
+
+# Create a knowledge directory (default: ~/knowledge)
+athenaeum init
+
+# Wire it into Claude Code — it auto-starts with every session
+claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+
+# Check the setup (read-only). FAILs are expected at this point; see below.
+athenaeum doctor
+```
+
+`athenaeum doctor` is a read-only health check. **On a fresh install it will
+show FAILs, and that is expected.** Right after the commands above it is
+expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
+`key_mode` when neither an API key nor the `claude` CLI is available)
+until the steps below are complete; each FAIL names its fix. Run it again
+once you have finished the quick start, and it should come back clean.
+
+> **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
+> without it search falls back to `fts5` with a one-time warning, never a failure.
+> See [Install](docs/guides/install.md) for both extras.
+
+Want to confirm it works before wiring anything up or spending API budget?
+
+```bash
+athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
+```
+
+That gives your agent two tools: `remember` to write an observation, `recall` to search
+the compiled wiki. A round-trip looks like this:
+
+> **You:** Jordan's partner is Priya; they met at Stanford GSB.
+>
+> *Claude calls `remember(...)`. A raw observation lands in
+> `~/knowledge/raw/claude-session/…md`.*
+
+Nothing is in the wiki yet — `remember` only appends. Compile it:
+
+```bash
+export ANTHROPIC_API_KEY=...     # or configure the claude-cli backend
+athenaeum run                    # add --dry-run to inspect without writing
+athenaeum status
+```
+
+The librarian creates or updates Jordan's entity page, creates Priya's, and links them.
+A later session asking *"who is Priya?"* gets the compiled page back from `recall`.
+
+Two more commands you will use daily:
+
+```bash
+athenaeum session-end   # make this session's memories recallable now, not tonight
+athenaeum decisions     # anything the pipeline refused to resolve on its own
+```
+
+→ [Daily operation](docs/guides/daily-operation.md) ·
+[Passive recall via hooks](docs/guides/sidecar.md) ·
+[MCP tool reference](docs/modules/mcp.md)
+
 <p align="center">
   <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
 </p>
@@ -54,80 +133,6 @@ just across turns of one conversation.
 The full argument, including how this differs from Claude's built-in memory, Anthropic's
 memory tool, RAG, and the existing agent-memory libraries, is in
 [**Why Athenaeum**](docs/why-athenaeum.md).
-
-## Quick start
-
-**Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
-`PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
-check against if `athenaeum --version` ever looks stale. `git` must be
-installed; no git identity is needed (`init` sets a repo-local one if you have none).
-
-```bash
-# Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
-uv tool install --python 3.13 'athenaeum[mcp]'
-# ...or, into an activated Python 3.13+ environment:
-pip install 'athenaeum[mcp]'
-
-# Create a knowledge directory (default: ~/knowledge)
-athenaeum init
-
-# Wire it into Claude Code — it auto-starts with every session
-claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
-
-# Check the setup (read-only). FAILs are expected at this point; see below.
-athenaeum doctor
-```
-
-`athenaeum doctor` is a read-only health check. **On a fresh install it will
-show FAILs, and that is expected.** Right after the commands above it is
-expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
-`key_mode` when neither an API key nor the `claude` CLI is available)
-until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start, and it should come back clean.
-
-The `[mcp]` extra above is all a fresh install needs. `athenaeum init`'s
-default config (`search_backend: vector`) wants the optional `[vector]`
-extra for semantic search, but without it `recall`, `reindex` and
-`session-end` all degrade to the `fts5` backend automatically, with a
-one-time warning on stderr — never a hard failure. Add the `[vector]`
-extra to the install command above later if you want semantic (not just
-keyword) matching.
-
-Want to confirm it works before wiring anything up or spending API budget?
-
-```bash
-athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
-```
-
-That gives your agent two tools: `remember` to write an observation, `recall` to search
-the compiled wiki. A round-trip looks like this:
-
-> **You:** Jordan's partner is Priya; they met at Stanford GSB.
->
-> *Claude calls `remember(...)`. A raw observation lands in
-> `~/knowledge/raw/claude-session/…md`.*
-
-Nothing is in the wiki yet — `remember` only appends. Compile it:
-
-```bash
-export ANTHROPIC_API_KEY=...     # or configure the claude-cli backend
-athenaeum run                    # add --dry-run to inspect without writing
-athenaeum status
-```
-
-The librarian creates or updates Jordan's entity page, creates Priya's, and links them.
-A later session asking *"who is Priya?"* gets the compiled page back from `recall`.
-
-Two more commands you will use daily:
-
-```bash
-athenaeum session-end   # make this session's memories recallable now, not tonight
-athenaeum decisions     # anything the pipeline refused to resolve on its own
-```
-
-→ [Daily operation](docs/guides/daily-operation.md) ·
-[Passive recall via hooks](docs/guides/sidecar.md) ·
-[MCP tool reference](docs/modules/mcp.md)
 
 ## Key features
 

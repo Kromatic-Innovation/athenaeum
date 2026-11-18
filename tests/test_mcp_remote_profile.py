@@ -139,10 +139,19 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
         "properties": ["bucket", "content", "explicit_request", "source", "sources", "valid_until"],
         "required": ["content"],
     },
-    "resolve_merge": {"properties": ["decision", "id", "note"], "required": ["decision", "id"]},
-    "resolve_question": {"properties": ["answer", "id"], "required": ["answer", "id"]},
+    # Re-pinned for athenaeum#2531: `apply` (immediate | deferred) and `wait`
+    # (run-lock seconds) on the three answer tools -- the ONLY delta; no
+    # property removed, and neither is required.
+    "resolve_merge": {
+        "properties": ["apply", "decision", "id", "note", "wait"],
+        "required": ["decision", "id"],
+    },
+    "resolve_question": {
+        "properties": ["answer", "apply", "id", "wait"],
+        "required": ["answer", "id"],
+    },
     "review_audit_item": {
-        "properties": ["human_verdict", "id", "note"],
+        "properties": ["apply", "human_verdict", "id", "note", "wait"],
         "required": ["human_verdict", "id"],
     },
     "scan_retraction_cascade": {"properties": [], "required": []},

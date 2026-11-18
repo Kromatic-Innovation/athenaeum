@@ -144,6 +144,7 @@ __all__ = [
     "send_bracketed_paste",
     "read_pty_until_idle",
     "find_transcript_record",
+    "find_transcript_record_by_text",
     "transcript_record_fields",
     "claude_ai_bridge_skip_reason",
 ]
@@ -704,6 +705,31 @@ def find_transcript_record(session_jsonl: Path, *, prompt_id: str | None) -> dic
     return None
 
 
+def find_transcript_record_by_text(
+    session_jsonl: Path, *, prompt_digest: str
+) -> dict[str, Any] | None:
+    """Find the record in *session_jsonl* whose user-authored text hashes to
+    *prompt_digest* (``canon.digest(canon.normalize(text))``) -- how intake
+    finds a record, by what was typed rather than by id. The hook's
+    ``prompt_id`` is a hint the harness does not keep unique (a queued prompt
+    reuses the id of the turn it queued behind), so it cannot name one record.
+
+    Returns the first matching record ``dict``, or ``None`` when the file is
+    absent or no record's text matches. Read-only.
+    """
+    try:
+        text = session_jsonl.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for record in _parse_session_text(text):
+        if not isinstance(record, dict):
+            continue
+        record_text = _user_authored_text(record)
+        if record_text and canon.digest(canon.normalize(record_text)) == prompt_digest:
+            return record
+    return None
+
+
 def transcript_record_fields(record: Mapping[str, Any] | None) -> dict[str, Any]:
     """Pull the four fields :func:`athenaeum.witness_attestation.attest`
     needs out of a raw transcript *record* -- the single place this harness
@@ -908,12 +934,9 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
     # Live observation (athenaeum#2161, claude 2.1.326): a prompt queued
     # behind a running turn fires the hook with the SAME ``prompt_id`` as the
     # turn it queued behind, not its own. Intake resolves the prompt by that
-    # id, finds the first prompt's text, and reports a clean
-    # ``digest-mismatch`` miss -- never a false "witnessed". The row pins that
-    # safe miss; flip it to a hit once the adapter can attest a shared id.
-    # ``LedgerIndex`` keeps the LAST line per ``prompt_id``, so the queued
-    # line also displaces the earlier typed prompt's line: that earlier
-    # prompt loses attestation too (a second safe miss, not a false hit).
+    # id. ``LedgerIndex`` keeps every line per id and resolves a shared id by
+    # digest (athenaeum#2759), so BOTH prompts of the row attest -- the
+    # harness asserts the earlier prompt as well as the queued one.
     EntryPathCase(
         id="queued-while-turn-runs",
         description="queued (typed while a turn runs)",
@@ -921,8 +944,8 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         expected_channel="interactive",
         expected_segment_kinds=("typed",),
         expect_resumed=False,
-        intake_hit=False,
-        intake_miss_reason_prefix="digest-mismatch",
+        intake_hit=True,
+        intake_miss_reason_prefix=None,
     ),
     # Live observation (athenaeum#2161, claude 2.1.326): the hook classifies
     # and records the slash line correctly, but the transcript record of a
@@ -1096,11 +1119,14 @@ def _attest_line(
     :func:`athenaeum.witness_attestation.attest` over it -- the "athenaeum
     intake (athenaeum#2158)" step each case asserts on."""
     session_jsonl = _find_session_jsonl(paths.claude_config_dir, str(line.session))
-    record = (
-        find_transcript_record(session_jsonl, prompt_id=line.prompt_id)
-        if session_jsonl is not None
-        else None
-    )
+    record = None
+    if session_jsonl is not None:
+        # By text first, as intake does; the id is only the fallback for a
+        # line whose digest cannot match its record (a slash command: the
+        # hook digests ``/name args``, the transcript holds expanded text).
+        record = find_transcript_record_by_text(session_jsonl, prompt_digest=line.prompt_digest)
+        if record is None:
+            record = find_transcript_record(session_jsonl, prompt_id=line.prompt_id)
     fields = transcript_record_fields(record)
     index = AttestationIndex.load(paths.promptwitness_dir)
     utterance_digest = canon.digest(canon.normalize(fields["matched_record_text"])).removeprefix(
@@ -1484,19 +1510,43 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     # prompt_id / prompt_digest parity against the transcript record (issue
     # AC: "prompt_id joined to the transcript record's promptId, and
     # prompt_digest parity with the transcript record").
-    assert line.prompt_id == fields["prompt_id"]
+    if case.id != "queued-while-turn-runs":
+        assert line.prompt_id == fields["prompt_id"]
     expected_digest = canon.digest(canon.normalize(fields["matched_record_text"]))
     # Not for slash commands: the hook sees the raw ``/name args`` line while
     # the transcript holds the expanded ``<command-*>`` text, so the two
     # digests differ by construction (athenaeum#2161). Not for the queued row
-    # either: it shares the earlier prompt's id, so the id resolves to the
-    # wrong record.
-    if (
-        line.prompt_kind == "human"
-        and fields["matched_record_text"]
-        and case.intake_miss_reason_prefix != "digest-mismatch"
-    ):
+    # either: it shares the earlier prompt's id by design (athenaeum#2759),
+    # so only the id-parity assertion is dropped for it.
+    if line.prompt_kind == "human" and fields["matched_record_text"]:
         assert line.prompt_digest == expected_digest
+
+    if case.id == "queued-while-turn-runs":
+        # The earlier prompt of the pair shares the queued line's id and must
+        # attest too; record both ids so the next live run can tell whether
+        # the transcript's own ``promptId`` differs from the hook's.
+        earlier_lines = [
+            other
+            for other in _ledger_lines_since(paths.promptwitness_dir, 0)
+            if other.session == line.session and other.seq < line.seq
+        ]
+        assert earlier_lines, "expected the earlier prompt's line in the same session"
+        earlier_outcome, earlier_fields = _attest_line(paths, earlier_lines[-1])
+        assert earlier_outcome.hit is True, earlier_outcome.miss_reason
+        write_observations(
+            observations_path,
+            EntryPathObservations(
+                claude_version=str(line.harness_version),
+                child_session_top_level=None,
+                subagent_fires_hook=None,
+                notes={
+                    "entry_path": case.id,
+                    "line_prompt_id": line.prompt_id,
+                    "queued_record_prompt_id": fields["prompt_id"],
+                    "earlier_record_prompt_id": earlier_fields["prompt_id"],
+                },
+            ),
+        )
 
     if case.id == "interactive-typed":
         write_observations(
