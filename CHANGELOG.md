@@ -45,6 +45,7 @@ kept as they were written.
 
 ### Fixed
 
+- `athenaeum doctor` `key_mode` and `athenaeum init` no longer report a Claude Code login when only the `claude` binary exists. With `llm.provider: claude-cli` they now run `claude auth status` (a local read, no model call); a logged-out CLI fails `key_mode` with the fix "run `claude` and `/login`, or set ANTHROPIC_API_KEY", and `init` prints that finding instead of the plan-usage disclosure. With no `claude` binary and no key, both name the missing binary and the install step and say compiles cannot run (athenaeum#2762).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no

@@ -464,6 +464,7 @@ def test_claude_cli_provider_with_binary_present_ok(
     _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(doctor, "_claude_login_missing", lambda: False)
     results = _run_healthy(healthy_install)
     key_mode = next(r for r in results if r.name == "key_mode")
     assert key_mode.status == "ok"
