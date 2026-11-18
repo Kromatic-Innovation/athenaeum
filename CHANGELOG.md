@@ -5,8 +5,8 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-From the next release on, each release opens with a short `**Summary.**`
-paragraph, followed by sections headed with the Keep a Changelog names, in
+From 0.25.0 on, each release opens with a short `**Summary.**`
+paragraph and its `**Upgrading from ...**` steps, followed by sections headed with the Keep a Changelog names, in
 this order and only the ones that apply: `### Removed`, `### Changed`,
 `### Added`, `### Fixed`, `### Security`. Each heading appears once per
 release, so release-notes tooling can parse them. Older release sections are
@@ -141,44 +141,7 @@ type, and it fixes `athenaeum schedule remove` on systemd, which left a timer
 stamp behind that made a later `schedule install` fire a stale run straight
 away. Nothing changes for an install that adds no guidance file. The
 remote-mode hardening planned with this release already shipped in 0.25.0.
-
-**Breaking changes**
-
-- None.
-
-**Behaviour changes** (an install that changes no configuration will notice these)
-
-- On the systemd backend, `athenaeum schedule remove` now also clears the
-  `athenaeum-run.timer` stamp: it runs `systemctl --user clean --what=state`
-  (systemd 247 or later) and then deletes the stamp file if it is still there
-  (athenaeum#2707). A later `athenaeum schedule install` no longer runs a
-  "missed" compile at once.
-
-**New, opt-in** (each does nothing until configured)
-
-- Per-type librarian guidance (athenaeum#2590). Two optional files in
-  `wiki/_schema/` steer the Tier-3 create and merge prompts for one page type:
-  `_entity-template-<type>.md` replaces `_entity-template.md` for creates of
-  that type, and `_type-guidance-<type>.md` adds guidance to the create and
-  merge prompts, on both the synchronous and Batch API transports. Only types
-  declared in `types.md` with a plain lowercase key are read. The run summary
-  gains a `type_guidance=` token.
-
-**Experimental surface** (not in `athenaeum.__all__`; flags, keys, formats and
-import paths may change in any minor release without a deprecation cycle)
-
-- The per-type guidance file names and format, and the `type_guidance=` run
-  summary token.
-- Everything 0.25.0 listed as experimental stays experimental, remote serving
-  included.
-- `athenaeum.__all__` is unchanged from 0.25.0.
-
-**Security-relevant changes**
-
-- None. The new guidance files are operator-authored prompt input: they are
-  size-capped and defanged like the other `wiki/_schema/` fragments, and a fixed
-  precedence clause stops guidance from overriding the librarian's rules or
-  authorising paraphrase (athenaeum#2590).
+There are no breaking changes.
 
 **Upgrading from 0.25.0**
 
@@ -204,6 +167,40 @@ The per-merge Added / Fixed entries are in
 [docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.26.0-build-notes.md).
 They are reference material; this section is the release.
 
+### Added
+
+- Per-type librarian guidance, opt-in: it does nothing until configured
+  (athenaeum#2590). Two optional files in
+  `wiki/_schema/` steer the Tier-3 create and merge prompts for one page type:
+  `_entity-template-<type>.md` replaces `_entity-template.md` for creates of
+  that type, and `_type-guidance-<type>.md` adds guidance to the create and
+  merge prompts, on both the synchronous and Batch API transports. Only types
+  declared in `types.md` with a plain lowercase key are read. The run summary
+  gains a `type_guidance=` token.
+- Experimental surface (not in `athenaeum.__all__`; flags, keys, formats and
+  import paths may change in any minor release without a deprecation cycle):
+  - The per-type guidance file names and format, and the `type_guidance=` run
+    summary token.
+  - Everything 0.25.0 listed as experimental stays experimental, remote serving
+    included.
+  - `athenaeum.__all__` is unchanged from 0.25.0.
+
+### Fixed
+
+- On the systemd backend, `athenaeum schedule remove` now also clears the
+  `athenaeum-run.timer` stamp: it runs `systemctl --user clean --what=state`
+  (systemd 247 or later) and then deletes the stamp file if it is still there
+  (athenaeum#2707). A later `athenaeum schedule install` no longer runs a
+  "missed" compile at once. An install that changes no configuration will
+  notice this.
+
+### Security
+
+- No security-relevant changes. The new guidance files are operator-authored
+  prompt input: they are size-capped and defanged like the other
+  `wiki/_schema/` fragments, and a fixed precedence clause stops guidance from
+  overriding the librarian's rules or authorising paraphrase (athenaeum#2590).
+
 ## [0.25.0] - 2026-11-16
 
 **Summary.** 0.25.0 is a MINOR release on 0.24.0. It enforces the relevance
@@ -214,91 +211,6 @@ on, and per-type stores, so one type's pages can live in their own git
 repository or be read from a shared one. It also hardens remote mode. An
 install with no policy file, no owner and no `storage:` config compiles exactly
 as before. Read "Upgrading from 0.24.0" if you run `athenaeum serve --transport http`.
-
-**Breaking changes** (remote mode only; stdio serving is unchanged)
-
-- `athenaeum serve --transport http --profile remote` refuses to start when no
-  audience is configured (athenaeum#2604). Pin a role with `--audience <role>`,
-  `serve.audience` or `ATHENAEUM_AUDIENCE`, or set `owner` deliberately.
-- Remote mode refuses an access token with no `exp`, a future `nbf` or `iat`
-  (beyond `serve.auth.clock_leeway`, default 60 seconds), or, when the new
-  `serve.auth.max_token_lifetime` is set, a lifetime over that cap
-  (athenaeum#2599). An issuer that mints tokens without `exp` no longer works.
-- An unauthenticated HTTP server answers a request whose `Host` is not
-  `localhost`, `127.0.0.1` or `::1` with `421`, and a foreign `Origin` with
-  `403` (athenaeum#2605). Reach it through one of those names.
-
-**Behaviour changes** (an install that changes no configuration will notice these)
-
-- `athenaeum ingest-answers` now applies an answered `classification_failed`
-  question: it writes the answer as a new raw note under `raw/question-answers/`
-  for the next compile, and archives a question with nothing left to apply as
-  `unrecoverable` (athenaeum#2705). Answers held under 0.24.0 are applied on the
-  first run.
-- `athenaeum run` prints a `WARNING:` line for each removed config key still
-  set, and `athenaeum doctor` reports them at a new `WARN` level that does not
-  change its exit code (athenaeum#2686).
-- `athenaeum --help` groups its subcommands; every invocation parses as before
-  (athenaeum#2686).
-- Protected resource metadata advertises `serve.auth.issuer` byte for byte,
-  with no added trailing slash (athenaeum#2600).
-
-**New, opt-in** (each does nothing until configured)
-
-- Relevance policy enforcement (athenaeum#2644 to athenaeum#2650). A `never`
-  rule drops a covered fact before any model tier runs, on the synchronous,
-  batch and auto-memory paths alike, and records it in the drop ledger. Facts
-  with no declared category are classified, escalated to the reasoning tier when
-  the classifier is unsure, and dropped if still unsure. A covered raw note is
-  kept out of the recall index. `always` rules reach the classify prompt as a
-  hint. `remember(explicit_request=true)` overrides a `never` rule, with an
-  audit record. The new `set_capture_rule` MCP tool records a rule from
-  conversation (a proposal, not an edit, over HTTP), and
-  `athenaeum relevance-policy report` lists existing pages a `never` rule covers.
-- Owner page (athenaeum#2652 to athenaeum#2655). `athenaeum owner set --name NAME`
-  (or `athenaeum init --owner-name NAME`) creates the owner's person page and
-  records `owner.uid`. With an owner set, first-person facts and preferences
-  ("I prefer...", "my team...") are filed on that page, and batch runs get
-  person hints too.
-- Per-type stores (athenaeum#2617 to athenaeum#2622). Compile writes a page to
-  the surface its type maps to in `storage.mapping`; `read_entity`, recall and
-  structured upsert find a page on any indexed surface. `storage.adapters`
-  entries gain `visibility` (no merges across stores, no link from a shared page
-  to a more private one, checked by `athenaeum store-link-lint`) and `read_only`
-  (a shared git repository that is pulled and indexed but never written).
-  `athenaeum storage move-type <type> --to <surface>` moves a type's existing
-  pages, dry run by default, with `--undo`. Guide:
-  `docs/guides/shared-store-reader.md`.
-- Never-merge rulings survive page splits (athenaeum#2651).
-
-**Experimental surface** (not in `athenaeum.__all__`; flags, keys, formats and
-import paths may change in any minor release without a deprecation cycle)
-
-- Everything listed under "New, opt-in" above: the relevance policy file format,
-  `set_capture_rule`, `explicit_request`, `athenaeum relevance-policy`,
-  `athenaeum owner`, the `storage.adapters` keys `visibility` and `read_only`,
-  `athenaeum storage move-type` and `athenaeum store-link-lint`.
-- Remote serving stays experimental, including the new `serve.auth.jwks_uri`,
-  `serve.auth.jwks_refetch_interval`, `serve.auth.allowed_clients`,
-  `serve.auth.max_token_lifetime` and `serve.auth.clock_leeway` keys.
-- `athenaeum.__all__` is unchanged from 0.24.0.
-
-**Security-relevant changes** (all in experimental remote mode)
-
-- Token checks: `exp` required, `nbf` and `iat` enforced, optional lifetime cap
-  (athenaeum#2599). Refusals are logged with the `sub` and a reason, never the
-  token.
-- A remote server can no longer serve the whole corpus by omission
-  (athenaeum#2604).
-- DNS-rebinding protection for unauthenticated HTTP servers (athenaeum#2605).
-- `serve.auth.allowed_clients` pins which client apps may use a server and can
-  make any of them read-only (athenaeum#2602).
-- Signing keys are found from `serve.auth.jwks_uri` or issuer discovery, and an
-  unknown `kid` refetches the key set at most once per
-  `serve.auth.jwks_refetch_interval` seconds (athenaeum#2601).
-- A `remember` that overrides a `never` rule is refused unless its audit record
-  is written first (athenaeum#2646); a remote client cannot edit the relevance
-  policy directly (athenaeum#2649).
 
 **Upgrading from 0.24.0**
 
@@ -325,6 +237,92 @@ athenaeum relevance-policy     # show the active capture rules, if any
 The per-merge Added / Changed / Fixed entries are in
 [docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.25.0-build-notes.md).
 They are reference material; this section is the release.
+
+### Changed
+
+- Breaking (remote mode only; stdio serving is unchanged):
+  - `athenaeum serve --transport http --profile remote` refuses to start when no
+    audience is configured (athenaeum#2604). Pin a role with `--audience <role>`,
+    `serve.audience` or `ATHENAEUM_AUDIENCE`, or set `owner` deliberately.
+  - Remote mode refuses an access token with no `exp`, a future `nbf` or `iat`
+    (beyond `serve.auth.clock_leeway`, default 60 seconds), or, when the new
+    `serve.auth.max_token_lifetime` is set, a lifetime over that cap
+    (athenaeum#2599). An issuer that mints tokens without `exp` no longer works.
+  - An unauthenticated HTTP server answers a request whose `Host` is not
+    `localhost`, `127.0.0.1` or `::1` with `421`, and a foreign `Origin` with
+    `403` (athenaeum#2605). Reach it through one of those names.
+- Behaviour changes (an install that changes no configuration will notice these):
+  - `athenaeum ingest-answers` now applies an answered `classification_failed`
+    question: it writes the answer as a new raw note under `raw/question-answers/`
+    for the next compile, and archives a question with nothing left to apply as
+    `unrecoverable` (athenaeum#2705). Answers held under 0.24.0 are applied on the
+    first run.
+  - `athenaeum run` prints a `WARNING:` line for each removed config key still
+    set, and `athenaeum doctor` reports them at a new `WARN` level that does not
+    change its exit code (athenaeum#2686).
+  - `athenaeum --help` groups its subcommands; every invocation parses as before
+    (athenaeum#2686).
+  - Protected resource metadata advertises `serve.auth.issuer` byte for byte,
+    with no added trailing slash (athenaeum#2600).
+
+### Added
+
+All of these are opt-in: each does nothing until configured.
+
+- Relevance policy enforcement (athenaeum#2644 to athenaeum#2650). A `never`
+  rule drops a covered fact before any model tier runs, on the synchronous,
+  batch and auto-memory paths alike, and records it in the drop ledger. Facts
+  with no declared category are classified, escalated to the reasoning tier when
+  the classifier is unsure, and dropped if still unsure. A covered raw note is
+  kept out of the recall index. `always` rules reach the classify prompt as a
+  hint. `remember(explicit_request=true)` overrides a `never` rule, with an
+  audit record. The new `set_capture_rule` MCP tool records a rule from
+  conversation (a proposal, not an edit, over HTTP), and
+  `athenaeum relevance-policy report` lists existing pages a `never` rule covers.
+- Owner page (athenaeum#2652 to athenaeum#2655). `athenaeum owner set --name NAME`
+  (or `athenaeum init --owner-name NAME`) creates the owner's person page and
+  records `owner.uid`. With an owner set, first-person facts and preferences
+  ("I prefer...", "my team...") are filed on that page, and batch runs get
+  person hints too.
+- Per-type stores (athenaeum#2617 to athenaeum#2622). Compile writes a page to
+  the surface its type maps to in `storage.mapping`; `read_entity`, recall and
+  structured upsert find a page on any indexed surface. `storage.adapters`
+  entries gain `visibility` (no merges across stores, no link from a shared page
+  to a more private one, checked by `athenaeum store-link-lint`) and `read_only`
+  (a shared git repository that is pulled and indexed but never written).
+  `athenaeum storage move-type <type> --to <surface>` moves a type's existing
+  pages, dry run by default, with `--undo`. Guide:
+  `docs/guides/shared-store-reader.md`.
+- Never-merge rulings survive page splits (athenaeum#2651).
+- Experimental surface (not in `athenaeum.__all__`; flags, keys, formats and
+  import paths may change in any minor release without a deprecation cycle):
+  - Everything listed above in this section: the relevance policy file format,
+    `set_capture_rule`, `explicit_request`, `athenaeum relevance-policy`,
+    `athenaeum owner`, the `storage.adapters` keys `visibility` and `read_only`,
+    `athenaeum storage move-type` and `athenaeum store-link-lint`.
+  - Remote serving stays experimental, including the new `serve.auth.jwks_uri`,
+    `serve.auth.jwks_refetch_interval`, `serve.auth.allowed_clients`,
+    `serve.auth.max_token_lifetime` and `serve.auth.clock_leeway` keys.
+  - `athenaeum.__all__` is unchanged from 0.24.0.
+
+### Security
+
+All in experimental remote mode.
+
+- Token checks: `exp` required, `nbf` and `iat` enforced, optional lifetime cap
+  (athenaeum#2599). Refusals are logged with the `sub` and a reason, never the
+  token.
+- A remote server can no longer serve the whole corpus by omission
+  (athenaeum#2604).
+- DNS-rebinding protection for unauthenticated HTTP servers (athenaeum#2605).
+- `serve.auth.allowed_clients` pins which client apps may use a server and can
+  make any of them read-only (athenaeum#2602).
+- Signing keys are found from `serve.auth.jwks_uri` or issuer discovery, and an
+  unknown `kid` refetches the key set at most once per
+  `serve.auth.jwks_refetch_interval` seconds (athenaeum#2601).
+- A `remember` that overrides a `never` rule is refused unless its audit record
+  is written first (athenaeum#2646); a remote client cannot edit the relevance
+  policy directly (athenaeum#2649).
 
 ## [0.24.0] - 2026-11-15
 
@@ -10820,7 +10818,10 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.23.5...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.24.0...v0.25.0
+[0.24.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.23.5...v0.24.0
 [0.23.5]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.22.43...v0.23.5
 [0.9.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.8.0...v0.9.0
