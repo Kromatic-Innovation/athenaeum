@@ -61,6 +61,8 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 `PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
 check against if `athenaeum --version` ever looks stale. `git` must be
 installed; no git identity is needed (`init` sets a repo-local one if you have none).
+Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
+current release is supported; see the [support policy](docs/guides/install.md#support-policy).
 
 ```bash
 # Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
