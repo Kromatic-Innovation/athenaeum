@@ -30,6 +30,38 @@ a cap is spent by that type's answers today. Its `digest_id` changes only when
 the offered decisions change, so a host can notify only on change. The MCP tool
 `queue_digest` returns the same digest.
 
+### I want a push when something needs me
+
+Push is off by default; the digest above is a poll. To be told, add a
+`notify.yaml` to your per-user config directory (`$XDG_CONFIG_HOME/athenaeum/`,
+which is `.config/athenaeum/` under your home directory when the variable is
+unset). The librarian run then runs your command with the digest JSON on stdin:
+
+```yaml
+decisions:
+  attention: push            # poll (default) | push | both
+  notify:
+    trigger: digest_change   # digest_change | daily | both
+    daily_at: "09:00"        # local time, used by daily and both
+    quiet_hours: "22:00-08:00"
+    min_interval_minutes: 120
+    payload: full            # full | counts (counts drops each item's summary)
+    channels:
+      - kind: command
+        argv: ["/path/to/notify-script"]
+```
+
+Athenaeum ships only the `command` notifier; a phone push, chat message or
+email is a script you own. The argv runs directly, never through a shell. The
+payload is the digest only, never page bodies; use `payload: counts` if your
+channel leaves the machine. A send is skipped when `digest_id` is unchanged
+(`digest_change`), inside quiet hours (it is deferred, not dropped), or within
+`min_interval_minutes` of the last attempt. A failing command is logged and not
+retried for at least 15 minutes. These settings are read only from your
+per-user file: a `decisions.notify` block in a knowledge base's `athenaeum.yaml`
+is refused with a warning and never run, because a shared knowledge base must
+not be able to run commands on your machine.
+
 `athenaeum decisions` unifies the two human-decision queues Athenaeum
 accumulates — **questions** (contradiction detector) and **merges**
 (resolver merge proposals) — so there's one place to look instead of two.
