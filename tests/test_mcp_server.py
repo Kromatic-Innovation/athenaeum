@@ -2251,6 +2251,7 @@ class TestAllMcpToolWrappers:
         "raise_decision": lambda fn: fn("a question worth asking", "standalone context"),
         "list_pending_merges": lambda fn: fn(),
         "list_pending_decisions": lambda fn: fn(),
+        "queue_digest": lambda fn: fn(),
         "list_axiom_audit": lambda fn: fn(),
         "scan_retraction_cascade": lambda fn: fn(),
         "calibration_summary": lambda fn: fn(),
@@ -2270,6 +2271,7 @@ class TestAllMcpToolWrappers:
         "list_pending_questions": dict,
         "list_pending_merges": list,
         "list_pending_decisions": dict,
+        "queue_digest": dict,
         "list_axiom_audit": list,
         "resolve_question": dict,
         "raise_decision": dict,
@@ -2330,8 +2332,9 @@ class TestAllMcpToolWrappers:
         # every known consumer had migrated to `read_entity`. Bumping this
         # number is exactly the tripwire this test exists for. Issue
         # athenaeum#2643 adds `relevance_policy` (read-only policy read-back);
+        # athenaeum#2529 adds `queue_digest` (read-only decision-queue digest);
         # athenaeum#2649 adds `set_capture_rule` (policy write / proposal).
-        assert len(registered) == 17
+        assert len(registered) == 18
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
@@ -2467,6 +2470,7 @@ class TestToolAnnotations:
         "list_pending_questions": True,
         "list_pending_merges": True,
         "list_pending_decisions": True,
+        "queue_digest": True,
         "list_axiom_audit": True,
         "calibration_summary": True,
         "remember": False,

@@ -6,9 +6,9 @@
 
 ## What it does
 
-`athenaeum serve` runs an MCP server exposing **17 tools** so agents can write to raw
+`athenaeum serve` runs an MCP server exposing **18 tools** so agents can write to raw
 intake, search the compiled wiki, and triage the human-decision queue.
-10 read-only, 7 that mutate state (decision-queue adjudication, intake, and the relevance policy).
+11 read-only, 7 that mutate state (decision-queue adjudication, intake, and the relevance policy).
 No tool writes a wiki page directly — the librarian is the only writer.
 
 ```bash
@@ -27,6 +27,7 @@ athenaeum test-mcp          # smoke-test the round-trip without a live session
 | `list_pending_questions` | READ | Unanswered contradiction-detector questions. |
 | `list_pending_merges` | READ | Unresolved resolver-proposed page merges. |
 | `list_pending_decisions` | READ | Unified queue — questions and merge proposals in one call, oldest first. |
+| `queue_digest` | READ | Poll surface for the decision queue — counts, per-type daily caps, the few decisions worth answering now and a one-line headline. No model call. |
 | `list_axiom_audit` | READ | Per-slug history of axiom promotions and demotions, so axiom status is auditable without a write tool. |
 | `scan_retraction_cascade` | WRITE | Flags completed merges that relied on a since-retracted source by appending a review item to the decision queue. Never auto-unmerges. |
 | `calibration_summary` | READ | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop. Reports "not enabled" when the opt-in is off. |
@@ -307,6 +308,7 @@ matched by name/value pairs elsewhere in this repo).
 | list_pending_questions | true | | |
 | list_pending_merges | true | | |
 | list_pending_decisions | true | | |
+| queue_digest | true | | |
 | list_axiom_audit | true | | |
 | calibration_summary | true | | |
 | remember | false | false | |
