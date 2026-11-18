@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -2925,6 +2925,456 @@ def _answer_order_key(path: Path, answer: "DecisionAnswer | None") -> tuple[str,
     return (stem, 0)
 
 
+def _apply_loaded_answer(
+    wiki_root: Path,
+    path: Path,
+    answer: DecisionAnswer,
+    *,
+    config: dict | None,
+    lock: "RunLock | None",
+    client: "LLMBackend | None",
+    usage: "TokenUsage | None",
+) -> DecisionAnswerOutcome:
+    """Schema-check, dispatch and post-apply side channels for ONE parsed
+    answer (extracted verbatim from :func:`apply_decision_answers`'s loop
+    body so the directory walk and the per-file entry point
+    :func:`apply_decision_answer_file` share one implementation)."""
+    pending_questions_path = wiki_root / "_pending_questions.md"
+    pending_merges_path = wiki_root / "_pending_merges.md"
+
+    # Issue athenaeum#717: an answer must satisfy the response schema the
+    # framed queue item published for its decision type. Validating here —
+    # before any per-type dispatch — is what makes the queue a machine
+    # interface rather than a free-text inbox: a malformed answer is
+    # refused at the boundary with a structured error code, never
+    # half-applied. Fail-soft like every other refusal in this loop.
+    #
+    # Division of labour, so one condition never gets two error codes: the
+    # SCHEMA owns the answer's SHAPE (unknown keys, wrong types, a missing
+    # verdict), and each per-type resolver keeps owning its verdict's
+    # VALUE — it already reports ``invalid_decision`` with a per-type
+    # message for an out-of-vocabulary verdict, and that contract is
+    # documented on the MCP mutators. :func:`shape_errors_only` is what
+    # draws that line.
+    # Issue athenaeum#2016: ``name`` is only a DECLARED schema property for
+    # ``dimension-proposal`` (and only valid alongside verdict=="rename" —
+    # the schema's own conditional forbids it being present at all
+    # otherwise), so it is included here ONLY when non-empty rather than
+    # unconditionally like ``verdict``/``note``.
+    answer_dict: dict[str, str] = {"verdict": answer.verdict, "note": answer.note}
+    if answer.name.strip():
+        answer_dict["name"] = answer.name.strip()
+    schema_errors = shape_errors_only(
+        validate_answer(answer.decision_type, answer_dict)
+    )
+    if schema_errors:
+        message = "; ".join(schema_errors)
+        log.warning(
+            "decision_answers: answer for %s fails its response schema: %s",
+            answer.decision_id,
+            message,
+        )
+        return DecisionAnswerOutcome(
+            path=path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="schema_invalid",
+            message=message,
+        )
+
+    # Issue athenaeum#1990: look up the item's OWN raise timestamp before
+    # dispatching — once applied, a question/merge/audit/proposed-rule
+    # item is resolved and no longer appears in its source's "pending"
+    # view, so this is the last point it is cheaply available. Best
+    # effort: a lookup miss leaves raised_at empty, which the budget
+    # instrumentation's decision-time metric already excludes rather
+    # than treats as zero.
+    raised_at = _raised_at_for(
+        answer.decision_type,
+        answer.decision_id,
+        pending_questions_path=pending_questions_path,
+        pending_merges_path=pending_merges_path,
+        wiki_root=wiki_root,
+    )
+
+    if answer.decision_type == "question":
+        outcome = _apply_question_answer(pending_questions_path, answer)
+    elif answer.decision_type == "merge":
+        outcome = _apply_merge_answer(
+            pending_merges_path, wiki_root, answer, config=config, lock=lock
+        )
+    elif answer.decision_type == "audit":
+        outcome = _apply_audit_answer(wiki_root, answer)
+    elif answer.decision_type == "coordinate":
+        outcome = _apply_coordinate_answer(
+            wiki_root,
+            pending_questions_path,
+            answer,
+            config=config,
+            lock=lock,
+            client=client,
+            usage=usage,
+        )
+    elif answer.decision_type == "proposed-rule":
+        outcome = _apply_proposed_rule_answer(wiki_root, answer)
+    elif answer.decision_type == "auto-apply-threshold":
+        outcome = _apply_auto_apply_threshold_proposal_answer(
+            wiki_root, answer, config=config
+        )
+    elif answer.decision_type == "dimension-proposal":
+        # Issue athenaeum#2016: converts the prior child's bare
+        # ``else: # "proposed-rule" — only other member`` into an
+        # explicit branch per type, per this issue's own AC — the
+        # misroute-guard test now asserts a dimension-proposal answer
+        # reaches THIS branch, never ``_apply_proposed_rule_answer``.
+        outcome = _apply_dimension_proposal_answer(
+            wiki_root.parent, wiki_root, answer, config=config
+        )
+    elif answer.decision_type == "relevance-policy-edit":
+        # Issue athenaeum#2649: approve appends the rule to the
+        # relevance policy file (audited); reject discards the request.
+        outcome = _apply_relevance_policy_edit_answer(wiki_root, answer)
+    elif answer.decision_type == "page-recompile":
+        # Issue athenaeum#2547: its own applier -- an approve runs the
+        # recompile applier under the caller's run lock and WRITES
+        # pages, which no other branch here does.
+        outcome = _apply_page_recompile_answer(
+            wiki_root, answer, config=config, lock=lock
+        )
+    else:  # pragma: no cover - unreachable: _load_decision_answer already
+        # refuses any decision_type outside VALID_DECISION_TYPES as
+        # MalformedDecisionAnswer before this loop ever dispatches.
+        outcome = DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="unroutable",
+            message=f"no dispatch branch for decision_type {answer.decision_type!r}",
+        )
+
+    if outcome.applied:
+        # Best-effort: the budget ledger is instrumentation, never a
+        # reason to fail an already-successful apply.
+        try:
+            from athenaeum.decision_budget import record_decision_answered
+
+            record_decision_answered(
+                wiki_root,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                raised_at=raised_at,
+            )
+        except Exception as exc:  # noqa: BLE001 - must never break apply
+            log.debug(
+                "decision_answers: budget-event recording skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        # Issue athenaeum#1996 ratchet guard 2: tag a default-acceptance AT
+        # ANSWER TIME -- right here, on the same conformant, newly-applied
+        # answer the budget-event write above just recorded -- and offer
+        # it to the deterministic sampler. Best-effort, same discipline as
+        # the budget-event write immediately above: this is a calibration
+        # SIDE channel, never a reason to fail an already-successful
+        # apply.
+        #
+        # Checked against `answer.origin_decision_type` -- the ORIGINAL
+        # outbound-queue type -- never `answer.decision_type` (the
+        # inbound APPLIER type). Those two differ for a `confirmation`
+        # item (applier "question"): checking the applier type would
+        # silently and permanently exclude `confirmation` -- the exact
+        # Seer finding on PR athenaeum#2005, since `question`'s own free-text
+        # schema has no discrete default to match at all.
+        try:
+            from athenaeum.calibration import sample_default_acceptance
+            from athenaeum.decision_framing import is_default_acceptance
+
+            if is_default_acceptance(answer.origin_decision_type, answer.verdict):
+                # Issue athenaeum#2079 AC1: the sampler refuses an answer
+                # whose source is a human decision_answer (the operator
+                # cannot meaningfully re-review their own ruling).
+                sample_default_acceptance(
+                    wiki_root,
+                    decision_id=answer.decision_id,
+                    answer_source=answer.source,
+                    config=config,
+                )
+        except Exception as exc:  # noqa: BLE001 - must never break apply
+            log.debug(
+                "decision_answers: default-acceptance sampling skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        # Issue athenaeum#2017 (AC1): ingest this resolution as a claim with
+        # provenance (who/when/which decision id) -- a resolution-claims
+        # SIDE channel, same discipline as the two best-effort writes
+        # above: never a reason to fail an already-successful apply.
+        # ingest_resolution_claim itself is a no-op for a decision_type
+        # outside RESOLUTION_CLAIM_DECISION_TYPES, so this call is safe
+        # (and a no-op) for "question"/"merge"/"proposed-rule" too.
+        try:
+            from athenaeum.resolution_claims import ingest_resolution_claim
+
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                verdict=answer.verdict,
+                dimension_name=outcome.dimension_name,
+                resolved_at=answer.resolved_at,
+                note=answer.note,
+            )
+        except Exception as exc:  # noqa: BLE001 - must never break apply
+            log.debug(
+                "decision_answers: resolution-claim ingestion skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    return outcome
+
+
+APPLY_IMMEDIATE = "immediate"
+APPLY_DEFERRED = "deferred"
+VALID_APPLY_MODES = (APPLY_IMMEDIATE, APPLY_DEFERRED)
+
+
+def apply_decision_answer_file(
+    wiki_root: Path,
+    path: Path,
+    *,
+    config: dict | None = None,
+    lock: "RunLock | None" = None,
+    client: "LLMBackend | None" = None,
+    usage: "TokenUsage | None" = None,
+) -> DecisionAnswerOutcome:
+    """Apply exactly ONE decision-answer file (issue athenaeum#2531).
+
+    The per-file twin of :func:`apply_decision_answers`: same schema check,
+    same per-type dispatch, same post-apply side channels (one shared
+    implementation), but it NEVER walks ``raw/answers/`` -- any other
+    unapplied answer file stays unapplied. A file that is unreadable, has no
+    ``decision_id`` or fails the schema returns a refused outcome
+    (``malformed`` / ``no_decision_id`` / ``schema_invalid``); it is never
+    deleted. Takes the same already-acquired *lock* and optional *client* as
+    the directory walk. It does not do the directory walk's same-decision
+    "newest wins" supersession: an answer applied the moment it is written is
+    by construction the newest for its decision.
+    """
+    try:
+        answer = _load_decision_answer(path)
+    except MalformedDecisionAnswer as exc:
+        return DecisionAnswerOutcome(
+            path=path,
+            decision_id=None,
+            decision_type=None,
+            applied=False,
+            error_code="malformed",
+            message=str(exc),
+        )
+    if answer is None:
+        return DecisionAnswerOutcome(
+            path=path,
+            decision_id=None,
+            decision_type=None,
+            applied=False,
+            error_code="no_decision_id",
+            message="file carries no decision_id; nothing to apply",
+        )
+    outcome = _apply_loaded_answer(
+        wiki_root, path, answer, config=config, lock=lock, client=client, usage=usage
+    )
+    log.info(
+        "decision_answers: decision_id=%s type=%s applied=%s error_code=%s: %s",
+        outcome.decision_id,
+        outcome.decision_type,
+        outcome.applied,
+        outcome.error_code,
+        outcome.message,
+    )
+    return outcome
+
+
+def answer_needs_run_lock(answer: DecisionAnswer, config: dict | None) -> bool:
+    """Whether applying *answer* needs the run lock held (issue athenaeum#2531).
+
+    ``coordinate`` always does (``lock_required`` otherwise); an approving
+    ``page-recompile`` does (it writes pages); a ``merge`` does only when the
+    verdict ledger is on, because the ledger append is single-appender and
+    skipping it at an immediate apply would lose that entry for good (the
+    file is then already applied, so no tick would add it).
+    """
+    if answer.decision_type == "coordinate":
+        return True
+    if answer.decision_type == "page-recompile":
+        return answer.verdict.strip().lower() == "approve"
+    if answer.decision_type == "merge":
+        from athenaeum.config import resolve_verdict_ledger_enabled
+
+        return bool(resolve_verdict_ledger_enabled(config))
+    return False
+
+
+@dataclass
+class AnswerWriteResult:
+    """What :func:`write_and_apply_decision_answer` hands back synchronously.
+
+    ``status`` is one of:
+
+    - ``applied`` -- the applier ran and changed state (``outcome.applied``).
+    - ``refused`` -- the applier ran and refused; ``error_code`` names why.
+      The record stays as its audit trail.
+    - ``held`` -- an immediate apply was requested but the run lock was held
+      past the wait; the answer fell back to deferred (recorded, applied on
+      the next ``ingest-answers`` tick). Not a failure.
+    - ``error`` -- the applier raised; the record stays and the next tick
+      retries it.
+    - ``deferred`` -- ``apply="deferred"`` was asked for; today's behaviour.
+    """
+
+    path: Path
+    status: str
+    apply_requested: str
+    message: str
+    error_code: str | None = None
+    outcome: DecisionAnswerOutcome | None = None
+
+    @property
+    def deferred(self) -> bool:
+        """True when the answer is recorded but NOT applied (yet)."""
+        return self.status in ("held", "error", "deferred")
+
+
+def _acquire_answer_run_lock(
+    knowledge_root: Path, wait: float | None, config: dict | None
+) -> "RunLock | None":
+    """Acquire the run lock with ``ingest-answers``' ``--wait`` semantics.
+
+    *wait* ``None`` -> ``resolve_lock_timeout`` (env, yaml, then 0 = fail
+    fast); a number overrides it. Returns ``None`` when the lock is held
+    past the wait. Never breaks a held lock (no ``--force`` here).
+    """
+    from athenaeum.config import (
+        resolve_lock_break_stale_after,
+        resolve_lock_heartbeat_interval,
+        resolve_lock_timeout,
+        resolve_lock_warn_stale_after,
+    )
+    from athenaeum.runlock import LockHeld, RunLock
+
+    if wait is None:
+        wait = resolve_lock_timeout(config)
+    lock = RunLock(
+        knowledge_root,
+        wait=wait,
+        break_stale_after=resolve_lock_break_stale_after(config),
+        warn_stale_after=resolve_lock_warn_stale_after(config),
+        heartbeat_interval=resolve_lock_heartbeat_interval(config),
+    )
+    try:
+        lock.acquire()
+    except LockHeld:
+        return None
+    return lock
+
+
+def write_and_apply_decision_answer(
+    raw_root: Path,
+    wiki_root: Path,
+    *,
+    apply: str = APPLY_IMMEDIATE,
+    wait: float | None = None,
+    client_factory: "Callable[[], LLMBackend | None] | None" = None,
+    config: dict | None = None,
+    **write_kwargs: Any,
+) -> AnswerWriteResult:
+    """Write one answer record, then (by default) apply ONLY that file.
+
+    Issue athenaeum#2531 (design athenaeum#2489 section 6). ``apply`` is
+    ``"immediate"`` (default) or ``"deferred"``. The record is ALWAYS written
+    first through :func:`write_decision_answer` (same audit trail, same
+    pre-write refusals -- :class:`CoordinateAnswerRefused` propagates). With
+    ``deferred`` that is all that happens, exactly as before. With
+    ``immediate`` the one written file goes through
+    :func:`apply_decision_answer_file`; the run lock is taken first when
+    :func:`answer_needs_run_lock` says so, waiting up to *wait* seconds, and
+    a lock held past the wait degrades to a deferred result (status
+    ``held``), never a failure. An applier that raises leaves the record in
+    place for the next tick (status ``error``). *client_factory* builds the
+    optional LLM client lazily, only for an answer that needs the lock (the
+    coordinate scope-sameness judge). Remaining keyword arguments go to
+    :func:`write_decision_answer`.
+    """
+    if apply not in VALID_APPLY_MODES:
+        raise ValueError(f"apply must be one of {VALID_APPLY_MODES}, got {apply!r}")
+
+    path = write_decision_answer(
+        raw_root, config=config, wiki_root=wiki_root, **write_kwargs
+    )
+    if apply == APPLY_DEFERRED:
+        return AnswerWriteResult(
+            path=path,
+            status="deferred",
+            apply_requested=apply,
+            message="answer recorded; applied on the next `athenaeum ingest-answers` tick",
+        )
+
+    lock: "RunLock | None" = None
+    try:
+        answer = _load_decision_answer(path)
+        if answer is not None and answer_needs_run_lock(answer, config):
+            lock = _acquire_answer_run_lock(wiki_root.parent, wait, config)
+            if lock is None:
+                return AnswerWriteResult(
+                    path=path,
+                    status="held",
+                    apply_requested=apply,
+                    error_code="lock_held",
+                    message=(
+                        "answer recorded but not applied: the run lock is held "
+                        "past the wait; falling back to deferred -- applied on "
+                        "the next `athenaeum ingest-answers` tick"
+                    ),
+                )
+        client = client_factory() if (client_factory and lock is not None) else None
+        outcome = apply_decision_answer_file(
+            wiki_root, path, config=config, lock=lock, client=client
+        )
+    except Exception as exc:  # noqa: BLE001 - the record is durable; the tick retries
+        log.warning(
+            "decision_answers: immediate apply of %s raised %s: %s",
+            path.name,
+            type(exc).__name__,
+            exc,
+        )
+        return AnswerWriteResult(
+            path=path,
+            status="error",
+            apply_requested=apply,
+            error_code="applier_error",
+            message=(
+                f"answer recorded but the applier raised {type(exc).__name__}: "
+                f"{exc}; the next `athenaeum ingest-answers` tick retries it"
+            ),
+        )
+    finally:
+        if lock is not None:
+            lock.release()
+
+    return AnswerWriteResult(
+        path=path,
+        status="applied" if outcome.applied else "refused",
+        apply_requested=apply,
+        message=outcome.message,
+        error_code=outcome.error_code,
+        outcome=outcome,
+    )
+
+
 def apply_decision_answers(
     wiki_root: Path,
     raw_root: Path,
@@ -3051,9 +3501,6 @@ def apply_decision_answers(
     if not answers_dir.exists():
         return report
 
-    pending_questions_path = wiki_root / "_pending_questions.md"
-    pending_merges_path = wiki_root / "_pending_merges.md"
-
     # Issue athenaeum#2514 (AC5): load the whole batch BEFORE dispatching any
     # of it, so "which file is the newest answer to this decision?" is known
     # when the first (possibly stale) one comes up. Parsing is pure and
@@ -3119,202 +3566,15 @@ def apply_decision_answers(
             report.skipped += 1
             continue
 
-        # Issue athenaeum#717: an answer must satisfy the response schema the
-        # framed queue item published for its decision type. Validating here —
-        # before any per-type dispatch — is what makes the queue a machine
-        # interface rather than a free-text inbox: a malformed answer is
-        # refused at the boundary with a structured error code, never
-        # half-applied. Fail-soft like every other refusal in this loop.
-        #
-        # Division of labour, so one condition never gets two error codes: the
-        # SCHEMA owns the answer's SHAPE (unknown keys, wrong types, a missing
-        # verdict), and each per-type resolver keeps owning its verdict's
-        # VALUE — it already reports ``invalid_decision`` with a per-type
-        # message for an out-of-vocabulary verdict, and that contract is
-        # documented on the MCP mutators. :func:`shape_errors_only` is what
-        # draws that line.
-        # Issue athenaeum#2016: ``name`` is only a DECLARED schema property for
-        # ``dimension-proposal`` (and only valid alongside verdict=="rename" —
-        # the schema's own conditional forbids it being present at all
-        # otherwise), so it is included here ONLY when non-empty rather than
-        # unconditionally like ``verdict``/``note``.
-        answer_dict: dict[str, str] = {"verdict": answer.verdict, "note": answer.note}
-        if answer.name.strip():
-            answer_dict["name"] = answer.name.strip()
-        schema_errors = shape_errors_only(
-            validate_answer(answer.decision_type, answer_dict)
+        outcome = _apply_loaded_answer(
+            wiki_root,
+            path,
+            answer,
+            config=config,
+            lock=lock,
+            client=client,
+            usage=usage,
         )
-        if schema_errors:
-            message = "; ".join(schema_errors)
-            log.warning(
-                "decision_answers: answer for %s fails its response schema: %s",
-                answer.decision_id,
-                message,
-            )
-            report.outcomes.append(
-                DecisionAnswerOutcome(
-                    path=path,
-                    decision_id=answer.decision_id,
-                    decision_type=answer.decision_type,
-                    applied=False,
-                    error_code="schema_invalid",
-                    message=message,
-                )
-            )
-            report.skipped += 1
-            continue
-
-        # Issue athenaeum#1990: look up the item's OWN raise timestamp before
-        # dispatching — once applied, a question/merge/audit/proposed-rule
-        # item is resolved and no longer appears in its source's "pending"
-        # view, so this is the last point it is cheaply available. Best
-        # effort: a lookup miss leaves raised_at empty, which the budget
-        # instrumentation's decision-time metric already excludes rather
-        # than treats as zero.
-        raised_at = _raised_at_for(
-            answer.decision_type,
-            answer.decision_id,
-            pending_questions_path=pending_questions_path,
-            pending_merges_path=pending_merges_path,
-            wiki_root=wiki_root,
-        )
-
-        if answer.decision_type == "question":
-            outcome = _apply_question_answer(pending_questions_path, answer)
-        elif answer.decision_type == "merge":
-            outcome = _apply_merge_answer(
-                pending_merges_path, wiki_root, answer, config=config, lock=lock
-            )
-        elif answer.decision_type == "audit":
-            outcome = _apply_audit_answer(wiki_root, answer)
-        elif answer.decision_type == "coordinate":
-            outcome = _apply_coordinate_answer(
-                wiki_root,
-                pending_questions_path,
-                answer,
-                config=config,
-                lock=lock,
-                client=client,
-                usage=usage,
-            )
-        elif answer.decision_type == "proposed-rule":
-            outcome = _apply_proposed_rule_answer(wiki_root, answer)
-        elif answer.decision_type == "auto-apply-threshold":
-            outcome = _apply_auto_apply_threshold_proposal_answer(
-                wiki_root, answer, config=config
-            )
-        elif answer.decision_type == "dimension-proposal":
-            # Issue athenaeum#2016: converts the prior child's bare
-            # ``else: # "proposed-rule" — only other member`` into an
-            # explicit branch per type, per this issue's own AC — the
-            # misroute-guard test now asserts a dimension-proposal answer
-            # reaches THIS branch, never ``_apply_proposed_rule_answer``.
-            outcome = _apply_dimension_proposal_answer(
-                wiki_root.parent, wiki_root, answer, config=config
-            )
-        elif answer.decision_type == "relevance-policy-edit":
-            # Issue athenaeum#2649: approve appends the rule to the
-            # relevance policy file (audited); reject discards the request.
-            outcome = _apply_relevance_policy_edit_answer(wiki_root, answer)
-        elif answer.decision_type == "page-recompile":
-            # Issue athenaeum#2547: its own applier -- an approve runs the
-            # recompile applier under the caller's run lock and WRITES
-            # pages, which no other branch here does.
-            outcome = _apply_page_recompile_answer(
-                wiki_root, answer, config=config, lock=lock
-            )
-        else:  # pragma: no cover - unreachable: _load_decision_answer already
-            # refuses any decision_type outside VALID_DECISION_TYPES as
-            # MalformedDecisionAnswer before this loop ever dispatches.
-            outcome = DecisionAnswerOutcome(
-                path=answer.path,
-                decision_id=answer.decision_id,
-                decision_type=answer.decision_type,
-                applied=False,
-                error_code="unroutable",
-                message=f"no dispatch branch for decision_type {answer.decision_type!r}",
-            )
-
-        if outcome.applied:
-            # Best-effort: the budget ledger is instrumentation, never a
-            # reason to fail an already-successful apply.
-            try:
-                from athenaeum.decision_budget import record_decision_answered
-
-                record_decision_answered(
-                    wiki_root,
-                    decision_id=answer.decision_id,
-                    decision_type=answer.decision_type,
-                    raised_at=raised_at,
-                )
-            except Exception as exc:  # noqa: BLE001 - must never break apply
-                log.debug(
-                    "decision_answers: budget-event recording skipped (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
-
-            # Issue athenaeum#1996 ratchet guard 2: tag a default-acceptance AT
-            # ANSWER TIME -- right here, on the same conformant, newly-applied
-            # answer the budget-event write above just recorded -- and offer
-            # it to the deterministic sampler. Best-effort, same discipline as
-            # the budget-event write immediately above: this is a calibration
-            # SIDE channel, never a reason to fail an already-successful
-            # apply.
-            #
-            # Checked against `answer.origin_decision_type` -- the ORIGINAL
-            # outbound-queue type -- never `answer.decision_type` (the
-            # inbound APPLIER type). Those two differ for a `confirmation`
-            # item (applier "question"): checking the applier type would
-            # silently and permanently exclude `confirmation` -- the exact
-            # Seer finding on PR athenaeum#2005, since `question`'s own free-text
-            # schema has no discrete default to match at all.
-            try:
-                from athenaeum.calibration import sample_default_acceptance
-                from athenaeum.decision_framing import is_default_acceptance
-
-                if is_default_acceptance(answer.origin_decision_type, answer.verdict):
-                    # Issue athenaeum#2079 AC1: the sampler refuses an answer
-                    # whose source is a human decision_answer (the operator
-                    # cannot meaningfully re-review their own ruling).
-                    sample_default_acceptance(
-                        wiki_root,
-                        decision_id=answer.decision_id,
-                        answer_source=answer.source,
-                        config=config,
-                    )
-            except Exception as exc:  # noqa: BLE001 - must never break apply
-                log.debug(
-                    "decision_answers: default-acceptance sampling skipped (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
-
-            # Issue athenaeum#2017 (AC1): ingest this resolution as a claim with
-            # provenance (who/when/which decision id) -- a resolution-claims
-            # SIDE channel, same discipline as the two best-effort writes
-            # above: never a reason to fail an already-successful apply.
-            # ingest_resolution_claim itself is a no-op for a decision_type
-            # outside RESOLUTION_CLAIM_DECISION_TYPES, so this call is safe
-            # (and a no-op) for "question"/"merge"/"proposed-rule" too.
-            try:
-                from athenaeum.resolution_claims import ingest_resolution_claim
-
-                ingest_resolution_claim(
-                    wiki_root,
-                    decision_id=answer.decision_id,
-                    decision_type=answer.decision_type,
-                    verdict=answer.verdict,
-                    dimension_name=outcome.dimension_name,
-                    resolved_at=answer.resolved_at,
-                    note=answer.note,
-                )
-            except Exception as exc:  # noqa: BLE001 - must never break apply
-                log.debug(
-                    "decision_answers: resolution-claim ingestion skipped (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
 
         report.outcomes.append(outcome)
         if outcome.applied:
@@ -3352,4 +3612,11 @@ __all__ = [
     "scan_overlapping_merge_proposals",
     "check_pending_conflicts",
     "apply_decision_answers",
+    "apply_decision_answer_file",
+    "write_and_apply_decision_answer",
+    "answer_needs_run_lock",
+    "AnswerWriteResult",
+    "APPLY_IMMEDIATE",
+    "APPLY_DEFERRED",
+    "VALID_APPLY_MODES",
 ]
