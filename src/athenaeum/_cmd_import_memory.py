@@ -117,7 +117,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -683,6 +683,7 @@ def _print_summary(
     max_files: int,
     max_calls: int,
     out: Any,
+    batch: Sequence[tuple[ProjectMemory, MemoryFile]] = (),
 ) -> None:
     names = ", ".join(p.scope for p in selected)
     print(f"Selected projects: {names}", file=out)
@@ -712,6 +713,38 @@ def _print_summary(
             file=out,
         )
     print(f"  Run cap: {max_files} files, {max_calls} API calls this run.", file=out)
+    if batch:
+        _print_batch_files(batch, out=out)
+
+
+#: How many file names the confirmation summary lists per project before it
+#: collapses the rest into a count (athenaeum#2737).
+PROMPT_FILES_PER_PROJECT = 5
+
+
+def _print_batch_files(
+    batch: Sequence[tuple[ProjectMemory, MemoryFile]],
+    *,
+    out: Any,
+    per_project: int = PROMPT_FILES_PER_PROJECT,
+) -> None:
+    """List the file names this run will read, grouped by project.
+
+    The user is consenting to which memory files are read, so the summary
+    names them rather than counting them (athenaeum#2737). A project with
+    more than *per_project* files in the batch shows the first
+    *per_project* names plus a count of the rest.
+    """
+    grouped: dict[str, list[str]] = {}
+    for project, file in batch:
+        grouped.setdefault(project.scope, []).append(file.path.name)
+    print("  Files this run will read:", file=out)
+    for scope, names in grouped.items():
+        print(f"    {scope}:", file=out)
+        for name in names[:per_project]:
+            print(f"      {name}", file=out)
+        if len(names) > per_project:
+            print(f"      ... and {len(names) - per_project} more", file=out)
 
 
 def run_import(
@@ -787,6 +820,7 @@ def run_import(
         max_files=max_files,
         max_calls=max_calls,
         out=out,
+        batch=pending[:batch_size],
     )
 
     if not pending:

@@ -1161,3 +1161,63 @@ class TestCostEstimateIsPerFileAndPerBatch:
             out=io.StringIO(),
         )
         assert staged_counts == [2]
+
+
+class TestPromptListsFileNames:
+    """The confirmation summary names the files it will read (athenaeum#2737)."""
+
+    def _prompt_at_confirm(
+        self, tmp_path: Path, projects: dict[str, list[str]], *, max_files: int = 20
+    ) -> str:
+        discovered = _discover(tmp_path, projects)
+        out = io.StringIO()
+        seen: list[str] = []
+
+        def _confirm() -> bool:
+            seen.append(out.getvalue())  # what the user saw when asked
+            return False
+
+        run_import(
+            knowledge_root=tmp_path / "knowledge",
+            cache_dir=tmp_path / "cache",
+            provider="claude-cli",
+            discovered=discovered,
+            cli_projects=list(projects),
+            auto_yes=False,
+            max_files=max_files,
+            max_calls=100,
+            confirm=_confirm,
+            out=out,
+        )
+        assert len(seen) == 1
+        return seen[0]
+
+    def test_file_names_appear_grouped_by_project_before_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        text = self._prompt_at_confirm(
+            tmp_path,
+            {"proj-a": ["feedback_tabs.md", "user_role.md"], "proj-b": ["project_x.md"]},
+        )
+        assert "Files this run will read:" in text
+        a = text.index("    proj-a:")
+        b = text.index("    proj-b:")
+        for name in ("feedback_tabs.md", "user_role.md"):
+            assert a < text.index(f"      {name}") < b
+        assert text.index("      project_x.md") > b
+        assert "... and" not in text
+
+    def test_long_list_shows_first_few_plus_a_count(self, tmp_path: Path) -> None:
+        names = [f"note-{i:02d}.md" for i in range(8)]
+        text = self._prompt_at_confirm(tmp_path, {"proj-a": names})
+        for name in names[:5]:
+            assert f"      {name}" in text
+        for name in names[5:]:
+            assert name not in text
+        assert "... and 3 more" in text
+
+    def test_lists_only_the_capped_batch(self, tmp_path: Path) -> None:
+        names = [f"note-{i:02d}.md" for i in range(4)]
+        text = self._prompt_at_confirm(tmp_path, {"proj-a": names}, max_files=2)
+        assert "      note-00.md" in text and "      note-01.md" in text
+        assert "note-02.md" not in text and "note-03.md" not in text
