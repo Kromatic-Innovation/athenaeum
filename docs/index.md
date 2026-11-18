@@ -168,6 +168,10 @@ does not answer.
   built: how several installs write one shared store, syncing its pages, bench and inbox,
   which conflicts merge by rule, how a librarian adjudicates the rest, and wider uids for
   new pages.
+- [Federation: intake routing](design/federation-intake-routing.md) — design, not built:
+  the one intake decision (keep it or not, which store, which type), routing rules as a
+  destination column on the capture rules, why an unsure fact stays in the personal store,
+  how a store limits what it takes, and where intake waits before compile.
 
 ## Measurements
 
