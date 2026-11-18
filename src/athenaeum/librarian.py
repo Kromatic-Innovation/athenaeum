@@ -241,6 +241,7 @@ from athenaeum.pii import (
 )
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
+    ClaudeCliNotLoggedInError,
     LLMBackend,
     LLMClientCache,
     ProviderConfigError,
@@ -10070,7 +10071,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
                             continue
                         except Exception as exc:
-                            log.exception("Failed to process %s", raw.ref)
+                            if isinstance(exc, ClaudeCliNotLoggedInError):
+                                # Issue athenaeum#2763: a known config fault
+                                # with a one-line fix — no traceback at the
+                                # default level (it is still on DEBUG).
+                                log.error(
+                                    "Failed to process %s: %s", raw.ref, exc
+                                )
+                                log.debug(
+                                    "traceback for %s", raw.ref, exc_info=True
+                                )
+                            else:
+                                log.exception("Failed to process %s", raw.ref)
                             # Issue athenaeum#800: WARNING-level failure reason (file
                             # path + exception type/message), distinct from the
                             # ERROR-level traceback above and from the trailing
