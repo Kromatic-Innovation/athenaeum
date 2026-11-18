@@ -980,6 +980,7 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
             [
                 "decisions", "answer", "--path", str(store), "--id", decision_id,
                 "--type", "confirmation", "--answer", f'{{"verdict": "{verdict}"}}',
+                "--apply", "deferred",
             ]
         )
 
