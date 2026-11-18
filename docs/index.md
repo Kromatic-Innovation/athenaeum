@@ -160,6 +160,10 @@ does not answer.
 - [Grok as a host](design/host-grok.md) — Grok's three surfaces (Grok Build, the Grok
   apps, the xAI API), what each can reach today, what "auto-recall" can honestly mean on
   each, and the cross-host hook hazard.
+- [Federation: multi-writer sync](design/federation-multi-writer-sync.md) — design, not
+  built: how several installs write one shared store, syncing its pages, bench and inbox,
+  which conflicts merge by rule, how a librarian adjudicates the rest, and wider uids for
+  new pages.
 
 ## Measurements
 
