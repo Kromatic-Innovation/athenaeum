@@ -12,10 +12,15 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
+Support policy: only the current release is supported, and breaking changes
+ship without a deprecation period. See the
+[support policy](docs/guides/install.md#support-policy).
+
 ## [Unreleased]
 
 ### Changed
 
+- Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
 - README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
 - Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file

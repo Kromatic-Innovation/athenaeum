@@ -18,6 +18,8 @@ Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 `PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
 check against if `athenaeum --version` ever looks stale. `git` must be
 installed; no git identity is needed (`init` sets a repo-local one if you have none).
+Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
+current release is supported; see the [support policy](docs/guides/install.md#support-policy).
 Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
 
 **Before the first compile** (`athenaeum run`, below) you need either
