@@ -172,6 +172,10 @@ does not answer.
   the one intake decision (keep it or not, which store, which type), routing rules as a
   destination column on the capture rules, why an unsure fact stays in the personal store,
   how a store limits what it takes, and where intake waits before compile.
+- [Federation: raise and retract](design/federation-raise-retract.md) — design, not
+  built: how a page is copied from one store to another with provenance and no link back,
+  where proposals wait, how a retraction or a newer version follows the copy, and what
+  happens to a copy whose origin can no longer be watched.
 
 ## Measurements
 
