@@ -24,6 +24,9 @@ kept as they were written.
   cap (a file costs two calls, so the call cap bounds the batch), names the
   expected API call count, names the total pending when the cap cuts the batch,
   and says large-file cost is not yet measured (athenaeum#2733).
+- `athenaeum import-memory` now lists the file names it will read, grouped by
+  project, before asking to proceed. A project with more than five files in
+  the run shows the first five and a count of the rest (athenaeum#2737).
 
 ### Fixed
 
