@@ -35,7 +35,7 @@ parts.
    athenaeum to filter.
 2. **The store carries a declaration of who holds which permission.** It names
    principals and groups, never credentials. Installs read it to decide their
-   own behaviour (compile or not, show the queue or not, mount or refuse), and a
+   own behaviour (compile or not, show the decision queue or not, mount or refuse), and a
    check compares it with what the host actually allows. The declaration grants
    nothing by being written.
 3. **Every athenaeum-side rule only narrows.** An install writes a store only
@@ -43,6 +43,9 @@ parts.
    accepts the push. Any one of the three can say no; none can say yes alone.
 
 ## 2. What exists today
+
+Code anchors below, and throughout this note, are symbols at `develop`
+`60f851e8`.
 
 - **A per-page audience check, per process.** `src/athenaeum/models.py:is_page_authorized`
   returns true for the owner (`caller_audience=None`) and otherwise requires
@@ -99,7 +102,7 @@ the same fetch and push semantics.
 | Location | Holds | Who fetches | Who pushes |
 |---|---|---|---|
 | **Pages** | The compiled pages and the access declaration | read, compile | compile |
-| **Inbox** | Proposals waiting for the compile role | compile | propose |
+| **Inbox** | Proposals from principals outside the compile role, waiting for it | compile | propose |
 | **Bench** | The decision queue, its answers, review cursors | compile | compile |
 
 | Permission | What it lets a principal's install do |
@@ -126,11 +129,21 @@ proposer can fetch from the inbox may exceed what §13 question 1 allows.
 
 **When a location can be omitted.**
 
-- The inbox is omitted when nobody holds propose without compile.
-- The bench is omitted when exactly one install compiles: the queue stays in
-  that install's own state, as it does today.
+- The inbox is omitted when nobody holds propose without compile. A member of
+  the compile role never needs it: what they raise goes straight to the compile
+  role's own intake (§8).
+- The bench is omitted only when exactly one install compiles **and** the
+  declaration names no stewards (§7). The decision queue then stays in that
+  install's own state, as it does today. As soon as a second install takes part
+  in the compile role, whether as a compiler or as a steward answering
+  decisions, the bench is required and the check refuses a declaration without
+  one.
 - The bench may live in the pages repository when every reader is in the compile
   role, because then nothing in it is shown to anyone outside that role.
+
+Keeping the inbox and the bench in step between installs is multi-writer sync
+and belongs to athenaeum#2624, which owns sync for both locations as well as
+for the pages. This note says only who may fetch and push each.
 
 The recipe store that athenaeum#2630 set up is the smallest case: a pages
 repository, one compiling install, no inbox and no bench. It needs no change.
@@ -158,6 +171,7 @@ grants:
 compile:
   mode: named                                     # cloud | named | members
   by: ["group:leadership"]
+sync_mode: fast_forward                           # fast_forward | integrate (athenaeum#2624)
 locations:
   inbox: "git@git.example.net:acme/announcements-inbox.git"
   bench: "git@git.example.net:acme/announcements-bench.git"
@@ -168,6 +182,15 @@ Why it lives in the store and not in each install's `athenaeum.yaml`: every
 install then acts on the same statement, and every change to it is a commit
 with an author and a diff. A per-install copy could disagree with its
 neighbours, and a member could name themselves a compiler in their own file.
+
+`sync_mode` is declared here, once for the whole store, and not in each
+writer's local config. It says whether the store's writers integrate each
+other's work, in the sense athenaeum#2624 defines; the default,
+`fast_forward`, is today's behaviour. This note does not define what
+integrating means. It uses the key for one thing: the check accepts more than
+one compiling install only on a store that declares `integrate` (§7). A local
+setting could not serve, for the same reason the rest of the declaration is not
+local: installs could disagree, and no other install could verify it.
 
 **The declaration is a statement, not a grant.** Writing a principal into
 `grants.read` does not give them a clone; only the host does that. Removing
@@ -226,10 +249,16 @@ Two reserved words: `"*"` means anyone the host admits, and is valid only under
 `grants.read`; `members` as a compile mode means every principal that holds
 read.
 
+`"*"` defers the read decision to the host entirely. Role resolution gives read
+to any install that holds the store, and the check treats `"*"` as matching
+every principal the host admits, so it never reports a read difference for such
+a store. It is refused under `propose`, `compile.by` and `stewards`, where an
+unnamed principal would defeat the point of the declaration.
+
 **Resolution is never on the recall path.** Groups are resolved when a run
 starts and when the check runs. An install whose directory cannot answer acts
 as a reader only: it does not compile, does not run reviews and does not show
-the store's queue. Failure narrows; it never widens.
+the store's decision queue. Failure narrows; it never widens.
 
 **The install's own identity is self-declared**, and that is acceptable for
 role selection only. A member who puts someone else's identity in
@@ -265,18 +294,32 @@ ancestor of two scopes (merges never cross a store, so no pair spans two).
 - **Only compile-role installs raise decisions about a store's pages.** A
   reader's install runs no merge, contradiction or repair pass over a store it
   cannot write, which is what `read_only` already means.
-- **The queue is kept where only the compile role can fetch it:** in the single
-  compiling install's own state, or on the bench. A declaration whose bench is
-  readable more widely than its compile role is refused by the check.
-- **A decision that involves pages from several stores goes to the least widely
-  shared one**, by the existing `visibility` rank. It may change only that
-  store's pages. Changing the other store is a proposal to it, never a direct
-  write. This is the epic's "narrowest store" rule applied to decisions, and it
-  stops a private page being quoted into a shared queue.
-- **Every member of the compile role sees the whole queue.** Sending each item
-  to the member most likely to know is athenaeum#2629 and is not designed here.
+- **The decision queue lives on the bench.** Where the bench is omitted (one
+  compiling install, no stewards) it is that install's own state. A declaration
+  whose bench is readable more widely than its compile role is refused by the
+  check.
+- **A decision shows only the pages of the store that owns it.** Access is not
+  nested: two stores can each be narrow and have no reader in common, so no
+  ranking of stores says whose compile role may see both. When a decision
+  involves pages from other stores (a contradiction between a page here and a
+  page in a store this install also reads, for example), the item written to
+  the decision queue quotes the owning store's pages and names every other page
+  by `store_id` and uid alone: no text, no title, no path.
+- **Other stores' pages are filled in on display, from the viewer's own
+  mounts.** A compile-role member whose install holds the other store sees its
+  page beside the item, read from their own copy. A member whose install does
+  not hold it sees that a page they cannot read is involved, and leaves the item
+  to a member who can. Nobody is shown a page through the decision queue that
+  they could not already read.
+- **A decision changes only the store that owns it.** If the other store's page
+  should change too, that is a second decision, raised in that store's decision
+  queue by an install that compiles it, or a proposal to it. It is never a
+  direct write from here.
+- **Every member of the compile role sees the whole decision queue.** Sending
+  each item to the member most likely to know is athenaeum#2629 and is not
+  designed here.
 
-In `cloud` mode the librarian is software, and a queue item is by definition
+In `cloud` mode the librarian is software, and a decision is by definition
 something software could not settle. The declaration therefore names the people
 who answer it:
 
@@ -288,16 +331,25 @@ compile:
 ```
 
 Stewards are part of the compile role. They fetch and push the bench, where
-they read the queue and leave answer files in the existing `raw/answers/`
-shape; they do not push the pages. Whether `cloud` mode should have human
-stewards at all is §13 question 5.
+they read the decision queue and leave answer files in the existing
+`raw/answers/` shape; they do not push the pages. Declaring stewards therefore
+makes the bench required (§4), in any mode. Whether `cloud` mode should have
+human stewards at all is §13 question 5.
 
 **Dependency on athenaeum#2624.** Two installs writing the same pages, and two
-stewards answering the same item, are multi-writer problems. Until that note is
-built, the check refuses any declaration that puts more than one install in a
-position to push the pages: `members`, and `named` resolving to more than one
-principal. `cloud`, and `named` with one principal, need nothing from it. That
-is the athenaeum#2630 interim rule, now stated by the store instead of assumed.
+stewards answering the same decision, are multi-writer problems, and
+athenaeum#2624 owns them: the sync sequence for the pages, sync for the bench
+and the inbox, and merging answer files. The check enforces the boundary from
+this side:
+
+- A declaration that puts more than one install in a position to push the
+  pages (`members`, or `named` resolving to more than one principal) is
+  accepted only when the store declares `sync_mode: integrate`. Otherwise it is
+  refused. That is the athenaeum#2630 interim rule, now stated by the store
+  instead of assumed.
+- `cloud`, and `named` with one principal, have one writer of the pages and
+  need nothing from athenaeum#2624 for them. With stewards they still have
+  several writers of the bench, which is why S9 waits for bench sync.
 
 ## 8. Scheduled cross-store review
 
@@ -312,7 +364,8 @@ configurable prompt decides what to escalate.
   The install mounts the source read-only, like any other reader. There is no
   review-specific way to read a store and no grant for part of one.
 - **compile or propose on the target**, because the review's output is a
-  proposal to the target.
+  proposal to the target. Which of the two it holds decides where that output
+  is written (below).
 
 **Both stores must agree.** The target declares the review; the source declares
 the reader. A review whose principal is not granted read in the source's
@@ -342,8 +395,11 @@ the members of the source store can see who reads their store and why.
   live in a markdown file in the target store, at the path the review names, so
   they are versioned and editable as prose by the people who own the target.
 - The **frame** (the instruction to judge source text against the criteria, and
-  the output shape) is the engine's. It is registered in
-  `src/athenaeum/prompt_registry.py` like every other engine prompt.
+  the output shape) is the engine's. It is a file,
+  `src/athenaeum/prompts/store_review_frame.md`, beside the page-recompile
+  prompts that already live in that directory, and it is indexed in
+  `src/athenaeum/prompt_registry.py` with a golden like every other engine
+  prompt.
 
 Source pages are passed to the model as untrusted data, in the same way the
 classifier treats raw intake (`src/athenaeum/tiers.py:CLASSIFY_SYSTEM`). What a
@@ -354,9 +410,23 @@ athenaeum#2628.
 
 | Where | What | Why it is safe |
 |---|---|---|
-| The target's inbox | Proposals, in the format athenaeum#2626 defines, with provenance and no link back to the source | They pass through the target's normal compile and queue before becoming pages. A review never writes a page directly. |
-| The target's bench or the reviewing install's own state | A cursor (the last source revision reviewed) and a run record (time, counts) | Neither contains source text. |
+| The target's intake (see below) | Proposals, in the format athenaeum#2626 defines, with provenance and no link back to the source | They pass through the target's normal compile and decision queue before becoming pages. A review never writes a page directly. |
+| The target's bench, or the reviewing install's own state when there is no bench | A cursor (the last source revision reviewed) and a run record (time, counts) | Neither contains source text. |
 | The source | **Nothing.** No page, no proposal, no marker, no cursor. | The reviewing install holds read only, and the host refuses anything else. |
+
+**Where the proposals go** depends on the grant the reviewing install holds on
+the target:
+
+| The reviewing install holds | Proposals are written to |
+|---|---|
+| compile on the target, and the target has a bench | The bench, as intake waiting for the compile role |
+| compile on the target, and the target has no bench (one compiling install, no stewards) | That install's own raw intake for the target store |
+| propose only | The target's inbox |
+
+The first two rows are the operator's own example: a leadership librarian
+reviewing into a leadership-only store, where nobody proposes without
+compiling and so no inbox exists. In every row the proposal waits somewhere
+only the target's compile role can fetch, and in none of them is it a page.
 
 "Recent changes" means the difference between the cursor and the source's
 current revision. A review that is due runs inside the ordinary librarian run;
@@ -390,6 +460,8 @@ requirements follow for whoever builds the index and athenaeum#2627:
 
 - **The index must be separable by store.** Removing one store's derived data
   must not require reading another store's. A segment per store satisfies it.
+  This note does not claim today's index has that property; it is built as its
+  own slice (S4b), and removal on unmount (S4c) waits for it.
 - **A store's derived data must be protectable with that store's key alone**,
   so that losing the key to one store does not expose the rest.
 
@@ -401,10 +473,17 @@ configuration that would index either.
 **The check.** `athenaeum store access check` reports, per mounted store:
 
 - this install's role according to the declaration;
-- what the host actually allows this install (can it fetch, would a push be
-  accepted), and any difference from the declared role;
-- declarations the interim rule refuses (§7), a bench readable beyond the
-  compile role, and reviews with no matching read grant in the source;
+- what the host has actually allowed this install, from evidence and not from
+  a probe: whether the last fetch of each location completed, and the recorded
+  outcome of this install's last real push to it. The check does not test
+  whether a push *would* be accepted. No portable way to ask exists (a dry-run
+  push does not reliably exercise the host's permission check), so an install
+  that has never pushed reports "push: not yet observed". Asking the host
+  directly is left to an external adapter (S12);
+- any difference between that evidence and the declared role;
+- declarations the one-writer rule refuses (§7), stewards declared without a
+  bench, a bench readable beyond the compile role, and reviews with no matching
+  read grant in the source;
 - with an external directory adapter that can list the host's access, every
   principal the host admits that the declaration does not name, and the reverse.
 
@@ -440,8 +519,10 @@ Neither recovers what a person already read.
 - **Remote-caller ceilings** (athenaeum#2607) decide what one install shows a
   remote caller. This note asks only that its predicate be able to key on the
   store a page lives on, so an install can decline to re-serve a shared store.
-- **Multi-writer sync** (athenaeum#2624) owns the sync sequence, conflicts and
-  concurrent answers. This note says who is allowed to be a writer.
+- **Multi-writer sync** (athenaeum#2624) owns the sync sequence for the pages,
+  the bench and the inbox, conflicts, and concurrent answers. This note says
+  who is allowed to be a writer of each, keeps the decision queue on the bench,
+  and declares `sync_mode` store-wide for that note to act on.
 - **Intake routing** (athenaeum#2625) owns which store a fact goes to and where
   raw intake waits. **Raise and retract** (athenaeum#2626) owns the proposal
   format, provenance and retraction. This note supplies the `store_id` they
@@ -465,7 +546,7 @@ by a deployment and do not. A deployment's declarations live in its own stores.
 | The declaration is malformed | The install acts as a reader only, and reports it. |
 | A compiler widens the declaration | Nothing changes until the host changes. The commit is in history and the check reports the drift. |
 | A revoked member keeps a clone | Not prevented. Bounded by `max_offline` and, later, by key rotation (§9). |
-| A private page is drawn into a shared queue | Prevented by filing cross-store decisions in the least widely shared store (§7). |
+| A decision involves pages from stores with different readers | The decision queue item quotes only its owning store's pages and names the rest by `store_id` and uid. Each viewer's install fills them in only from stores it holds (§7). |
 | A review reads a store it was not granted | Impossible by construction: the install does not hold it. A clone held without a declared grant is not mounted. |
 | A hostile source page steers a reviewing librarian | Contained to a proposal in the target's inbox. Anything further is athenaeum#2628. |
 
@@ -480,7 +561,7 @@ are introduced by this note, so there is nothing to convert back.
 **Principles applied.** The engine ships mechanism and the deployment supplies
 policy. Enforcement is physical first and declared second. Every
 athenaeum-side rule narrows. Existing seams are reused, not paralleled: the
-identity key, the `visibility` rank, the read-only guard, the answer-file
+identity key, the read-only guard, the artifact registry, the answer-file
 shape. Storage stays logically fixed and physically pluggable
 ([North star](../north-star.md) §2.11): nothing above depends on the host being
 git, only on separately permissioned locations with fetch and push.
@@ -512,22 +593,26 @@ git, only on separately permissioned locations with fetch and push.
 ## 12. Build slices
 
 Each is one pull request. Slices S1 to S5 depend on nothing outside this note.
+Slice numbers given for athenaeum#2624 are those of the build-slice table in
+its design note.
 
 | Slice | What it adds | Depends on |
 |---|---|---|
-| **S1** | Parse and validate `_store/access.yaml` (`store_id`, `grants`, `compile`, `locations`, `groups`), failing closed. Pin that `_store/` is skipped by the index scan on every surface. Document the format. No behaviour change. | none |
+| **S1** | Parse and validate `_store/access.yaml` (`store_id`, `grants`, `compile`, `sync_mode`, `locations`, `groups`), failing closed. Register the files under `_store/` in `src/athenaeum/store.py:ARTIFACT_REGISTRY` with persistence class `config`, so multi-writer merge has a rule for them. Pin that `_store/` is skipped by the index scan on every surface. Document the format. No behaviour change. | none |
 | **S2** | The directory adapter protocol, the built-in `static` adapter, and role resolution: given a surface and `owner.asserter`, return reader, proposer, compiler or none. | S1 |
 | **S3** | Fold the declared role into the write guard: an install outside the compile role is refused on that store's pages, whatever its local `read_only` says. | S2 |
-| **S4** | Refuse to mount a declared store whose declaration does not grant this install read, and remove a store's derived data when it is unmounted. | S2 |
-| **S5** | `athenaeum store access check`: declared role against what the host allows this install; the interim one-writer rule; a non-zero exit on any difference. | S2 |
-| **S6** | `max_offline`: unmount a store whose last completed pull is older than its declared limit. | S4, §13 question 2 |
-| **S7** | A decision queue per store on the decision seam: an item is filed with the store whose page it would change, and a cross-store item with the least widely shared one. Single compiling install; the queue stays in local state. | S2 |
-| **S8** | The `locations` entries: mount the bench and the inbox, refuse to index either, and refuse a bench readable beyond the compile role. | S5 |
-| **S9** | `cloud` mode stewards: a steward's install shows the store's queue from the bench and writes answer files to it; the compiling install applies them. | S7, S8, athenaeum#2624 |
+| **S4** | Refuse to mount a declared store whose declaration does not grant this install read: it is not indexed and not recalled. Nothing is deleted. | S2 |
+| **S4b** | Make the index separable by store: one store's derived data can be listed and removed without reading another's. | none |
+| **S4c** | Remove a store's derived data when it is unmounted. | S4, S4b |
+| **S5** | `athenaeum store access check`: declared role against local config and against the recorded outcome of this install's last fetch and last real push per location (no push probe); the one-writer rule; stewards without a bench; a non-zero exit on any difference. | S2 |
+| **S6** | `max_offline`: unmount a store whose last completed pull is older than its declared limit. | S4c, §13 question 2 |
+| **S7** | A decision queue per store on the decision seam: a decision is filed with the store whose page it would change, quotes only that store's pages, names pages of other stores by `store_id` and uid, and has them filled in on display from the viewer's own mounts. Single compiling install; the decision queue stays in local state. | S2 |
+| **S8** | The `locations` entries: mount the bench and the inbox, refuse to index either, require a bench when stewards are declared, and refuse a bench readable beyond the compile role. | S5 |
+| **S9** | Stewards: a steward's install shows the store's decision queue from the bench and writes answer files to it; the compiling install applies them. | S7, S8; athenaeum#2624 S4 (record merge, for answer files) and its bench and inbox sync slice |
 | **S10** | The `reviews` block: parse it, check the matching read grant in the source's declaration, compute "due", keep the cursor. No model call. | S2 |
-| **S11** | The review run: the frame prompt in the prompt registry, the criteria file, proposals written to the target's inbox. | S10, S8, athenaeum#2626 |
-| **S12** | The external directory adapter registration point, and the check's host-side comparison when an adapter can list access. | S5 |
-| **S13** | Lift the interim one-writer rule for `named` (several) and `members`. | athenaeum#2624 |
+| **S11** | The review run: the frame prompt file and its registry entry, the criteria file, proposals written to the target's intake (bench, own raw intake, or inbox, by the table in §8). | S10, athenaeum#2626; S8 for the bench and inbox rows |
+| **S12** | The external directory adapter registration point, and the check's host-side comparison when an adapter can list access or answer whether a push would be accepted. | S5 |
+| **S13** | Accept `named` (several) and `members` in the check when the store declares `sync_mode: integrate`; refuse them otherwise. | S5; athenaeum#2624 S4 and S7 (`integrate` mode), and its bench and inbox sync slice where the store has either |
 | **S14** | A guide: setting up a store with readers, proposers and a compile role. | S5, S8 |
 
 ## 13. Open questions for the operator
@@ -582,7 +667,8 @@ it?** The declaration is in the store, so by default they can.
   learn nothing about each other, and cannot check their own access.
 
 **5. When a cloud librarian compiles a store, who answers its decisions?** The
-ruling gives the queue to the compile role, and in this mode that role is
+ruling gives the decision queue to the compile role, and in this mode that
+role is
 software.
 
 - **Recommended: named human stewards.** The declaration names the people who
