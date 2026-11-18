@@ -5,50 +5,77 @@ plugin: the manifest, the MCP server registration, the hooks config, and a
 `uv`-only launcher. It is built and tested here, inside athenaeum's own CI
 (issue athenaeum#2368).
 
-**What this directory is not.** It is not itself an installable plugin
-repository, and nothing here publishes it to a marketplace. Claude Code
-plugin marketplaces install from a *repository* (ideally one holding only
-the plugin — a "thin repo"), not from a subdirectory of a larger repo.
-Creating that separate repo, publishing it from a self-hosted marketplace,
-and the clean-machine acceptance test that proves a fresh install actually
-works end-to-end are issue athenaeum#2308's job, not this one's. Nothing in
-this directory has been exercised against a real Claude Code install or a
-real marketplace — only the pieces this repo's own test suite
-(`tests/test_claude_code_plugin.py`) can prove without a login or network
-access: every JSON file parses, every hook command resolves to a real
-script, the version pin matches the release, and the launcher's two
-documented failure/pending paths behave as described below.
+**The installable plugin lives in a separate thin repo:**
+[`Kromatic-Innovation/athenaeum-claude-plugin`](https://github.com/Kromatic-Innovation/athenaeum-claude-plugin).
+That repo holds the manifest, the hooks and the launcher, and also serves as
+the self-hosted marketplace (`.claude-plugin/marketplace.json`). It is
+**private** for now. Publishing it waits on the install bugs athenaeum#2762
+and athenaeum#2764, and the public flip is an operator step. Once public, the
+install is:
 
-## Copying this to the thin repo
-
-When athenaeum#2308 creates the separate plugin repository, copy this
-directory's contents to that repo's root as a straight, literal copy:
-
-```bash
-# from an athenaeum checkout, into the thin repo's working tree
-cp -r examples/claude-code-plugin/. /path/to/the-thin-repo/
+```text
+/plugin marketplace add Kromatic-Innovation/athenaeum-claude-plugin
+/plugin install athenaeum@athenaeum-claude-plugin
 ```
 
-Two things do **not** travel with a plain copy and need a decision at that
-point (tracked by athenaeum#2308, not resolved here):
+Claude Code plugin marketplaces install from a *repository*, not from a
+subdirectory of a larger repo, which is why the thin repo exists. This
+directory remains the place the plugin is developed and tested; the thin repo
+is where it ships. Tracking issue: athenaeum#2308. Nothing here has been
+exercised against a real Claude Code install or marketplace by this repo's own
+test suite (`tests/test_claude_code_plugin.py`), which proves only what needs
+no login or network: every JSON file parses, every hook command resolves to a
+real script, the version pin matches the release, and the launcher's two
+documented failure/pending paths behave as described below. The clean-machine
+acceptance test is part of athenaeum#2308.
 
-- `hooks/hooks.json` references `${CLAUDE_PLUGIN_ROOT}/../claude-code/...`
-  for the four hooks it reuses from this repo's `examples/claude-code/`
-  (session-start-recall.sh, user-prompt-recall.sh, wiki-context-inject.sh,
-  pending-questions-surface.sh) — see "Why the hooks are referenced, not
-  copied" below. That relative path only resolves because, in *this* repo,
-  `examples/claude-code-plugin/` and `examples/claude-code/` are siblings.
-  The thin repo has no `examples/claude-code/` sibling, so athenaeum#2308
-  must either vendor those four scripts into the thin repo at publish time
-  (keeping this repo's copies as the single source of truth, re-synced per
-  release) or pin the thin repo's hooks.json to fetch them some other way.
-  Do not solve this by copying the scripts into the thin repo by hand once
-  and letting them drift — that is the exact "second copy that can drift"
-  this issue was told to avoid.
-- `hooks.json`'s `${CLAUDE_PLUGIN_ROOT}` substitution and `.mcp.json`'s
-  `command` path both assume `hooks/launcher.sh` ships at the SAME relative
-  location in the thin repo (`hooks/launcher.sh` under the repo root) — a
-  straight copy preserves this automatically; a restructure would not.
+## Keeping the thin repo in sync
+
+The thin repo was populated from this directory, with one deliberate
+difference: its hooks are self-contained.
+
+`hooks/hooks.json` here references `${CLAUDE_PLUGIN_ROOT}/../claude-code/...`,
+which resolves only because `examples/claude-code-plugin/` and
+`examples/claude-code/` are siblings in this repo. `hooks.json` references
+five reused hook scripts. The thin repo has no such sibling, so:
+
+- **Four are vendored** into the thin repo's `hooks/` as verbatim copies, and
+  its `hooks.json` points at `${CLAUDE_PLUGIN_ROOT}/hooks/<script>`:
+  `session-start-recall.sh`, `user-prompt-recall.sh`,
+  `wiki-context-inject.sh`, `pre-compact-save.sh`.
+- **`pending-questions-surface.sh` is omitted** and its `hooks.json` entry
+  removed, because athenaeum#2532 plans to remove that hook.
+
+This repo's copies in `examples/claude-code/` remain the single source of
+truth. The thin repo's copies must not be edited in place.
+
+**At each release cut**, in the same pass that bumps the version pin (see
+"Version-bump rule"), diff the vendored scripts against this repo's copies and
+re-sync any that differ:
+
+```bash
+# from an athenaeum checkout at the release commit; THIN is the thin repo's clone
+for f in session-start-recall user-prompt-recall wiki-context-inject pre-compact-save; do
+  diff -q "examples/claude-code/$f.sh" "$THIN/hooks/$f.sh"
+done
+cp examples/claude-code/<script>.sh "$THIN/hooks/"   # for each one that differs
+```
+
+Also copy over any change to `hooks/launcher.sh`, `.mcp.json` and
+`.claude-plugin/plugin.json`, apart from the thin-repo-only edits above. In
+the thin repo, bump `version` in both `plugin.json` and `marketplace.json`,
+and update the "Vendored from athenaeum commit" line in its README. The thin
+repo's `CI Required` workflow checks JSON validity, script syntax and hook
+path resolution, so a PR there must be green to merge.
+
+`hooks.json`'s `${CLAUDE_PLUGIN_ROOT}` substitution and `.mcp.json`'s
+`command` path both assume `hooks/launcher.sh` sits at the same relative
+location in the thin repo (`hooks/launcher.sh` under the repo root).
+
+Open items on the thin repo (tracked in athenaeum#2308):
+`userConfig.knowledgePath` is not yet wired (see below), the plugin has no
+icon, and `plugin.json` keeps a `_versionPinNote` field that Claude Code
+ignores but `claude plugin validate --strict` warns about.
 
 ## Version-bump rule
 
@@ -201,7 +228,7 @@ field as documentation of intent, not a working control.
   Code session inspecting where a `userConfig` value actually lands on
   disk / in logs after being set once.
 
-## Why the hooks are referenced, not copied
+## Why the hooks are referenced here, not copied
 
 `hooks/hooks.json` points every recall-hook command at
 `examples/claude-code/<script>.sh` via `${CLAUDE_PLUGIN_ROOT}/../claude-code/`,
@@ -216,6 +243,10 @@ above). Neither `session-start-recall.sh` nor `user-prompt-recall.sh` was
 modified to build this (both are the `.github/llm-surface.txt`-designated
 sidecar delivery path; this directory's tests exercise them read-only, by
 path resolution, never by editing their contents).
+
+The thin repo is the one place a copy is made, and only as a release-time
+vendoring of this repo's scripts (see "Keeping the thin repo in sync"), never
+as an independently edited second copy.
 
 ## Running the tree's own tests
 
