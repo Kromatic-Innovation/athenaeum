@@ -130,6 +130,8 @@ MODULE_LAYER: dict[str, int] = {
     "owner_memory_bridge": 3,  # issue athenaeum#2690
     "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
+    "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
+    "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
     "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)

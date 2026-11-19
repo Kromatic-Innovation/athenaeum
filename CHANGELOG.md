@@ -22,6 +22,16 @@ ship without a deprecation period. See the
 
 ### Added
 
+- `athenaeum.page_merge.merge_page(base, local, remote, spec)` is a pure
+  three-way merge of one page by unit (frontmatter key, H2 section, lines in
+  a section) using the multi-writer sync design's rule table. It returns the
+  merged text, the contested units, the held units with a reason code, and the
+  rule that settled each unit. `access` and `audience` are never merged: a
+  difference in either is held, and contested or held units carry the remote
+  value so the result always parses. It does no file access, runs no git
+  command and calls no model, and nothing calls it yet. The section and list
+  helpers it shares with the structured upsert moved to `athenaeum.page_text`
+  (athenaeum#2773).
 - `athenaeum.store_access` parses and validates a store's declaration,
   `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
   naming each offending key, and nothing reads it yet so no install behaves
