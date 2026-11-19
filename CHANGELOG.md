@@ -22,6 +22,13 @@ ship without a deprecation period. See the
 
 ### Added
 
+- `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
+  raised copy, failing closed (any key outside the nine of the design note is
+  refused), pins `raise:<raise_id>` as a typed source, and backs a new
+  read-only command, `athenaeum raised-from-lint`, that reports a page whose
+  block is malformed. `raised_from` is now left out of `content_hash`. No page
+  is written or changed; the precedence rank of the `raise` source type stays
+  unset (athenaeum#2626, athenaeum#2799).
 - `athenaeum.raise_projection`, a pure module with no I/O: the raise
   projection of a page (`type`, `name`, `description`, `aliases`, `tags`,
   `access`, `audience` and the body with links reduced to their labels), the
