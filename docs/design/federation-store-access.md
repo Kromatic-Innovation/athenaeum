@@ -512,6 +512,9 @@ roles:
 
 `purpose: review` changes nothing about what the read right allows. It is there so
 the members of the source store can see who reads their store and why.
+A raise made by a review is exempt from the origin's compile-right requirement
+only when the TARGET store declares that review (see
+`docs/design/federation-raise-retract.md`).
 
 **Where the prompt lives.** In two places, split by who owns the words:
 

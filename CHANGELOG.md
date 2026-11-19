@@ -20,6 +20,15 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Added
+
+- `athenaeum.store_access` parses and validates a store's declaration,
+  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
+  naming each offending key, and nothing reads it yet so no install behaves
+  differently. `_store/` files are registered as `config` artifacts, and a
+  `_`-prefixed directory of any surface is no longer yielded as a page by
+  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
