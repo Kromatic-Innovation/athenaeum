@@ -1,7 +1,7 @@
 """CI-versus-deploy dependency parity (athenaeum#1960).
 
 CI installs athenaeum's declared dependency ranges under the full transitive
-constraints file `requirements-ci.lock`; the deploy refresh (scripts/
+constraints file `requirements-ci.txt`; the deploy refresh (scripts/
 deploy-guard.sh / scripts/deploy-sync.sh) now constrains itself to that same
 lock (see _dg_constraints_flag / _ds_constraints_flag and
 tests/test_deploy_guard.py). That closes the class of drift where the deploy
@@ -13,7 +13,7 @@ This module is the other half: an offline parity test asserting the lock and
 the declared ranges cannot silently disagree for any DIRECT dependency the
 deploy closure actually needs -- `[project].dependencies` plus the `mcp` and
 `vector` extras (not `dev`, which is CI/tooling-only, and not `types`). For
-each one it asserts a `requirements-ci.lock` pin exists and that the pinned
+each one it asserts a `requirements-ci.txt` pin exists and that the pinned
 version satisfies the declared specifier, honouring environment markers.
 
 Fully offline: no network, no host access, no model spend. Runs in the
@@ -32,7 +32,7 @@ from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
-LOCKFILE = REPO_ROOT / "requirements-ci.lock"
+LOCKFILE = REPO_ROOT / "requirements-ci.txt"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "ci_lock_parity"
 
 # The extras whose direct deps the deploy refresh actually installs --
@@ -49,7 +49,7 @@ _LOCK_LINE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s#;]+)")
 
 
 def parse_lock(lock_text: str) -> dict[str, str]:
-    """`requirements-ci.lock` text -> {canonical name: pinned version}."""
+    """`requirements-ci.txt` text -> {canonical name: pinned version}."""
     pins: dict[str, str] = {}
     for raw_line in lock_text.splitlines():
         line = raw_line.strip()
@@ -78,7 +78,7 @@ def direct_requirements(pyproject_text: str) -> list[Requirement]:
 def applicable_requirements(reqs: list[Requirement]) -> list[Requirement]:
     """Drop requirements whose environment marker does not evaluate true HERE.
 
-    Mirrors the rule requirements-ci.lock's own header already relies on:
+    Mirrors the rule requirements-ci.txt's own header already relies on:
     "a constraint for a package not needed on a given interpreter is simply
     ignored." A marker-gated dependency inapplicable to this interpreter /
     platform is not something the lock is obligated to pin on this run.
@@ -100,7 +100,7 @@ def check_parity(pyproject_text: str, lock_text: str) -> list[str]:
         pinned = pins.get(canon)
         if pinned is None:
             violations.append(
-                f"{req.name}: declared ({req}) but requirements-ci.lock has no pin"
+                f"{req.name}: declared ({req}) but requirements-ci.txt has no pin"
             )
             continue
         if not req.specifier.contains(Version(pinned), prereleases=True):
@@ -132,7 +132,7 @@ def test_ci_lock_satisfies_pyproject_ranges_for_direct_deploy_deps() -> None:
 def _read_fixture_pair(name: str) -> tuple[str, str]:
     base = FIXTURES / name
     pyproject_text = (base / "pyproject.toml").read_text()
-    lock_text = (base / "requirements-ci.lock").read_text()
+    lock_text = (base / "requirements-ci.txt").read_text()
     return pyproject_text, lock_text
 
 
@@ -183,7 +183,7 @@ vector = []
 def test_marker_false_in_this_environment_is_not_required_to_have_a_pin() -> None:
     # A dependency gated on a marker that evaluates FALSE here must not be
     # required to carry a lock pin -- same rule `pip -c` itself applies
-    # (requirements-ci.lock's header: "a constraint for a package not needed
+    # (requirements-ci.txt's header: "a constraint for a package not needed
     # on a given interpreter is simply ignored").
     pyproject_text = _MARKER_PYPROJECT_TEMPLATE.format(marker='python_version < "3.0"')
     assert check_parity(pyproject_text, "") == []
