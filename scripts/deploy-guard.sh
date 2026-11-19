@@ -88,7 +88,7 @@
 #                              .venv/bin/pip for the same single-interpreter
 #                              reason as ATHENAEUM_GUARD_METADATA_REFRESH_CMD,
 #                              athenaeum#894. <constraints> is
-#                              " -c requirements-ci.lock" when that file
+#                              " -c requirements-ci.txt" when that file
 #                              exists in the deploy tree (dependency parity
 #                              with CI, athenaeum#1960) and empty otherwise;
 #                              an explicit ATHENAEUM_GUARD_INSTALL_CMD
@@ -138,7 +138,7 @@ _dg_ref()          { printf '%s' "${ATHENAEUM_DEPLOY_REF:-main}"; }
 _dg_extras()       { printf '%s' "${ATHENAEUM_DEPLOY_EXTRAS:-mcp,vector}"; }
 
 # CI-versus-deploy dependency parity (athenaeum#1960): when the deploy tree
-# carries requirements-ci.lock (it does once the fast-forward has picked up
+# carries requirements-ci.txt (it does once the fast-forward has picked up
 # the commit that added it), the default install constrains the refresh to
 # the SAME versions CI tested, instead of letting pip resolve pyproject.toml's
 # open ranges fresh. `pip -c` ignores constraints for packages the current
@@ -147,8 +147,8 @@ _dg_extras()       { printf '%s' "${ATHENAEUM_DEPLOY_EXTRAS:-mcp,vector}"; }
 # callers can splice this straight into a printf format string.
 _dg_constraints_flag() {
   local dir="${1:-.}"
-  if [ -f "$dir/requirements-ci.lock" ]; then
-    printf ' -c requirements-ci.lock'
+  if [ -f "$dir/requirements-ci.txt" ]; then
+    printf ' -c requirements-ci.txt'
   fi
 }
 

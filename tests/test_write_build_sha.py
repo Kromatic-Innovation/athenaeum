@@ -262,7 +262,7 @@ def test_deploy_sync_stamps_checkout(git_checkout: Path) -> None:
 # deploy-sync.sh reinstall step — CI-versus-deploy dependency parity
 # (athenaeum#1960 AC1). Mirrors the three cases covered against
 # scripts/deploy-guard.sh's _dg_default_install_cmd in test_deploy_guard.py:
-# the constraints flag present when requirements-ci.lock exists in the
+# the constraints flag present when requirements-ci.txt exists in the
 # deploy tree, and absent when it does not. (deploy-sync.sh's reinstall step
 # has no full-command override hook like ATHENAEUM_GUARD_INSTALL_CMD -- only
 # ATHENAEUM_SYNC_REINSTALL=0 to skip it entirely -- so there is no third
@@ -289,7 +289,7 @@ def test_deploy_sync_reinstall_adds_constraints_flag_when_lock_present(
     _require_bash()
     capture = tmp_path / "pip-argv.txt"
     _install_fake_pip(git_checkout, capture)
-    (git_checkout / "requirements-ci.lock").write_text("mcp==1.29.0\n")
+    (git_checkout / "requirements-ci.txt").write_text("mcp==1.29.0\n")
     proc = subprocess.run(
         ["bash", str(DEPLOY_SYNC)],
         env=_sync_env(git_checkout),
@@ -303,7 +303,7 @@ def test_deploy_sync_reinstall_adds_constraints_flag_when_lock_present(
         "-e",
         ".[mcp,vector]",
         "-c",
-        "requirements-ci.lock",
+        "requirements-ci.txt",
     ]
 
 
@@ -313,7 +313,7 @@ def test_deploy_sync_reinstall_omits_constraints_flag_when_lock_absent(
     _require_bash()
     capture = tmp_path / "pip-argv.txt"
     _install_fake_pip(git_checkout, capture)
-    assert not (git_checkout / "requirements-ci.lock").exists()
+    assert not (git_checkout / "requirements-ci.txt").exists()
     proc = subprocess.run(
         ["bash", str(DEPLOY_SYNC)],
         env=_sync_env(git_checkout),

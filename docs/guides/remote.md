@@ -243,6 +243,19 @@ Confirm the server came up the way you meant by reading its own startup lines
 A missing `[auth]` line on an HTTP server is the whole failure: it means the block
 did not resolve and the process is serving without authentication.
 
+### With an issuer configured, the token is the only DNS-rebinding defence
+
+With `serve.auth.issuer` set, the Host/Origin guard is off, so a request is not
+checked for a foreign `Host` or `Origin`. Bearer-token validation (signature, issuer,
+audience, a required `exp`, and `nbf` / `iat` not in the future) is then the only
+DNS-rebinding defence: a rebinding web page cannot supply a token your authorization
+server issued, and a request without one is refused. The guard is off because a proxy
+or tunnel forwards your public hostname, which the strict guard would answer with
+`421`. The startup log records which arm you are on, as
+`[transport] Host/Origin guard: off (bearer-token auth configured)`; an unauthenticated
+loopback server logs `[transport] Host/Origin guard: on` instead. Check the line after
+every config change.
+
 ## The reverse proxy
 
 The proxy terminates TLS for `memory.example.net` and forwards to the loopback

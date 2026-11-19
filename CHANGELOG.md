@@ -21,6 +21,7 @@ ship without a deprecation period. See the
 ### Changed
 
 - A remote `remember` (`--transport http`) under a restricted `--audience` now stamps the saved note with the server's pinned audience (`audience: [<roles>]`), so the caller that wrote it, and anyone else holding that role, can recall it. Before, the note was untagged and every restricted audience withheld it, including the writer's own. The stamp comes only from the server-side pin: it replaces any `audience:` in the note's own frontmatter, drops a note-written `access: open`, and no `remember` argument changes it. A different restricted audience still cannot recall the note, `--audience owner` and stdio stamp nothing, and `docs/guides/remote.md` now says remote saves are visible to the caller's whole audience without review (athenaeum#2779).
+- Renamed the CI constraints lock `requirements-ci.lock` to `requirements-ci.txt` so GitHub's dependency graph recognises it as a pip manifest. Dependabot alerts previously covered only the 38 direct dependencies; the full pinned set of 136 packages is now scanned. Contents are unchanged and it is still the single source of truth, applied with `-c requirements-ci.txt` in CI, `scripts/deploy-guard.sh` and `scripts/deploy-sync.sh`. If you install with `-c requirements-ci.lock`, switch to the new name (athenaeum#2784).
 - The witness-ledger lookup now survives a `prompt_id` that several lines share. `LedgerIndex` keeps every line per id and one resolver (`LedgerIndex.resolve`), used by both intake and `promptwitness verify`, picks among them by digest, so a prompt typed while a turn is running no longer makes the earlier prompt report `digest-mismatch`. `LedgerIndex.human_lines()` now returns every turn line, including displaced ones and ones with no id (athenaeum#2759).
 - Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
 - README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
@@ -37,6 +38,8 @@ ship without a deprecation period. See the
   the run shows the first five and a count of the rest (athenaeum#2737).
 
 ### Added
+
+- First-person auto-memory notes now reach the owner page. With an owner configured and its page resolving, each `user`-type auto-memory note is bridged, once per content, into a derived raw note under `raw/owner-memory-bridge/`; the entity tier then offers the owner candidate and the owner-verify merge files the fact under `## Preferences`. The bridge itself makes no model call, the entity-tier calls run inside `max_api_calls` and are deferred (never dropped) when it is spent, and bridge notes have owner-only scope: every tier-2 classification except the owner is dropped by code before tier 3. A body-hash `owner_routed` marker is stamped into the source note only after the bridge write succeeds, so an edited note is bridged again once. The new `owner.bridge_memory_types` key (default `["user"]`, `[]` disables; `feedback` is excluded by default because those notes are standing assistant instructions) is documented in the configuration reference, and the run summary's auto-memory entry reports `owner_bridged=N` (athenaeum#2690).
 
 - Answering a decision now applies it straight away by default
   (athenaeum#2531, part of athenaeum#2489). `athenaeum decisions answer`
@@ -169,6 +172,10 @@ ship without a deprecation period. See the
   `athenaeum registry` writes beside `registry.json`, so no query scans page
   bodies. Re-run `athenaeum registry` to build it; a corpus without the
   sidecar behaves as before. `with_pii` gating is unchanged.
+
+### Security
+
+- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
 
 ## [0.26.0] - 2026-11-16
 
