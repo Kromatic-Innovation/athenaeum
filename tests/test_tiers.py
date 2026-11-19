@@ -912,7 +912,7 @@ class TestTier3Create:
         assert entity.type == "company"
         assert entity.access == "internal"
         assert entity.tags == ["active", "client"]
-        assert len(entity.uid) == 8
+        assert len(entity.uid) == 16
         assert "Alice Zhang" in entity.body
 
     def test_api_error_propagates(self) -> None:

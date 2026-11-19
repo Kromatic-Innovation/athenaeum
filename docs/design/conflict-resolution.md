@@ -757,6 +757,11 @@ the adapters and the lock rule.
   transcripts with no `origin` field) that the text not open with a known
   harness-wrapper tag. This tightens WHICH record can win the substring
   match above — it does not change what winning a substring match proves.
+- **A paste is attested as human, and marked only where detectable
+  (athenaeum#2770).** `witness_paste: "detected"` means the prompt had a
+  `<pasted_content>` wrapper; a short paste has none and is recorded as
+  typed, so `typed` means "no paste wrapper", not "keystrokes". See
+  [the witness ledger](witness-ledger.md#prompt-kind-and-channel-claude-code).
 
 ### Witnessed receipts (issue athenaeum#2158) — attesting `user-stated` against the witness ledger
 

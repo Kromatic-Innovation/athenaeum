@@ -3195,6 +3195,21 @@ def remember_write(
     return f"Saved to {filepath}"
 
 
+def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
+    """Rewrite ``Saved to <abs path>`` to a corpus-root-relative path (athenaeum#2781).
+
+    Used under ``--transport http`` only. *raw_root* is ``<corpus>/raw``, so
+    the result reads ``Saved to raw/<session>/<file>.md``. A path that is not
+    under the corpus root falls back to the file name alone, never absolute.
+    """
+    written = Path(result[len("Saved to ") :])
+    try:
+        shown = written.relative_to(raw_root.resolve().parent)
+    except ValueError:
+        shown = Path(written.name)
+    return f"Saved to {shown.as_posix()}"
+
+
 def _audit_relevance_override(wiki_root: Path, final_content: str, transport: str) -> str | None:
     """Audit an explicit-remember fact that a ``never`` rule matches (athenaeum#2646).
 
@@ -3680,6 +3695,31 @@ _ADJUDICATION_TOOL_ANNOTATIONS: dict[str, Any] = {
     "openWorldHint": False,
     "idempotentHint": True,
 }
+
+
+def _remember_session_dir(source: str | None, default_subdir: str) -> str:
+    """The ``raw/`` subdirectory an MCP ``remember`` call writes into.
+
+    The tool's ``source`` argument names a session directory, not a
+    provenance source, and a model that supplies one invents a directory
+    (``manual`` was the example the tool used to give) that is not in
+    ``recall.extra_intake_roots``, so the note was unrecallable until the next
+    compile (issue athenaeum#2764). Every non-empty value is therefore
+    rerouted to the transport default (*default_subdir*); the argument stays
+    in the signature so existing callers do not break. An EMPTY string is
+    passed through so ``remember_write`` keeps returning its
+    "must contain at least one alphanumeric character" error. The in-process
+    :func:`remember_write` is untouched and still honours ``source``.
+    """
+    if source is None or source == "":
+        return default_subdir if source is None else source
+    if source != default_subdir:
+        log.info(
+            "remember: ignoring caller-supplied source %r; filing under %r",
+            source,
+            default_subdir,
+        )
+    return default_subdir
 
 
 def create_server(
@@ -4680,17 +4720,12 @@ def create_server(
 
         Args:
             content: The knowledge to save (markdown string).
-            source: SESSION identifier — selects the ``raw/<session>/``
-                subdirectory the file lands in. Example: ``"manual"``.
-                **Not** a per-claim provenance source — pass ``sources`` for
-                that. Omitted (the default) means "let this server pick",
-                which it does from the transport it is serving (issue
-                athenaeum#2385): ``claude-session`` under stdio, which one
-                Claude Code conversation owns, and ``remote-session`` under
-                ``--transport http``, which many clients and many hosts
-                share. The parameter's own schema is the same on both
-                transports — there is nothing here for a caller to read a
-                host identity out of.
+            source: Leave this out. The server files the note itself, and
+                that is the only placement that is searchable by ``recall``
+                before the next compile. A value passed here is ignored and
+                the note is filed in the same place as when it is omitted
+                (issue athenaeum#2764). It is **not** a per-claim provenance
+                source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
 
@@ -4760,7 +4795,7 @@ def create_server(
             # a default, and `or` would have quietly turned that error into
             # a successful write to the default subdirectory. Stdio stays
             # byte-identical down to the error strings.
-            _transport_defaults.session_subdir if source is None else source,
+            _remember_session_dir(source, _transport_defaults.session_subdir),
             wiki_root=wiki_root,
             sources=sources,
             screening=screening,
@@ -4784,6 +4819,10 @@ def create_server(
                 cache_dir=cache_dir,
                 config=config,
             )
+        if transport == "http" and result.startswith("Saved to "):
+            # athenaeum#2781: an absolute server path is egress to the host
+            # provider; name the file relative to the corpus root instead.
+            result = _corpus_relative_saved_reply(result, raw_root)
         return result
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

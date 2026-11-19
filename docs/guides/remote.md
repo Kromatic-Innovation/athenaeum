@@ -84,6 +84,14 @@ Before you start, have all of these:
    built: `athenaeum init`, then at least one `athenaeum run` and
    `athenaeum reindex`. A remote host pointed at an unindexed store gets empty
    `recall` results and no error.
+
+   Which index that is depends on your install. The `mcp` extra alone serves
+   **FTS5 keyword search**: with `search_backend: vector` (the default) and no
+   `chromadb`, both `reindex` and `recall` fall back to FTS5, and the startup check
+   looks for the FTS5 index (`wiki-index.db`). Semantic (vector) search needs the
+   `vector` extra as well, installed alongside `mcp`; see
+   [Install](install.md#i-want-semantic-vector-recall-not-just-keyword-search) and
+   [Vector search](vector-search.md).
 3. **A DNS name you control**, resolving to the host — `memory.example.net` below.
 4. **A TLS certificate** for that name, and a reverse proxy to terminate it.
 5. **An OAuth 2.1 / OIDC authorization server** meeting the requirements in the next
@@ -91,8 +99,16 @@ Before you start, have all of these:
 6. **The `sub` or verified email of every identity** that may use the server. There
    is no "anyone my provider vouches for" setting; an empty allowlist is a startup
    error.
-7. **A scheduler** — systemd timers or cron. No Claude Code `SessionStart` hook runs
+7. **git** on the host (`athenaeum init` creates a git repository for the store).
+   Slim server images often omit it: `apt-get install git`.
+8. **A scheduler** — systemd timers or cron. No Claude Code `SessionStart` hook runs
    on a server, so nothing compiles or reindexes unless you schedule it.
+8. **`curl`, or an equivalent, for the verification steps.** This guide checks the
+   provider's discovery document and your public endpoints with `curl`, which slim
+   server images often lack. Install it, or use Python, which athenaeum already needs:
+   `python3 -c "import sys,urllib.request as u; print(u.urlopen(sys.argv[1]).read()[:400].decode())" https://id.example.net/.well-known/openid-configuration`.
+   For the status-code check, `urllib.request.urlopen` raises `urllib.error.HTTPError`
+   on the refused call; its `.code` is the `401` that `curl` prints.
 
 A loopback dry run first is worth the five minutes, because it separates athenaeum
 configuration errors from proxy and provider errors:
@@ -103,6 +119,31 @@ athenaeum serve --path ~/knowledge --transport http --port 8000 --profile remote
 
 That binds `127.0.0.1` only and needs no auth block at all. Confirm it starts and
 prints its transport line, then stop it and configure the rest.
+
+### The one outbound request at startup
+
+`athenaeum serve --transport http` makes one outbound request when it starts:
+`GET https://pypi.org/pypi/fastmcp/json`. It is FastMCP's update check, run while it
+prints its startup banner, and it only decides whether to show an "Update available"
+box. athenaeum itself makes no request here. It appears in the log as
+`INFO httpx2 ... HTTP Request: GET https://pypi.org/pypi/fastmcp/json`. FastMCP caches
+the answer under its home directory (`version_cache.json`, 12 hours), so a restart
+inside that window sends nothing.
+
+On a host with restricted egress, turn it off with an environment variable on the
+serve process (for example `Environment=FASTMCP_CHECK_FOR_UPDATES=off` in the systemd
+unit below):
+
+```bash
+FASTMCP_CHECK_FOR_UPDATES=off athenaeum serve --path ~/knowledge --transport http --port 8000 --profile remote
+```
+
+The value is `off`. `false`, `0` and `no` are not accepted: FastMCP refuses to start
+with a validation error. `FASTMCP_SHOW_SERVER_BANNER=false` also stops the request,
+because the check runs only when the banner is shown. This was checked against
+FastMCP 4.0.11 with a fresh FastMCP home directory: without the variable the log shows
+the `GET https://pypi.org/pypi/fastmcp/json` line and a lookup of `pypi.org`; with
+`FASTMCP_CHECK_FOR_UPDATES=off` neither appears.
 
 ## What your authorization server must provide
 
@@ -530,7 +571,7 @@ tick with nothing new costs no model calls and no index work. It is what closes 
 write-then-recall gap for a remote caller, and running it every few minutes is
 cheaper than running `reindex --full` once.
 
-Two details specific to remote mode:
+Details specific to remote mode:
 
 - **A remote `remember` lands in `raw/remote-session/`**, not `raw/claude-session/`.
   `athenaeum init` creates it and registers it as a `recall.extra_intake_roots`
@@ -546,6 +587,9 @@ Two details specific to remote mode:
   `remember` argument, and replaces any `audience:` written in the note itself; a
   note's own `access: open` is dropped. Under `--audience owner` nothing is
   stamped, because the owner reads every page already.
+- **A remote `remember` reply names the saved file relative to the corpus root**
+  (`raw/remote-session/<file>.md`), never an absolute server path, because every
+  value returned to the host is egress. A local stdio server keeps the absolute path.
 - **Wiki-level sources default to `remote:inferred`** under `--transport http`, not
   `claude:inferred`. That is the string to select on when you want to know what
   arrived over the remote endpoint.
@@ -631,7 +675,10 @@ What you get from startup lines, and what you do not:
   `recall` will return nothing.** It is the single most common silent remote-mode
   failure: the server resolved a different `ATHENAEUM_CACHE_DIR` than the compiler
   wrote to. Fix the cache directory, do not ignore the warning — nothing downstream
-  reports it again.
+  reports it again. The `search_backend=` it names is the backend that will actually
+  answer: on an install without the `vector` extra a `vector` setting is reported as
+  `fts5` and the path is the FTS5 index, because that is what `reindex` built and
+  `recall` reads.
 - **Startup lines name the whole resolved configuration**: the `[auth]` line carries
   the issuer, the audience and the allowed-identity count; `[remote-policy]` carries
   the profile and the excluded-fields pin; `[transport]` carries the bind and the
