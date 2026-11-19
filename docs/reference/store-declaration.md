@@ -19,7 +19,7 @@ roles and no rights.
 
 ```yaml
 version: 1
-store_id: st_q7m2xk4vwz9d
+store_id: st_q7m2xk4vwz5d
 directory: static
 groups:
   leadership:
@@ -51,7 +51,7 @@ reviews: []
 | Key | Required | Meaning |
 |---|---|---|
 | `version` | yes | Must be `1`. |
-| `store_id` | yes | The one identifier of the store: `st_` followed by 12 lowercase base32 characters (`0-9` and `a-z` without `i`, `l`, `o`, `u`). Opaque; never a name, URL or path. |
+| `store_id` | yes | The one identifier of the store: `st_` followed by 12 lowercase base32 characters (`a-z` and `2-7`, so no `0`, `1`, `8`, `9` and no upper case). Opaque; never a name, URL or path. |
 | `directory` | no | The directory adapter that resolves group names. Default `static`. |
 | `groups` | no | A group name mapped to a list of principal blocks. Read as data only. |
 | `roles` | no | A role name you choose, mapped to `{rights, members}`. |

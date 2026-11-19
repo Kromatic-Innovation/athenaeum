@@ -214,7 +214,7 @@ for every surface.
 
 ```yaml
 version: 1
-store_id: st_q7m2xk4vwz9d        # the one identifier of this store (below)
+store_id: st_q7m2xk4vwz5d        # the one identifier of this store (below)
 directory: static                 # which directory adapter resolves group names
 groups:                           # read by the static adapter only
   leadership:
@@ -497,7 +497,7 @@ declaration does not run, even if the clone is on disk.
 # in the TARGET store's _store/access.yaml
 reviews:
   - name: weekly-field-notes
-    source: st_f2n8rb5hjc3t          # the source's store_id
+    source: st_f2n6rb5hjc3t          # the source's store_id
     every: 7d
     criteria: _store/reviews/weekly-field-notes.md
 ```

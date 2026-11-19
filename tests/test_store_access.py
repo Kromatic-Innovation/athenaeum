@@ -31,7 +31,7 @@ ISS = "https://git.example.net"
 
 EXAMPLE: dict[str, Any] = {
     "version": 1,
-    "store_id": "st_q7m2xk4vwz9d",
+    "store_id": "st_q7m2xk4vwz5d",
     "directory": "static",
     "groups": {
         "leadership": [{"iss": ISS, "sub": "1042"}, {"iss": ISS, "sub": "1077"}],
@@ -97,7 +97,7 @@ class TestDocumentedExamples:
         )
         result = parse_store_declaration(block)
         assert isinstance(result, StoreDeclaration), getattr(result, "messages", None)
-        assert result.store_id == "st_q7m2xk4vwz9d"
+        assert result.store_id == "st_q7m2xk4vwz5d"
         assert result.sync.mode == "integrate"
         assert result.sync.always_ask == ()
         assert sorted(r.name for r in result.roles) == ["contributor", "editor", "staff"]
@@ -120,7 +120,7 @@ class TestValid:
         result = parse_store_declaration(_doc())
         assert isinstance(result, StoreDeclaration)
         assert result.version == 1
-        assert result.store_id == "st_q7m2xk4vwz9d"
+        assert result.store_id == "st_q7m2xk4vwz5d"
         assert result.directory == "static"
         groups = {g.name: g for g in result.groups}
         assert sorted(groups) == ["department-heads", "leadership"]
@@ -201,7 +201,7 @@ class TestValid:
         reviews = [
             {
                 "name": "weekly-field-notes",
-                "source": "st_f2n8rb5hjc3t",
+                "source": "st_f2n6rb5hjc3t",
                 "every": "7d",
                 "criteria": "_store/reviews/weekly-field-notes.md",
             }
@@ -232,11 +232,14 @@ COUNTER_EXAMPLES: list[tuple[str, str, str]] = [
     ("version-bool", _bad(version=True), "version"),
     ("version-missing", _bad(version=_DROP), "version"),
     ("store-id-missing", _bad(store_id=_DROP), "store_id"),
-    ("store-id-no-prefix", _bad(store_id="q7m2xk4vwz9d"), "store_id"),
-    ("store-id-too-short", _bad(store_id="st_q7m2xk4vwz9"), "store_id"),
-    ("store-id-too-long", _bad(store_id="st_q7m2xk4vwz9dd"), "store_id"),
-    ("store-id-uppercase", _bad(store_id="st_Q7M2XK4VWZ9D"), "store_id"),
-    ("store-id-bad-letter", _bad(store_id="st_q7m2xk4vwz9l"), "store_id"),
+    ("store-id-no-prefix", _bad(store_id="q7m2xk4vwz5d"), "store_id"),
+    ("store-id-too-short", _bad(store_id="st_q7m2xk4vwz5"), "store_id"),
+    ("store-id-too-long", _bad(store_id="st_q7m2xk4vwz5dd"), "store_id"),
+    ("store-id-uppercase", _bad(store_id="st_Q7M2XK4VWZ5D"), "store_id"),
+    ("store-id-digit-8", _bad(store_id="st_q7m2xk4vwz8d"), "store_id"),
+    ("store-id-digit-9", _bad(store_id="st_q7m2xk4vwz9d"), "store_id"),
+    ("store-id-digit-0", _bad(store_id="st_q7m2xk4vwz0d"), "store_id"),
+    ("store-id-digit-1", _bad(store_id="st_q7m2xk4vwz1d"), "store_id"),
     ("directory-empty", _bad(directory=""), "directory"),
     ("rights-write", _bad(**_role(["write"])), "roles.r.rights"),
     ("rights-compile-without-read", _bad(**_role(["compile"])), "roles.r.rights"),
@@ -421,10 +424,21 @@ class TestStoreId:
         assert len(seen) == 50
         for sid in seen:
             assert is_store_id(sid)
-            assert re.fullmatch(r"st_[0-9a-z]{12}", sid)
+            assert re.fullmatch(r"st_[a-z2-7]{12}", sid)
 
     @pytest.mark.parametrize(
-        "bad", ["", "st_", "st_abc", "ST_q7m2xk4vwz9d", None, 12, "st_q7m2xk4vwz9d "]
+        "bad",
+        [
+            "",
+            "st_",
+            "st_abc",
+            "ST_q7m2xk4vwz5d",
+            "st_q7m2xk4vwz8d",
+            "st_q7m2xk4vwz0d",
+            None,
+            12,
+            "st_q7m2xk4vwz5d ",
+        ],
     )
     def test_bad_shapes(self, bad: object) -> None:
         assert not is_store_id(bad)

@@ -70,9 +70,9 @@ RIGHTS = ("read", "propose", "compile", "answer")
 SYNC_MODES = ("fast_forward", "integrate")
 DEFAULT_DIRECTORY = "static"
 
-#: Lowercase Crockford base32: ``0-9`` and ``a-z`` without ``i``, ``l``, ``o``,
-#: ``u``. 32 symbols, so 12 characters carry 60 random bits.
-STORE_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+#: Lowercase RFC 4648 base32: ``a-z`` and ``2-7``. 32 symbols, so 12 characters
+#: carry 60 random bits.
+STORE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 _STORE_ID_LEN = 12
 _STORE_ID_RE = re.compile(rf"^st_[{STORE_ID_ALPHABET}]{{{_STORE_ID_LEN}}}$")
 
