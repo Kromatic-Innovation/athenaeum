@@ -203,6 +203,18 @@ class TestOpaquePushIdFromFilename:
         assert "alice" not in pid.lower()
         assert "wonderland" not in pid.lower()
 
+    def test_16_hex_entity_filename_truncates_to_the_16_hex_uid(self) -> None:
+        pid = push_metrics.opaque_push_id_from_filename("7b2e9a04c1d85f36-acme-corp.md")
+        assert pid == "7b2e9a04c1d85f36"
+        assert "acme" not in pid
+
+    def test_8_hex_entity_filename_still_truncates(self) -> None:
+        assert push_metrics.opaque_push_id_from_filename("3fa8c2d1-acme-corp.md") == "3fa8c2d1"
+
+    def test_12_hex_prefix_is_not_an_entity_filename(self) -> None:
+        fname = "3fa8c2d1a4b7-acme-corp.md"
+        assert push_metrics.opaque_push_id_from_filename(fname) == fname
+
     def test_raw_intake_filename_is_recorded_whole(self) -> None:
         # Raw-intake filenames are `<timestamp>Z-<hash>.md` — the 9th
         # character is `T`, never `-`, so the uid-prefix pattern never

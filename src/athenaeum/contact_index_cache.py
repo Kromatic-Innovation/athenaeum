@@ -9,7 +9,7 @@ athenaeum#2182 builds anyway, closing exactly that gap rather than reopening
 it:
 
 - **Never a raw address on disk.** The cache stores, per contact-record
-  file: its ``uid`` (an opaque 8-char-hex id — :data:`athenaeum.models.generate_uid`
+  file: its ``uid`` (an opaque 8- or 16-char-hex id — :data:`athenaeum.models.generate_uid`
   — never itself erasure-class content) and the HMAC-SHA256 digest of every
   address the record lists, keyed under the SAME per-corpus
   ``_erasure_hmac_key`` :mod:`athenaeum.erasure` already mints and purges

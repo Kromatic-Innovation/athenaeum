@@ -31,6 +31,7 @@ created, never pre-existing content — a first-run UX concern.
 from __future__ import annotations
 
 import importlib.resources
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -110,10 +111,26 @@ def _is_identity_error(exc: subprocess.CalledProcessError) -> bool:
     return "user.name" in stderr or "user.email" in stderr or exc.returncode == 128
 
 
+#: athenaeum#2778: the one-line message when no ``git`` binary is on PATH.
+_GIT_MISSING_MESSAGE = (
+    "athenaeum init: git is not installed or not on PATH. "
+    "Install it (e.g. `apt-get install git`, `brew install git`) and retry."
+)
+
+
 def _git(cmd: list[str], cwd: Path) -> None:
-    """Run a git command; turn a failure into a short ``SystemExit`` message."""
+    """Run a git command; turn a failure into a short ``SystemExit`` message.
+
+    A missing ``git`` binary surfaces here, on the first call (``git init``),
+    as ``FileNotFoundError``. It becomes a one-line hint instead of a
+    traceback, and ``init_knowledge_dir``'s rollback removes everything this
+    call created, so a retry after installing git starts clean
+    (athenaeum#2778).
+    """
     try:
         subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise SystemExit(_GIT_MISSING_MESSAGE) from exc
     except subprocess.CalledProcessError as exc:
         raise _git_failure(exc) from exc
 
@@ -127,7 +144,6 @@ def _git_failure(exc: subprocess.CalledProcessError) -> SystemExit:
 
 def _rollback(root: Path, created: list[Path]) -> None:
     """Remove only what this call created, newest first; never pre-existing content."""
-    import shutil
 
     for p in reversed(created):
         try:

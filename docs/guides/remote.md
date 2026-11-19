@@ -91,7 +91,9 @@ Before you start, have all of these:
 6. **The `sub` or verified email of every identity** that may use the server. There
    is no "anyone my provider vouches for" setting; an empty allowlist is a startup
    error.
-7. **A scheduler** — systemd timers or cron. No Claude Code `SessionStart` hook runs
+7. **git** on the host (`athenaeum init` creates a git repository for the store).
+   Slim server images often omit it: `apt-get install git`.
+8. **A scheduler** — systemd timers or cron. No Claude Code `SessionStart` hook runs
    on a server, so nothing compiles or reindexes unless you schedule it.
 
 A loopback dry run first is worth the five minutes, because it separates athenaeum
@@ -242,6 +244,19 @@ Confirm the server came up the way you meant by reading its own startup lines
 
 A missing `[auth]` line on an HTTP server is the whole failure: it means the block
 did not resolve and the process is serving without authentication.
+
+### With an issuer configured, the token is the only DNS-rebinding defence
+
+With `serve.auth.issuer` set, the Host/Origin guard is off, so a request is not
+checked for a foreign `Host` or `Origin`. Bearer-token validation (signature, issuer,
+audience, a required `exp`, and `nbf` / `iat` not in the future) is then the only
+DNS-rebinding defence: a rebinding web page cannot supply a token your authorization
+server issued, and a request without one is refused. The guard is off because a proxy
+or tunnel forwards your public hostname, which the strict guard would answer with
+`421`. The startup log records which arm you are on, as
+`[transport] Host/Origin guard: off (bearer-token auth configured)`; an unauthenticated
+loopback server logs `[transport] Host/Origin guard: on` instead. Check the line after
+every config change.
 
 ## The reverse proxy
 

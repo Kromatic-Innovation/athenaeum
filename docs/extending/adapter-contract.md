@@ -68,8 +68,10 @@ Write each intake file to:
   alphanumerics plus `-`/`_` (the MCP `remember` tool sanitises to exactly that
   set). Examples: `raw/press-releases/`, `raw/crm-export/`, `raw/notes/`.
 - **`<timestamp>`** is UTC, formatted `YYYYMMDDTHHMMSSZ`.
-- **`<uuid8>`** is 8 hexadecimal characters (use `athenaeum.generate_uid()`, or
-  the first 8 chars of a `uuid4().hex`).
+- **`<uuid8>`** is 8 lowercase hexadecimal characters (use
+  `secrets.token_hex(4)`, or the first 8 chars of a `uuid4().hex`). Do not use
+  `athenaeum.generate_uid()` here: it mints 16-character page uids, which the
+  raw filename pattern does not accept.
 
 The canonical filename is matched by
 `athenaeum.librarian.RAW_FILE_RE = ^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.(?:md|jsonl)$`,
@@ -226,7 +228,7 @@ If MCP is not available (a cron job, a one-shot importer, a language other than
 Python calling the CLI), write the file directly following §1–§3. A minimal,
 synthetic, runnable example lives at
 [`examples/adapters/minimal_adapter.py`](../examples/adapters/minimal_adapter.py):
-it uses only the public `render_frontmatter` / `generate_uid` helpers, writes
+it uses only the public `render_frontmatter` helper and the stdlib, writes
 atomically, path-guards, and declares provenance. Copy it as a starting point.
 
 ```bash
