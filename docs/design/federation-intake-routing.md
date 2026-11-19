@@ -266,8 +266,8 @@ stays one table read top to bottom. It gains one column and one verdict.
 |---------|--------|-----------------|---------|-----------------|
 | never   |        | personal        |         |                 |
 | always  |        | personal/travel |         |                 |
-| route   |        | hr              |         | st_h4r8n2kd6wq3 |
-| route   | policy |                 |         | st_q7m2xk4vwz9d |
+| route   |        | hr              |         | st_h4r5n2kd6wq3 |
+| route   | policy |                 |         | st_q7m2xk4vwz5d |
 | route   |        | hr/health       |         | personal        |
 ```
 
@@ -451,7 +451,7 @@ record of it, and it is part of what a proposer may read back
 ```yaml
 # _store/propose/notice-3.yaml, in the raw location repository
 version: 2                      # the declaration's version
-store_id: st_q7m2xk4vwz9d
+store_id: st_q7m2xk4vwz5d
 intake:
   default: refuse
   rules:

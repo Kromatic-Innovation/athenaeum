@@ -3735,7 +3735,7 @@ def _remember_session_dir(source: str | None, default_subdir: str) -> str:
     if source is None or source == "":
         return default_subdir if source is None else source
     if source != default_subdir:
-        log.info(
+        log.warning(
             "remember: ignoring caller-supplied source %r; filing under %r",
             source,
             default_subdir,
@@ -4745,7 +4745,8 @@ def create_server(
                 that is the only placement that is searchable by ``recall``
                 before the next compile. A value passed here is ignored and
                 the note is filed in the same place as when it is omitted
-                (issue athenaeum#2764). It is **not** a per-claim provenance
+                (issue athenaeum#2764); the reply says so and the server logs
+                a warning (issue athenaeum#2900). It is **not** a per-claim provenance
                 source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
@@ -4790,7 +4791,8 @@ def create_server(
                 override is recorded in an audit log. Default ``false``.
 
         Returns:
-            Confirmation message with the file path.
+            Confirmation message with the file path. When a ``source`` was
+            supplied and ignored, a second line says so.
 
         Issue athenaeum#2313 (AC2): on success, when the configured search
         backend is ``fts5`` or ``vector``, this also refreshes that backend's
@@ -4844,6 +4846,18 @@ def create_server(
             # athenaeum#2781: an absolute server path is egress to the host
             # provider; name the file relative to the corpus root instead.
             result = _corpus_relative_saved_reply(result, raw_root)
+        if (
+            result.startswith("Saved to ")
+            and source
+            and source != _transport_defaults.session_subdir
+        ):
+            # athenaeum#2900: the supplied `source` was dropped (athenaeum#2764);
+            # say so in the reply, not only in the server log.
+            result += (
+                f"\nNote: the supplied `source` was ignored; the note was filed "
+                f"under {_transport_defaults.session_subdir!r}. Omit `source`; pass "
+                "`sources` for provenance."
+            )
         return result
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

@@ -1142,6 +1142,25 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         source_ref="config.py:185 'athenaeum.yaml' (design note §5.2 R3 box, issue "
         "athenaeum#980 AC5)",
     ),
+    # -- store declaration (issue athenaeum#2772) -------------------------
+    # Operator-authored and versioned with the pages, so a copy changed on both
+    # sides is held for a person and never merged by rule.
+    ArtifactDeclaration(
+        name="store-access-declaration",
+        persistence_class="config",
+        operational_scope=None,
+        location="surface root (_store/access.yaml)",
+        source_ref="store_access.py DECLARATION_RELPATH (design note "
+        "federation-store-access §5, issue athenaeum#2772)",
+    ),
+    ArtifactDeclaration(
+        name="store-review-criteria",
+        persistence_class="config",
+        operational_scope=None,
+        location="surface root (_store/reviews/<name>.md)",
+        source_ref="store_access.py (design note federation-store-access §8, "
+        "issue athenaeum#2772)",
+    ),
     # -- off-corpus purgeable surface (design note §8, issue athenaeum#984) --
     # AC4: the purgeable surface's derived/operational artifacts, declared
     # through this SAME R3 catalogue every other store artifact declares
