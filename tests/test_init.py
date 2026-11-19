@@ -282,6 +282,26 @@ def test_git_add_failure_is_a_clean_message(
     assert not target.exists()
 
 
+def test_init_without_git_binary_exits_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No git on PATH: one-line hint, non-zero exit, nothing created (athenaeum#2778)."""
+    from athenaeum.cli import main
+
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    target = tmp_path / "knowledge"
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["init", "--path", str(target)])
+    assert excinfo.value.code not in (0, None)
+    msg = str(excinfo.value.code)
+    assert "git" in msg and "install" in msg.lower()
+    assert "\n" not in msg.strip()
+    assert not target.exists()
+
+
 def test_force_help_mentions_no_backup(capsys: pytest.CaptureFixture[str]) -> None:
     """`--force` help text should warn that no backup is created (athenaeum#105)."""
     from athenaeum.cli import main

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: A recorded push id: the 8-hex-char frontmatter ``uid`` every compiled page
+#: A recorded push id: the 8- or 16-hex-char frontmatter ``uid`` every compiled page
 #: carries. Anchored and length-bounded because this value reaches
 #: :func:`resolve_path`, which is a filesystem lookup — a permissive pattern
 #: here is how a traversal attempt would get a chance to matter.

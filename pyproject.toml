@@ -31,7 +31,7 @@ dependencies = [
     # wheel — bumps are explicit PRs.
     # Floor 0.39.0: first stable release shipping client.messages.batches
     # (the Batch API surface batch-mode depends on, athenaeum#236).
-    # requirements-ci.lock pins anthropic 0.120.2, but the SDK has since
+    # requirements-ci.txt pins anthropic 0.120.2, but the SDK has since
     # shipped 1.x and 2.x, and the unlocked `clean-venv` CI job installs
     # whatever resolves under this bound. The ceiling therefore stays at the
     # next major boundary (`<3.0`): a tighter `<1` would exclude releases
@@ -74,7 +74,7 @@ mcp = [
     # admitted releases on which unauthenticated HTTP serving refuses to start.
     # Note the 3.x line declares `mcp<2.0`, which conflicts with the
     # `mcp>=2.0` pin below, so a resolver lands on fastmcp 4.x in practice;
-    # `requirements-ci.lock` pins 4.0.11.
+    # `requirements-ci.txt` pins 4.0.11.
     "fastmcp>=3.4.3,<5.0",
     "mcp>=2.0,<3.0",
     # athenaeum#1954: cli_tool_bridge.py validates `tools/call` arguments
@@ -139,7 +139,7 @@ dev = [
     # dependency -- until `anthropic` 1.17.0 switched to `httpx2` and a clean
     # `pip install -e ".[dev]"` stopped collecting the suite at all (3 ERRORs,
     # 0 tests run). CI never saw it, because CI constrains with
-    # `requirements-ci.lock`, which pins an older `anthropic` that still carries
+    # `requirements-ci.txt`, which pins an older `anthropic` that still carries
     # `httpx`. `packaging` is the same class, found by
     # `scripts/check_declared_imports.py` on its first run (it rides in via
     # pip's own build requirements). Both bounded like every other dep here.

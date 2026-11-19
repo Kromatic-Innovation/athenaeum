@@ -12,7 +12,7 @@ guided walkthrough.
 - **[`minimal_adapter.py`](minimal_adapter.py)** — a synthetic, generic,
   runnable Lane-A adapter. It writes one raw-intake file under
   `raw/<source>/<timestamp>-<uuid8>.md` using only Athenaeum's public
-  `render_frontmatter` / `generate_uid` helpers, writes atomically, path-guards
+  `render_frontmatter` helper, writes atomically, path-guards
   the write to stay inside `raw/`, and declares provenance. Copy it as a
   starting point for a real adapter.
 
