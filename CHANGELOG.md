@@ -192,6 +192,7 @@ ship without a deprecation period. See the
 ### Security
 
 - Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
+- Under `--transport http`, the `remember` reply no longer returns the server's absolute filesystem path. It names the saved file relative to the corpus root (`Saved to raw/remote-session/<file>.md`), so a remote caller and its host provider no longer learn the deployment's directory layout. The stdio reply is byte-identical to before (athenaeum#2781).
 
 ## [0.26.0] - 2026-11-16
 
