@@ -614,13 +614,14 @@ def opaque_push_id(filename: str, fm: dict[str, object] | None) -> str:
     return filename
 
 
-#: Matches the leading ``<8-hex-uid-prefix>-`` an entity's on-disk filename
+#: Matches the leading ``<8-or-16-hex-uid-prefix>-`` an entity's on-disk filename
 #: carries (``athenaeum.models.WikiEntity.filename``: ``<uid>-<slug>.md``).
 #: A raw-intake filename (``<timestamp>Z-<hash>.md``, e.g.
 #: ``20260802T023311Z-3f0ea402.md``) never matches: its 9th character is
-#: ``T``, never ``-``. Mirrors the pre-convergence shell hook's
-#: ``_pm_opaque_push_id`` case pattern (issue athenaeum#1343, issue athenaeum#1362).
-_UID_PREFIX_RE = re.compile(r"^[0-9a-f]{8}-")
+#: ``T``, never ``-``, and a 16-hex uid is only matched when all 16 are hex.
+#: Mirrors the pre-convergence shell hook's ``_pm_opaque_push_id`` case pattern
+#: (issue athenaeum#1343, issue athenaeum#1362).
+_UID_PREFIX_RE = re.compile(r"^([0-9a-f]{16}|[0-9a-f]{8})-")
 
 
 def opaque_push_id_from_filename(filename: str) -> str:
@@ -632,8 +633,8 @@ def opaque_push_id_from_filename(filename: str) -> str:
     usable there). Reproduces the pre-convergence shell hook's
     ``_pm_opaque_push_id`` behaviour in Python:
 
-    - A compiled entity's filename (``<8-hex-uid-prefix>-<slug>.md``) is
-      truncated to just the 8-hex-char uid prefix, so the name-derived slug
+    - A compiled entity's filename (``<uid-prefix>-<slug>.md``, 8 or 16 hex) is
+      truncated to just the uid prefix, so the name-derived slug
       never reaches the ledger.
     - Anything else (a raw-intake filename, which is never name-derived) is
       recorded whole, same as :func:`opaque_push_id`'s no-``uid`` branch.
@@ -642,8 +643,9 @@ def opaque_push_id_from_filename(filename: str) -> str:
     ``recall`` path) — it is exact rather than pattern-matched. This
     function exists only for a caller with no frontmatter to consult.
     """
-    if _UID_PREFIX_RE.match(filename):
-        return filename[:8]
+    m = _UID_PREFIX_RE.match(filename)
+    if m:
+        return m.group(1)
     return filename
 
 

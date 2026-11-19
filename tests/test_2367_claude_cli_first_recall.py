@@ -179,6 +179,8 @@ class TestInitDisclosesProvider:
         import athenaeum.provider as provider_mod
 
         monkeypatch.setattr(provider_mod.shutil, "which", lambda _b: "/usr/bin/claude")
+        # No real `claude auth status` probe (athenaeum#2762): pretend a login exists.
+        monkeypatch.setattr("athenaeum.doctor._claude_login_missing", lambda: False)
 
         target = tmp_path / "knowledge"
         rc = cli_main(["init", "--path", str(target)])

@@ -1,5 +1,5 @@
 # Counter-example fixture (athenaeum#1960 AC3b): a declared direct dependency
-# (mcp) has no corresponding pin in the paired requirements-ci.lock at all.
+# (mcp) has no corresponding pin in the paired requirements-ci.txt at all.
 [project]
 name = "demo"
 dependencies = [
