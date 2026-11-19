@@ -23,8 +23,8 @@ Two routes, chosen by the transport the server is running under:
   proposal id) and a ``reject`` discards it.
 
 **Deterministic.** The caller (a model) supplies a structured rule — a
-verdict plus type / tag / subject. There is no natural-language parsing and no
-LLM call here.
+verdict plus type / tag / subject (and, for a ``route`` rule, a ``store``).
+There is no natural-language parsing and no LLM call here.
 
 **Semantics preserved.** The file is read top to bottom and the last matching
 rule wins, so a new rule is APPENDED: it overrides any earlier rule it
@@ -76,6 +76,8 @@ DECISION_TYPE = "relevance-policy-edit"
 
 _HEADER_ROW = "| Verdict | Type | Tag | Subject |"
 _SEPARATOR_ROW = "|---------|------|-----|---------|"
+_HEADER_ROW_STORE = "| Verdict | Type | Tag | Subject | Store |"
+_SEPARATOR_ROW_STORE = "|---------|------|-----|---------|-------|"
 
 
 def audit_path(wiki_root: Path) -> Path:
@@ -90,13 +92,17 @@ def _policy_path(wiki_root: Path) -> Path:
     return Path(wiki_root) / "_schema" / POLICY_FILENAME
 
 
-RuleKey = tuple[str, "str | None", "str | None", "str | None"]
+RuleKey = tuple[str, "str | None", "str | None", "str | None", "str | None"]
 
 
 def normalize_rule(
-    verdict: str, type_: str | None, tag: str | None, subject: str | None
+    verdict: str,
+    type_: str | None,
+    tag: str | None,
+    subject: str | None,
+    store: str | None = None,
 ) -> RuleKey:
-    """Canonical ``(verdict, type, tag, subject)``: lowercase verdict, blank -> ``None``.
+    """Canonical ``(verdict, type, tag, subject, store)``: lowercase verdict, blank -> ``None``.
 
     Raises :class:`RelevancePolicyError` for a value that cannot live in one
     markdown table cell (``|`` or a line break).
@@ -114,19 +120,32 @@ def normalize_rule(
             )
         return value
 
-    return ((verdict or "").strip().lower(), clean(type_), clean(tag), clean(subject))
+    return (
+        (verdict or "").strip().lower(),
+        clean(type_),
+        clean(tag),
+        clean(subject),
+        clean(store),
+    )
 
 
 def _rule_dict(key: RuleKey) -> dict[str, str | None]:
-    return {"verdict": key[0], "type": key[1], "tag": key[2], "subject": key[3]}
+    return {
+        "verdict": key[0],
+        "type": key[1],
+        "tag": key[2],
+        "subject": key[3],
+        "store": key[4],
+    }
 
 
 def _rule_row(key: RuleKey) -> str:
-    return "| " + " | ".join(c or "" for c in key) + " |"
+    cells = key if key[4] is not None else key[:4]
+    return "| " + " | ".join(c or "" for c in cells) + " |"
 
 
 def _keys(policy: RelevancePolicy) -> list[RuleKey]:
-    return [(r.verdict, r.type, r.tag, r.subject) for r in policy.rules]
+    return [(r.verdict, r.type, r.tag, r.subject, r.store) for r in policy.rules]
 
 
 def _snapshot(policy: RelevancePolicy) -> dict[str, Any]:
@@ -136,15 +155,41 @@ def _snapshot(policy: RelevancePolicy) -> dict[str, Any]:
     }
 
 
-def _append_row(existing: str | None, row: str) -> str:
-    """Insert *row* after the last table row of *existing* (or create the table)."""
+def _widen_header(lines: list[str]) -> None:
+    """Widen a four-column header (and its separator row) to five, in place.
+
+    Existing rule rows are left as they are: the loader pads a short row.
+    """
+    table = [i for i, ln in enumerate(lines) if ln.strip().startswith("|")]
+    if not table:
+        return
+    head = lines[table[0]].strip()
+    if len([c for c in head.strip("|").split("|")]) != 4:
+        return
+    lines[table[0]] = f"{head} Store |"
+    if len(table) > 1 and table[1] == table[0] + 1:
+        sep = lines[table[1]].strip()
+        if all(c.strip() and set(c.strip()) <= set("-: ") for c in sep.strip("|").split("|")):
+            lines[table[1]] = f"{sep}-------|"
+
+
+def _append_row(existing: str | None, row: str, *, with_store: bool = False) -> str:
+    """Insert *row* after the last table row of *existing* (or create the table).
+
+    *with_store* widens a four-column header to five (a ``route`` rule).
+    """
+    head, sep_row = (
+        (_HEADER_ROW_STORE, _SEPARATOR_ROW_STORE) if with_store else (_HEADER_ROW, _SEPARATOR_ROW)
+    )
     if not existing:
-        return f"{_HEADER_ROW}\n{_SEPARATOR_ROW}\n{row}\n"
+        return f"{head}\n{sep_row}\n{row}\n"
     lines = existing.splitlines()
     last_table = max((i for i, ln in enumerate(lines) if ln.strip().startswith("|")), default=None)
     if last_table is None:
         sep = "" if existing.endswith("\n") else "\n"
-        return f"{existing}{sep}\n{_HEADER_ROW}\n{_SEPARATOR_ROW}\n{row}\n"
+        return f"{existing}{sep}\n{head}\n{sep_row}\n{row}\n"
+    if with_store:
+        _widen_header(lines)
     lines.insert(last_table + 1, row)
     return "\n".join(lines) + "\n"
 
@@ -165,7 +210,7 @@ def _plan_edit(
         return before, None, ""
     path = _policy_path(wiki_root)
     existing = path.read_text(encoding="utf-8") if path.is_file() else None
-    new_text = _append_row(existing, _rule_row(key))
+    new_text = _append_row(existing, _rule_row(key), with_store=key[4] is not None)
     valid_types, valid_tags = policy_vocabulary(wiki_root)
     after = parse_relevance_policy(new_text, valid_types, valid_tags)
     if _keys(after) != [*old_keys, key]:  # pragma: no cover - defensive round-trip check
@@ -174,10 +219,15 @@ def _plan_edit(
 
 
 def validate_rule(
-    wiki_root: Path, verdict: str, type_: str | None, tag: str | None, subject: str | None
+    wiki_root: Path,
+    verdict: str,
+    type_: str | None,
+    tag: str | None,
+    subject: str | None,
+    store: str | None = None,
 ) -> RuleKey:
     """Normalize and validate a rule against the current policy file and vocabulary."""
-    key = normalize_rule(verdict, type_, tag, subject)
+    key = normalize_rule(verdict, type_, tag, subject, store)
     _plan_edit(Path(wiki_root), key)
     return key
 
@@ -199,6 +249,7 @@ def rule_edit_is_noop(
     type_: str | None = None,
     tag: str | None = None,
     subject: str | None = None,
+    store: str | None = None,
 ) -> bool:
     """True when the rule is identical to the policy file's current last rule.
 
@@ -206,7 +257,7 @@ def rule_edit_is_noop(
     for it (an approval would be a no-op). Raises :class:`RelevancePolicyError`
     for an invalid rule, exactly as :func:`validate_rule` does.
     """
-    key = normalize_rule(verdict, type_, tag, subject)
+    key = normalize_rule(verdict, type_, tag, subject, store)
     return _plan_edit(Path(wiki_root), key)[1] is None
 
 
@@ -216,6 +267,7 @@ def apply_rule_edit(
     type_: str | None = None,
     tag: str | None = None,
     subject: str | None = None,
+    store: str | None = None,
     *,
     transport: str,
     proposal_id: str | None = None,
@@ -228,7 +280,7 @@ def apply_rule_edit(
     invalid rule or an already-invalid policy file; nothing is written then.
     """
     wiki_root = Path(wiki_root)
-    key = normalize_rule(verdict, type_, tag, subject)
+    key = normalize_rule(verdict, type_, tag, subject, store)
     before, after, new_text = _plan_edit(wiki_root, key)
     if after is None:
         return EditResult(False, _rule_dict(key), _snapshot(before), _snapshot(before), before)
@@ -350,6 +402,7 @@ def file_rule_edit_proposal(
     type_: str | None = None,
     tag: str | None = None,
     subject: str | None = None,
+    store: str | None = None,
     *,
     rationale: str = "",
     transport: str = "http",
@@ -362,9 +415,10 @@ def file_rule_edit_proposal(
     that proposal (``created=False``). The policy file is NOT touched.
     """
     wiki_root = Path(wiki_root)
-    key = validate_rule(wiki_root, verdict, type_, tag, subject)
+    key = validate_rule(wiki_root, verdict, type_, tag, subject, store)
     for rec in list_pending_proposals(wiki_root):
-        if tuple(rec.get("rule_key") or ()) == key:
+        # A record filed before the Store column has a four-element key.
+        if (tuple(rec.get("rule_key") or ()) + (None,) * 5)[:5] == key:
             return rec, False
     created_at = now_iso(now)
     record = {
@@ -440,6 +494,7 @@ def resolve_rule_edit_proposal(
                 rule.get("type"),
                 rule.get("tag"),
                 rule.get("subject"),
+                rule.get("store"),
                 transport=str(proposal.get("transport") or "http"),
                 proposal_id=proposal_id,
                 now=now,
