@@ -81,8 +81,13 @@ decision-queue digest and an opt-in push notifier, and routes first-person
 auto-memory notes to the owner page. The documentation and packaging fixes
 asked for by the 0.25.0/0.26.0 release review are in: README quick start
 order, project status and release cadence, supported dependency ranges, and
-the remote-mode security notes. `athenaeum.__all__` is unchanged. There are no
-breaking changes to the public API; the behaviour changes are listed below.
+the remote-mode security notes. `athenaeum.__all__` is unchanged. One change is
+breaking and data-mutating for scripted callers: answering a decision
+(`athenaeum decisions answer` and the `resolve_question`, `resolve_merge` and
+`review_audit_item` MCP tools) now applies the answer at once by default, where
+it used to only record it (athenaeum#2531). Scripts that relied on the old
+record-only behaviour must pass `--apply deferred` (MCP: `apply="deferred"`);
+see upgrade step 3. The behaviour changes are listed below.
 
 Behaviour changes an existing install will notice:
 
@@ -116,9 +121,11 @@ decision push (`notify.yaml`), the `apply` option on decision answers, the
    `fastmcp` yourself, it must be 3.4.3 or later.
 2. If you install with `-c requirements-ci.lock`, switch to
    `-c requirements-ci.txt`.
-3. If you script decision answers and rely on them staying unapplied until the
-   next `ingest-answers` tick, add `--apply deferred` (MCP:
-   `apply="deferred"`).
+3. If you script `athenaeum decisions answer`, or call the `resolve_question`,
+   `resolve_merge` or `review_audit_item` MCP tools, and rely on answers staying
+   unapplied until the next `ingest-answers` tick, add `--apply deferred` (MCP:
+   `apply="deferred"`) to keep the previous record-only behaviour. Without it,
+   each answer mutates the knowledge base at once.
 4. If you have an owner configured and do not want auto-memory notes bridged to
    the owner page, set `owner.bridge_memory_types: []`.
 5. Optional: re-run `athenaeum registry` to build the
