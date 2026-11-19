@@ -22,6 +22,12 @@ ship without a deprecation period. See the
 
 ### Added
 
+- `athenaeum.raise_projection`, a pure module with no I/O: the raise
+  projection of a page (`type`, `name`, `description`, `aliases`, `tags`,
+  `access`, `audience` and the body with links reduced to their labels), the
+  payload hash over that projection, `raise_id` / `message_id` minting and
+  validators, and the derived uid of a raised copy. Nothing calls it yet, so no
+  install behaves differently (athenaeum#2626, athenaeum#2798).
 - `athenaeum.store_access` parses and validates a store's declaration,
   `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
   naming each offending key, and nothing reads it yet so no install behaves
