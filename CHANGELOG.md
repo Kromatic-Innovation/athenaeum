@@ -87,6 +87,7 @@ ship without a deprecation period. See the
 
 ### Fixed
 
+- A failing `claude` provider call now reports its real cause. When the CLI prints its error on stdout and leaves stderr empty, the error carries that text (bounded) instead of `(no stderr)`. The not-logged-in case reads as one line naming `/login` (run `claude`, then `/login`) and the `ANTHROPIC_API_KEY` alternative, and `athenaeum run` logs it without a traceback unless debug logging is on. `athenaeum status` shows a `Last compile: FAILED` line with the reason while a raw file is still failing (athenaeum#2763).
 - `athenaeum doctor` `key_mode` and `athenaeum init` no longer report a Claude Code login when only the `claude` binary exists. With `llm.provider: claude-cli` they now run `claude auth status` (a local read, no model call); a logged-out CLI fails `key_mode` with the fix "run `claude` and `/login`, or set ANTHROPIC_API_KEY", and `init` prints that finding instead of the plan-usage disclosure. With no `claude` binary and no key, both name the missing binary and the install step and say compiles cannot run (athenaeum#2762).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
