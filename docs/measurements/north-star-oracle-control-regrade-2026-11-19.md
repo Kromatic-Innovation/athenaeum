@@ -94,7 +94,7 @@ What the reading in athenaeum#2805 got right and what it did not:
 
 ## What changed, and the offline re-grade
 
-Two changes that do not touch the page corpus:
+Two changes (the first is code, the second edits the probe corpus but no page):
 
 1. `_normalize_marker_for_match` (tests/evals/corpus.py) now strips markdown
    emphasis delimiters (`*`, and `_` at a word boundary) before lowercasing.
@@ -107,16 +107,46 @@ Two changes that do not touch the page corpus:
    `bramfield_retainer_renewal` -> "eighteen-month",
    `triform_vendor_consolidation` -> "bundled discount".
 
-**The corpus digest does not move.** `Corpus.fingerprint()` digests pages
-only, and neither change touches a page, so `corpus_digest[core]` and
+**The corpus digest does not move, because `Corpus.fingerprint()` covers
+pages only** (not `probes.yaml`), and neither change touches a page, so `corpus_digest[core]` and
 `corpus_digest[medium]` stay `3c5ea876688b089e` and `42e6ce0dfdc53e02`. What
 does move is the grading rule, which the digest cannot show, so
 `GRADER_REVISION` goes from `athenaeum#1935` to `athenaeum#2918`. A report
 stamped `athenaeum#2918` and one stamped `athenaeum#1935` over the same rows
 are not comparable, and run 44438673846's own render stays stamped `athenaeum#1935`.
 
-Re-grade of the stored oracle rows with both changes, per class (correct over
-graded, core then medium; before in parentheses):
+### View 1 (the issue's acceptance figure): matcher fix only, original markers
+
+The page corpus and `probes.yaml` are both corpus (`tests/evals/data/corpus/`),
+so the re-grade that does not change the corpus is: the stored answers, the
+ORIGINAL markers, and only the emphasis-stripping matcher applied. Correct over
+graded; the recorded run is in parentheses.
+
+| probe_class | enrolled in §7 | oracle core | oracle medium |
+| --- | --- | --- | --- |
+| `abstention` | yes | 3/3 (3/3) | 3/3 (3/3) |
+| `disambiguation` | yes | 4/4 (4/4) | 4/4 (4/4) |
+| `distractor_robustness` | yes | 2/2 (2/2) | 2/2 (2/2) |
+| `follow_through` | yes | 6/6 (6/6) | 6/6 (6/6) |
+| `multi_hop` | yes | 3/3 (3/3) | 3/3 (3/3) |
+| `redundancy` | yes | **3/4** (2/4) | **3/4** (2/4) |
+| `single_hop` | yes | **5/8** (5/8) | **6/8** (6/8) |
+| `temporal` | yes | 6/6 (6/6) | 6/6 (6/6) |
+| `aggregation` | report-only | 1/3 (1/3) | 2/3 (2/3) |
+| `contradiction` | report-only | 3/3 (3/3) | 3/3 (3/3) |
+| `negative_knowledge` | report-only | 2/3 (2/3) | 2/3 (2/3) |
+| `unprompted_push` | report-only | 5/12 (5/12) | 3/12 (3/12) |
+
+The matcher fix alone recovers exactly the two `mira_castellane_role` cells.
+The control still fails on two enrolled classes (`redundancy`, `single_hop`) at
+both scales, so under the new renderer gate this run's decision block would
+still be void until the marker repairs below are in place.
+
+### View 2: matcher fix plus the four repaired markers
+
+This view changes the corpus (`probes.yaml`), so it is NOT the issue's figure;
+it shows what the repairs buy on the same stored answers. Before-values are the
+recorded run.
 
 | probe_class | enrolled in §7 | oracle core | oracle medium |
 | --- | --- | --- | --- |
@@ -133,7 +163,7 @@ graded, core then medium; before in parentheses):
 | `negative_knowledge` | report-only | 2/3 (2/3) | 2/3 (2/3) |
 | `unprompted_push` | report-only | 5/12 (5/12) | 3/12 (3/12) |
 
-All eight enrolled classes now read 1.000 at oracle at both scales, on the
+In view 2 all eight enrolled classes read 1.000 at oracle at both scales, on the
 stored answers. The 21 cells still failing are all in report-only classes and
 are all model failures (19 paraphrase, 2 figure omitted). Two cautions on
 reading this:
