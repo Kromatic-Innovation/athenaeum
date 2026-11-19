@@ -572,7 +572,7 @@ def classify_plan_scope(
 
 #: The alias-move action's verb, written ``move-alias:<target uid>:<alias>``
 #: in :attr:`RecompilePlan.page_actions` (issue athenaeum#2548 AC8/AC12).
-#: A uid is 8 hex characters (:func:`athenaeum.models.generate_uid`) and so
+#: A uid is 8 or 16 hex characters (:func:`athenaeum.models.generate_uid`) and so
 #: never contains a colon, which is what makes
 #: :func:`split_disposition`-then-partition unambiguous for an alias that
 #: does.

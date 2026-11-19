@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -452,15 +453,44 @@ class TestSlugify:
 class TestGenerateUid:
     def test_length(self) -> None:
         uid = generate_uid()
-        assert len(uid) == 8
+        assert len(uid) == 16
 
     def test_hex_chars(self) -> None:
         uid = generate_uid()
-        assert all(c in "0123456789abcdef" for c in uid)
+        assert re.fullmatch(r"[0-9a-f]{16}", uid)
 
     def test_unique(self) -> None:
-        uids = {generate_uid() for _ in range(100)}
-        assert len(uids) == 100  # no collisions in 100 tries
+        uids = {generate_uid() for _ in range(10_000)}
+        assert len(uids) == 10_000  # no collisions in 10,000 tries
+
+    def test_not_a_uuid4_prefix(self) -> None:
+        # The 13th hex character of a uuid4 is always "4" (version nibble);
+        # a uuid4 prefix would leave only 60 random bits (athenaeum#2771).
+        assert {generate_uid()[12] for _ in range(200)} != {"4"}
+
+
+class TestMixedWidthUids:
+    """Pages with 8-hex (legacy) and 16-hex uids coexist in one store."""
+
+    @pytest.mark.parametrize("uid", ["3fa8c2d1", "7b2e9a04c1d85f36"])
+    def test_load_find_and_round_trip(self, tmp_path: Path, uid: str) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        other = "3fa8c2d1" if len(uid) == 16 else "7b2e9a04c1d85f36"
+        entity = WikiEntity(uid=uid, type="company", name="Acme Corp")
+        sibling = WikiEntity(uid=other, type="company", name="Other Corp")
+        text = entity.render()
+        (wiki / entity.filename).write_text(text, encoding="utf-8")
+        (wiki / sibling.filename).write_text(sibling.render(), encoding="utf-8")
+
+        index = EntityIndex(wiki)
+        assert index.get_by_uid(uid) == wiki / entity.filename
+        assert index.get_by_uid(other) == wiki / sibling.filename
+        assert index.lookup("Acme Corp") is not None
+
+        meta, _body = parse_frontmatter(text)
+        assert meta["uid"] == uid
+        assert render_frontmatter(meta) == text.split("\n---\n", 1)[0] + "\n---\n"
 
 
 # ---------------------------------------------------------------------------

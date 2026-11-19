@@ -20,9 +20,10 @@ Run it against a throwaway knowledge root::
     python examples/adapters/minimal_adapter.py /tmp/kb
     python -m athenaeum run --path /tmp/kb           # compile raw → wiki
 
-The two public helpers used below — ``render_frontmatter`` and
-``generate_uid`` — are part of athenaeum's stable ``__all__`` surface, so
-an adapter built on them does not reach into internal modules.
+The public helper ``render_frontmatter`` used below is part of athenaeum's
+stable ``__all__`` surface, so an adapter built on it does not reach into
+internal modules. The intake filename suffix is 8 hex characters from the
+stdlib; it is not a page uid (``generate_uid`` mints 16-hex page uids).
 """
 
 from __future__ import annotations
@@ -30,12 +31,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import secrets
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from athenaeum import generate_uid, render_frontmatter
+from athenaeum import render_frontmatter
 
 # The intake filename convention the librarian recognises:
 #   <YYYYMMDDTHHMMSSZ>-<8 hex chars>.md or .jsonl, case-insensitive.
@@ -109,7 +111,7 @@ def write_raw_intake(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime(_TIMESTAMP_FMT)
-    filename = f"{timestamp}-{generate_uid()}.md"
+    filename = f"{timestamp}-{secrets.token_hex(4)}.md"
     filepath = target_dir / filename
 
     # Open-schema frontmatter (see athenaeum.models.parse_frontmatter). Only
