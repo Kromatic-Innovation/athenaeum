@@ -431,3 +431,49 @@ def test_run_summary_reports_notes_bridged(make_env, caplog: pytest.LogCaptureFi
     ]
     assert summaries
     assert any("owner_bridged=1" in s for s in summaries)
+
+
+# --- Unparseable frontmatter (Seer review on PR athenaeum#2803) ---------------
+
+
+def test_unparseable_frontmatter_is_left_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source whose frontmatter does not parse is neither bridged nor stamped.
+
+    ``parse_frontmatter`` returns ``({}, whole text)`` for a broken block, so
+    stamping would re-render the broken block into the body as plain text.
+    """
+    from types import SimpleNamespace
+
+    import athenaeum.owner_memory_bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "owner_uid_from_config", lambda config: "own1")
+    monkeypatch.setattr(bridge_mod, "_owner_candidate", lambda uid, index, reg: object())
+    broken = "---\nname: [unclosed\nmetadata: {type: user\n---\n" + FACT_BODY
+    good_text = "---\nname: coffee\n---\n" + FACT_BODY
+    src_dir = tmp_path / "memories"
+    src_dir.mkdir()
+    bad = src_dir / "bad.md"
+    bad.write_text(broken, encoding="utf-8")
+    good = src_dir / "good.md"
+    good.write_text(good_text, encoding="utf-8")
+
+    def _am(path: Path) -> Any:
+        return SimpleNamespace(
+            path=path, memory_type="user", origin_scope="scope", origin_session_id=""
+        )
+
+    raw_root = tmp_path / "raw"
+    count = bridge_owner_memories(
+        [_am(bad), _am(good)],
+        config={"owner": {"name": OWNER_NAME}},
+        raw_root=raw_root,
+        index=MagicMock(),
+        person_registry=None,
+    )
+    assert count == 1  # only the parseable note
+    assert bad.read_text(encoding="utf-8") == broken  # byte-identical, unstamped
+    meta, body = parse_frontmatter(good.read_text(encoding="utf-8"))
+    assert meta.get(ROUTED_KEY) and body == FACT_BODY
+    assert len(list((raw_root / BRIDGE_SOURCE).glob("*.md"))) == 1

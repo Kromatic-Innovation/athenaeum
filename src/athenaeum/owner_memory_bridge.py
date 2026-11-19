@@ -116,9 +116,16 @@ def bridge_owner_memories(
         if path is None:
             continue
         try:
-            meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             log.warning("owner bridge: cannot read %s (%s); skipping", path, exc)
+            continue
+        meta, body = parse_frontmatter(text)
+        if not isinstance(meta, dict) or (not meta and text.lstrip().startswith("---")):
+            # A frontmatter block that does not parse to a mapping comes back
+            # as ``({}, whole text)``; stamping it would re-render the broken
+            # block into the body as plain text. Leave such a file untouched.
+            log.warning("owner bridge: unparseable frontmatter in %s; skipping", path)
             continue
         if not body.strip():
             continue
