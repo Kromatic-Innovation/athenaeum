@@ -30,6 +30,16 @@ ship without a deprecation period. See the
   supplies the patterns and the engine supplies the skip
   (athenaeum#2914).
 
+### Added
+
+- A push ledger row now records the query terms it searched on and which
+  extractor produced them (`model`, `regex_fallback` or `regex_only`), so a push
+  that missed can be attributed to extraction or to ranking. On by default;
+  `push_metrics.record_query_terms: false` (or
+  `ATHENAEUM_PUSH_RECORD_QUERY_TERMS=0`) turns it off. Older ledgers read
+  unchanged, `push-metrics tail` projects the fields and `athenaeum demo` shows
+  them (athenaeum#2916).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
