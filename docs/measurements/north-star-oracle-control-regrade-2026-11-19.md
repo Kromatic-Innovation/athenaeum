@@ -113,7 +113,7 @@ only, and neither change touches a page, so `corpus_digest[core]` and
 does move is the grading rule, which the digest cannot show, so
 `GRADER_REVISION` goes from `athenaeum#1935` to `athenaeum#2918`. A report
 stamped `athenaeum#2918` and one stamped `athenaeum#1935` over the same rows
-are not comparable, and run 44438673846's own render stays stamped `#1935`.
+are not comparable, and run 44438673846's own render stays stamped `athenaeum#1935`.
 
 Re-grade of the stored oracle rows with both changes, per class (correct over
 graded, core then medium; before in parentheses):
