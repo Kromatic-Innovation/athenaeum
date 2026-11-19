@@ -49,8 +49,13 @@ human-and-interactive (``transcript_origin == "human"`` and
    expose it, so the chain alone reports it intact; tail tamper-evidence
    is what anchoring provides (``witness_anchored`` on the outcome);
 7. the transcript record's ``origin.kind`` is ``"human"`` when present;
-8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``
-   (absent fails);
+8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``.
+   Absent fails for a ``human`` line. For a ``slash-command`` line, absent
+   passes only when the record states ``origin.kind == "human"`` explicitly
+   (Claude Code writes no ``promptSource`` on a slash command's record, and
+   ``origin`` is what separates a human-typed one from the rest;
+   athenaeum#2769); absent with no origin fails, and any other present
+   value fails for both kinds;
 9. the transcript record's ``isSidechain`` is not ``True``.
 
 Each failing condition reports exactly one of the fixed
@@ -600,7 +605,15 @@ def attest(
     if transcript_origin_kind is not None and transcript_origin_kind != "human":
         return miss("transcript-origin-not-human", line, entrypoint)
 
-    if transcript_prompt_source not in ("typed", "queued"):
+    # A slash-command record carries no ``promptSource`` at all, so absent is
+    # accepted for that kind alone, and only on an explicit human origin
+    # (athenaeum#2769). Any present value must still be typed/queued.
+    absent_slash_ok = (
+        slash_segment is not None
+        and transcript_prompt_source is None
+        and transcript_origin_kind == "human"
+    )
+    if transcript_prompt_source not in ("typed", "queued") and not absent_slash_ok:
         value = transcript_prompt_source if transcript_prompt_source is not None else "absent"
         return miss(f"transcript-promptsource:{value}", line, entrypoint)
 

@@ -81,6 +81,7 @@ ship without a deprecation period. See the
 
 ### Fixed
 
+- Intake can now attest a slash command's arguments. Claude Code writes no `promptSource` on a slash command's transcript record, so the check that required `typed` or `queued` rejected every one. For a `slash-command` witness line an absent `promptSource` now passes when the record states `origin.kind == "human"`; absent with no origin, and any other present value, still miss, and `human` lines are unchanged (athenaeum#2769).
 - `promptwitness` now fills `harness_version` on witness-ledger lines from the hook environment, trying `CLAUDE_CODE_VERSION`, then `AI_AGENT` (`claude-code_<a>-<b>-<c>_agent`), then a bare-version last path component of `CLAUDE_CODE_EXECPATH`, and records the winner in `signals.harness_version_source`. Values must match one anchored, length-capped version pattern; no subprocess is run and no file is read. Earlier lines keep their empty value. The assumed hook-environment presence is settled by the next live entry-path run (athenaeum#2760).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
