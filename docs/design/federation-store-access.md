@@ -260,6 +260,26 @@ the store are the union of the rights of every role that lists them. No code
 path reads a role name except to print it. The validator refuses a role whose
 rights include `compile` or `answer` without `read`.
 
+**`locations.raw` has two shapes.** A single string is one raw location that
+every proposer shares, as in the example above. It is valid only when every
+principal who holds propose also holds read (§4). Otherwise it is a list with
+one entry per proposer:
+
+```yaml
+locations:
+  raw:
+    - for: {iss: "https://git.example.net", sub: "1203"}
+      at: "git@git.example.net:acme/announcements-raw-1203.git"
+    - for: {iss: "https://git.example.net", sub: "1318"}
+      at: "git@git.example.net:acme/announcements-raw-1318.git"
+```
+
+Each `for` is one principal block, never a group and never `"*"`, because a
+group's members would share the location. No principal may appear twice. The
+parser (S1) checks that shape. Whether every proposer is covered, and whether
+a shared location is allowed, needs groups resolved, so the check does it
+(§9, S8).
+
 Why it lives in the store and not in each install's `athenaeum.yaml`: every
 install then acts on the same statement, and every change to it is a commit
 with an author and a diff. A per-install copy could disagree with its
@@ -843,8 +863,9 @@ a page directly.
 who is the librarian of a store: the installs that hold compile. They own what
 they file there, and the filing checks bind them on every path into the
 store's pages, whichever location a record arrived through. The checks
-themselves, and when they run before a push, are athenaeum#2624 §4.3 and
-athenaeum#2626 §4.4.
+themselves run after a merge is published and after a raise is accepted, never
+as a hold, and a failure opens a decision or a correction in the store's queue
+(athenaeum#2624 §4.3, athenaeum#2626 §4.4; operator ruling 2026-11-19).
 
 ## 15. Points settled by athenaeum#2806
 
@@ -854,8 +875,8 @@ athenaeum#2626 §4.4.
 | 2. Role names | The engine fixes four rights. A declaration names its own roles and maps each to rights. Resolution returns a set of rights. | §4, §5, §7, S2 |
 | 3. Where proposals wait | No inbox. In the store's raw intake, kept in the raw location, on the bench under `raw/`, or in the single compiling install's own raw tree. How a proposer delivers, and what they may read back, are stated. | §4 |
 | 4. Source rank of a raised copy | Not set in any of the four notes. athenaeum#2626 §5.1. | — |
-| 5. Checks before a write is published | Proposed, pending operator review: athenaeum#2624 §4.3 and athenaeum#2626 §4.4. | — |
-| 6. One conformance format | Proposed, pending operator review: athenaeum#2626 §6.1. | — |
+| 5. Checks before a write is published | The filing checks run after publishing, never as a hold (operator ruling 2026-11-19): athenaeum#2624 §4.3 and athenaeum#2626 §4.4. | — |
+| 6. One conformance format | A raise message is a record kind in the one envelope-first JSONL format (operator ruling 2026-11-19): athenaeum#2626 §6.1. | — |
 | 7. Writer trust | No slice may rely on a writer being trusted or untrusted. Every slice here may be built. Placeholder eval named. | §12 |
 | 8. One queue across stores | One listing spans every store an install's owner may answer for. | §7 |
 | 9. Small mismatches | The access model does not require git; multi-writer sync does. | §11 |

@@ -5,10 +5,11 @@
 **Status:** DESIGN, not built (Vitruvius Specify, 2026-11-18). The design note
 athenaeum#2626 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
-operator's rulings on its six questions (§15). None of those is still open. It
-was reconciled with the other three federation notes by athenaeum#2806 (§17).
-Two points of that reconciliation are still proposals awaiting the operator:
-the checks before an automatic acceptance (§4.4) and the record format (§6.1).
+operator's rulings on its six questions (§15). It was reconciled with the
+other three federation notes by athenaeum#2806 (§17), and the operator ruled
+on its last two open points on 2026-11-19: the checks around an automatic
+acceptance (§4.4) and the record format (§6.1). No question in this note is
+open.
 
 Code anchors are `path:symbol` on `develop` at `759e3b64`.
 
@@ -303,8 +304,8 @@ are dropped by rule.
   ledger and applied again to every later payload for the same `raise_id`.
   Any other editing, and merging with an existing target page, happen
   afterwards, through the target's ordinary compile and its ordinary merge
-  proposals, which never cross a store. When de-duplication happens is part
-  of the proposal below.
+  proposals, which never cross a store. De-duplication happens afterwards
+  too (below).
 - **Uid:** derived, not minted at random: the first 16 hex characters of
   `sha256("athenaeum-raise-v1" + "\x00" + target store_id + "\x00" + raise_id)`.
   The separator is one NUL byte, which no part can contain, so two different
@@ -341,24 +342,23 @@ anything other than a duplicate, raised as a decision. That is the ladder of
 [North star](../north-star.md) §2.2: a record that cannot be applied by rule
 is not refused, it goes up.
 
-**Proposed (pending operator review, athenaeum#2806):** two rules for a raise
-that is accepted with no person looking (`auto`, below). They answer
-athenaeum#2806 point 5.
+**What happens around an acceptance with no person looking** (`auto`, below).
+Two rules answer athenaeum#2806 point 5 (operator ruling 2026-11-19).
 
-1. **The filing checks run before the copy is created.** They are the
-   deterministic filing checks of North star §2.12, made against the target's
-   own pages, read through the store seam: a contact value already attributed
-   to another page of the target; an address whose local part names a
-   different person; a person-shaped value on an organisation's page. The
-   fourth check, a value absent from the source it cites, holds by
+1. **The filing checks run after the raise is accepted, never before.** A
+   raise that passes the rule checks above keeps `auto`: the copy is created
+   and published with no hold. The accepting install then runs the
+   deterministic filing checks of North star §2.12 on the copy, against the
+   target's own pages, read through the store seam: a contact value already
+   attributed to another page of the target; an address whose local part
+   names a different person; a person-shaped value on an organisation's page.
+   The fourth check, a value absent from the source it cites, holds by
    construction: the copy cites `raise:<raise_id>`, its body is the payload's
-   body accepted whole, and the `content_hash` was checked. A payload that
-   fails a check loses `auto`. It is not rejected. It goes up the ladder: to
-   reasoning where a tier has been measured for that class of question, and
-   otherwise to the `raise` decision, which shows the payload and the check it
-   failed. The same holds when a supersede would replace an untouched copy
-   without asking (§7.4). Under `ask` the checks also run, and their result is
-   shown to the person.
+   body accepted whole, and the `content_hash` was checked. A failed check
+   opens a decision or a correction in the target's decision queue, naming
+   the copy. The copy stays as published until that item is settled, and the
+   fix is an ordinary follow-up commit. The same holds after a supersede
+   replaces an untouched copy without asking (§7.4).
 2. **De-duplication happens after the copy is a page, not before.** Before
    the page exists the only de-duplication is by identity: one `raise_id`
    gives one uid and so one page, however often the record is delivered.
@@ -366,35 +366,27 @@ athenaeum#2806 point 5.
    judged afterwards, by the target's ordinary merge proposals, once both are
    pages of the one store.
 
-*Rationale.* For the checks: automatic acceptance is the one path on which
-text written in another store becomes a page here with nobody looking, and
-§2.12 makes the librarian that files a value responsible for it, on every
-path. Checking after the push would mean repairing something every reader of
-the target already holds. For de-duplication: the copy's derived uid is what
-lets a later retract or supersede find it with no index and no scan (§7.2),
-and what makes two compiling installs produce the same page. Folding a payload
-into an existing page at acceptance would leave nothing at that uid, and a
-later retract would meet the problem of §6.3: no rule can tell which words on
-the page came from the raise, so every withdrawal would become a person's job.
-A merge made afterwards leaves a tombstone at the derived uid, which §7.2
+*Why de-duplication waits.* The copy's derived uid is what lets a later
+retract or supersede find it with no index and no scan (§7.2), and what makes
+two compiling installs produce the same page. Folding a payload into an
+existing page at acceptance would leave nothing at that uid, and a later
+retract would meet the problem of §6.3: no rule can tell which words on the
+page came from the raise, so every withdrawal would become a person's job. A
+merge made afterwards leaves a tombstone at the derived uid, which §7.2
 follows and §8 lists. Judging "the same thing" also needs a model, and
 acceptance stays deterministic. The cost is stated plainly: between the push
 and the merge, readers of the target may see two pages that say the same
-thing. Contradiction between pages is not checked at acceptance at all. By the
+thing.
+
+*Alternatives rejected.* A pre-publish hold, running the filing checks before
+the copy is created and withdrawing `auto` from a payload that fails: the
+operator rejected it (2026-11-19), because it makes acceptance wait on a check
+when a follow-up commit corrects the same value. And de-duplicating before the
+copy becomes a page, for the reasons above.
+
+Contradiction between pages is not checked at acceptance at all. By the
 operator's view (2026-11-18) it is a later pass, because it can only be judged
 once everything on a topic is on one page.
-
-*Alternative rejected.* De-duplicate before the copy becomes a page: match the
-payload against the target's pages at acceptance and fold it into the match.
-The store never holds a duplicate. Rejected for the reasons above: it loses
-the uid a retract depends on, and it puts a judgement into a step that is
-otherwise a rule. For the checks, the alternative is to accept first and let a
-later pass find a misfiled value, which athenaeum#2624 §4.3 rejects for a
-merged page on the same ground.
-
-*If the proposal is not accepted,* acceptance is the rule checks listed above
-and nothing more, and de-duplication is whatever the target's later passes
-find.
 
 **The store's `intake` rules are applied here too.** athenaeum#2625 §7 gives a
 store ordered accept and refuse rules over type and tags, and asks that they
@@ -548,9 +540,8 @@ shared store is athenaeum#2628 and is not designed here.
 
 ### 6.1 Format
 
-**Proposed (pending operator review, athenaeum#2806):** a message is a record
-in the one conformance format, and not an envelope of its own. This answers
-athenaeum#2806 point 6.
+**A message is a record in the one conformance format, and not an envelope of
+its own** (operator ruling 2026-11-19). This answers athenaeum#2806 point 6.
 
 [North star](../north-star.md) §2.2 says there is exactly one conformance
 format. It is the envelope-first JSONL batch of
@@ -628,11 +619,6 @@ second format at the gate, and the readability it buys matters only to someone
 reading a waiting file by hand, which the `raise` decision already does better
 by showing the payload.
 
-*If the proposal is not accepted,* a message keeps the first draft's form: one
-markdown file per message with the same keys in YAML frontmatter and the page
-text as its body. Nothing else in this note changes: it still waits in the
-store's raw intake (§6.2) and is still handled as athenaeum#2625 §4.5 says.
-
 ### 6.2 Where a message waits
 
 There is no inbox (operator ruling 2026-11-18, athenaeum#2806 point 3). A
@@ -693,7 +679,7 @@ personal facts. Raising that page would send all of them.
 ```
 
 The `fact.type` and `fact.tags` are a suggestion; the compile role fixes the
-type. The form shown is the one §6.1 proposes.
+type.
 
 | Aspect | A `raise` | A `propose-fact` |
 |---|---|---|
@@ -1210,7 +1196,7 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | Slice | What it delivers | Needs |
 |---|---|---|
 | **S1** | The pure raise projection: page to projection by the table in §4.2, its rendering, the payload hash, `raise_id` and `message_id` minting, and the derived uid. No I/O. Includes the test that a payload accepted into a copy and projected again gives the same hash. | none |
-| **S2** | The message codec: parse, validate and render `raise`, `propose-fact`, `supersede`, `retract`, `lapse` and `attest` and the fixed reason codes. A message that does not conform is reported as a fallthrough, never raised as an error. The record form is the one §6.1 proposes, so this slice waits for the operator's ruling on it. | S1 |
+| **S2** | The message codec: parse, validate and render `raise`, `propose-fact`, `supersede`, `retract`, `lapse` and `attest` and the fixed reason codes. A message that does not conform is reported as a fallthrough, never raised as an error. The record form is the one conformance format (§6.1). | S1 |
 | **S3** | The `raised_from` block: parse and validate it, including its `v` key, leave it out of `verdicts.py:content_hash`, accept `raise` as a source type with its precedence rank left unset (§5.1), and a lint for a page whose `raised_from` is malformed. No behaviour change. | none |
 | **S4** | The raise ledger: record shape, parser, registry entry, kept in the install's own state. | S1 |
 | **S5** | The acceptance ledger: record shape (including an adjustment of type and tags, and the page uids written for a fact), parser, registry entry, kept in the install's own state. | S2 |
@@ -1229,7 +1215,7 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | **S17** | `raise.max_silence` and the `attest` message. | S14, S16 |
 | **S18** | A three-store test harness that proves a retract travels two hops, one per run. | S9, S11; athenaeum#2624 S6a (the two-clone harness) |
 | **S19** | A guide: raising between stores, and what a reader sees on a copy. Docs only. | S14, S15 |
-| **S21** | *Proposed, pending operator review (§4.4).* The filing checks before an automatic acceptance, and before a supersede replaces an untouched copy without asking: a payload that fails loses `auto` and goes up the ladder. Not to be filed as an issue until the operator rules. | S7a, S8 |
+| **S21** | The filing checks after acceptance (§4.4): once a copy has been created or replaced, run the deterministic filing checks on it against the target's pages, and open a decision or a correction in the target's decision queue for each failure. Never a hold: an `auto` raise keeps `auto`. | S7a; S13 for a replaced copy |
 | **S20** | The single routed fact (§6.3): the entry point intake calls with an item, its suggested type and tags and a `store_id`, which writes the `propose-fact` message and the sender's ledger row; the acceptance ledger row that records the pages compiled from it; a retract that withdraws a waiting fact or raises a decision for a compiled one, urgent and at the head of the queue when the reason is erasure; and the fact row in the raiser pass. | S2, S4, S5, S11 |
 
 **Who owns what at the two hand-offs.**
@@ -1252,7 +1238,7 @@ nothing from athenaeum#2624 except the pure page merge.
 
 **Trust (athenaeum#2806 point 7).** The trust design (athenaeum#2628) is on
 hold. Until it reports, **no slice may rely on a writer being trusted or
-untrusted.** Under that rule S1 to S20 may all be built. No trust score is an
+untrusted.** Under that rule S1 to S21 may all be built. No trust score is an
 input to any rule in this note. Automatic acceptance (S8) is switched by the
 route a record arrived by, which the target's own declaration sets, and not by
 who wrote the source page; a store that wants a person to look declares `ask`.
@@ -1271,8 +1257,8 @@ a review, and a proposer naming someone else in a retract.
 
 No question the note put is open. It put five questions, and a sixth after
 review. The operator accepted the recommended answer to each on 2026-11-18,
-recorded on athenaeum#2631. (The two proposals in §4.4 and §6.1 come from
-athenaeum#2806 and are not among these six.) They are stated below as rulings, with the options that were
+recorded on athenaeum#2631. (The two rulings of 2026-11-19, in §4.4 and §6.1,
+come from athenaeum#2806 and are not among these six.) They are stated below as rulings, with the options that were
 not chosen kept for the record.
 
 ### Ruling 1. A copy names the proposer as the receiving store's access list does
@@ -1344,9 +1330,8 @@ origin it mounts, the target reads its own pages, and no index is consulted
 conforms to a shape the librarian understands, so it is applied at the
 deterministic tier with no model call (§4.4, §7). One that fails a check, or
 does not conform at all, is not refused: it goes up to a decision (§4.4,
-§6.1). Whether a message uses the one conformance format or an envelope of its
-own is the proposal in §6.1, pending the operator; the note is written to the
-one format.
+§6.1). A message has no envelope of its own: it is a record kind in the one
+conformance format (§6.1, operator ruling 2026-11-19).
 
 **§2.8, one queue of questions, answered through the one way in.** Every
 question this protocol asks is an item in the target store's decision queue: a
@@ -1358,9 +1343,10 @@ listing, which spans every store an install's owner may answer for
 **§2.12, filing is verification.** The accepting librarian owns what it files.
 Three guarantees hold by rule today: the payload's hash is checked, its body
 is accepted whole so no text is invented, and `access` and `audience` are
-never widened or narrowed (§4.4, §7.4). Whether the filing checks against the
-target's own pages run before an automatic acceptance is the proposal in §4.4,
-pending the operator. An origin's word changes only the copy; every other page
+never widened or narrowed (§4.4, §7.4). The filing checks against the target's
+own pages run after acceptance, and a failure opens a decision or a correction
+in the target's queue (§4.4, operator ruling 2026-11-19). An origin's word
+changes only the copy; every other page
 in the target is the target librarian's to judge (§8).
 
 ---
@@ -1373,8 +1359,8 @@ in the target is the target librarian's to judge (§8).
 | 2. Role names | Rights, not role names: compile on the origin, propose or compile on the target. | §3, §4.1 |
 | 3. Where proposals wait | No inbox. A message waits in the target's raw intake. What a proposer may read back is athenaeum#2623 §4. | §6.2 |
 | 4. Source rank of a raised copy | Unset. The `raise` source type is recorded and the precedence table is left alone. No slice may rely on a raised copy winning or losing a conflict. | §5.1 |
-| 5. Checks before a write is published | Contradiction detection is a later pass (settled). Filing checks before an automatic acceptance, and de-duplication after the copy is a page, are **proposed, pending operator review**. | §4.4 |
-| 6. One conformance format | **Proposed, pending operator review:** a message is a record in the one conformance format. | §6.1 |
-| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S20 may be built. | §14 |
+| 5. Checks before a write is published | None beyond the rule checks. The filing checks run after acceptance, an `auto` raise keeps `auto`, and a failure opens a decision or a correction with the fix as a follow-up commit. De-duplication runs after the copy is a page. Contradiction detection is a later pass (operator ruling 2026-11-19). | §4.4 |
+| 6. One conformance format | A message is a record kind in the one envelope-first JSONL format (operator ruling 2026-11-19). | §6.1 |
+| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S21 may be built. | §14 |
 | 8. One queue across stores | Every question of the protocol is an item in the target's queue, shown in the one listing. | §16 |
 | 9. Small mismatches | The derived uid joins its parts with a NUL byte. The `raised_from` block has a version key, `v`. | §4.4, §5.1 |

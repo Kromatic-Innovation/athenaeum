@@ -970,8 +970,8 @@ value up the ladder there. Nothing in this note skips them.
 | 2. Role names | `decide` takes a set of rights per store, never a role name. | §4.1, S2 |
 | 3. Where proposals wait | No inbox. A message is raw intake of the store it is addressed to; the intake run reads it and a deterministic handler applies it. | §4.5, §8, §8.1 |
 | 4. Source rank of a raised copy | Not set here. athenaeum#2626 §5.1. | — |
-| 5. Checks before a write is published | Proposed in athenaeum#2624 §4.3 and athenaeum#2626 §4.4. | — |
-| 6. One conformance format | Proposed in athenaeum#2626 §6.1. | — |
+| 5. Checks before a write is published | The filing checks run after publishing, never as a hold (operator ruling 2026-11-19): athenaeum#2624 §4.3 and athenaeum#2626 §4.4. | — |
+| 6. One conformance format | A message is a record kind in the one envelope-first JSONL format (operator ruling 2026-11-19): athenaeum#2626 §6.1. | — |
 | 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S15 may be built. | §13 |
 | 8. One queue across stores | A message that cannot be applied is an item in its store's queue, in the one listing. | §4.5, §15 |
 | 9. Small mismatches | The `propose-fact` slice of athenaeum#2626 is cited by number, S20. | §13 |

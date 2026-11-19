@@ -6,9 +6,9 @@
 athenaeum#2624 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
 operator's rulings on its four questions (§15), given on 2026-11-18. It was
-reconciled with the other three federation notes by athenaeum#2806 (§17). One
-point of that reconciliation is still a proposal awaiting the operator: the
-filing checks before a push (§4.3).
+reconciled with the other three federation notes by athenaeum#2806 (§17), and
+the operator ruled on its last open point, the filing checks around a push, on
+2026-11-19 (§4.3). No question in this note is open.
 
 Code anchors are `path:symbol` on `develop` at `60f851e8`. Line numbers are
 given to make a claim quick to check and will drift.
@@ -248,59 +248,51 @@ page the merge touched:
 A page that fails is held (§6.4). If the tree cannot be made valid, nothing is
 pushed and the run reports why.
 
-These four checks are about structure. Whether a merged page is also checked
-for what it *says* is athenaeum#2806 point 5. One half of that point is
-settled and one half is proposed.
+These four checks are about structure. What a merged page *says* is checked
+after it is published, never before (athenaeum#2806 point 5).
 
-**Settled: contradiction detection stays a later pass.** The operator's view
-(2026-11-18) is that a contradiction can only be judged once everything on a
-topic is on one page. Sync does not run the contradiction detector before a
-push, and two clean edits that contradict each other are found by it on a
-later run (§5.4).
+**The filing checks run after the push** (operator ruling 2026-11-19). Once a
+sync merge has been published, the install that pushed it runs the
+deterministic filing checks of [North star](../north-star.md) §2.12 on what
+the merge published. They are never a hold: the push does not wait for them,
+and no unit is held because of them.
 
-**Proposed (pending operator review, athenaeum#2806):** the filing checks of
-[North star](../north-star.md) §2.12 run on a merged page **before the push**,
-on the values the merge would newly publish.
-
-- *What is checked.* Only the units whose merged value differs from the
-  remote's value. Those are exactly what this push adds to what other
-  installs already hold. For each, the deterministic filing checks: a contact
-  value already attributed to another page of this store; an address whose
-  local part names a different person; a person-shaped value on an
+- *What is checked.* Only the units whose merged value differs from the value
+  the remote had before the push. Those are exactly what the push added to
+  what other installs hold. For each, the deterministic filing checks: a
+  contact value already attributed to another page of this store; an address
+  whose local part names a different person; a person-shaped value on an
   organisation's page. Pages are read through the store seam, inside the one
-  store being pushed. No index is consulted (§10).
+  store that was pushed. No index is consulted (§10).
 - *What holds without a check.* The fourth filing check, a value absent from
   the source it cites, holds by construction. A merged unit is always text
   that one side already filed, and the adjudicator's answer is refused unless
   every unit is byte-identical to one side's text (§6.2). The merge authors
   nothing.
-- *What a failure does.* It is not a rejection and it does not stop the push
-  (§2.2). The unit is held the way §6.4 holds a contested unit: the remote
-  version stays on the page, the local version stays in history, and the
-  value goes up the ladder as §2.12 says. That means reasoning first, where a
-  tier has been measured for that class of question, and a decision only if
-  the answer stays below calibrated confidence. Until a tier has been
-  measured, up the ladder means the decision.
+- *What a failure does.* It opens a decision or a correction in the store's
+  decision queue, naming the page and the unit. The published page is left as
+  it is until that item is settled, and the fix is an ordinary follow-up
+  commit. Nothing is reverted by rule.
 
-*Rationale.* §2.12 binds every writer, the librarian's own maintenance paths
-included: "a value moved by a repair is filed again, and is checked again". A
-merge moves values. Each install checked its own compile against its own copy
-of the store, and neither checked it against the other's new pages. Jordan's
-install files an address on one page while Priya's files the same address on
-another; each passes at home, and the merged tree holds a misattribution that
-no librarian has looked at. The push is the last moment before other people
-read it, and what has been read cannot be recalled. Scoping the checks to the
-changed units keeps the cost proportional to the merge and never to the store
-(§2.4).
+*Why the check exists at all.* §2.12 binds every writer, the librarian's own
+maintenance paths included, and a merge moves values. Each install checked its
+own compile against its own copy of the store, and neither checked it against
+the other's new pages. Jordan's install files an address on one page while
+Priya's files the same address on another; each passes at home, and the merged
+tree holds a misattribution that no librarian has looked at. The check after
+the push is what looks at it. Scoping it to the published units keeps the cost
+proportional to the merge and never to the store (§2.4).
 
-*Alternative rejected.* Run the filing checks after the push, in the same
-later pass as contradiction detection. It is cheaper and a push never waits on
-it. Rejected because §2.12 says a value is checked before it is absorbed, and
-on a shared store "absorbed" is the push: a later pass would be repairing
-something every reader already holds.
+*Alternative rejected.* A pre-publish hold, running the same checks before the
+push and holding a unit that fails: the operator rejected it (2026-11-19),
+because it makes publication wait on a check when a follow-up commit corrects
+the same value.
 
-*If the proposal is not accepted,* §4.3 stays as the four structural checks,
-and a misfiled value is found by the next compile that touches its page.
+**Contradiction detection stays a later pass.** The operator's view
+(2026-11-18) is that a contradiction can only be judged once everything on a
+topic is on one page. Sync does not run the contradiction detector around a
+push, and two clean edits that contradict each other are found by it on a
+later run (§5.4).
 
 ### 4.4 Rewritten remote history
 
@@ -909,7 +901,7 @@ A dependency written `athenaeum#2623 S7` is a slice of that note.
 | **S14** | Concurrent answers and review cursors on the bench: pair answers by decision id, the three cases for two answers to one item, and the earlier-cursor rule (§8.2). | S13; athenaeum#2623 S7 |
 | **S15** | The same uid in two stores: the cross-store check before publishing, store-qualified lookup, and an ambiguous result in place of `AmbiguousPageUidError` (§7.5). | S2; athenaeum#2623 S1 (for `store_id`) |
 | **S16** | The erasure mark: the erasing path writes `Athenaeum-Erasure` on its deletion commit and integrate honours it (§5.1). | S7 |
-| **S17** | *Proposed, pending operator review (§4.3).* The filing checks before a push: run the deterministic filing checks on the units a merge would newly publish, and hold a unit that fails. Not to be filed as an issue until the operator rules. | S7, S8 |
+| **S17** | The filing checks after a push (§4.3): once a merge has been published, run the deterministic filing checks on the units it published, and open a decision or a correction in the store's decision queue for each failure. Never a hold, and nothing is reverted by rule. | S7; athenaeum#2623 S7 (the per-store queue) |
 
 S7 is the first slice that makes a two-writer store converge. A deployment
 could run on S1 to S9 with no model adjudication at all, with every contested
@@ -921,7 +913,7 @@ rule) needs S7 for the pages and S13 for the bench.
 
 **Trust (athenaeum#2806 point 7).** The trust design (athenaeum#2628) is on
 hold. Until it reports, **no slice may rely on a writer being trusted or
-untrusted.** Under that rule S1 to S16 may all be built. None takes a measure
+untrusted.** Under that rule S1 to S17 may all be built. None takes a measure
 of how far a writer is believed as an input: the rules of §5 treat both sides
 alike, and the adjudicator is not shown which writer made a change (§6.1).
 What may not be built before the trust design reports has no slice here:
@@ -1004,9 +996,10 @@ record too, and no rule picks between them.
 maintenance paths, so §2.12 binds it. Two guarantees hold today by
 construction: no value is invented, because a merged unit is byte-identical to
 one side; and `access` and `audience` are never changed by a rule or a model
-(§5.1). Whether the filing checks also run on the merged page before the push
-is the proposal in §4.3, pending the operator. Contradiction detection is a
-later pass by the operator's view, and is not a filing check.
+(§5.1). The filing checks themselves run on what a merge published, after the
+push, and a failure opens a decision or a correction in the store's queue
+(§4.3, operator ruling 2026-11-19). Contradiction detection is a later pass by
+the operator's view, and is not a filing check.
 
 ---
 
@@ -1018,8 +1011,8 @@ later pass by the operator's view, and is not a filing check.
 | 2. Role names | Writer, proposer and steward are described by rights and are not names in any file or interface. | §3.4 |
 | 3. Where proposals wait | No inbox. Sync moves raw intake records in the raw location and under the bench's `raw/`, append-only. | §8.1 |
 | 4. Source rank of a raised copy | Not set here. The merge never ranks a source. athenaeum#2626 §5.1. | — |
-| 5. Checks before a write is published | Contradiction detection is a later pass (settled). Filing checks before the push are **proposed, pending operator review**. | §4.3 |
-| 6. One conformance format | Proposed in athenaeum#2626 §6.1. This note requires only one file per record, never edited. | §8.1 |
-| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S16 may be built. | §14 |
+| 5. Checks before a write is published | None beyond structure. The filing checks run after the push, on what a merge published; a failure opens a decision or a correction, and the fix is a follow-up commit (operator ruling 2026-11-19). Contradiction detection is a later pass. | §4.3 |
+| 6. One conformance format | A raise message is a record kind in the one envelope-first JSONL format (operator ruling 2026-11-19, athenaeum#2626 §6.1). This note requires only one file per batch, never edited. | §8.1 |
+| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S17 may be built. | §14 |
 | 8. One queue across stores | A held page is an item in its store's queue, shown in the one listing. | §6.4, §16 |
 | 9. Small mismatches | Sync in `integrate` mode requires git; the access model does not. | §3.3 |
