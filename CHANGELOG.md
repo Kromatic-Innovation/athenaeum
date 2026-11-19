@@ -169,6 +169,10 @@ ship without a deprecation period. See the
   bodies. Re-run `athenaeum registry` to build it; a corpus without the
   sidecar behaves as before. `with_pii` gating is unchanged.
 
+### Security
+
+- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
+
 ## [0.26.0] - 2026-11-16
 
 **Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian
@@ -231,8 +235,6 @@ They are reference material; this section is the release.
   notice this.
 
 ### Security
-
-- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
 
 - No security-relevant changes. The new guidance files are operator-authored
   prompt input: they are size-capped and defanged like the other
