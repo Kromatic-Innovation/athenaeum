@@ -2,7 +2,7 @@
 """The `clean-venv` CI job is wired, and wired the way it has to be (athenaeum#2136).
 
 A job that exists but is not in `CI Required`'s `needs:` blocks nothing, and a
-job that quietly acquires `-c requirements-ci.lock` or the `[vector]` extra
+job that quietly acquires `-c requirements-ci.txt` or the `[vector]` extra
 answers a question some other job already answers. Both regressions are a
 one-line edit away and neither shows up as a test failure anywhere else, so
 they are asserted here — the same reason
@@ -63,7 +63,7 @@ def test_it_installs_the_unconstrained_contributor_path(job: dict[str, Any]) -> 
     script = _run_script(job)
     assert 'pip install -e ".[dev]"' in script
     # The two ways this job silently stops testing anything new.
-    assert "requirements-ci.lock" not in script, (
+    assert "requirements-ci.txt" not in script, (
         "the clean-venv job must resolve pyproject's PUBLISHED ranges; "
         "constraining it to the lock makes it a duplicate of the `test` job"
     )

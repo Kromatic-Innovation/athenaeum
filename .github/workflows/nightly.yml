@@ -42,12 +42,12 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            requirements-ci.lock
+            requirements-ci.txt
 
       - name: Install dependencies (with vector extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,vector]" -c requirements-ci.lock
+          pip install -e ".[dev,vector]" -c requirements-ci.txt
 
       # `-m nightly` on the command line REPLACES addopts' `-m` expression,
       # so this selects exactly the nightly tier and nothing else.
