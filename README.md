@@ -12,55 +12,21 @@ uv tool install --python 3.13 'athenaeum[mcp]'
 
 Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 
-<p align="center">
-  <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
-</p>
-
-## What is this?
-
-A context window forgets everything the moment a session ends, and even within a session
-it can't tell a durable fact ("Acme is a client") from a passing remark not worth
-remembering ("the weather is nice"). And when two sessions disagree, most memory systems
-resolve the contradiction silently rather than escalating it to a source of truth — such as
-a human authority.
-
-Athenaeum is a memory layer that sits outside any one agent session. Agents **write**
-observations to an append-only intake log. A separate compiler — **the librarian** — turns
-that raw stream into a structured, deduplicated **wiki** of entities. A **sidecar** injects
-the relevant slice of that wiki back into context automatically, on every turn.
-
-The result is memory that survives across sessions, across agents, and across a team — not
-just across turns of one conversation.
-
-> **Is this for me?** Three cases, in order of how well they are established:
->
-> - **Your corpus no longer fits your agent's native memory.** Claude Code's auto memory
->   loads the first 200 lines or 25KB of its index and nothing more; past a few hundred
->   pages the agent is grepping a directory. If you have thousands of pages of people,
->   projects, decisions and retros, you are already past that line. This is the case
->   Athenaeum is being measured against, head to head, and the result decides whether the
->   project continues — see [use cases](docs/use-cases.md) §1.
-> - **You need to know where a fact came from before you act on it.** Relationship and
->   client memory where a stale scraped value must never overwrite what a person told
->   you, and where contact data has to stay off the searchable corpus.
-> - **Several agents, or agents and humans, write the same knowledge.** This is what the
->   write path is built for. It is the design goal, not yet a validated market: we run it
->   this way ourselves, but we have not confirmed that teams want it.
->
-> If you are building a single-user chatbot that needs conversational continuity and
-> your memory fits in a file, [mem0](https://github.com/mem0ai/mem0),
-> [Letta](https://github.com/letta-ai/letta), or the agent's own memory is a better fit.
-
-The full argument, including how this differs from Claude's built-in memory, Anthropic's
-memory tool, RAG, and the existing agent-memory libraries, is in
-[**Why Athenaeum**](docs/why-athenaeum.md).
-
 ## Quick start
 
 **Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
 `PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
 check against if `athenaeum --version` ever looks stale. `git` must be
 installed; no git identity is needed (`init` sets a repo-local one if you have none).
+Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
+current release is supported; see the [support policy](docs/guides/install.md#support-policy).
+Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
+
+**Before the first compile** (`athenaeum run`, below) you need either
+`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI.
+
+The `[mcp]` extra in the install command is required by `athenaeum serve` and
+`athenaeum test-mcp`.
 
 ```bash
 # Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
@@ -83,15 +49,14 @@ show FAILs, and that is expected.** Right after the commands above it is
 expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
 `key_mode` when neither an API key nor the `claude` CLI is available)
 until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start, and it should come back clean.
+once you have finished the quick start (through `athenaeum session-end`):
+`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
+because the per-turn recall hook is optional and the quick start does not
+wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
-The `[mcp]` extra above is all a fresh install needs. `athenaeum init`'s
-default config (`search_backend: vector`) wants the optional `[vector]`
-extra for semantic search, but without it `recall`, `reindex` and
-`session-end` all degrade to the `fts5` backend automatically, with a
-one-time warning on stderr — never a hard failure. Add the `[vector]`
-extra to the install command above later if you want semantic (not just
-keyword) matching.
+> **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
+> without it search falls back to `fts5` with a one-time warning, never a failure.
+> See [Install](docs/guides/install.md) for both extras.
 
 Want to confirm it works before wiring anything up or spending API budget?
 
@@ -134,6 +99,49 @@ athenaeum decisions     # anything the pipeline refused to resolve on its own
 → [Daily operation](docs/guides/daily-operation.md) ·
 [Passive recall via hooks](docs/guides/sidecar.md) ·
 [MCP tool reference](docs/modules/mcp.md)
+
+<p align="center">
+  <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
+</p>
+
+## What is this?
+
+A context window forgets everything the moment a session ends, and even within a session
+it can't tell a durable fact ("Acme is a client") from a passing remark not worth
+remembering ("the weather is nice"). And when two sessions disagree, most memory systems
+resolve the contradiction silently rather than escalating it to a source of truth — such as
+a human authority.
+
+Athenaeum is a memory layer that sits outside any one agent session. Agents **write**
+observations to an append-only intake log. A separate compiler — **the librarian** — turns
+that raw stream into a structured, deduplicated **wiki** of entities. A **sidecar** injects
+the relevant slice of that wiki back into context automatically, on every turn.
+
+The result is memory that survives across sessions, across agents, and across a team — not
+just across turns of one conversation.
+
+> **Is this for me?** Three cases, in order of how well they are established:
+>
+> - **Your corpus no longer fits your agent's native memory.** Claude Code's auto memory
+>   loads the first 200 lines or 25KB of its index and nothing more; past a few hundred
+>   pages the agent is grepping a directory. If you have thousands of pages of people,
+>   projects, decisions and retros, you are already past that line. This is the case
+>   Athenaeum is being measured against, head to head, and the result decides whether the
+>   project continues — see [use cases](docs/use-cases.md) §1.
+> - **You need to know where a fact came from before you act on it.** Relationship and
+>   client memory where a stale scraped value must never overwrite what a person told
+>   you, and where contact data has to stay off the searchable corpus.
+> - **Several agents, or agents and humans, write the same knowledge.** This is what the
+>   write path is built for. It is the design goal, not yet a validated market: we run it
+>   this way ourselves, but we have not confirmed that teams want it.
+>
+> If you are building a single-user chatbot that needs conversational continuity and
+> your memory fits in a file, [mem0](https://github.com/mem0ai/mem0),
+> [Letta](https://github.com/letta-ai/letta), or the agent's own memory is a better fit.
+
+The full argument, including how this differs from Claude's built-in memory, Anthropic's
+memory tool, RAG, and the existing agent-memory libraries, is in
+[**Why Athenaeum**](docs/why-athenaeum.md).
 
 ## Key features
 
@@ -244,6 +252,12 @@ minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
   command-by-command mapping and the [CHANGELOG](CHANGELOG.md) for the full list.
 - **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
   for supported versions and how to report a vulnerability.
+
+## Project status
+
+Athenaeum is maintained by Kromatic. Security reports go to the mailbox named
+in [SECURITY.md](SECURITY.md). If the project is ever discontinued, the
+repository will be archived and this README will say so at the top.
 
 ## Where to go next
 

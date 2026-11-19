@@ -208,6 +208,38 @@ def _read_only_client_message(tool_name: str) -> str:
     )
 
 
+def _answer_tool_response(result: Any, decision_id: str) -> dict:
+    """Shape a :class:`athenaeum.decision_answers.AnswerWriteResult` into the
+    adjudication tools' response dict (issue athenaeum#2531).
+
+    ``ok`` is ``False`` only for an applier REFUSAL (the record stays as its
+    audit trail); a deferred, held or applier-error result is ``ok=True``
+    with ``deferred=True`` -- the answer is durably recorded and a later
+    ``ingest-answers`` tick applies it.
+    """
+    return {
+        "ok": result.status != "refused",
+        "error_code": result.error_code if result.status == "refused" else None,
+        "message": result.message,
+        "deferred": result.deferred,
+        "applied": result.status == "applied",
+        "apply_status": result.status,
+        "answer_file": str(result.path),
+        "decision_id": decision_id,
+    }
+
+
+def _invalid_apply_result(apply: str) -> dict:
+    return {
+        "ok": False,
+        "error_code": "invalid_apply",
+        "message": f"apply must be 'immediate' or 'deferred', got {apply!r}",
+        "deferred": False,
+        "answer_file": None,
+        "decision_id": None,
+    }
+
+
 def _forbidden_result() -> dict:
     """Structured fail-closed refusal for the ``resolve_*`` tools (dict shape)."""
     return {
@@ -3627,6 +3659,31 @@ _ADJUDICATION_TOOL_ANNOTATIONS: dict[str, Any] = {
 }
 
 
+def _remember_session_dir(source: str | None, default_subdir: str) -> str:
+    """The ``raw/`` subdirectory an MCP ``remember`` call writes into.
+
+    The tool's ``source`` argument names a session directory, not a
+    provenance source, and a model that supplies one invents a directory
+    (``manual`` was the example the tool used to give) that is not in
+    ``recall.extra_intake_roots``, so the note was unrecallable until the next
+    compile (issue athenaeum#2764). Every non-empty value is therefore
+    rerouted to the transport default (*default_subdir*); the argument stays
+    in the signature so existing callers do not break. An EMPTY string is
+    passed through so ``remember_write`` keeps returning its
+    "must contain at least one alphanumeric character" error. The in-process
+    :func:`remember_write` is untouched and still honours ``source``.
+    """
+    if source is None or source == "":
+        return default_subdir if source is None else source
+    if source != default_subdir:
+        log.info(
+            "remember: ignoring caller-supplied source %r; filing under %r",
+            source,
+            default_subdir,
+        )
+    return default_subdir
+
+
 def create_server(
     raw_root: Path,
     wiki_root: Path,
@@ -4625,17 +4682,12 @@ def create_server(
 
         Args:
             content: The knowledge to save (markdown string).
-            source: SESSION identifier — selects the ``raw/<session>/``
-                subdirectory the file lands in. Example: ``"manual"``.
-                **Not** a per-claim provenance source — pass ``sources`` for
-                that. Omitted (the default) means "let this server pick",
-                which it does from the transport it is serving (issue
-                athenaeum#2385): ``claude-session`` under stdio, which one
-                Claude Code conversation owns, and ``remote-session`` under
-                ``--transport http``, which many clients and many hosts
-                share. The parameter's own schema is the same on both
-                transports — there is nothing here for a caller to read a
-                host identity out of.
+            source: Leave this out. The server files the note itself, and
+                that is the only placement that is searchable by ``recall``
+                before the next compile. A value passed here is ignored and
+                the note is filed in the same place as when it is omitted
+                (issue athenaeum#2764). It is **not** a per-claim provenance
+                source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
 
@@ -4705,7 +4757,7 @@ def create_server(
             # a default, and `or` would have quietly turned that error into
             # a successful write to the default subdirectory. Stdio stays
             # byte-identical down to the error strings.
-            _transport_defaults.session_subdir if source is None else source,
+            _remember_session_dir(source, _transport_defaults.session_subdir),
             wiki_root=wiki_root,
             sources=sources,
             screening=screening,
@@ -4788,7 +4840,9 @@ def create_server(
         return paginate(all_items, offset=offset, limit=limit)
 
     @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
-    def resolve_question(id: str, answer: str) -> dict:
+    def resolve_question(
+        id: str, answer: str, apply: str = "immediate", wait: float | None = None
+    ) -> dict:
         """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
         Also resolves a ``type: "confirmation"`` item (issue athenaeum#1290)
@@ -4812,6 +4866,18 @@ def create_server(
         Args:
             id: The id returned by ``list_pending_questions``.
             answer: The answer body (markdown; may be multi-line).
+            apply: ``"immediate"`` (default, issue athenaeum#2531) applies THIS
+                answer file only, synchronously, right after its record is
+                written -- the result carries ``applied`` and
+                ``apply_status`` (``applied`` / ``refused`` / ``held`` /
+                ``error``). ``"deferred"`` only records it; the next
+                ``ingest-answers`` tick applies it. A refusal sets
+                ``ok=False`` plus the applier's ``error_code`` (the record
+                stays); a held run lock or an applier error degrades to
+                deferred (``ok=True``, ``deferred=True``).
+            wait: Seconds to wait for the run lock when the answer needs
+                one (same semantics as ``ingest-answers --wait``); ``None``
+                uses the configured default (0, fail fast).
 
         Returns:
             A dict with:
@@ -4821,9 +4887,11 @@ def create_server(
               ``already_answered``, ``file_missing`` on failure; ``None``
               on success.
             - ``message`` (str): human-readable status.
-            - ``deferred`` (bool): ``True`` on success — the answer is
-              recorded but NOT YET applied; state changes on the next
+            - ``deferred`` (bool): ``True`` when the answer is recorded
+              but NOT YET applied (``apply="deferred"``, or an immediate
+              apply that fell back); state changes on the next
               ``ingest-answers`` tick.
+            - ``applied`` (bool) / ``apply_status`` (str): see ``apply``.
             - ``answer_file`` (str | None): path to the written
               decision-answer file on success; ``None`` on failure.
             - ``decision_id`` (str | None): echoes ``id`` on success.
@@ -4839,7 +4907,14 @@ def create_server(
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
-        from athenaeum.decision_answers import preflight_question, write_decision_answer
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import (
+            preflight_question,
+            write_and_apply_decision_answer,
+        )
+
+        if apply not in ("immediate", "deferred"):
+            return _invalid_apply_result(apply)
 
         pending_path = wiki_root / "_pending_questions.md"
         ok, error_code, message = preflight_question(pending_path, id)
@@ -4853,20 +4928,19 @@ def create_server(
                 "decision_id": None,
             }
 
-        answer_path = write_decision_answer(
-            raw_root, decision_id=id, decision_type="question", verdict=answer
+        return _answer_tool_response(
+            write_and_apply_decision_answer(
+                raw_root,
+                wiki_root,
+                apply=apply,
+                wait=wait,
+                config=load_config(wiki_root.parent),
+                decision_id=id,
+                decision_type="question",
+                verdict=answer,
+            ),
+            id,
         )
-        message = (
-            "answer recorded; applied on the next `athenaeum ingest-answers` tick"
-        )
-        return {
-            "ok": True,
-            "error_code": None,
-            "message": message,
-            "deferred": True,
-            "answer_file": str(answer_path),
-            "decision_id": id,
-        }
 
     @_register_tool(annotations=_APPEND_ONLY_TOOL_ANNOTATIONS)
     def raise_decision(
@@ -5299,7 +5373,13 @@ def create_server(
         return _summary(wiki_root)
 
     @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
-    def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
+    def review_audit_item(
+        id: str,
+        human_verdict: str,
+        note: str = "",
+        apply: str = "immediate",
+        wait: float | None = None,
+    ) -> dict:
         """Record a human's confirm/overturn of a sampled audit item (athenaeum#438,
         deferred apply per athenaeum#908).
 
@@ -5326,6 +5406,18 @@ def create_server(
                 different = overturn (recorded as a calibration signal only —
                 no merge is executed or unwound).
             note: Optional free-text note on the review.
+            apply: ``"immediate"`` (default, issue athenaeum#2531) applies THIS
+                answer file only, synchronously, right after its record is
+                written -- the result carries ``applied`` and
+                ``apply_status`` (``applied`` / ``refused`` / ``held`` /
+                ``error``). ``"deferred"`` only records it; the next
+                ``ingest-answers`` tick applies it. A refusal sets
+                ``ok=False`` plus the applier's ``error_code`` (the record
+                stays); a held run lock or an applier error degrades to
+                deferred (``ok=True``, ``deferred=True``).
+            wait: Seconds to wait for the run lock when the answer needs
+                one (same semantics as ``ingest-answers --wait``); ``None``
+                uses the configured default (0, fail fast).
 
         Returns:
             A dict with ``ok``, ``error_code`` (``id_not_found`` /
@@ -5356,7 +5448,13 @@ def create_server(
                 "error": "tier auditing not enabled",
             }
 
-        from athenaeum.decision_answers import preflight_audit, write_decision_answer
+        from athenaeum.decision_answers import (
+            preflight_audit,
+            write_and_apply_decision_answer,
+        )
+
+        if apply not in ("immediate", "deferred"):
+            return _invalid_apply_result(apply)
 
         ok, error_code, message = preflight_audit(wiki_root, id)
         if not ok:
@@ -5369,27 +5467,29 @@ def create_server(
                 "decision_id": None,
             }
 
-        answer_path = write_decision_answer(
-            raw_root,
-            decision_id=id,
-            decision_type="audit",
-            verdict=human_verdict,
-            note=note,
+        return _answer_tool_response(
+            write_and_apply_decision_answer(
+                raw_root,
+                wiki_root,
+                apply=apply,
+                wait=wait,
+                config=load_config(wiki_root.parent),
+                decision_id=id,
+                decision_type="audit",
+                verdict=human_verdict,
+                note=note,
+            ),
+            id,
         )
-        message = (
-            "review recorded; applied on the next `athenaeum ingest-answers` tick"
-        )
-        return {
-            "ok": True,
-            "error_code": None,
-            "message": message,
-            "deferred": True,
-            "answer_file": str(answer_path),
-            "decision_id": id,
-        }
 
     @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
-    def resolve_merge(id: str, decision: str, note: str = "") -> dict:
+    def resolve_merge(
+        id: str,
+        decision: str,
+        note: str = "",
+        apply: str = "immediate",
+        wait: float | None = None,
+    ) -> dict:
         """Record approve/reject on a pending merge (issue athenaeum#908: deferred apply).
 
         Validates ``decision`` and ``id`` against the CURRENT state of
@@ -5433,6 +5533,18 @@ def create_server(
                 relation's own invariants (a second parent, a cycle, a
                 third nesting level, an inactive target) are broken.
             note: Optional human note attached to the decision block.
+            apply: ``"immediate"`` (default, issue athenaeum#2531) applies THIS
+                answer file only, synchronously, right after its record is
+                written -- the result carries ``applied`` and
+                ``apply_status`` (``applied`` / ``refused`` / ``held`` /
+                ``error``). ``"deferred"`` only records it; the next
+                ``ingest-answers`` tick applies it. A refusal sets
+                ``ok=False`` plus the applier's ``error_code`` (the record
+                stays); a held run lock or an applier error degrades to
+                deferred (``ok=True``, ``deferred=True``).
+            wait: Seconds to wait for the run lock when the answer needs
+                one (same semantics as ``ingest-answers --wait``); ``None``
+                uses the configured default (0, fail fast).
 
         Returns:
             A dict with:
@@ -5441,12 +5553,13 @@ def create_server(
             - ``error_code`` (str | None): one of ``invalid_decision``,
               ``id_not_found``, ``already_resolved``, ``file_missing`` on
               failure; ``None`` on success.
-            - ``deferred`` (bool): ``True`` on success — the decision is
-              recorded but NOT YET applied; the merge is written on the
-              next ``ingest-answers`` tick, so ``folded_sources`` /
-              ``aliases_added`` / ``links_rewritten`` are NOT available
-              here (they were previously returned synchronously; this is
-              the documented deferral trade-off).
+            - ``deferred`` (bool): ``True`` when the decision is recorded
+              but NOT YET applied (``apply="deferred"``, or an immediate
+              apply that fell back); the merge is then written on the next
+              ``ingest-answers`` tick. ``folded_sources`` /
+              ``aliases_added`` / ``links_rewritten`` are NOT returned
+              either way (the documented deferral trade-off).
+            - ``applied`` (bool) / ``apply_status`` (str): see ``apply``.
             - ``answer_file`` (str | None): path to the written
               decision-answer file on success; ``None`` on failure.
             - ``decision_id`` (str | None): echoes ``id`` on success.
@@ -5463,7 +5576,14 @@ def create_server(
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
-        from athenaeum.decision_answers import preflight_merge, write_decision_answer
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import (
+            preflight_merge,
+            write_and_apply_decision_answer,
+        )
+
+        if apply not in ("immediate", "deferred"):
+            return _invalid_apply_result(apply)
 
         merges_path = wiki_root / "_pending_merges.md"
         ok, error_code, message = preflight_merge(merges_path, id, decision)
@@ -5477,8 +5597,12 @@ def create_server(
                 "decision_id": None,
             }
 
-        answer_path = write_decision_answer(
+        result = write_and_apply_decision_answer(
             raw_root,
+            wiki_root,
+            apply=apply,
+            wait=wait,
+            config=load_config(wiki_root.parent),
             decision_id=id,
             decision_type="merge",
             verdict=decision,
@@ -5490,17 +5614,7 @@ def create_server(
             # placeholder stands in until that lands.
             actor="unattributed",
         )
-        message = (
-            "decision recorded; applied on the next `athenaeum ingest-answers` tick"
-        )
-        return {
-            "ok": True,
-            "error_code": None,
-            "message": message,
-            "deferred": True,
-            "answer_file": str(answer_path),
-            "decision_id": id,
-        }
+        return _answer_tool_response(result, id)
 
     # Issue athenaeum#2383, AC2's counter-example: validate the allowlist
     # against what was ACTUALLY registered, after the last registration. An
