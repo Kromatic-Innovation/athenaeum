@@ -318,12 +318,14 @@ the single most common way to misread this project's history.
   means "the forty-third merge since the MINOR bump", not "the forty-third
   release". Do not bump the version by hand in a PR, and do not read a large
   PATCH digit as a long release history.
-- **Releases are cut weekly**, from whatever `develop` reads at the time of the
-  cut. There is no separate release-numbering step: the cut tags the version
+- **Releases ship when their changes are ready**, on no fixed schedule, from
+  whatever `develop` reads at the time of the cut — sometimes several land
+  close together, and only the latest is supported. There is no separate
+  release-numbering step: the cut tags the version
   already in `pyproject.toml`, and the tag is what publishes — pushing a `v*`
   tag is the only trigger on
   [`release.yml`](.github/workflows/release.yml), which builds from the tag and
-  publishes to PyPI with provenance attestations. A week with no merges
+  publishes to PyPI with provenance attestations. A span with no merges
   produces no cut.
 - **MINOR increments when the span being cut removed or broke public surface.**
   Athenaeum is pre-1.0, so under semver a MINOR bump is the breaking-change
@@ -341,12 +343,19 @@ PATCH you happened to install.
 
 **Where the bump happens, so you do not go looking for it here.** Only the
 publish half is in this repository — `release.yml`, triggered by the tag. The
-per-merge PATCH bump and the weekly cut are applied by the maintainer's merge
+per-merge PATCH bump and the release cut are applied by the maintainer's merge
 and release tooling, which is shared across repositories and lives outside this
 one; there is deliberately no workflow or script here that does either. The
 practical consequence for a contributor is the same either way: leave
 `version` in `pyproject.toml` alone, and write the changelog entry — the cut
 reads your entry, not your version number.
+
+**What the "bump version" commits are.** Between two releases the history
+carries one automated `chore: bump version to 0.y.z for this merge` commit
+per merge to `develop`. Each is that per-merge PATCH bump and nothing else:
+it changes only the `version` field in `pyproject.toml`, carries no feature
+or fix, and can be skipped when reading the history or bisecting. The changes themselves are in the merge commits and
+the changelog entries beside them.
 
 ### Changelog rules
 

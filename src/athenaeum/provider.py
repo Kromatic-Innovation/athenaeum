@@ -1021,6 +1021,50 @@ def _looks_retryable(*blobs: str) -> bool:
     return any(marker in haystack for marker in _RETRYABLE_MARKERS)
 
 
+#: How much of a failing ``claude`` call's stdout a one-line error carries
+#: (athenaeum#2763): enough for the CLI's own message, never a payload dump.
+_CLI_STDOUT_ERROR_MAX_CHARS = 300
+
+_CLI_NOT_LOGGED_IN_MARKER = "not logged in"
+
+
+class ClaudeCliNotLoggedInError(RuntimeError):
+    """``claude -p`` exited non-zero because no login is on file (athenaeum#2763).
+
+    A configuration fault with a known fix, not a processing defect: callers
+    log it as one line (traceback at debug only)."""
+
+
+def looks_not_logged_in(*blobs: str) -> bool:
+    """True when any blob carries the ``claude`` CLI's not-logged-in message
+    (``Not logged in · Please run /login``, printed on stdout, exit 1)."""
+    return any(_CLI_NOT_LOGGED_IN_MARKER in (b or "").lower() for b in blobs)
+
+
+def _claude_cli_exit_error(returncode: int, stdout: str, stderr: str) -> RuntimeError:
+    """The one-line error for a failed ``claude -p`` exit (athenaeum#2763).
+
+    The CLI prints some failures on stdout and leaves stderr empty, so stdout
+    (bounded, redacted, whitespace-collapsed) stands in when stderr is empty.
+    """
+    stderr = (stderr or "").strip()
+    out = " ".join((stdout or "").split())
+    if looks_not_logged_in(stderr, out):
+        return ClaudeCliNotLoggedInError(
+            "claude CLI is not logged in (it said: "
+            f"{(stderr or out)[:_CLI_STDOUT_ERROR_MAX_CHARS]!r}). Run `claude`, "
+            "then `/login`; or set ANTHROPIC_API_KEY and use llm.provider: api."
+        )
+    if stderr:
+        text = stderr
+    elif out:
+        text, _findings = redact_outbound_text(out[:_CLI_STDOUT_ERROR_MAX_CHARS])
+        text = f"{text} (from stdout)"
+    else:
+        text = "(no stderr)"
+    return RuntimeError(f"claude CLI exited {returncode}: {text}")
+
+
 # ---------------------------------------------------------------------------
 # Opt-in eval-only tool passthrough (issue athenaeum#1951)
 # ---------------------------------------------------------------------------
@@ -1314,9 +1358,7 @@ class ClaudeCliClient:
                 raise TransientError(
                     f"claude CLI rate-limited/transient: {stderr}"
                 )
-            raise RuntimeError(
-                f"claude CLI exited {proc.returncode}: {stderr or '(no stderr)'}"
-            )
+            raise _claude_cli_exit_error(proc.returncode, proc.stdout or "", stderr)
 
         return self._parse_envelope(proc.stdout or "", model)
 
