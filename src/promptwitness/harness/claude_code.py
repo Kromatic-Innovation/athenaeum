@@ -669,6 +669,47 @@ def _sanitise_launcher(raw: str | None) -> str | None:
     return cleaned or None
 
 
+#: One anchored pattern for "a version": three dot-separated numbers, an
+#: optional short pre-release suffix, capped in length. Anything else (a path,
+#: free text, a multi-line value) is rejected so it can never reach the ledger.
+_VERSION_RE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:-[0-9A-Za-z.]{1,16})?")
+_VERSION_MAX_LEN = 40
+_AI_AGENT_RE = re.compile(r"claude-code_([0-9]{1,6})-([0-9]{1,6})-([0-9]{1,6})(?:_|$)")
+
+
+def _valid_version(value: object) -> str | None:
+    """Return *value* when it is a valid version string, else ``None``."""
+    if not isinstance(value, str) or len(value) > _VERSION_MAX_LEN:
+        return None
+    return value if _VERSION_RE.fullmatch(value) else None
+
+
+def resolve_harness_version(env: Mapping[str, str]) -> tuple[str, str | None]:
+    """Return ``(version, source)`` for the running Claude Code process.
+
+    Tried in order: ``CLAUDE_CODE_VERSION``; ``AI_AGENT`` of the form
+    ``claude-code_<a>-<b>-<c>[_...]``; the last path component of
+    ``CLAUDE_CODE_EXECPATH`` when it is a bare version. ``("", None)`` when
+    none is usable (athenaeum#2760). Pure: no subprocess, no file read, no
+    per-session state; only the path's last component is inspected and the
+    path itself is never returned.
+    """
+    direct = _valid_version(env.get("CLAUDE_CODE_VERSION"))
+    if direct is not None:
+        return direct, "env:CLAUDE_CODE_VERSION"
+    agent = env.get("AI_AGENT")
+    if isinstance(agent, str) and len(agent) <= _VERSION_MAX_LEN * 2:
+        match = _AI_AGENT_RE.match(agent)
+        if match:
+            return ".".join(match.groups()), "env:AI_AGENT"
+    execpath = env.get("CLAUDE_CODE_EXECPATH")
+    if isinstance(execpath, str) and len(execpath) <= 4096:
+        tail = _valid_version(execpath.rstrip("/").rsplit("/", 1)[-1])
+        if tail is not None:
+            return tail, "env:CLAUDE_CODE_EXECPATH"
+    return "", None
+
+
 def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine | None:
     """Parse one ``UserPromptSubmit`` hook stdin payload and append a
     ``kind="turn"`` witness line.
@@ -750,11 +791,15 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine | None:
     if argv_probe_status is not None:
         signals["argv_probe"] = argv_probe_status
 
+    harness_version, harness_version_source = resolve_harness_version(env)
+    if harness_version_source is not None:
+        signals["harness_version_source"] = harness_version_source
+
     line = ledger.try_append_line(
         ledger_dir,
         kind="turn",
         harness="claude-code",
-        harness_version=str(env.get("CLAUDE_CODE_VERSION") or ""),
+        harness_version=harness_version,
         hook_version=_HOOK_VERSION,
         session=session,
         turn=turn,
@@ -814,7 +859,7 @@ def session_close(env: Mapping[str, str]) -> ledger.WitnessLine | None:
         ledger_dir,
         kind="session-close",
         harness="claude-code",
-        harness_version=str(env.get("CLAUDE_CODE_VERSION") or ""),
+        harness_version=resolve_harness_version(env)[0],
         hook_version=_HOOK_VERSION,
         session=session,
         turns=turns,

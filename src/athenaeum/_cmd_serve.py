@@ -12,6 +12,7 @@ down.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import ipaddress
 import os
 import sys
@@ -686,14 +687,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolved_search_backend(backend: str) -> str:
+    """The backend that will actually answer a recall (athenaeum#2780).
+
+    ``vector`` without ``chromadb`` installed degrades to ``fts5`` at query time
+    (``VectorBackend.query``) and at ``reindex``; the same ``find_spec`` probe
+    ``librarian`` uses to mirror that decision, which does not import chromadb.
+    """
+    if backend == "vector" and importlib.util.find_spec("chromadb") is None:
+        return "fts5"
+    return backend
+
+
 def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
-    """Print a warning if the configured backend has no cache on disk.
+    """Print a warning if the backend that will serve has no cache on disk.
 
     The keyword backend has no cache. FTS5 expects ``wiki-index.db``;
     vector expects ``wiki-vectors/``. When either is missing, recall
     silently returns empty — the warning tells the user to run
-    ``athenaeum reindex``.
+    ``athenaeum reindex``. The check runs against the backend that resolves
+    after the chromadb fallback, so a plain install configured for ``vector``
+    is judged by its FTS5 index, the one ``reindex`` built for it.
     """
+    backend = _resolved_search_backend(backend)
     if backend == "keyword":
         return
     if backend == "fts5":

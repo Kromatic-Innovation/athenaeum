@@ -401,6 +401,9 @@ def test_no_api_key_fails_key_mode_and_names_fix(
 ) -> None:
     _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # A `claude` binary exists (the no-binary wording is covered in
+    # tests/test_2762_key_mode_login.py), so this is the plain missing-key case.
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
     results = _run_healthy(healthy_install)
     assert doctor.exit_code(results) == 1
     key_mode = next(r for r in results if r.name == "key_mode")
@@ -464,6 +467,7 @@ def test_claude_cli_provider_with_binary_present_ok(
     _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(doctor, "_claude_login_missing", lambda: False)
     results = _run_healthy(healthy_install)
     key_mode = next(r for r in results if r.name == "key_mode")
     assert key_mode.status == "ok"

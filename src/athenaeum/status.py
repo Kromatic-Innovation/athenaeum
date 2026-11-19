@@ -72,7 +72,7 @@ import logging
 import subprocess
 from datetime import date
 from pathlib import Path
-from typing import NamedTuple, TypedDict, cast
+from typing import Any, NamedTuple, TypedDict, cast
 
 from athenaeum.config import (
     load_config,
@@ -96,7 +96,11 @@ from athenaeum.page_recompile import (
     sort_candidates,
 )
 from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
-from athenaeum.stuck_ledger import held_stuck_summary, load_stuck_ledger
+from athenaeum.stuck_ledger import (
+    held_stuck_summary,
+    latest_failure,
+    load_stuck_ledger,
+)
 from athenaeum.tiers import schema_fragment_state
 from athenaeum.zero_yield import load_state as load_zero_yield_state
 
@@ -227,6 +231,10 @@ class StatusInfo(TypedDict):
     # uses to exclude a file from the entity phase's intake window, so this
     # WARNING and that hold-out never disagree about which files are stuck.
     stuck_backlog_warning: dict[str, object] | None
+    # Issue athenaeum#2763: the most recent compile failure still unresolved
+    # (``stuck_ledger.latest_failure``: ref/failed_at/error/detail/
+    # files_failing), or ``None`` when no pending raw file is failing.
+    last_compile_failure: dict[str, Any] | None
     # Issue athenaeum#716: repair-debt instrumentation for the five-verdict
     # comparator's reversible-operation auto-apply loan (see
     # docs/design/conflict-resolution.md §15) — "reversible => auto" is a
@@ -622,8 +630,10 @@ def status(knowledge_root: Path) -> StatusInfo:
     # stuck-ledger entries? Best-effort — a ledger read hiccup must never
     # break status, same discipline as the other advisory sections below.
     stuck_backlog_warning: dict[str, object] | None = None
+    last_compile_failure: dict[str, Any] | None = None
     try:
         ledger = load_stuck_ledger(wiki_root)
+        last_compile_failure = latest_failure(ledger, raw_files)
         if ledger and raw_files:
             summary = held_stuck_summary(ledger, raw_files)
             considered = summary["considered"]
@@ -1007,6 +1017,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "embedder_provenance": embedder_provenance,
         "cluster_embedder_snapshot": cluster_embedder_snapshot,
         "stuck_backlog_warning": stuck_backlog_warning,
+        "last_compile_failure": last_compile_failure,
         "repair_debt": repair_debt,
         "decision_budget": decision_budget,
         "hook_degradation": hook_degradation,
@@ -1111,6 +1122,16 @@ def format_status(info: StatusInfo, *, verbose: bool = False) -> str:
             "permanently held (stuck) and cannot occupy the entity phase's "
             f"slot budget; dominant last_error={dominant_error} "
             f"({dominant_count} file(s)) — issue athenaeum#1597"
+        )
+
+    last_failure = info.get("last_compile_failure")
+    if last_failure:
+        lines.append(
+            f"Last compile:         FAILED ({last_failure['files_failing']} file(s) "
+            f"failing; latest {last_failure['failed_at']})"
+        )
+        lines.append(
+            f"  why: {last_failure.get('detail') or last_failure.get('error') or 'unknown'}"
         )
 
     lines.append(f"Wiki entities:        {info['entity_count']}")

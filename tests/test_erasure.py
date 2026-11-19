@@ -115,6 +115,18 @@ class TestAC2OpaqueIdentity:
         with pytest.raises(erasure.OpaqueIdentityError):
             erasure.opaque_person_slug("Alice Example")
 
+    @pytest.mark.parametrize("uid", ["3fa8c2d1", "7b2e9a04c1d85f36"])
+    def test_person_slug_accepts_both_uid_widths(self, uid: str) -> None:
+        assert erasure.opaque_person_slug(uid) == f"person-{uid}"
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["3fa8c2d1a4b7", "3FA8C2D1", "7B2E9A04C1D85F36", "jordan-reyes", "3fa8c2d1c", ""],
+    )
+    def test_person_slug_refuses_other_widths_case_and_names(self, bad: str) -> None:
+        with pytest.raises(erasure.OpaqueIdentityError):
+            erasure.opaque_person_slug(bad)
+
     def test_pair_id_is_order_independent(self) -> None:
         a, b = "abcd1234", "00001111"
         assert erasure.opaque_pair_id(a, b) == erasure.opaque_pair_id(b, a)

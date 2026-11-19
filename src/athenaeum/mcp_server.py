@@ -2953,6 +2953,7 @@ def remember_write(
     stamp_env_provenance: bool = True,
     explicit_request: bool = False,
     audit_transport: str = "stdio",
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -3068,6 +3069,16 @@ def remember_write(
             never dropped by a ``never`` rule.
         audit_transport: Client transport (``stdio`` / ``http``) recorded in
             the override audit record. This function does not branch on it.
+        pinned_audience: The caller's server-side pinned read audience
+            (athenaeum#2779). When non-empty, the written raw is stamped
+            ``audience: [<roles>]`` — REPLACING any ``audience:`` in *content*
+            and dropping a caller-written ``access: open`` — so a restricted
+            caller can recall its own write. A note whose ``access:`` is
+            ``internal``/``confidential``/``personal`` (from intake screening
+            or the note itself) is not stamped and stays owner-only.
+            ``None`` (default) stamps nothing. Never a tool argument: the MCP
+            ``remember`` tool passes the server's pin, under
+            ``--transport http`` only.
 
     When *wiki_root* is given and the final raw carries the explicit-remember
     marker (stamped by *explicit_request* or already in *content*'s own
@@ -3172,7 +3183,12 @@ def remember_write(
         return f"Error: invalid `screening` config: {exc}"
 
     final_content = _inject_provenance_frontmatter(
-        content, wiki_source, field_sources_map, extras, screened_access=screened_access
+        content,
+        wiki_source,
+        field_sources_map,
+        extras,
+        screened_access=screened_access,
+        pinned_audience=pinned_audience,
     )
     if wiki_root is not None:
         override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
@@ -3180,6 +3196,21 @@ def remember_write(
             return override_error
     filepath = write_raw_intake(target_dir, final_content)
     return f"Saved to {filepath}"
+
+
+def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
+    """Rewrite ``Saved to <abs path>`` to a corpus-root-relative path (athenaeum#2781).
+
+    Used under ``--transport http`` only. *raw_root* is ``<corpus>/raw``, so
+    the result reads ``Saved to raw/<session>/<file>.md``. A path that is not
+    under the corpus root falls back to the file name alone, never absolute.
+    """
+    written = Path(result[len("Saved to ") :])
+    try:
+        shown = written.relative_to(raw_root.resolve().parent)
+    except ValueError:
+        shown = Path(written.name)
+    return f"Saved to {shown.as_posix()}"
 
 
 def _audit_relevance_override(wiki_root: Path, final_content: str, transport: str) -> str | None:
@@ -3215,12 +3246,20 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
+#: ``access:`` levels that are owner-only for a restricted caller unless an
+#: ``audience:`` grant opens them (``models.effective_audience``). A remote
+#: ``remember`` never stamps its pinned audience onto a note carrying one of
+#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
+_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
+
+
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
     field_sources_map: dict | None,
     extras: dict | None = None,
     screened_access: str | None = None,
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -3242,6 +3281,7 @@ def _inject_provenance_frontmatter(
         and field_sources_map is None
         and not extras
         and not screened_access
+        and not pinned_audience
     ):
         return content
 
@@ -3264,6 +3304,25 @@ def _inject_provenance_frontmatter(
         existing_access = meta.get("access")
         existing = existing_access if isinstance(existing_access, str) else ""
         meta["access"] = more_restrictive(existing, screened_access)
+    if pinned_audience:
+        # athenaeum#2779: the server-side pin is authoritative. Overwrite (never
+        # merge with) a caller-written `audience:`, and drop `access: open`,
+        # which would make the note world-readable and so widen the stamp.
+        access_value = meta.get("access")
+        access_level = (
+            access_value.strip().lower() if isinstance(access_value, str) else ""
+        )
+        if access_level == "open":
+            del meta["access"]
+            access_level = ""
+        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+            # A restrictive `access:` (set by intake screening, or written in
+            # the note itself) is owner-only, and an `audience:` grant is the
+            # one thing that would open it to a role. Fail closed: stamp
+            # nothing, and drop any caller-written grant too.
+            meta.pop("audience", None)
+        else:
+            meta["audience"] = sorted(pinned_audience)
 
     if has_frontmatter:
         return render_frontmatter(meta) + body
@@ -3657,6 +3716,31 @@ _ADJUDICATION_TOOL_ANNOTATIONS: dict[str, Any] = {
     "openWorldHint": False,
     "idempotentHint": True,
 }
+
+
+def _remember_session_dir(source: str | None, default_subdir: str) -> str:
+    """The ``raw/`` subdirectory an MCP ``remember`` call writes into.
+
+    The tool's ``source`` argument names a session directory, not a
+    provenance source, and a model that supplies one invents a directory
+    (``manual`` was the example the tool used to give) that is not in
+    ``recall.extra_intake_roots``, so the note was unrecallable until the next
+    compile (issue athenaeum#2764). Every non-empty value is therefore
+    rerouted to the transport default (*default_subdir*); the argument stays
+    in the signature so existing callers do not break. An EMPTY string is
+    passed through so ``remember_write`` keeps returning its
+    "must contain at least one alphanumeric character" error. The in-process
+    :func:`remember_write` is untouched and still honours ``source``.
+    """
+    if source is None or source == "":
+        return default_subdir if source is None else source
+    if source != default_subdir:
+        log.info(
+            "remember: ignoring caller-supplied source %r; filing under %r",
+            source,
+            default_subdir,
+        )
+    return default_subdir
 
 
 def create_server(
@@ -4657,17 +4741,12 @@ def create_server(
 
         Args:
             content: The knowledge to save (markdown string).
-            source: SESSION identifier — selects the ``raw/<session>/``
-                subdirectory the file lands in. Example: ``"manual"``.
-                **Not** a per-claim provenance source — pass ``sources`` for
-                that. Omitted (the default) means "let this server pick",
-                which it does from the transport it is serving (issue
-                athenaeum#2385): ``claude-session`` under stdio, which one
-                Claude Code conversation owns, and ``remote-session`` under
-                ``--transport http``, which many clients and many hosts
-                share. The parameter's own schema is the same on both
-                transports — there is nothing here for a caller to read a
-                host identity out of.
+            source: Leave this out. The server files the note itself, and
+                that is the only placement that is searchable by ``recall``
+                before the next compile. A value passed here is ignored and
+                the note is filed in the same place as when it is omitted
+                (issue athenaeum#2764). It is **not** a per-claim provenance
+                source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
 
@@ -4737,7 +4816,7 @@ def create_server(
             # a default, and `or` would have quietly turned that error into
             # a successful write to the default subdirectory. Stdio stays
             # byte-identical down to the error strings.
-            _transport_defaults.session_subdir if source is None else source,
+            _remember_session_dir(source, _transport_defaults.session_subdir),
             wiki_root=wiki_root,
             sources=sources,
             screening=screening,
@@ -4747,6 +4826,12 @@ def create_server(
             stamp_env_provenance=_transport_defaults.env_session_attribution,
             explicit_request=explicit_request,
             audit_transport="http" if transport == "http" else "stdio",
+            # athenaeum#2779: a remote write is stamped with the server-side
+            # pin so the caller's own audience can recall it. Stdio and an
+            # owner (unpinned) server stamp nothing.
+            pinned_audience=(
+                caller_audience if transport == "http" and caller_audience else None
+            ),
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(
@@ -4755,6 +4840,10 @@ def create_server(
                 cache_dir=cache_dir,
                 config=config,
             )
+        if transport == "http" and result.startswith("Saved to "):
+            # athenaeum#2781: an absolute server path is egress to the host
+            # provider; name the file relative to the corpus root instead.
+            result = _corpus_relative_saved_reply(result, raw_root)
         return result
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

@@ -298,6 +298,12 @@ class ReceiptEntry:
     ``"witnessed"`` (hit) receipt, not only on an unwitnessed one — see
     :class:`athenaeum.witness_attestation.AttestationOutcome`'s own
     docstring for why that is additive rather than a behaviour change.
+
+    **Paste marker (athenaeum#2770, additive).** ``witness_paste`` is one
+    more additive field, same treatment: ``"detected"`` when the attested
+    ledger line had a ``pasted`` segment, else ``None`` (also on a receipt
+    written before the field existed). ``None`` does not mean typed; see
+    :class:`athenaeum.witness_attestation.AttestationOutcome`.
     """
 
     origin_scope: str
@@ -319,6 +325,7 @@ class ReceiptEntry:
     transcript_entrypoint: str | None = None
     witness_strength_verified: str | None = None
     witness_anchor_source: str | None = None
+    witness_paste: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -341,6 +348,7 @@ class ReceiptEntry:
             "transcript_entrypoint": self.transcript_entrypoint,
             "witness_strength_verified": self.witness_strength_verified,
             "witness_anchor_source": self.witness_anchor_source,
+            "witness_paste": self.witness_paste,
         }
 
     @classmethod
@@ -363,6 +371,7 @@ class ReceiptEntry:
             transcript_entrypoint=d.get("transcript_entrypoint"),
             witness_strength_verified=d.get("witness_strength_verified"),
             witness_anchor_source=d.get("witness_anchor_source"),
+            witness_paste=d.get("witness_paste"),
             recorded_at=str(d.get("recorded_at", "")),
             schema_version=int(d.get("schema_version", SCHEMA_VERSION)),
         )
@@ -965,6 +974,7 @@ def write_receipt_for_origin(
         witness_anchor_source=(
             witness_outcome.witness_anchor_source if witness_outcome is not None else None
         ),
+        witness_paste=witness_outcome.witness_paste if witness_outcome is not None else None,
     )
     append_receipt(wiki_root, entry, lock=lock, sealer=sealer, run=run)
     return entry

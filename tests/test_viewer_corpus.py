@@ -931,3 +931,19 @@ def test_each_server_mints_a_distinct_nonce(tmp_path: Path) -> None:
     finally:
         a.server_close()
         b.server_close()
+
+
+class TestUidWidths:
+    """``UID_RE`` accepts both the legacy 8-hex and the 16-hex page uid."""
+
+    def test_accepts_8_and_16_hex(self) -> None:
+        from athenaeum.viewer_corpus import UID_RE
+
+        assert UID_RE.match("3fa8c2d1")
+        assert UID_RE.match("7b2e9a04c1d85f36")
+
+    def test_rejects_uppercase_and_traversal(self) -> None:
+        from athenaeum.viewer_corpus import UID_RE
+
+        assert not UID_RE.match("7B2E9A04C1D85F36")
+        assert not UID_RE.match("../etc/passwd")
