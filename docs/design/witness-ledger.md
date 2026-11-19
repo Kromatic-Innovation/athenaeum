@@ -227,6 +227,19 @@ set from `PROMPTWITNESS_LAUNCHER` when non-empty) lets a caller that starts
 `prompt_kind` or human-ness (athenaeum#2172).
 **Headless and bridge are never human.**
 
+**Pasted text, and the limit of "pasted" (athenaeum#2770).** By operator
+ruling a paste is the human's intent and counts as instructions from that
+human: a `human` line with `pasted` segments attests exactly as one without,
+with `witness_tag` still `typed`. The `pasted` segments, and the receipt's
+`witness_paste: "detected"` derived from them, mean "pasted where
+detectable". Claude Code wraps a paste in `<pasted_content>` only above a size
+threshold (not measured), so a paste below it reaches the hook as plain text
+and is recorded as `typed`. A `typed` segment, or a `witness_tag` of `typed`,
+therefore means "no paste wrapper", not "keystrokes", and `witness_paste`
+being absent does not mean the prompt was typed. The marker is per prompt, not
+per claim: it does not say the quoted claim lies inside the paste. It is
+metadata only: it is no input to any hit condition and adds no miss reason.
+
 ### Signing
 
 `KeyProvider` (`key_id`, `algorithm`, `strength`, `presence_required`,
@@ -552,7 +565,9 @@ no `signals.agent_id`; transcript `origin.kind == human` when present,
 human`; Claude Code writes no `promptSource` on a slash record, and a
 non-human slash record carries no `origin`), `isSidechain` not true. A hit writes
 `channel: witnessed` plus `witness_tag`/`witness_ref`/`witness_strength`/
-`witness_anchored` (receipt schema v2, additive); a miss stays `user-stated`
+`witness_anchored`, plus `witness_paste` (`"detected"` when the attested
+line has a `pasted` segment, else absent; athenaeum#2770) (receipt schema v2,
+additive); a miss stays `user-stated`
 with a `witness_miss` reason and is surfaced as a warning/incident (ruling
 10). **Nothing gates on the result yet.**
 
@@ -617,6 +632,11 @@ These replace the open questions the design pass raised.
     readout window, the miss counter stays, and any miss is surfaced as a
     warning/incident (athenaeum#2158, athenaeum#2160), not a tolerated rate.
     athenaeum#2163 is blocked only on athenaeum#2160 and athenaeum#2161.
+11. **A paste counts as human, and is marked as pasted where detectable
+    (athenaeum#2741, athenaeum#2770).** Pasted text is attested like typed
+    text; the receipt carries `witness_paste: "detected"` as metadata. A paste
+    below claude's wrapper threshold is recorded as typed, and no change on
+    our side can fix that.
 
 ## 6. Children and sequencing
 
