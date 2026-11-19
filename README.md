@@ -39,20 +39,7 @@ athenaeum init
 
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
-
-# Check the setup (read-only). FAILs are expected at this point; see below.
-athenaeum doctor
 ```
-
-`athenaeum doctor` is a read-only health check. **On a fresh install it will
-show FAILs, and that is expected.** Right after the commands above it is
-expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
-`key_mode` when neither an API key nor the `claude` CLI is available)
-until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start (through `athenaeum session-end`):
-`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
-because the per-turn recall hook is optional and the quick start does not
-wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.
@@ -63,6 +50,41 @@ Want to confirm it works before wiring anything up or spending API budget?
 ```bash
 athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
 ```
+
+Then check the install (read-only):
+
+```bash
+athenaeum doctor
+```
+
+On a fresh install, steps you have not done yet show as `WARN` with
+`setup pending` and the command that finishes each one; `doctor` still exits
+`0`. Only something present but broken (an unparseable `settings.json`, a hook
+whose script is missing, an unreadable index) is a `FAIL` and exits non-zero.
+Abridged output right after `athenaeum init`, before `claude mcp add` (paths
+shortened):
+
+```text
+Athenaeum Doctor
+========================================
+[OK] package_version: running 0.27.4; latest release is 0.27.4
+[OK] interpreter: Python 3.13.1
+[WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
+    fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+[WARN] hooks: setup pending: no Claude Code settings file found at ~/.claude/settings.json
+    fix: merge examples/claude-code/settings-snippet.json into ~/.claude/settings.json ...
+[WARN] key_mode: setup pending: llm.provider=claude-cli but Claude Code is not logged in ...
+    fix: run `claude` and `/login`, or set ANTHROPIC_API_KEY
+[WARN] search_index: setup pending: no vector index found under ~/.cache/athenaeum/wiki-vectors
+    fix: run `athenaeum reindex --path <knowledge-root>` to build it, ...
+...
+All checks passed, with 4 warning(s).
+```
+
+Run it again once you have finished the quick start (through
+`athenaeum session-end`): `mcp` and `search_index` are then OK. `hooks` stays
+a `WARN` because the per-turn recall hook is optional and the quick start does
+not wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 That gives your agent two tools: `remember` to write an observation, `recall` to search
 the compiled wiki. A round-trip looks like this:

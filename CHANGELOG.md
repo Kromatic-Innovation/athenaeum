@@ -20,6 +20,19 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Changed
+
+- `athenaeum doctor` now reports the first-run setup checks (`mcp`, `hooks`,
+  `key_mode`, `search_index`) as `WARN` with "setup pending" and the command
+  that finishes setup, instead of `FAIL`, so a fresh `athenaeum init` exits
+  `0`. Present-but-broken state (unparseable `settings.json` or
+  `.claude.json`, a hook whose script is missing, an unreadable fts5 index, an
+  unrecognised `llm.provider`) is still `FAIL`. The README Quick start now runs
+  `doctor` after `test-mcp` with sample output. Topic extraction also logs a
+  one-time-per-process warning when it falls back to the regex extractor
+  because no LLM credential is available, naming how to enable LLM extraction
+  (athenaeum#2906).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
