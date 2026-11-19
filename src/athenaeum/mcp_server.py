@@ -3073,9 +3073,12 @@ def remember_write(
             (athenaeum#2779). When non-empty, the written raw is stamped
             ``audience: [<roles>]`` — REPLACING any ``audience:`` in *content*
             and dropping a caller-written ``access: open`` — so a restricted
-            caller can recall its own write. ``None`` (default) stamps
-            nothing. Never a tool argument: the MCP ``remember`` tool passes
-            the server's pin, under ``--transport http`` only.
+            caller can recall its own write. A note whose ``access:`` is
+            ``internal``/``confidential``/``personal`` (from intake screening
+            or the note itself) is not stamped and stays owner-only.
+            ``None`` (default) stamps nothing. Never a tool argument: the MCP
+            ``remember`` tool passes the server's pin, under
+            ``--transport http`` only.
 
     When *wiki_root* is given and the final raw carries the explicit-remember
     marker (stamped by *explicit_request* or already in *content*'s own
@@ -3243,6 +3246,13 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
+#: ``access:`` levels that are owner-only for a restricted caller unless an
+#: ``audience:`` grant opens them (``models.effective_audience``). A remote
+#: ``remember`` never stamps its pinned audience onto a note carrying one of
+#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
+_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
+
+
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
@@ -3298,10 +3308,21 @@ def _inject_provenance_frontmatter(
         # athenaeum#2779: the server-side pin is authoritative. Overwrite (never
         # merge with) a caller-written `audience:`, and drop `access: open`,
         # which would make the note world-readable and so widen the stamp.
-        meta["audience"] = sorted(pinned_audience)
         access_value = meta.get("access")
-        if isinstance(access_value, str) and access_value.strip().lower() == "open":
+        access_level = (
+            access_value.strip().lower() if isinstance(access_value, str) else ""
+        )
+        if access_level == "open":
             del meta["access"]
+            access_level = ""
+        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+            # A restrictive `access:` (set by intake screening, or written in
+            # the note itself) is owner-only, and an `audience:` grant is the
+            # one thing that would open it to a role. Fail closed: stamp
+            # nothing, and drop any caller-written grant too.
+            meta.pop("audience", None)
+        else:
+            meta["audience"] = sorted(pinned_audience)
 
     if has_frontmatter:
         return render_frontmatter(meta) + body

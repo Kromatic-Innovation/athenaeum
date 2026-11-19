@@ -138,6 +138,43 @@ class TestCallerCannotWidenTheStamp:
         assert _only_meta(corpus, "remote-session")["audience"] == ["ops"]
 
 
+class TestRestrictiveAccessIsNotWidened:
+    """A restrictive ``access:`` is owner-only; the stamp must not open it to a role."""
+
+    MEDICAL = "Owner was diagnosed with type 2 diabetes and started metformin."
+
+    def test_a_screened_personal_note_is_not_stamped(self, corpus: Path) -> None:
+        server = _server(
+            corpus,
+            transport="http",
+            caller_audience={"ops"},
+            screening={"medical": {"action": "label_restrict", "access": "personal"}},
+        )
+        assert _tool(server, "remember")(content=self.MEDICAL).startswith("Saved to")
+        meta = _only_meta(corpus, "remote-session")
+        assert meta["access"] == "personal"
+        assert "audience" not in meta
+        def recall_as(audience: set[str] | None) -> str:
+            return _tool(_http(corpus, audience), "recall")(query="metformin", top_k=5)
+
+        # Positive control: the owner reads it, so the query does find the note.
+        assert "diagnosed" in recall_as(None)
+        assert "diagnosed" not in recall_as({"ops"})
+
+    @pytest.mark.parametrize("level", ["internal", "confidential", "personal"])
+    def test_a_note_written_restrictive_drops_its_own_grant(
+        self, corpus: Path, level: str
+    ) -> None:
+        _tool(_http(corpus, {"ops"}), "remember")(
+            content=f"---\naccess: {level}\naudience: [finance]\n---\nThe {NEEDLE} is quarterly.\n"
+        )
+        meta = _only_meta(corpus, "remote-session")
+        assert meta["access"] == level
+        assert "audience" not in meta
+        assert BODY not in _recall(_http(corpus, {"finance"}))
+        assert BODY not in _recall(_http(corpus, {"ops"}))
+
+
 class TestStdioUnchanged:
     def test_stdio_remember_stamps_no_audience_even_when_pinned(self, corpus: Path) -> None:
         server = _server(corpus, caller_audience={"ops"})

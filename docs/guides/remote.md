@@ -585,8 +585,10 @@ Details specific to remote mode:
   caller's whole audience **without review**: nothing screens or approves the note
   before it is recallable. The stamp comes from the server-side pin, never from a
   `remember` argument, and replaces any `audience:` written in the note itself; a
-  note's own `access: open` is dropped. Under `--audience owner` nothing is
-  stamped, because the owner reads every page already.
+  note's own `access: open` is dropped. A note marked `internal`, `confidential`
+  or `personal`, whether by intake screening or in its own frontmatter, is not
+  stamped and stays readable by the owner only. Under `--audience owner` nothing
+  is stamped, because the owner reads every page already.
 - **A remote `remember` reply names the saved file relative to the corpus root**
   (`raw/remote-session/<file>.md`), never an absolute server path, because every
   value returned to the host is egress. A local stdio server keeps the absolute path.
