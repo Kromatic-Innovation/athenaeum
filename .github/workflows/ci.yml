@@ -169,7 +169,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            requirements-ci.lock
+            requirements-ci.txt
 
       - name: Install dependencies (with vector extras)
         run: |
@@ -178,7 +178,7 @@ jobs:
           # is applied as a CONSTRAINTS file: pyproject.toml still resolves the
           # graph per Python version, then each package is pinned to the locked
           # version. pyproject's published ranges are unchanged.
-          pip install -e ".[dev,vector]" -c requirements-ci.lock
+          pip install -e ".[dev,vector]" -c requirements-ci.txt
 
       - name: Lint with ruff
         run: ruff check src/ tests/
@@ -244,7 +244,7 @@ jobs:
       - name: Install coverage (locked version)
         run: |
           python -m pip install --upgrade pip
-          pip install coverage -c requirements-ci.lock
+          pip install coverage -c requirements-ci.txt
 
       - name: Download shard coverage data
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -304,13 +304,13 @@ jobs:
           python -m pip install --upgrade pip
           # Same reproducible-CI lock (athenaeum#556); the `types`-only extras
           # (mypy + stubs) resolve unpinned since the lock tracks [dev,vector].
-          pip install -e ".[dev,vector,types]" -c requirements-ci.lock
+          pip install -e ".[dev,vector,types]" -c requirements-ci.txt
 
       - name: Type check with mypy
         run: mypy
 
   # athenaeum#2136 — the CONTRIBUTOR's install path, with NO
-  # `requirements-ci.lock`. Every other job here constrains to that lock, which
+  # `requirements-ci.txt`. Every other job here constrains to that lock, which
   # is the right call for reproducibility but means the published, unconstrained
   # ranges in pyproject.toml are never actually resolved by CI. That blind spot
   # shipped a real break: four test modules `import httpx`, `httpx` was declared
@@ -340,7 +340,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      # `[dev]` only, and NO `-c requirements-ci.lock` — this is verbatim what
+      # `[dev]` only, and NO `-c requirements-ci.txt` — this is verbatim what
       # CONTRIBUTING.md step 2 offers a contributor who is not touching search
       # or clustering. Adding the lock here, or widening the extras to match the
       # `test` job, would delete the entire point of this job.
@@ -407,14 +407,14 @@ jobs:
       - name: Run public-safe-lint scan
         run: bash public-safe-lint.sh .
 
-  # athenaeum#2324 — catch a pyproject.toml / requirements-ci.lock exact-pin
+  # athenaeum#2324 — catch a pyproject.toml / requirements-ci.txt exact-pin
   # duplicate BY NAME before any other job pays for `pip install`. Twice
   # (athenaeum#1922, athenaeum#2284) a Dependabot PR bumped `ruff`'s `==` pin
   # in pyproject.toml without touching a stale duplicate in
-  # requirements-ci.lock (applied as a constraints file), so every install
+  # requirements-ci.txt (applied as a constraints file), so every install
   # step died with `ResolutionImpossible` and the failure `CI Required`
   # actually reported was a downstream skipped `Coverage` job, never naming
-  # the real cause. The fix is structural (see requirements-ci.lock's header
+  # the real cause. The fix is structural (see requirements-ci.txt's header
   # and docs/design/security-posture.md §3.1): an exact-pinned direct
   # dependency is no longer duplicated into the lock at all, so it cannot
   # desync. This job is the backstop that fails loudly, by name, if a
@@ -428,7 +428,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: Check pyproject.toml / requirements-ci.lock exact-pin parity
+      - name: Check pyproject.toml / requirements-ci.txt exact-pin parity
         run: python3 scripts/check_exact_pin_parity.py
 
   # athenaeum#2297 — prove the documented uv install path actually clears the

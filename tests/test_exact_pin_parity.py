@@ -2,7 +2,7 @@
 """CI gate + unit tests for the exact-pin parity check (issue athenaeum#2324).
 
 `test_gate_passes_on_the_current_tree` is the enforcement gate: it fails the
-suite if this repo's own `pyproject.toml` and `requirements-ci.lock` ever
+suite if this repo's own `pyproject.toml` and `requirements-ci.txt` ever
 duplicate an exact `==` pin again. The rest prove the checker itself works --
 a deliberate-mismatch counter-example (`mismatch/`) names the right package
 and both versions, and a positive control (`clean/`) proves that failure is
@@ -42,14 +42,14 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "exact_pin_parity"
 def _read_fixture_pair(name: str) -> tuple[str, str]:
     base = FIXTURES / name
     pyproject_text = (base / "pyproject.toml").read_text()
-    lock_text = (base / "requirements-ci.lock").read_text()
+    lock_text = (base / "requirements-ci.txt").read_text()
     return pyproject_text, lock_text
 
 
 def test_gate_passes_on_the_current_tree() -> None:
     # The gate. A re-introduced duplicate exact pin must make this red.
     pyproject_text = (REPO_ROOT / "pyproject.toml").read_text()
-    lock_text = (REPO_ROOT / "requirements-ci.lock").read_text()
+    lock_text = (REPO_ROOT / "requirements-ci.txt").read_text()
     violations = check_exact_pin_parity.check_parity(pyproject_text, lock_text)
     assert violations == [], "\n".join(violations)
 
@@ -69,7 +69,7 @@ def test_fixture_duplicate_mismatch_is_reported_by_name() -> None:
 def test_fixture_no_duplicate_passes() -> None:
     # Positive control: proves the failure above is about the deliberate
     # duplicate, not about the checker always failing. Same ruff==0.17.3
-    # exact pin, but requirements-ci.lock carries no copy of it at all.
+    # exact pin, but requirements-ci.txt carries no copy of it at all.
     pyproject_text, lock_text = _read_fixture_pair("clean")
     assert check_exact_pin_parity.check_parity(pyproject_text, lock_text) == []
 
@@ -103,7 +103,7 @@ def test_main_exits_nonzero_and_names_the_package_on_a_mismatch(
     # calls -- not just the pure check_parity() helper above.
     pyproject_text, lock_text = _read_fixture_pair("mismatch")
     fake_pyproject = tmp_path / "pyproject.toml"
-    fake_lock = tmp_path / "requirements-ci.lock"
+    fake_lock = tmp_path / "requirements-ci.txt"
     fake_pyproject.write_text(pyproject_text)
     fake_lock.write_text(lock_text)
     monkeypatch.setattr(check_exact_pin_parity, "PYPROJECT", fake_pyproject)

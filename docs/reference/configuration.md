@@ -4599,6 +4599,30 @@ carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
 `athenaeum.models.asserter_identity_key` to key on; a non-dict or
 empty block is inert.
 
+### `resolve_owner_bridge_memory_types`
+
+- **YAML path:** `owner.bridge_memory_types`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `['user']`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Return the auto-memory ``memory_type`` values bridged to the owner page.
+
+Read from ``owner.bridge_memory_types`` in ``athenaeum.yaml``. A first-person
+auto-memory note otherwise compiles only into ``wiki/auto-*.md``; every
+note whose author-set ``memory_type`` is in this list is also handed to the
+entity tier once per content, where the owner candidate classify and the
+owner-verify merge file it on the owner page. It does nothing unless an
+owner is configured (``owner.uid``) and that page resolves.
+
+Default ``["user"]``: ``user`` is the type an author gives a note about the
+person themselves. ``feedback`` is excluded on purpose, since those notes
+are mostly standing instructions to the assistant and would flood the
+owner's Preferences section with operating rules. An explicitly empty list
+disables the bridge. Unknown type names are ignored; an absent key, or a
+value that is not a list, falls back to the default.
+
 ## `person_registry`
 
 ### `resolve_person_registry_root`
@@ -6326,7 +6350,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/decision_answers.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/page_recompile_plan.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/_cmd_import_memory.py`, `src/athenaeum/config.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
+| `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/_cmd_import_memory.py`, `src/athenaeum/config.py`, `src/athenaeum/doctor.py`, `src/athenaeum/provider.py`, `src/athenaeum/schedule.py` |
 | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | `src/athenaeum/provider.py` |
 | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_MAX_TOKENS` | `src/athenaeum/comparator.py`, `src/athenaeum/shadow_parity.py` |
 | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING` | `src/athenaeum/comparator.py` |

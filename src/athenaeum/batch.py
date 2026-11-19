@@ -105,6 +105,7 @@ from athenaeum.models import (
     resolve_page_type,
 )
 from athenaeum.never_ingest import NEVER_INGEST_TIER_ENTITY, check_and_refuse
+from athenaeum.owner_memory_bridge import is_owner_only_raw, restrict_to_owner
 from athenaeum.person_hints import (
     PersonHintSet,
     build_hint_action,
@@ -1737,6 +1738,13 @@ def process_batch_run(
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
             )
+        # Issue athenaeum#2690: an owner-only bridge note may only touch the
+        # owner's page; same deterministic scope as ``librarian.process_one``,
+        # applied before any gate or tier-3 call.
+        if is_owner_only_raw(parse_frontmatter(st.raw.content)[0]):
+            _owner_uid = st.hint_set.owner_uid
+            classified = restrict_to_owner(classified, _owner_uid, st.raw.ref)
+            st.matched = [m for m in st.matched if m[1] == _owner_uid]
         # Issue athenaeum#680: never mint a wiki entity from a filename/path (a code
         # artifact) — the repo is the source of truth for its own code, so a
         # memory of it is stale by construction. Dropped at creation, on the

@@ -146,6 +146,7 @@ from athenaeum.config import (
     resolve_heartbeat_interval,
     resolve_intake_runtime_floor,
     resolve_model_rates,
+    resolve_owner_bridge_memory_types,
     resolve_page_recompile_mode,
     resolve_person_registry_root,
     resolve_pull_before_run,
@@ -219,10 +220,16 @@ from athenaeum.never_ingest import (
     check_and_refuse,
     filter_never_ingest,
 )
+from athenaeum.owner_memory_bridge import (
+    bridge_owner_memories,
+    is_owner_only_raw,
+    restrict_to_owner,
+)
 from athenaeum.person_hints import (
     build_hint_action,
     build_person_hints,
     cap_hint_claims,
+    owner_uid_from_config,
 )
 from athenaeum.person_registry import PERSON_TYPE, PersonRegistry
 from athenaeum.pii import (
@@ -3195,6 +3202,11 @@ def process_one(
                     "hint instead): %s",
                     [name for name, _uid, _fpath in _hint_shadowed],
                 )
+        # Issue athenaeum#2690: an owner-only bridge note may only touch the
+        # owner's page, so no literal name match may reach another page.
+        _owner_only = is_owner_only_raw(raw_meta)
+        if _owner_only:
+            matched = [m for m in matched if m[1] == hint_set.owner_uid]
         matched_names = [name for name, _, _ in matched]
         # Issue athenaeum#1184: the fan-out driver — how many existing entities this
         # ONE file's index-key hits dispatched a merge decision for. Recorded on
@@ -3255,6 +3267,9 @@ def process_one(
         result.degraded += t2_stats.degraded
         result.truncated += t2_stats.truncated  # issue athenaeum#476
         log.info("  T2 classified %d new entities", len(classified))
+        if _owner_only:
+            # Issue athenaeum#2690: deterministic owner-only scope, before tier 3.
+            classified = restrict_to_owner(classified, hint_set.owner_uid, raw.ref)
         # Issue athenaeum#1866: one decision per hinted candidate, defaulting to
         # "the classifier never asserted anything about this person" — every
         # branch below (a dropped item, a fan-out-capped action, a write-merge
@@ -5855,6 +5870,9 @@ class RunContext:
     # matched a manifest-declared ``never_ingest_classes`` entry. Empty/zero
     # when the manifest declares no classes (the dark-by-default case).
     never_ingest_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2690: auto-memory notes bridged to the owner page this run
+    # (rendered in the auto-memory run-summary entry as ``owner_bridged``).
+    owner_bridged: int = 0
     # Issue athenaeum#968: the ingestion gate's verdict for this run (``None``
     # until ``_run_auto_memory_phase`` runs). ``blocked=True`` means
     # auto-memory compilation was skipped this run because push-metrics
@@ -11108,6 +11126,36 @@ def _stamp_unbucketed_auto_memory(
         )
 
 
+def _bridge_owner_memories(
+    ctx: RunContext, auto_memory_files: list[AutoMemoryFile]
+) -> int:
+    """Run the athenaeum#2690 owner-note bridge; return notes bridged this run.
+
+    Builds the entity index and person registry only when an owner is
+    configured and the type list is non-empty, so a run without an owner pays
+    nothing. Never raises: a failure is logged and the run continues.
+    """
+    if not resolve_owner_bridge_memory_types(ctx.config) or owner_uid_from_config(
+        ctx.config
+    ) is None:
+        return 0
+    try:
+        return bridge_owner_memories(
+            auto_memory_files,
+            config=ctx.config,
+            raw_root=ctx.raw_root,
+            index=EntityIndex(
+                ctx.wiki_root, resolve_locator_surfaces(ctx.knowledge_root, ctx.config)
+            ),
+            person_registry=PersonRegistry(
+                resolve_person_registry_root(ctx.knowledge_root, ctx.config)
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — the bridge must not break the run
+        log.warning("owner bridge failed (non-fatal): %s", exc)
+        return 0
+
+
 def _write_transcript_receipts(
     ctx: RunContext, auto_memory_files: list[AutoMemoryFile]
 ) -> None:
@@ -11372,6 +11420,14 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             ctx.usage,
             wiki_root=ctx.wiki_root,
         )
+        # Issue athenaeum#2690: bridge author-typed owner notes (default
+        # ``owner.bridge_memory_types: ["user"]``, ``feedback`` excluded since
+        # those are standing assistant instructions that would flood the owner
+        # page's Preferences) into the entity tier, once per content. Pure
+        # deterministic code: NO model call here. The entity loop's tier-2/3
+        # calls on the derived note run on a LATER run, inside ``max_api_calls``.
+        # Non-dry only (this branch), inert without a resolvable owner.
+        ctx.owner_bridged = _bridge_owner_memories(ctx, auto_memory_files)
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
     # baseline. A caller that already threads an explicit
@@ -11486,6 +11542,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     "embed_fallback": _embedder_counts.get(
                         EMBEDDER_FALLBACK_HASHING, 0
                     ),
+                    "owner_bridged": ctx.owner_bridged,  # issue athenaeum#2690
                     "reason": "deadline",  # issue athenaeum#1102 AC1
                 },
             )
@@ -11514,6 +11571,8 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 # for the full rationale.
                 "embed_chromadb": _embedder_counts.get(EMBEDDER_CHROMADB_DEFAULT, 0),
                 "embed_fallback": _embedder_counts.get(EMBEDDER_FALLBACK_HASHING, 0),
+                # Issue athenaeum#2690: owner-page bridge count, rendered every run.
+                "owner_bridged": ctx.owner_bridged,
                 # Issue athenaeum#1256: ``_auto_memory_reason`` is now always
                 # "completed" -- see that function's own docstring.
                 "reason": _auto_memory_reason(_merge_stats),
@@ -12073,6 +12132,14 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     ctx.zero_yield_consecutive,
                     _zy_alert_threshold,
                 )
+
+    # Issue athenaeum#2533: optional decision-queue push (per-user command
+    # notifier; off unless the user's notify config opts in). After every
+    # phase that can change the queue; never raises, skipped on dry-run.
+    if not ctx.dry_run:
+        from athenaeum.decision_notify import maybe_notify
+
+        maybe_notify(ctx.wiki_root, ctx.config)
 
     # Issue athenaeum#2040: witness anchoring + off-machine mirror, BEFORE the
     # push so this run's own records are what gets pushed.
