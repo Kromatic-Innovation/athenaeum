@@ -20,9 +20,34 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-11-19
+
+**Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
+published). It changes one behaviour: a note saved by a remote `remember`
+(`--transport http`) under a restricted `--audience` is now stamped with the
+server's pinned audience, so the writer and anyone else holding that role can
+recall it. Before, every restricted audience withheld it, including the
+writer's own (athenaeum#2779). It also refreshes the pinned versions in the
+CI constraints file, `requirements-ci.txt`, to clear open security advisories
+against those pins (athenaeum#2812). That file only constrains CI and
+`-c requirements-ci.txt` installs; the dependency ranges the published package
+declares are unchanged. `athenaeum.__all__` is unchanged.
+
+**Upgrading from 0.27.0**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`.
+2. If you run the server remotely with a restricted `--audience`, notes saved
+   through it from now on are visible to that whole audience without review.
+   Notes saved before the upgrade stay untagged.
+
 ### Changed
 
 - A remote `remember` (`--transport http`) under a restricted `--audience` now stamps the saved note with the server's pinned audience (`audience: [<roles>]`), so the caller that wrote it, and anyone else holding that role, can recall it. Before, the note was untagged and every restricted audience withheld it, including the writer's own. The stamp comes only from the server-side pin: it replaces any `audience:` in the note's own frontmatter, drops a note-written `access: open`, and no `remember` argument changes it. A note whose `access:` is `internal`, `confidential` or `personal` (set by intake screening or by the note) is not stamped and stays owner-only. A different restricted audience still cannot recall the note, `--audience owner` and stdio stamp nothing, and `docs/guides/remote.md` now says remote saves are visible to the caller's whole audience without review (athenaeum#2779).
+
+### Security
+
+- The CI constraints file `requirements-ci.txt` takes a grouped update of 13 pins that clears open security advisories, among them several against `aiohttp`, plus the transitive pins those updates require. Only CI and installs run with `-c requirements-ci.txt` see the change; the package's declared dependency ranges are unchanged (athenaeum#2812).
 
 ## [0.27.0] - 2026-11-19
 
@@ -10846,7 +10871,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.24.0...v0.25.0
