@@ -547,6 +547,9 @@ Two details specific to remote mode:
   default, so a note written there is recallable in the same session as the write.
   If you are scheduling against an older store, confirm that root exists before
   assuming a remote write is being picked up.
+- **A remote `remember` reply names the saved file relative to the corpus root**
+  (`raw/remote-session/<file>.md`), never an absolute server path, because every
+  value returned to the host is egress. A local stdio server keeps the absolute path.
 - **Wiki-level sources default to `remote:inferred`** under `--transport http`, not
   `claude:inferred`. That is the string to select on when you want to know what
   arrived over the remote endpoint.
