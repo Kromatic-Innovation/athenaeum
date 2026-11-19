@@ -98,9 +98,9 @@ Behaviour changes an existing install will notice:
 Experimental surface (not in `athenaeum.__all__`; flags, keys, formats and
 import paths may change in any minor release without a deprecation cycle): the
 decision digest (`athenaeum decisions digest`, the `queue_digest` MCP tool),
-decision push (`notify.yaml`), the `apply` option on decision answers, the
+decision push (`notify.yaml`) (athenaeum#2489), the `apply` option on decision answers, the
 `owner.bridge_memory_types` key, the `witness_paste` receipt field, the new
-`athenaeum.type_guidance` module, and everything 0.26.0 listed as experimental.
+`athenaeum.type_guidance` module (athenaeum#2731), and everything 0.26.0 listed as experimental.
 
 **Upgrading from 0.26.0**
 
