@@ -1496,7 +1496,11 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     assert outcome.hit is case.intake_hit
     if case.intake_hit:
         assert outcome.miss_reason is None
+        # athenaeum#2770: a detected paste is marked, never counted against
+        # the human attestation; every other hit row carries no marker.
+        assert outcome.witness_paste == ("detected" if case.id == "pasted-content" else None)
     else:
+        assert outcome.witness_paste is None
         assert outcome.miss_reason is not None
         expected_reason = case.intake_miss_reason_prefix
         assert expected_reason is not None

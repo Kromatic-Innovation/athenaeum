@@ -615,6 +615,7 @@ class TestWitnessAttestationIntegration:
         assert parsed.transcript_origin is None
         assert parsed.witness_strength_verified is None
         assert parsed.witness_anchor_source is None
+        assert parsed.witness_paste is None  # athenaeum#2770: absent key reads None
 
         # A run over a DIFFERENT, unrelated claim must not touch the v1 line.
         pr = tmp_path / "projects"
@@ -2165,3 +2166,52 @@ class TestRecoveredSessionIntegration:
         )
         assert authorized is True
         assert channel_ref.startswith("receipt")
+
+
+class TestWitnessPasteReceipt:
+    """athenaeum#2770: a receipt written from a paste hit carries the marker
+    and round-trips; a dict with no key loads as None."""
+
+    def test_paste_hit_receipt_carries_marker_and_round_trips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "see: <pasted_content id=1>the winning claim, pasted</pasted_content> ok"
+        _append_witness_turn(
+            witness_dir,
+            _text=text,
+            segments=[
+                ledger.Segment("typed", 0, 5, canon.digest("see: ")),
+                ledger.Segment("pasted", 5, 40, canon.digest("x"), paste_id="1"),
+            ],
+        )
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        run = ReceiptRun(wiki, config={"librarian": {"witness_attestation_enabled": True}})
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.channel == "witnessed"
+        assert entry.witness_tag == "typed"
+        assert entry.witness_paste == "detected"
+        assert entry.to_dict()["witness_paste"] == "detected"
+        assert ReceiptEntry.from_dict(entry.to_dict()).witness_paste == "detected"
+        [parsed] = iter_receipts(wiki)
+        assert parsed.witness_paste == "detected"
+
+    def test_dict_without_the_key_loads_none(self) -> None:
+        d = ReceiptEntry(origin_scope="s", memory_digest="m", channel="user-stated").to_dict()
+        d.pop("witness_paste")
+        assert ReceiptEntry.from_dict(d).witness_paste is None
