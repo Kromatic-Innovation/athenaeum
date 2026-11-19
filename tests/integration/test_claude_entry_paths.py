@@ -1557,6 +1557,14 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
                 if isinstance(line.signals, Mapping)
                 else None,
                 subagent_fires_hook=None,
-                notes={"entry_path": case.id},
+                # Which variable the live hook environment really supplies
+                # the version through (athenaeum#2760); empty when none.
+                notes={
+                    "entry_path": case.id,
+                    "harness_version": line.harness_version,
+                    "harness_version_source": line.signals.get("harness_version_source")
+                    if isinstance(line.signals, Mapping)
+                    else None,
+                },
             ),
         )
