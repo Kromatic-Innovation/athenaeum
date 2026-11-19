@@ -343,13 +343,8 @@ class AttestationIndex:
     def lookup(
         self, prompt_id: str | None, origin_session_id: str, utterance_digest_sha: str
     ) -> ledger.WitnessLine | None:
-        """By ``prompt_id`` first, falling back to ``(session, digest)``."""
-        if prompt_id:
-            line = self._ledger_index.by_prompt_id(prompt_id)
-            if line is not None:
-                return line
-        matches = self._ledger_index.by_session_digest(origin_session_id, utterance_digest_sha)
-        return matches[0] if matches else None
+        """Delegates to :meth:`promptwitness.ledger.LedgerIndex.resolve`."""
+        return self._ledger_index.resolve(prompt_id, origin_session_id, utterance_digest_sha)
 
     def chain_intact_through(self, seq: int) -> bool:
         """See hit-rule item 6 in the module docstring. A content edit to

@@ -104,7 +104,7 @@ identifiers.
 | Module | Responsibility | Owning issue |
 |---|---|---|
 | `promptwitness.canon` | `normalize` (byte-identical to `transcript_verify._normalize`), `digest -> "sha256:<hex>"`, `canonical_json` (sorted keys, `(",", ":")`, `ensure_ascii=False`, UTF-8) | athenaeum#2147 |
-| `promptwitness.ledger` | `WitnessLine` v1, `append_line`, `iter_lines`, `verify_chain`, `LedgerIndex` (by `prompt_id` and `(session, prompt_digest)`) | athenaeum#2147 |
+| `promptwitness.ledger` | `WitnessLine` v1, `append_line`, `iter_lines`, `verify_chain`, `LedgerIndex` (every line per `prompt_id`, in ledger order, and by `(session, prompt_digest)`; `resolve` is the one lookup rule) | athenaeum#2147 |
 | `promptwitness.cli` | `promptwitness status` (and the later subcommands below) | athenaeum#2147 |
 | `promptwitness.harness.claude_code` | Hook stdin/env → `TurnEvent`; wrapper table; channel detection; transcript reader | athenaeum#2149 |
 | `promptwitness.signing` | `KeyProvider` protocol and adapters (`none`, `software-file`, `os-keystore`) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
@@ -538,8 +538,12 @@ raises `LockNotHeld` without one.
 
 `src/athenaeum/witness_attestation.py` (athenaeum#2158) loads and verifies the
 ledger once per run. For a `user-stated` classification (flag
-`librarian.witness_attestation_enabled`), lookup is by `promptId` (fallback
-`(session, utterance_digest)`). A hit needs **both** sides to agree: witness
+`librarian.witness_attestation_enabled`), lookup is `LedgerIndex.resolve`: by `promptId` (fallback
+`(session, utterance_digest)`). The id is a hint the harness does not keep
+unique (a prompt queued behind a running turn reuses that turn's id), so when
+several lines share it the first with the asked-for digest wins, else the last
+(a single line for the id is returned as is, so an edited prompt still reports
+`digest-mismatch`). A hit needs **both** sides to agree: witness
 `kind == turn`, `prompt_kind` `human` (or `slash-command` args), `channel ==
 interactive`, same session, digest equality, chain intact through that `seq`,
 no `signals.agent_id`; transcript `origin.kind == human` when present,

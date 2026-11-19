@@ -343,6 +343,32 @@ newer than your last manual `athenaeum run`. There is no error for this —
 the only way to find out is to notice that recall feels stale, or to run
 `athenaeum status` and see the raw backlog count grow instead of shrink.
 
+## Supported dependency ranges
+
+| Component | Supported range |
+|-----------|-----------------|
+| Python | 3.13 and newer (`requires-python = ">=3.13"`) |
+| `fastmcp` (`[mcp]` extra) | `>=3.4.3,<5.0` -- 3.4.3 is the first release that accepts `host_origin_protection`, which `athenaeum serve --transport http` needs |
+| `mcp` (`[mcp]` extra) | `>=2.0,<3.0` |
+| `anthropic` | `>=0.39.0,<3.0` |
+
+These are the ranges the package metadata accepts. The tested set is
+`requirements-ci.txt` in the repository: CI installs it, so the exact
+versions pinned there are what the test suite runs against. One CI job also
+installs the package with no lock at all, which exercises the newest releases
+the ranges allow. Versions inside a range but older than the lock are not
+exercised; treat them as best effort. `anthropic` in particular spans many
+majors, and only the locked release and the newest one are tested.
+
+## Support policy
+
+- Only the current release is supported.
+- The Python floor and the dependency floors move up whenever that is
+  convenient, with no advance notice.
+- Breaking changes ship without a deprecation period or a warn-first release.
+- If you need a longer deprecation notice, or support for an older Python or
+  dependency version, open an issue asking for it.
+
 ## See also
 
 - Modules — [librarian](../modules/librarian.md) · [mcp](../modules/mcp.md)

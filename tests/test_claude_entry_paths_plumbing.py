@@ -34,6 +34,7 @@ from tests.integration.test_claude_entry_paths import (
     build_child_env,
     claude_ai_bridge_skip_reason,
     find_transcript_record,
+    find_transcript_record_by_text,
     promptwitness_hook_settings,
     resolve_hook_command,
     scrub_inherited_claude_env,
@@ -353,6 +354,54 @@ class TestFindTranscriptRecordAndFields:
 
         assert record is not None
         assert record["promptId"] == "prompt-2"
+
+    def test_finds_each_record_by_text_when_two_records_share_an_id(self, tmp_path: Path) -> None:
+        records = [
+            {
+                "type": "user",
+                "promptId": "prompt-1",
+                "origin": {"kind": "human"},
+                "promptSource": "typed",
+                "message": {"content": "summarise the release notes"},
+            },
+            {
+                "type": "user",
+                "promptId": "prompt-1",
+                "origin": {"kind": "human"},
+                "promptSource": "queued",
+                "message": {"content": "also list the open questions"},
+            },
+        ]
+        session_jsonl = self._write_session(tmp_path, records)
+
+        # Lookup by id alone cannot tell the two apart (it returns the first).
+        assert find_transcript_record(session_jsonl, prompt_id="prompt-1") is records[0] or (
+            find_transcript_record(session_jsonl, prompt_id="prompt-1") == records[0]
+        )
+        for record in records:
+            text = record["message"]["content"]
+            found = find_transcript_record_by_text(
+                session_jsonl, prompt_digest=canon.digest(canon.normalize(text))
+            )
+            assert found == record
+
+        assert (
+            find_transcript_record_by_text(
+                session_jsonl, prompt_digest=canon.digest(canon.normalize("never typed"))
+            )
+            is None
+        )
+        assert (
+            find_transcript_record_by_text(
+                tmp_path / "absent.jsonl", prompt_digest=canon.digest("x")
+            )
+            is None
+        )
+
+    def test_queued_case_expects_an_intake_hit(self) -> None:
+        case = next(c for c in ENTRY_PATH_CASES if c.id == "queued-while-turn-runs")
+        assert case.intake_hit is True
+        assert case.intake_miss_reason_prefix is None
 
     def test_falls_back_to_last_human_record_when_prompt_id_is_none(self, tmp_path: Path) -> None:
         records = [

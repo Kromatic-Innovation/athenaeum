@@ -871,3 +871,55 @@ class TestTolerantReaderSurvivesWrongFieldTypes:
         assert not result.ok
         assert result.first_break_seq == 2
         assert result.lines_checked == 2
+
+
+class TestLedgerIndexSharedPromptId:
+    """athenaeum#2759: the harness does not keep ``prompt_id`` unique."""
+
+    def _pair(self, d: Path) -> tuple[ledger.WitnessLine, ledger.WitnessLine]:
+        first = _append_turn(
+            d,
+            session="s-demo",
+            prompt_id="p-100",
+            prompt_digest=canon.digest(canon.normalize("summarise the release notes")),
+        )
+        second = _append_turn(
+            d,
+            session="s-demo",
+            prompt_id="p-100",
+            prompt_digest=canon.digest(canon.normalize("also list the open questions")),
+        )
+        return first, second
+
+    def test_resolve_picks_by_digest(self, tmp_path: Path) -> None:
+        first, second = self._pair(tmp_path)
+        idx = ledger.LedgerIndex.build(tmp_path)
+        assert idx.resolve("p-100", "s-demo", first.prompt_digest or "") == first
+        assert idx.resolve("p-100", "s-demo", second.prompt_digest or "") == second
+
+    def test_resolve_with_no_digest_match_returns_last(self, tmp_path: Path) -> None:
+        _, second = self._pair(tmp_path)
+        idx = ledger.LedgerIndex.build(tmp_path)
+        assert idx.resolve("p-100", "s-demo", "sha256:none") == second
+
+    def test_resolve_single_line_returned_even_on_digest_difference(self, tmp_path: Path) -> None:
+        only = _append_turn(tmp_path, session="s-demo", prompt_id="p-1")
+        idx = ledger.LedgerIndex.build(tmp_path)
+        assert idx.resolve("p-1", "s-demo", "sha256:edited") == only
+
+    def test_resolve_falls_back_to_session_digest(self, tmp_path: Path) -> None:
+        line = _append_turn(tmp_path, session="s-demo", prompt_id=None)
+        idx = ledger.LedgerIndex.build(tmp_path)
+        assert idx.resolve("unknown", "s-demo", line.prompt_digest or "") == line
+        assert idx.resolve(None, "s-demo", line.prompt_digest or "") == line
+        assert idx.resolve(None, "s-other", line.prompt_digest or "") is None
+
+    def test_by_prompt_id_still_returns_last(self, tmp_path: Path) -> None:
+        _, second = self._pair(tmp_path)
+        assert ledger.LedgerIndex.build(tmp_path).by_prompt_id("p-100") == second
+
+    def test_human_lines_returns_shared_id_pair_and_id_less_line(self, tmp_path: Path) -> None:
+        first, second = self._pair(tmp_path)
+        bare = _append_turn(tmp_path, session="s-demo", prompt_id=None)
+        got = ledger.LedgerIndex.build(tmp_path).human_lines()
+        assert [ln.seq for ln in got] == [first.seq, second.seq, bare.seq]

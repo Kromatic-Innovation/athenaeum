@@ -350,3 +350,50 @@ class TestLoadTranscriptRecords:
         path.write_text(json.dumps(["not an object"]), encoding="utf-8")
         with pytest.raises(ValueError, match="JSON object"):
             verify.load_transcript_records(path)
+
+
+class TestVerifySharedPromptId:
+    """athenaeum#2759: two queued prompts sharing one ``prompt_id``."""
+
+    def test_both_records_of_a_shared_id_are_witnessed(self, tmp_path: Path) -> None:
+        _append_turn(
+            tmp_path, prompt_id="p-100", session="s-demo", text="summarise the release notes"
+        )
+        _append_turn(
+            tmp_path, prompt_id="p-100", session="s-demo", text="also list the open questions"
+        )
+        idx = ledger.LedgerIndex.build(tmp_path)
+        records = [
+            {
+                "role": "human",
+                "text": "summarise the release notes",
+                "session": "s-demo",
+                "prompt_id": "p-100",
+            },
+            {
+                "role": "human",
+                "text": "also list the open questions",
+                "session": "s-demo",
+                "prompt_id": "p-100",
+            },
+        ]
+        verdicts = verify.verify_transcript(records, idx)
+        assert [v.verdict for v in verdicts] == [verify.VERDICT_WITNESSED] * 2
+
+    def test_record_matching_neither_shared_line_is_edited(self, tmp_path: Path) -> None:
+        _append_turn(tmp_path, prompt_id="p-100", session="s-demo", text="one")
+        _append_turn(tmp_path, prompt_id="p-100", session="s-demo", text="two")
+        idx = ledger.LedgerIndex.build(tmp_path)
+        records = [{"role": "human", "text": "three", "session": "s-demo", "prompt_id": "p-100"}]
+        assert (
+            verify.verify_transcript(records, idx)[0].verdict
+            == verify.VERDICT_DIGEST_MISMATCH_EDITED
+        )
+
+    def test_lookup_witness_line_delegates_to_resolve(self) -> None:
+        class _Spy:
+            def resolve(self, *args: object) -> str:
+                return "sentinel"
+
+        got = verify._lookup_witness_line(_Spy(), prompt_id="p", session="s", text="t")  # type: ignore[arg-type]
+        assert got == "sentinel"
