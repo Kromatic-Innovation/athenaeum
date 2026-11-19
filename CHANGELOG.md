@@ -33,6 +33,13 @@ ship without a deprecation period. See the
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
 
+### Fixed
+
+- `athenaeum.store_access` no longer raises on a `_store/access.yaml` whose YAML
+  parses but fails to construct a value (an impossible date such as `2026-02-30`,
+  a bad `!!int`, deep nesting): it returns the invalid result naming the parse
+  failure. A `version` written as `1.0` is now invalid too (athenaeum#2772).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
