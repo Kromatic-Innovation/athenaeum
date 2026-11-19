@@ -92,7 +92,8 @@ comes from this structure, not from trusting the source.
      provenance injection for you.
    - **Direct file drop** (cron job, importer, non-MCP): write
      `raw/<source>/<timestamp>-<uuid8>.md` yourself. Use
-     `athenaeum.generate_uid()` for the uuid8 and a UTC `YYYYMMDDTHHMMSSZ`
+     `secrets.token_hex(4)` for the uuid8 (not `athenaeum.generate_uid()`,
+     which mints 16-character page uids) and a UTC `YYYYMMDDTHHMMSSZ`
      timestamp; build frontmatter with `athenaeum.render_frontmatter`. **Copy
      [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py)
      as your starting point** — it already does the atomic write, path-guard,

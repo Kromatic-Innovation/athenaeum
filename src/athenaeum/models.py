@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
+import secrets
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -48,8 +48,15 @@ log = logging.getLogger(__name__)
 
 
 def generate_uid() -> str:
-    """Generate an 8-character hex UID from uuid4."""
-    return uuid.uuid4().hex[:8]
+    """Generate a 16-character lowercase-hex page UID (64 random bits).
+
+    Pages written before athenaeum#2771 carry 8-hex uids; those stay valid and
+    are never rewritten, so readers accept both widths.
+    """
+    # Not ``uuid.uuid4().hex[:16]``: the thirteenth hex character of a
+    # version 4 uuid is always ``4`` (the version nibble), which would leave
+    # only 60 random bits in a 16-character prefix. ``token_hex`` is fully random.
+    return secrets.token_hex(8)
 
 
 # --- Origin-traced source provenance (issue athenaeum#260, slice A of athenaeum#259) ---
