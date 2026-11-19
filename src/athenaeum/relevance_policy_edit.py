@@ -173,6 +173,38 @@ def _widen_header(lines: list[str]) -> None:
             lines[table[1]] = f"{sep}-------|"
 
 
+def _stray_cell_error(existing: str | None) -> str | None:
+    """Why a four-column file cannot be widened without changing its meaning.
+
+    A row of a four-column table may carry an extra trailing cell, which the
+    four-column parser ignores. Under a five-column header that cell would be a
+    ``Store``, so widening would turn ignored text into a validation error (or,
+    on a ``route`` row, a destination). Existing rows are never rewritten, so
+    the widening is refused instead.
+    """
+    if not existing:
+        return None
+    table = [
+        (n, ln.strip())
+        for n, ln in enumerate(existing.splitlines(), start=1)
+        if ln.strip().startswith("|")
+    ]
+    if not table or len(table[0][1].strip("|").split("|")) != 4:
+        return None
+    for n, ln in table[1:]:
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if all(c and set(c) <= set("-: ") for c in cells):
+            continue
+        if len(cells) > 4 and any(c not in ("", "-") for c in cells[4:]):
+            return (
+                f"line {n}: cannot add a route rule: this row has a fifth cell "
+                f"({cells[4]!r}) that the four-column table ignores, and widening the "
+                "header to add a Store column would read it as a Store. Edit or remove "
+                "the cell in the policy file, then retry"
+            )
+    return None
+
+
 def _append_row(existing: str | None, row: str, *, with_store: bool = False) -> str:
     """Insert *row* after the last table row of *existing* (or create the table).
 
@@ -210,6 +242,10 @@ def _plan_edit(
         return before, None, ""
     path = _policy_path(wiki_root)
     existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    if key[4] is not None:
+        problem = _stray_cell_error(existing)
+        if problem:
+            raise RelevancePolicyError(f"invalid {POLICY_FILENAME}: {problem}")
     new_text = _append_row(existing, _rule_row(key), with_store=key[4] is not None)
     valid_types, valid_tags = policy_vocabulary(wiki_root)
     after = parse_relevance_policy(new_text, valid_types, valid_tags)
