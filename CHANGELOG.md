@@ -20,6 +20,10 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Added
+
+- Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
