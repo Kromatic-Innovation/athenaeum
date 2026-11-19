@@ -547,7 +547,10 @@ several lines share it the first with the asked-for digest wins, else the last
 `kind == turn`, `prompt_kind` `human` (or `slash-command` args), `channel ==
 interactive`, same session, digest equality, chain intact through that `seq`,
 no `signals.agent_id`; transcript `origin.kind == human` when present,
-`promptSource` in `{typed, queued}`, `isSidechain` not true. A hit writes
+`promptSource` in `{typed, queued}` (for a `slash-command` line an absent
+`promptSource` also passes, but only when the record states `origin.kind ==
+human`; Claude Code writes no `promptSource` on a slash record, and a
+non-human slash record carries no `origin`), `isSidechain` not true. A hit writes
 `channel: witnessed` plus `witness_tag`/`witness_ref`/`witness_strength`/
 `witness_anchored` (receipt schema v2, additive); a miss stays `user-stated`
 with a `witness_miss` reason and is surfaced as a warning/incident (ruling

@@ -299,6 +299,113 @@ class TestSlashCommandHit:
         assert outcome.miss_reason == "digest-mismatch"
 
 
+class TestSlashCommandAbsentPromptSource:
+    """athenaeum#2769: Claude Code writes no `promptSource` on a slash
+    command's record. For a `slash-command` line an absent value attests only
+    on an explicit `origin.kind == "human"`; `human` lines are unchanged."""
+
+    _ARGS_TEXT = TestSlashCommandHit._ARGS_TEXT
+    _PROMPT = TestSlashCommandHit._PROMPT
+    _record_via_real_producer = TestSlashCommandHit._record_via_real_producer
+
+    def _attest(self, tmp_path: Path, **overrides: object) -> Any:
+        kwargs: dict[str, object] = {
+            "prompt_id": "p1",
+            "origin_session_id": "s1",
+            "claim": self._ARGS_TEXT,
+            "utterance_digest": _UTTERANCE_DIGEST,
+            "matched_record_text": self._PROMPT,
+            "transcript_origin_kind": "human",
+            "transcript_prompt_source": None,
+            "transcript_is_sidechain": False,
+        }
+        kwargs.update(overrides)
+        return attest(AttestationIndex.load(tmp_path), **kwargs)  # type: ignore[arg-type]
+
+    def test_absent_prompt_source_with_human_origin_attests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path)
+        assert outcome.hit is True
+        assert outcome.witness_tag == "slash-args"
+        assert outcome.miss_reason is None
+
+    def test_absent_prompt_source_without_origin_misses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path, transcript_origin_kind=None)
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:absent"
+
+    def test_other_present_value_still_misses_with_human_origin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path, transcript_prompt_source="sdk")
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:sdk"
+
+    @pytest.mark.parametrize("source", [None, "typed", "sdk"])
+    def test_claim_outside_args_span_is_digest_mismatch_whatever_the_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(
+            tmp_path, claim="typo-reporting policy", transcript_prompt_source=source
+        )
+        assert outcome.hit is False
+        assert outcome.miss_reason == "digest-mismatch"
+
+    def test_slash_line_without_args_segment_is_kind_not_human(self, tmp_path: Path) -> None:
+        _append_turn(tmp_path, prompt_kind="slash-command")
+        outcome = self._attest(tmp_path)
+        assert outcome.hit is False
+        assert outcome.miss_reason == "kind-not-human:slash-command"
+
+    def test_human_line_absent_source_still_misses_even_with_human_origin(
+        self, tmp_path: Path
+    ) -> None:
+        _append_turn(tmp_path)
+        outcome = attest(
+            AttestationIndex.load(tmp_path),
+            **_good_attest_kwargs(  # type: ignore[arg-type]
+                transcript_prompt_source=None, transcript_origin_kind="human"
+            ),
+        )
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:absent"
+
+    def test_end_to_end_through_attest_user_stated_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.transcript_receipts import attest_user_stated_records
+
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        record: dict[str, Any] = {
+            "type": "user",
+            "promptId": "p1",
+            "origin": {"kind": "human"},
+            "message": {"role": "user", "content": self._PROMPT},
+        }
+        index = AttestationIndex.load(tmp_path)
+        outcome, _digest, origin_kind = attest_user_stated_records(
+            [record], origin_session_id="s1", claim=self._ARGS_TEXT, index=index
+        )
+        assert outcome is not None and outcome.hit is True
+        assert outcome.witness_tag == "slash-args"
+        assert origin_kind == "human"
+
+        # The same record without `origin` is not a human record to intake
+        # at all: nothing is attested.
+        no_origin = {k: v for k, v in record.items() if k != "origin"}
+        outcome2, _d, _o = attest_user_stated_records(
+            [no_origin], origin_session_id="s1", claim=self._ARGS_TEXT, index=index
+        )
+        assert outcome2 is None
+
+
 # ---------------------------------------------------------------------------
 # The eleven original forgery pins — each isolates exactly one failing
 # condition. The twelfth miss reason, `witness-strength-mismatch`, is NOT
