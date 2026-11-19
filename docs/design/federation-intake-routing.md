@@ -5,7 +5,9 @@
 **Status:** DESIGN, not built (Vitruvius Specify, 2026-11-18). Design note for
 athenaeum#2625, a child of the federation design epic athenaeum#2631. The
 operator answered the four questions in §14 on 2026-11-18, and the note is
-written to those rulings. The build slices are in §13.
+written to those rulings. It was reconciled with the other three federation
+notes by athenaeum#2806 (§16). No question in this note is open. The build
+slices are in §13.
 
 Code anchors are `path:symbol` at `develop` `759e3b64`.
 
@@ -17,10 +19,11 @@ and uses their terms unchanged: [store access](federation-store-access.md)
 
 - the capture rules themselves (athenaeum#2598, shipped) or how a page of a
   type is written (athenaeum#2590, shipped);
-- the message format, provenance, and raising or retracting between stores
-  (athenaeum#2626, written in parallel as
-  `federation-raise-retract.md` in this directory). This note says where
-  intake hands a fact to it and stops there;
+- the format of a record addressed to a store, its provenance, and raising
+  or retracting between stores (athenaeum#2626,
+  [Federation: raise and retract](federation-raise-retract.md)). This note
+  says where intake hands a fact to it, and how intake handles such a record
+  when it arrives;
 - encryption (athenaeum#2627);
 - trust between writers and poisoning of a shared store (athenaeum#2628), and
   routing a decision to the member most likely to know (athenaeum#2629). Both
@@ -52,8 +55,13 @@ and uses their terms unchanged: [store access](federation-store-access.md)
 6. **Unrouted intake never leaves the install that received it.** Raw intake
    is local and readable only by its owner until the decision is made. What
    reaches a shared location afterwards is a page (when this install compiles
-   the store) or one fact in a `propose-fact` message of the raise protocol
-   (athenaeum#2626). A routed fact travels as a single fact, never as a page.
+   the store) or one fact in a `propose-fact` record delivered to the
+   destination store's raw intake (athenaeum#2626). A routed fact travels as a
+   single fact, never as a page.
+7. **There is no inbox.** A record addressed to a store, from another person
+   or agent, is raw intake of that store. A compiling install's ordinary
+   intake run reads it, and intake handles that kind of record in its own way:
+   at the deterministic tier, with the destination already fixed (§4.5).
 
 **Where each acceptance criterion of athenaeum#2625 is answered.**
 
@@ -91,9 +99,11 @@ nothing today can send a fact to a store the install does not compile.
 ## 3. Terms
 
 The terms of athenaeum#2623 §3 and athenaeum#2624 §3.4 are used unchanged:
-install, store, principal, compile role, writer, proposer, steward, pages,
-inbox, bench, decision queue, host, `store_id`, and the declaration
-`_store/access.yaml`. This note adds four.
+install, store, principal, right (read, propose, compile, answer), compile
+role, writer, proposer, steward, pages, raw location, bench, raw intake,
+decision queue, host, `store_id`, and the declaration `_store/access.yaml`.
+The engine ships no role names: "writer", "proposer" and "steward" describe an
+install by the rights its owner holds. This note adds five terms.
 
 | Term | Meaning |
 |---|---|
@@ -101,6 +111,7 @@ inbox, bench, decision queue, host, `store_id`, and the declaration
 | **Item** | One fact inside a raw note, in the sense the capture gate already uses: a `.jsonl` record, one frontmatter document, or one classified entity. Items are decided independently. |
 | **Description** | What is known about an item when the decision runs: a candidate type, tags (including the classified category), a subject uid, and the confidence of anything classified. It is evidence, not a decision. |
 | **Destination** | The store the decision picks for an item. |
+| **Message** | One raw intake record of the raise protocol (athenaeum#2626 §6), addressed to a store: a `propose-fact`, a raise, a supersede, a retract and the rest. |
 
 ## 4. The intake decision
 
@@ -116,8 +127,9 @@ decide(description, rules, stores) -> IntakeDecision
 
 It is pure: no file access, no clock, no model. `rules` is the parsed
 relevance policy (§5). `stores` is what this install knows about each store it
-is configured for: its role from the declaration (athenaeum#2623 S2) and the
-store's own intake rules (§7).
+is configured for, keyed by `store_id`: the set of rights its owner holds
+there, as the declaration resolves them (athenaeum#2623 S2), and the store's
+own intake rules (§7). It is a set of rights, never a role name.
 
 The three answers are given in this order, and each can end the decision.
 
@@ -183,32 +195,61 @@ no lookup at all for that store.
 |---|---|
 | Files the item in its personal store | The candidate type, checked against the install's own type vocabulary, as today. |
 | Compiles the destination store | The candidate type, which must be a type the store's intake rules accept (§7). Otherwise the item goes to the personal store. |
-| Proposes to the destination store, or is a steward of it | The candidate type and tags travel as a *suggestion*. The receiving compile role may adjust either when it accepts the fact, and the adjustment is recorded with the acceptance (athenaeum#2626). |
+| Holds propose or answer on the destination store, and not compile | The candidate type and tags travel as a *suggestion*. The receiving compile role may adjust either when it accepts the fact, and the adjustment is recorded with the acceptance (athenaeum#2626). |
 
 The page is then written to the destination the decision chose. Slice S3a
 changes the compile write path to take the store from the decision, where
 today `storage.py:page_write_root_for_class` derives it from the type.
 
-### 4.5 A received message is not routed again
+### 4.5 A record addressed to a store is raw intake, and is not routed again
 
-The decision runs once, on the install where the fact entered. Anything that
-arrives through the raise protocol is outside it. That covers every message
-kind of athenaeum#2626 (a `propose-fact`, a raise, a supersede, a retract and
-the rest), **wherever the message waits**: an inbox, a bench, or the
-compile-role install's own waiting place for that store (§8.1). For such a
-message:
+The operator ruled on 2026-11-18 that there is no inbox (athenaeum#2806 point
+3). A suggestion from another person or agent enters through raw intake like
+every other write. It is a structured record with provenance, and intake
+processes that kind of record in its own way. This section says what that way
+is.
 
-- the destination is fixed: the store the message is addressed to;
+**Where such a record is.** A message names the store it is addressed to, and
+sits in that store's raw intake, which athenaeum#2623 §4 keeps in up to three
+places: the raw location, the bench under `raw/`, and the single compiling
+install's own raw tree for the store (§8.1). An install that holds compile on
+a store reads all three in its ordinary intake run, as raw sources of that
+store.
+
+**How intake handles it.** The precedent is the answer record. An answer is a
+file under `raw/answers/`, recognised by its `decision_id` and applied by a
+deterministic handler with no model call
+(`src/athenaeum/decision_answers.py:apply_decision_answers`), and the
+discovery that feeds classify skips that source
+(`src/athenaeum/intake.py:discover_raw_files`). A message is handled the same
+way: recognised by its shape, and read by its own handler. It already says
+what it is, where it goes and where it came from, so it enters the ladder at
+the deterministic tier ([North star](../north-star.md) §2.2). For such a
+record:
+
+- the destination is fixed: the store whose raw intake it was found in. A
+  message that names a different store is not applied;
 - the only rules applied are that store's intake rules (§7) and the
   acceptance rules of athenaeum#2626;
 - `decide` is never called on it, and the compiling member's own relevance
   policy is **not** applied. A member's personal `never` rule must not drop a
   team's proposal or raise, and a member's personal `route` rule must not
-  move one into another store they happen to hold.
+  move one into another store they happen to hold;
+- it ends in exactly one recorded disposition (North star §2.3): accepted,
+  rejected with a reason code, or held for a decision. The store's acceptance
+  ledger holds it (athenaeum#2626 §4.4);
+- a message that does not conform is not refused. It goes up the ladder, and
+  the next tier for it is a decision in that store's queue. It is never
+  handed to the compiling member's personal classify path, because text from
+  another principal must not fall through into a member's personal store.
 
-This is structural, not a flag on the decision. The waiting places are not
-raw-intake sources: ordinary raw discovery never visits them (§8.1), so no
-message can reach the three enforcement points of §4.2.
+**Why the member's rules cannot reach it.** The decision of §4.1 runs once, on
+the install where a fact entered, over that install's own unaddressed raw
+tree. A store's raw intake is a different raw source. The discovery that feeds
+classify skips it, as it skips `answers`, and the handler above is the only
+reader. So no message can reach the three enforcement points of §4.2. This is
+a dispatch on the record's source and shape, not a flag a record could set for
+itself.
 
 Sending a fact onward from one store to another is a raise, and belongs to
 athenaeum#2626.
@@ -221,21 +262,25 @@ The policy file stays where it is, `wiki/_schema/relevance-policy.md`, and
 stays one table read top to bottom. It gains one column and one verdict.
 
 ```
-| Verdict | Type   | Tag             | Subject | Store    |
-|---------|--------|-----------------|---------|----------|
-| never   |        | personal        |         |          |
-| always  |        | personal/travel |         |          |
-| route   |        | hr              |         | hr       |
-| route   | policy |                 |         | general  |
-| route   |        | hr/health       |         | personal |
+| Verdict | Type   | Tag             | Subject | Store           |
+|---------|--------|-----------------|---------|-----------------|
+| never   |        | personal        |         |                 |
+| always  |        | personal/travel |         |                 |
+| route   |        | hr              |         | st_h4r8n2kd6wq3 |
+| route   | policy |                 |         | st_q7m2xk4vwz9d |
+| route   |        | hr/health       |         | personal        |
 ```
 
 - **`route`** names a destination. Its `Type`, `Tag` and `Subject` cells mean
   what they mean on any other row and are matched by the same code
   (`relevance_policy.py:RelevanceRule.matches`).
-- **`Store`** is the install's name for the store: an entry under
-  `storage.adapters`, or the reserved word `personal`. It is required on a
-  `route` row and must be blank on an `always` or `never` row. A table without
+- **`Store`** is the store's `store_id`, or the reserved word `personal`
+  (operator ruling 2026-11-18, athenaeum#2806 point 1). It is never the
+  install's local adapter name: a rule then means the same store on every
+  install, and the same id appears in the rule, in the declaration and in
+  every record sent. The install's config maps the id to the adapter entry
+  that mounts the store (athenaeum#2623 §5). It is required on a `route` row
+  and must be blank on an `always` or `never` row. A table without
   the column is valid and has no routes, so every existing file parses as
   before.
 - **Two questions, one pass.** Capture is the last matching row among
@@ -245,8 +290,10 @@ stays one table read top to bottom. It gains one column and one verdict.
   row above keeps health facts personal although the `hr` row would have sent
   them on.
 - **`never` beats `route`.** Capture is decided first (§4.1).
-- **Validation.** A `route` row whose store is not configured on this install
-  fails validation and names the row, like any other bad rule. A policy that
+- **Validation.** A `route` row whose `Store` cell is not `personal`, is not
+  shaped like a `store_id`, or names a `store_id` that no adapter entry on
+  this install maps, fails validation and names the row, like any other bad
+  rule. A policy that
   fails validation routes nothing: every captured item goes to the personal
   store.
 - **Hash and read-back.** The `Store` cell is part of
@@ -254,7 +301,7 @@ stays one table read top to bottom. It gains one column and one verdict.
   summary's policy token.
 
 The edit path is unchanged in behaviour. `set_capture_rule` gains a `store`
-argument. Over local stdio the rule is applied and audit-logged. Over HTTP it
+argument, which takes a `store_id` or `personal`. Over local stdio the rule is applied and audit-logged. Over HTTP it
 is filed as a proposal for the owner, which matters more for a `route` rule
 than for any other: a remote client cannot widen where facts go.
 
@@ -290,7 +337,7 @@ scopes, each with one owner:
 
 | Scope | Lives in | Owner | May it widen? |
 |---|---|---|---|
-| Install | `wiki/_schema/relevance-policy.md` | The install's owner | Yes, within the grants the owner holds |
+| Install | `wiki/_schema/relevance-policy.md` | The install's owner | Yes, within the rights the owner holds |
 | Store | The `intake` block of `_store/access.yaml` | Whoever may push the store's pages | No. It only refuses. |
 
 Page-level `audience:` remains a separate axis (athenaeum#2623 §10). Routing
@@ -344,8 +391,8 @@ store with a declaration.
 
 A store limits what enters it in two ways. Both are in its declaration.
 
-**Who.** `grants.propose` and the compile role (athenaeum#2623 §5, §7). This
-note adds nothing to them.
+**Who.** The principals its declaration gives propose or compile
+(athenaeum#2623 §4, §5). This note adds nothing to them.
 
 **What.** A new `intake` block in `_store/access.yaml`:
 
@@ -387,20 +434,22 @@ intake:
 
 | Where | By whom | Standing |
 |---|---|---|
-| In `decide`, on the sending install, before anything is written to the store's pages, inbox or bench | The writer's or proposer's own install | A courtesy that keeps refused facts from leaving. It is self-policing, like the install's self-declared identity (athenaeum#2623 §6). |
-| When the compile role reads a `propose-fact` message, wherever it waits (§8.1) | A compile-role install | Authoritative. A fact the rules refuse is not compiled into a page. The check uses the type and tags as adjusted on acceptance (§4.4). |
+| In `decide`, on the sending install, before anything is written to the store's pages or its raw intake | The writer's or proposer's own install | A courtesy that keeps refused facts from leaving. It is self-policing, like the install's self-declared identity (athenaeum#2623 §6). |
+| When a compiling install handles a `propose-fact` message from the store's raw intake (§4.5) | An install that holds compile | Authoritative. A fact the rules refuse is not compiled into a page. The check uses the type and tags as adjusted on acceptance (§4.4). |
 
 The second application also covers a message written by an older or
 misconfigured install that skipped the first.
 
-**The proposer's notice.** Propose does not imply read (athenaeum#2623 §4),
+**The proposer's notice.** Propose does not require read (athenaeum#2623 §4),
 and the declaration lives in the pages repository. A principal who may only
 propose therefore cannot see the store's `store_id` or its intake rules. So
-the compile role publishes exactly those two things in the inbox, as a
-**notice**:
+the compile role publishes exactly those two things in the raw location, as a
+**notice**. A notice is configuration published beside the raw intake, not a
+record of it, and it is part of what a proposer may read back
+(athenaeum#2623 §4):
 
 ```yaml
-# _store/propose/notice-3.yaml, in the inbox repository
+# _store/propose/notice-3.yaml, in the raw location repository
 version: 2                      # the declaration's version
 store_id: st_q7m2xk4vwz9d
 intake:
@@ -415,16 +464,16 @@ intake:
   `store_id` or the `intake` block of the declaration has changed since the
   newest notice, not on every run.
 - **Only the compile role writes them.** The declaration stays the single
-  source; a notice is a derived copy. With one inbox per proposer (operator
-  ruling 1 on athenaeum#2623), each inbox gets its own.
-- **This keeps the inbox append-only**, as athenaeum#2624 §8.1 requires. A
+  source; a notice is a derived copy. With one raw location per proposer (operator
+  ruling 1 on athenaeum#2623), each raw location gets its own.
+- **This keeps the raw location append-only**, as athenaeum#2624 §8.1 requires. A
   new notice is a new path, so it falls in that note's "changed on one side
-  only" case, exactly like a new proposal. A notice's bytes are a pure
+  only" case, exactly like a new record. A notice's bytes are a pure
   function of the declaration, so two compiling installs that write the same
   number from the same declaration write identical files, which is not a
   conflict. If they ever differ, athenaeum#2624 §5 holds the file as it holds
   anything under `_store/`, and the next notice supersedes it. No file in the
-  inbox is ever rewritten, and this note asks athenaeum#2624 for no new sync
+  raw location is ever rewritten, and this note asks athenaeum#2624 for no new sync
   rule.
 - It discloses the store's id and what the store accepts. It does not disclose
   members, roles, reviews or any page. That is less than the declaration,
@@ -458,8 +507,8 @@ destination.
 |---|---|---|---|
 | Files it in the personal store | A page in the personal store, in the same run | Nowhere | The owner |
 | Is a writer of the destination (pushes its pages) | A page in the destination, compiled by this install in the same run, then synced by the sequence in athenaeum#2624 §4 | Nowhere shared. Until the push it is a local commit. | The owner, until the push; then the store's readers |
-| Holds propose only | One fact in a `propose-fact` message of the raise protocol (athenaeum#2626) | The store's inbox | The compile role. In a shared inbox, also the other proposers, which operator ruling 1 on athenaeum#2623 allows only when every proposer can read the store. |
-| Is a steward (pushes the bench, not the pages) | One fact in a `propose-fact` message | The store's bench, as intake waiting for the compiling install | The compile role |
+| Holds propose, and neither compile nor answer | One fact in a `propose-fact` message (athenaeum#2626) | The store's raw intake, in the raw location | The principals who hold compile. In a shared raw location, also the other proposers, which operator ruling 1 on athenaeum#2623 allows only when every proposer can read the store. |
+| Holds answer and not compile (pushes the bench, not the pages) | One fact in a `propose-fact` message | The store's raw intake, on the bench under `raw/` | The compile role |
 
 In every row the raw note itself is consumed by the run and deleted, as raw
 notes are today.
@@ -477,7 +526,8 @@ is already entitled to compile.
 **The same install uses different waiting places for a routed fact and for a
 raise, on purpose.** A writer's routed fact skips the bench and becomes a page
 at once. A raise of an existing page by that same install is a message, and
-athenaeum#2626 §6.2 sends it to the bench when the store has one. The
+athenaeum#2626 §6.2 puts it in the store's raw intake, on the bench under
+`raw/` when the store has one. The
 difference is what each needs. A raise must be accepted by the compile role
 before it is a page, and its copy has a uid derived from the raise, so two
 compiling installs that process one message create the same page. A routed
@@ -486,7 +536,7 @@ derived uid, so waiting on the bench would only give two librarians the
 chance to write two different pages for it.
 
 **The hand-off to athenaeum#2626: a routed fact travels as one fact, never as
-a page.** Intake never writes a message file itself. For the last two rows of
+a page.** Intake never writes a message itself. For the last two rows of
 the table it hands the raise protocol exactly this: the item's own text, its
 suggested type and tags, and the destination `store_id`. athenaeum#2626 owns
 the message kind that carries it, `propose-fact`: one fact with its suggested
@@ -504,9 +554,9 @@ projection of athenaeum#2626 §4.2 is not used for it.
 
 This note places three requirements on the `propose-fact` kind:
 
-- it follows the three rules athenaeum#2624 §8.1 sets for anything in an
-  inbox: one file per message, a random id in its name, never edited after it
-  is written;
+- it follows the three rules athenaeum#2624 §8.1 sets for a raw intake
+  record in a shared location: one file per record, a random id in its name,
+  never edited after it is written;
 - it carries the suggested type and tags, so the compile role can apply the
   store's intake rules without a model call;
 - it carries one fact and nothing else: no other text from the sender's
@@ -518,36 +568,38 @@ compiled into the sender's personal store in the same run, exactly as an
 unrouted fact would be. The personal copy and the message are made from the
 same item independently; neither is derived from the other.
 
-**If the inbox or bench cannot be reached,** the message waits in the sending
-install's own state and is sent on a later run. It is never written anywhere
+**If the raw location or bench cannot be reached,** the message waits in the
+sending install's own state and is sent on a later run. It is never written anywhere
 wider in the meantime.
 
-### 8.1 The compile-role install's own waiting place for a store
+### 8.1 A store's raw intake on its single compiling install
 
-athenaeum#2623 §8 and athenaeum#2626 §6.2 both send a message to "that
-install's own raw intake for the target store" when the target has one
-compiling install and no bench, and leave the place to this note. It is:
+athenaeum#2623 §4 and athenaeum#2626 §6.2 both put a message in "that
+install's own raw tree for the store" when the store has one compiling install
+and no bench, and leave the place to this note. It is:
 
 ```
 <knowledge root>/raw/_stores/<store_id>/
 ```
 
 - **One directory per store, named by `store_id`.** Messages sit in it with
-  the layout they have on a bench (athenaeum#2626 §6.1), so the receiving pass
-  reads all three waiting places with one reader.
+  the layout they have in a raw location or under a bench's `raw/`
+  (athenaeum#2626 §6.1), so one reader handles all three.
+- **It is raw intake.** It is part of the install's own `raw/` tree, and the
+  ordinary intake run reads it. The run treats it the way it treats
+  `raw/answers/` today: a raw source with its own deterministic handler, which
+  the discovery that feeds classify skips
+  (`src/athenaeum/intake.py:discover_raw_files` skips `answers`, and
+  `src/athenaeum/decision_answers.py:apply_decision_answers` reads it). What
+  is found there is handled as §4.5 says, and never reaches the capture gates
+  or `decide`.
 - **Only this install reads it.** It is on this machine, in no shared
   location, and is never pushed. It exists only on an install that is the
   single compiler of that store.
-- **It is not a raw-intake source.** Ordinary raw discovery skips
-  `raw/_stores/` whole, the way `src/athenaeum/intake.py:discover_raw_files`
-  already skips the `answers` directory and any directory named in
-  `librarian.non_intake_sources`. Nothing in it reaches classify, the capture
-  gates or `decide` (§4.5).
-- **It is never indexed.** It is not among `recall.extra_intake_roots`, and
-  the config check that refuses to index an inbox or a bench (athenaeum#2623
-  §9) refuses this directory too.
-- **It is read by the receiving pass of the raise protocol only**, which
-  applies the store's intake rules and athenaeum#2626's acceptance rules.
+- **It is never added to the recall index.** It is not among
+  `recall.extra_intake_roots`, and the config check that refuses to index a
+  raw location or a bench (athenaeum#2623 §9) refuses this directory too. A
+  record waiting for a store is not something the member's assistant recalls.
 
 It is not where a writer's own routed facts wait. Those do not wait (the
 table above).
@@ -562,16 +614,17 @@ rejected (§12).
 
 ### 9.2 A destination the owner names
 
-`remember` gains an optional `store` argument, stamped into the raw note's
-frontmatter as a declared key, beside `type` and `tags`.
+`remember` gains an optional `store` argument, a `store_id` or `personal`,
+stamped into the raw note's frontmatter as a declared key, beside `type` and
+`tags`.
 
 - `store: personal` is always honoured. Narrowing needs no permission.
 - A shared store is honoured only together with `explicit_request: true`,
   that is, when the person asked for it. Without the marker the named store is
   ignored and the rules decide. The calling model's own choice of a wider
   store is a guess, and a guess does not widen.
-- An honoured destination still passes the grant check and the store's intake
-  rules (§6). Those only narrow, and nothing overrides them.
+- An honoured destination still passes the rights check and the store's
+  intake rules (§6). Those only narrow, and nothing overrides them.
 - A fact kept by `explicit_request` against a `never` rule goes to the
   personal store unless the person also named a store.
 
@@ -620,7 +673,8 @@ not read the index at all.**
   (`relevance_policy.py:RelevanceDrop`); a routing record does not, and
   nothing derived from the fact other than the `propose-fact` message leaves the
   install.
-- The inbox and the bench are never indexed (athenaeum#2623 §9).
+- The raw location, the bench and `raw/_stores/` are never added to the
+  recall index (athenaeum#2623 §9).
 
 One existing behaviour needs a rule. `remember` adds each new raw note to the
 local index before compile (§2), so unrouted text is in the index of the
@@ -646,14 +700,16 @@ owner reads it, but two requirements follow:
 | **Store declaration** (athenaeum#2623) | Roles, and the `intake` block this note adds to it. | The install's own rules. |
 | **Compile write path** | Writing the page to the store the decision chose; lookups scoped to it. | Choosing the store. |
 | **Raise protocol** (athenaeum#2626) | Every message kind including `propose-fact`, provenance, the ledgers, sending, acceptance, retraction. | Whether and where a new fact is routed. |
+| **Intake run** (existing) | Reading each store's raw intake and handing a message to the handler of §4.5. | What a message means. |
 
-- **athenaeum#2623** supplies the role of this install in each store, the
-  inbox and the bench, and the declaration that carries the `intake` block.
+- **athenaeum#2623** supplies the rights this install holds on each store, the
+  raw location and the bench, and the declaration that carries the `intake`
+  block.
   Its review output (§8 there) keeps its own destination table.
-- **athenaeum#2624** syncs the pages, the inbox and the bench. This note adds
+- **athenaeum#2624** syncs the pages, the raw location and the bench. This note adds
   no sync step. The proposer's notice follows its rule for `_store/` files.
 - **athenaeum#2626** takes over at the hand-off in §8 with its `propose-fact`
-  kind, uses the waiting place of §8.1, and is asked to apply
+  kind, uses the raw tree of §8.1, and is asked to apply
   the store's intake rules to raised copies (§7).
 - **athenaeum#2598** and **athenaeum#2590** are shipped and unchanged in
   behaviour. The capture verdicts, their escalation and their audit trail work
@@ -675,11 +731,12 @@ repository. A deployment's rules live in its own installs and stores.
 | A `route` rule names a store this install may not write | Personal store, reason `no-grant`. |
 | The store's intake rules refuse the item | Personal store, reason `store-refuses`. |
 | The policy file fails validation | Nothing is routed; every captured item goes to the personal store. Capture rules behave as they do today on an invalid file. |
-| A grant is withdrawn between the decision and the push | The host refuses the push. The item stays local, the run reports it, and a later run decides again against the new declaration. |
+| A right is withdrawn between the decision and the push | The host refuses the push. The item stays local, the run reports it, and a later run decides again against the new declaration. |
 | A routed fact was filed as a section of a personal page | Only the fact is sent. The message is built from the item, never from the page (§8). |
-| A message of the raise protocol waits on an install whose owner has a matching `never` or `route` rule | The rule is not consulted. Messages never pass through `decide` (§4.5, §8.1). |
+| A message waits in a store's raw intake on an install whose owner has a matching `never` or `route` rule | The rule is not consulted. Messages never pass through `decide` (§4.5, §8.1). |
+| A message does not conform, or names a store other than the one whose raw intake it is in | Not applied and not refused: it becomes a decision in that store's queue (§4.5). |
 | An install older than the declaration's `version` meets a store with an `intake` block | It treats the store as read-only (§7). |
-| The inbox or bench is unreachable | The message waits locally and is sent later (§8). |
+| The raw location or bench is unreachable | The message waits locally and is sent later (§8). |
 | A proposing install skips or alters the notice | The compile role applies the declared rules and does not compile a refused proposal (§7). |
 | One raw note holds items for several stores | Each item is decided on its own. No item travels with another. |
 | A name matches a page in a store the item was not routed to | The match is ignored; the lookup runs in the destination only (§4.3). |
@@ -733,6 +790,14 @@ engine ships mechanism; each owner and each store supply their own rules.
    the kind of control athenaeum#2628 is reviewing. Operator ruling 4 (§14).
 7. **Pass a writer's intake through the bench.** Rejected: two compiling
    installs could each write a page for the same waiting item (§8).
+8. **A separate inbox, whose messages ordinary raw discovery never visits.**
+   This was the first draft. Rejected by operator ruling (2026-11-18): it is a
+   second way in. A message is raw intake of the store it is addressed to, and
+   what keeps a member's personal rules away from it is the handler of §4.5,
+   not a separate place.
+9. **Name a store in a rule by the install's adapter name.** Also the first
+   draft. Rejected by operator ruling (2026-11-18): one identifier, the
+   `store_id`.
 
 ## 13. Build slices
 
@@ -740,34 +805,45 @@ Each is one pull request. S1, S2 and S3a depend on nothing outside this note.
 A
 dependency written `athenaeum#2623 S2` or `athenaeum#2624 S13` is a slice of
 that note's build-slice table, and `athenaeum#2626 S2` of the table in
-`federation-raise-retract.md`. The one exception is the athenaeum#2626 slice
-that adds the `propose-fact` kind: it is cited by description, because it had
-no number when this note was written.
+`federation-raise-retract.md`.
 
 | Slice | What it adds | Depends on |
 |---|---|---|
-| **S1** | The `Store` column and the `route` verdict in the policy parser, validator, read-back and hash. `set_capture_rule` gains `store`, through the existing stdio and HTTP edit paths. A file without the column parses byte-identically. No routing. | none |
-| **S2** | The pure `decide` function and its reason codes. The three existing enforcement points call it in both transports, with a parity test. With no `route` row its capture answer is byte-identical to today's gates. No behaviour change. | S1 |
+| **S1** | The `Store` column, holding a `store_id` or `personal`, and the `route` verdict in the policy parser, validator, read-back and hash. `set_capture_rule` gains `store`, through the existing stdio and HTTP edit paths. A file without the column parses byte-identically. No routing. | none |
+| **S2** | The pure `decide` function and its reason codes. Its `stores` input is keyed by `store_id` and carries a set of rights, never a role name. The three existing enforcement points call it in both transports, with a parity test. With no `route` row its capture answer is byte-identical to today's gates. No behaviour change. | S1 |
 | **S3a** | The compile write path takes the store from the decision, where it derives it from the type today. `storage.mapping` is the default destination, so with no `route` row every page lands where it lands now. No routing change. | S2 |
-| **S3b** | Routing on declared keys, for stores this install compiles and for the personal store: `route` rows take effect on declared metadata, page lookup is scoped to the destination (§4.3), and auto-memory is pinned to the personal store. | S3a; athenaeum#2623 S2 (role resolution) and S3 (the declared role in the write guard) for stores with a declaration |
+| **S3b** | Routing on declared keys, for stores this install compiles and for the personal store: `route` rows take effect on declared metadata, page lookup is scoped to the destination (§4.3), and auto-memory is pinned to the personal store. | S3a; athenaeum#2623 S2 (rights resolution) and S3 (the declared rights in the write guard) for stores with a declaration |
 | **S4** | Routing on classified keys: `route` tags join the category list of the existing classify call, a type confidence is added to the same call, and anything not high-confidence goes to the personal store with reason `unsure`. No new model call. | S3b |
 | **S5** | The `intake` block of `_store/access.yaml`: parse, validate, fail closed, and a pure accept check. The block is accepted only in a declaration whose `version` is the one that introduces it; an install that does not support that version treats the store as read-only (§7). Documented with the declaration format. | athenaeum#2623 S1; athenaeum#2772 (the declaration parser and its `version` rule) |
 | **S6** | Apply the store's intake rules in `decide` for stores this install compiles, with reason `store-refuses`. | S3b, S5 |
-| **S7** | The proposer's notice: a compile-role install appends `_store/propose/notice-<n>.yaml` to each inbox when the declaration's `store_id` or `intake` block has changed, and a proposing install reads the newest. Includes the local config entry by which an install that only proposes names a store's inbox, in the `storage.adapters` family, never indexed. | S5; athenaeum#2623 S8 (the inbox mount); athenaeum#2624 S13 (inbox sync) |
-| **S8** | The propose path: for a store where this install holds propose only, hand the item alone (never the personal page it was filed on), its suggested type and tags, and the `store_id` to the raise protocol as a `propose-fact`; compile the sender's own copy into the personal store; queue locally when the inbox is unreachable. | S4, S6, S7; athenaeum#2623 S2; athenaeum#2626 S2 (the codec), S4 (the raise ledger), S14 (writing to an inbox or bench), and its slice that adds the `propose-fact` kind |
-| **S9** | The receiving side: a compile-role install applies the store's intake rules to each `propose-fact` it reads, using the type and tags as adjusted on acceptance, compiles accepted ones into that store only, and never calls `decide` or applies its owner's personal policy to any raise-protocol message (§4.5). | S5, S15; athenaeum#2623 S8; athenaeum#2624 S13; athenaeum#2626 S5 (the acceptance ledger), S7 (acceptance), and its slice that adds the `propose-fact` kind |
-| **S10** | The steward path: the bench as the waiting place for a steward's `propose-fact` messages. | S8, S9; athenaeum#2623 S9 (stewards) |
+| **S7** | The proposer's notice: an install that holds compile appends `_store/propose/notice-<n>.yaml` to each raw location when the declaration's `store_id` or `intake` block has changed, and a proposing install reads the newest. Includes the local config entry by which an install that only proposes names a store's raw location, in the `storage.adapters` family, never indexed. | S5; athenaeum#2623 S8 (the raw location mount); athenaeum#2624 S13 (raw location sync) |
+| **S8** | The propose path: for a store where this install holds propose only, hand the item alone (never the personal page it was filed on), its suggested type and tags, and the `store_id` to the raise protocol as a `propose-fact`; compile the sender's own copy into the personal store; queue locally when the raw location is unreachable. | S4, S6, S7; athenaeum#2623 S2; athenaeum#2626 S2 (the codec), S4 (the raise ledger), S14 (writing to a raw location or bench), and S20 (the `propose-fact` kind) |
+| **S9** | The receiving side: the intake run reads each message found in a store's raw intake through the handler of §4.5. For a `propose-fact`, an install that holds compile applies the store's intake rules, using the type and tags as adjusted on acceptance, compiles accepted ones into that store only, records one disposition per message, and never calls `decide` or applies its owner's personal policy to any message. | S5, S15; athenaeum#2623 S8; athenaeum#2624 S13; athenaeum#2626 S5 (the acceptance ledger), S7a (acceptance), and S20 (the `propose-fact` kind) |
+| **S10** | The path for a principal who holds answer and not compile: their `propose-fact` messages go to the store's raw intake on the bench, under `raw/`. | S8, S9; athenaeum#2623 S9 (answering from a second install) |
 | **S11** | The owner's explicit destination: the `store` argument of `remember`, honoured for `personal` always and for a shared store only with `explicit_request`; the remote-transport rule of §9.3 (operator ruling 3). | S3b |
 | **S12** | Reporting: a routing token in the run summary (counts by store and reason code, no fact text) and a read-only report of facts held in the personal store with reason `unsure` (operator ruling 1). | S4 |
 | **S13** | Index hygiene: pre-compile rows for raw intake are kept with the personal store's part of the index, and are removed when the raw note is consumed. | athenaeum#2623 S4b |
 | **S14** | A guide: writing routing rules, and giving a store intake rules. Docs only. | S6, S8 |
-| **S15** | The compile-role install's own waiting place for a store, `raw/_stores/<store_id>/` (§8.1): skipped whole by raw discovery, refused by the index config check, and read only by the raise protocol's receiving pass. This is the place athenaeum#2623 §8 and athenaeum#2626 S6 depend on. | athenaeum#2623 S1 (for `store_id`) |
+| **S15** | A store's raw intake on its single compiling install, `raw/_stores/<store_id>/` (§8.1): read by the intake run as a raw source of that store through the handler of §4.5, skipped by the discovery that feeds classify and so kept out of `decide`, and refused by the recall-index config check. This is the place athenaeum#2623 §8 and athenaeum#2626 S6 depend on. | athenaeum#2623 S1 (for `store_id`) |
 
 S1 to S4 are useful on their own: one person with a personal store and a
-store they compile gets rule-based routing with no inbox, no bench and no
-second install.
+store they compile gets rule-based routing with no raw location, no bench and
+no second install.
 
-## 14. Open questions for the operator
+**Trust (athenaeum#2806 point 7).** The trust design (athenaeum#2628) is on
+hold. Until it reports, **no slice may rely on a writer being trusted or
+untrusted.** Under that rule S1 to S15 may all be built. No measure of how far
+a writer is believed is an input to `decide`, to a store's intake rules or to
+the handler of §4.5, and every fallback is the personal store whoever the
+writer is. What may not be built before the trust design reports has no slice
+here: a store shipping rules or guidance to its members' assistants (§14,
+ruling 4), and routing a remote caller's fact to a shared store on the
+strength of who the caller says they are (§9.3). The eval that would later
+show a store resists a hostile writer is named as a placeholder in
+athenaeum#2623 §12. For this note its subject would be a raw note or a
+`propose-fact` written to steer a fact into a wider store.
+
+## 14. Operator rulings
 
 Each was a values call the design could not settle. **The operator answered
 all four on 2026-11-18, accepting the recommended answer each time**; the
@@ -846,3 +922,56 @@ options are recorded so the review has them.
   without reading works like an instruction.
 - Yes, applied automatically to every member. The least setup. Cost: anyone
   who can change that file can change what every member's assistant sends.
+
+## 15. How this note meets the north star
+
+Sections are those of [North star](../north-star.md).
+
+**§2.1, one way in and one way out.** Every fact still enters as raw intake of
+the install that received it, and routing is a step of that install's
+librarian run, not a second entry (§4.2, §8). A fact for a store the install
+does not compile is delivered as a record into that store's raw intake, where
+an install that holds compile files it (§4.5). There is no inbox and no
+shared raw directory of unrouted notes. Nothing here reads a store except
+through the pages an install holds, and the decision does not read the index
+(§10).
+
+**§2.2, one ladder; conformance sets depth, never admission.** There is one
+decision, over the one rule file, at the three points where capture is already
+enforced, and no routing classifier or routing prompt (§4). A record addressed
+to a store conforms to a shape the librarian understands, so it enters at the
+deterministic tier; one that does not conform goes up the ladder to a decision
+and is not refused (§4.5). A store's intake rules only refuse a destination:
+the fact is still kept, in the sender's personal store (§6, §7). The one model
+call involved is the existing classify call, and an unsure destination is not
+escalated to a costlier model, because the personal store loses nothing (§6).
+
+**§2.8, one queue of questions, answered through the one way in.** Routing
+raises no question of its own: an unsure destination is listed in a report and
+not asked (ruling 1, §14). A message that cannot be applied becomes an item in
+the queue of the store it was addressed to, shown in the one listing
+(athenaeum#2623 §7), and a rule edit arriving over the remote transport is
+filed as a proposal for the owner through the existing pending-decisions path
+(§5.1).
+
+**§2.12, filing is verification.** Routing chooses the store and then looks up
+the target page inside that store alone (§4.3), so a value is checked against
+the store it is filed in and is never attached to a page in another store
+because a name matched. The filing checks themselves run in the compile that
+follows, on whichever install compiles: the sender's for its personal copy,
+and the receiving store's for a `propose-fact`. A check that fails sends the
+value up the ladder there. Nothing in this note skips them.
+
+## 16. Points settled by athenaeum#2806
+
+| Point | Answer | Where |
+|---|---|---|
+| 1. Store identifier | A `route` rule, `remember`'s `store` argument and `decide` all name a store by `store_id`, or `personal`. The install's config maps the id to an adapter entry. | §4.1, §5.1, §9.2 |
+| 2. Role names | `decide` takes a set of rights per store, never a role name. | §4.1, S2 |
+| 3. Where proposals wait | No inbox. A message is raw intake of the store it is addressed to; the intake run reads it and a deterministic handler applies it. | §4.5, §8, §8.1 |
+| 4. Source rank of a raised copy | Not set here. athenaeum#2626 §5.1. | — |
+| 5. Checks before a write is published | Proposed in athenaeum#2624 §4.3 and athenaeum#2626 §4.4. | — |
+| 6. One conformance format | Proposed in athenaeum#2626 §6.1. | — |
+| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S15 may be built. | §13 |
+| 8. One queue across stores | A message that cannot be applied is an item in its store's queue, in the one listing. | §4.5, §15 |
+| 9. Small mismatches | The `propose-fact` slice of athenaeum#2626 is cited by number, S20. | §13 |

@@ -5,17 +5,20 @@
 **Status:** DESIGN, NOT BUILT (Vitruvius Specify, 2026-11-18). The design note
 athenaeum#2624 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
-questions only the operator can answer (§15).
+operator's rulings on its four questions (§15), given on 2026-11-18. It was
+reconciled with the other three federation notes by athenaeum#2806 (§17). One
+point of that reconciliation is still a proposal awaiting the operator: the
+filing checks before a push (§4.3).
 
 Code anchors are `path:symbol` on `develop` at `60f851e8`. Line numbers are
 given to make a claim quick to check and will drift.
 
 **Depends on, and does not design:**
 
-- **Who may read, propose and compile**, where a store's decision queue is
-  kept and who answers it: athenaeum#2623, the store access model
-  note, written in parallel as `federation-store-access.md` in this
-  directory. This note uses its terms (§3.4).
+- **Who may read, propose, compile and answer**, where a store's raw intake
+  and decision queue are kept: athenaeum#2623, the store access model note,
+  [Federation: store access](federation-store-access.md). This note uses its
+  terms (§3.4).
 - **Trust and poisoning across writers**: athenaeum#2628, held for an external
   review. Out of scope here (§13).
 - **Encryption at rest**: athenaeum#2627. This note is written so that it
@@ -41,10 +44,11 @@ given to make a claim quick to check and will drift.
    remote text or both in order, or says it cannot decide. It authors no new
    text. Every decision is recorded in the merge commit, and an undecided
    page is held for a person (§6).
-5. **The same sequence syncs a store's bench and inbox.** The decision queue
-   and its answers are merged on the bench, never in the pages repository,
-   and two people who answer one item differently are never overruled by a
-   rule (§8).
+5. **The same sequence syncs a store's bench and raw location.** Both hold
+   raw intake as one file per record, never edited, so they merge without a
+   conflict. The decision queue is merged on the bench, never in the pages
+   repository, and two people who answer one item differently are never
+   overruled by a rule (§8).
 6. **New pages get 16-hex-character uids (64 random bits).** Existing 8-hex
    uids stay valid and are never rewritten. A collision is still detected at
    integrate time and repaired before it is published (§7).
@@ -53,7 +57,7 @@ given to make a claim quick to check and will drift.
 
 | Criterion | Where |
 |---|---|
-| Sync sequence and the rejected push | §4, and §8 for the bench and inbox |
+| Sync sequence and the rejected push | §4, and §8 for the bench and raw location |
 | Handing a page conflict to a librarian: shown, may decide, recorded, cannot decide | §6.1 to §6.4 |
 | Conflicts resolved without a model call | §5, §8 |
 | Uid width, collision probability, existing uids, same uid minted twice | §7 |
@@ -115,20 +119,25 @@ repository is needed.
 ### 3.3 Capability and configuration
 
 - `StoreCapabilities` gains a `multi_writer` capability. Only a store that is
-  versioned by git and has a remote can declare it. Non-git stores are out of
-  scope (athenaeum#2624).
+  versioned by git and has a remote can declare it. **Sync in `integrate`
+  mode requires git** (athenaeum#2806 point 9). The access model does not:
+  athenaeum#2623 needs only separately permissioned locations with fetch and
+  push. The two statements fit together this way: a store on any other
+  backing may be read, proposed to and compiled, with one writer per
+  location, and it cannot declare `integrate` until a sync design for that
+  backing exists.
 - **Integrate mode is declared by the store, not by each install.** The
   store's declaration, `_store/access.yaml` (athenaeum#2623 §5), carries:
 
   ```yaml
   sync:
     mode: integrate        # fast_forward (default) | integrate
-    always_ask: []         # page types whose contested units always go to a person (§15, question 2)
+    always_ask: []         # page types whose contested units always go to a person (§15, ruling 2)
   ```
 
   Every install then acts on one statement, and a change to it is a commit
   with an author. The access check (athenaeum#2623 §9) accepts more than one
-  compile-role install only when the declaration says `integrate`.
+  install holding compile only when the declaration says `integrate`.
 - **A local setting may only narrow.** `sync_mode: fast_forward` under
   `storage.adapters.<name>` makes that one install never merge, so it stops
   pushing as soon as it diverges. A local `integrate` on a store that does
@@ -137,19 +146,24 @@ repository is needed.
   includes a knowledge repository. One person syncing a knowledge repository
   between two machines opts in with the same declaration file.
 - The declared mode covers every location of the store: its pages, its bench
-  and its inbox (§8).
+  and its raw location (§8).
 - A `read_only` mount is unaffected. It is still pulled and never pushed.
 
 ### 3.4 Terms
 
-These are the terms of athenaeum#2623, used here unchanged.
+These are the terms of athenaeum#2623, used here unchanged. The engine fixes
+four rights (read, propose, compile, answer). The words below describe an
+install by the rights its owner holds. None is a role name in any file or
+interface.
 
 | Term | Meaning here |
 |---|---|
-| **Writer** | An install in a store's **compile role**. Only writers push the pages. |
-| **Proposer** | An install that may push the store's inbox and nothing else. Not a writer. |
-| **Steward** | A person in the compile role who answers decisions on the bench and does not push the pages. |
-| **Pages, inbox, bench** | The store's three separately permissioned locations. |
+| **Writer** | An install whose owner holds **compile** on the store. Only writers push the pages. |
+| **Proposer** | An install whose owner holds **propose** and neither compile nor answer. It pushes the store's raw location and nothing else. Not a writer. |
+| **Steward** | Shorthand for a person who holds **answer** and not compile. They answer decisions and do not push the pages. |
+| **Compile role** | Shorthand for the principals who hold compile or answer. |
+| **Pages, raw location, bench** | The store's three separately permissioned locations (athenaeum#2623 §4). |
+| **Raw intake** | Every record waiting to be compiled into the store. It is kept in the raw location, on the bench under `raw/`, or in the single compiling install's own raw tree. There is no inbox. |
 | **Decision queue** | The store's open decisions. It is kept on the bench, or in the single compiling install's own state when there is no bench. |
 | **`_store/`** | The directory in the pages repository for store-level files, including the declaration. |
 
@@ -159,7 +173,7 @@ These are the terms of athenaeum#2623, used here unchanged.
 
 Each repository of a store in `integrate` mode runs this sequence,
 independently of the others. This section describes the pages repository. The
-bench and the inbox run the same sequence without the compile step (§8).
+bench and the raw location run the same sequence without the compile step (§8).
 
 ```
  1. lock        take the local run lock and the repository lease (§9)
@@ -234,6 +248,60 @@ page the merge touched:
 A page that fails is held (§6.4). If the tree cannot be made valid, nothing is
 pushed and the run reports why.
 
+These four checks are about structure. Whether a merged page is also checked
+for what it *says* is athenaeum#2806 point 5. One half of that point is
+settled and one half is proposed.
+
+**Settled: contradiction detection stays a later pass.** The operator's view
+(2026-11-18) is that a contradiction can only be judged once everything on a
+topic is on one page. Sync does not run the contradiction detector before a
+push, and two clean edits that contradict each other are found by it on a
+later run (§5.4).
+
+**Proposed (pending operator review, athenaeum#2806):** the filing checks of
+[North star](../north-star.md) §2.12 run on a merged page **before the push**,
+on the values the merge would newly publish.
+
+- *What is checked.* Only the units whose merged value differs from the
+  remote's value. Those are exactly what this push adds to what other
+  installs already hold. For each, the deterministic filing checks: a contact
+  value already attributed to another page of this store; an address whose
+  local part names a different person; a person-shaped value on an
+  organisation's page. Pages are read through the store seam, inside the one
+  store being pushed. No index is consulted (§10).
+- *What holds without a check.* The fourth filing check, a value absent from
+  the source it cites, holds by construction. A merged unit is always text
+  that one side already filed, and the adjudicator's answer is refused unless
+  every unit is byte-identical to one side's text (§6.2). The merge authors
+  nothing.
+- *What a failure does.* It is not a rejection and it does not stop the push
+  (§2.2). The unit is held the way §6.4 holds a contested unit: the remote
+  version stays on the page, the local version stays in history, and the
+  value goes up the ladder as §2.12 says. That means reasoning first, where a
+  tier has been measured for that class of question, and a decision only if
+  the answer stays below calibrated confidence. Until a tier has been
+  measured, up the ladder means the decision.
+
+*Rationale.* §2.12 binds every writer, the librarian's own maintenance paths
+included: "a value moved by a repair is filed again, and is checked again". A
+merge moves values. Each install checked its own compile against its own copy
+of the store, and neither checked it against the other's new pages. Jordan's
+install files an address on one page while Priya's files the same address on
+another; each passes at home, and the merged tree holds a misattribution that
+no librarian has looked at. The push is the last moment before other people
+read it, and what has been read cannot be recalled. Scoping the checks to the
+changed units keeps the cost proportional to the merge and never to the store
+(§2.4).
+
+*Alternative rejected.* Run the filing checks after the push, in the same
+later pass as contradiction detection. It is cheaper and a push never waits on
+it. Rejected because §2.12 says a value is checked before it is absorbed, and
+on a shared store "absorbed" is the push: a later pass would be repairing
+something every reader already holds.
+
+*If the proposal is not accepted,* §4.3 stays as the four structural checks,
+and a misfiled value is found by the next compile that touches its page.
+
 ### 4.4 Rewritten remote history
 
 If the fetch shows that the remote branch no longer contains the commit this
@@ -255,6 +323,7 @@ artifact registry already declares (`src/athenaeum/store.py:PERSISTENCE_CLASSES`
 |---|---|
 | **Page** (`source`) | Three-way page merge by unit (§5.1, §5.2). |
 | **Record file** (`operational`, store-durable): the append-only ledgers | Union of records through the file's own parser (§5.3). |
+| **Raw intake record** (a file in the raw location, or under the bench's `raw/`) | Never merged. Each record is its own file and is never edited, so two sides never change one path (§8.1). |
 | **Decision queue files** (the pending questions and merges lists and their archives) | Not expected in a shared pages repository. They are merged on the bench (§8.2). They are merged here only in the one case athenaeum#2623 §4 allows the bench to live in the pages repository: every reader is in the compile role. |
 | **Regenerated file** (`derived`), and `wiki/_index.md` written by `librarian.py:rebuild_index` | Take either side, then regenerate. Never merged. |
 | **Configuration** (`config`), and **every file under `_store/`** | Never merged automatically. The remote version stays and a decision is raised for a person. |
@@ -290,7 +359,7 @@ For each unit, with the common ancestor as the base:
 | `uid`, `type`, `created`, `access` or `audience` differs | Held for a person. `access` and `audience` decide who may see the page (`src/athenaeum/models.py:effective_audience`, `is_page_authorized`). Neither a rule nor a model may widen or narrow that. | No (held) |
 | Any other key changed differently on both sides | Contested | Yes |
 | The same lines changed differently, or a `replace_sections` section changed differently | Contested | Yes |
-| Page deleted on one side by a retire or a merge, edited on the other | Contested (see §15, question 4) | Yes |
+| Page deleted on one side by a retire or a merge, edited on the other | Contested, then settled as operator ruling 4 says (§15) | Yes |
 
 **How an erasure is recognised.** The redaction ledger is in each install's
 cache directory (`src/athenaeum/erasure.py:redaction_ledger_path`), so the
@@ -337,7 +406,8 @@ Two writers can each create a page for the same real thing, with two uids and
 two paths. Git sees no conflict and neither does this merge. That is a
 duplicate, and the existing merge-proposal machinery finds it on the next run
 after integrate. Likewise, two clean edits that contradict each other are the
-contradiction detector's job. This note does not change either.
+contradiction detector's job, as a later pass (operator view 2026-11-18,
+§4.3). This note does not change either.
 
 ---
 
@@ -412,8 +482,7 @@ A page is **held** when a unit is `cannot_decide`, when the answer fails its
 check, or when §5 says a person must decide. For a held page:
 
 1. The **remote** version of each contested unit stays on the page. That is
-   the version other installs already have. (This default is question 1 in
-   §15.)
+   the version other installs already have. (Operator ruling 1, §15.)
 2. The local version is not lost. It is in history, named by blob id.
 3. A decision is raised in the store's decision queue, naming the uid, the
    contested units and the three blob ids. The queue is on the bench, or in
@@ -452,7 +521,7 @@ home for them. Each rule's reason is stated at its site, as in the table
 above.
 
 Whether a store may carry its own additional instructions for the adjudicator
-is question 3 in §15. It waits on athenaeum#2628.
+was ruled out for now (§15, ruling 3). It waits on athenaeum#2628.
 
 ---
 
@@ -558,47 +627,59 @@ At 64 bits this is as rare as §7.2 says. The realistic source is existing
 
 ---
 
-## 8. The bench and the inbox
+## 8. The bench and the raw location
 
-A store's bench and inbox are repositories named under `locations:` in its
-declaration (athenaeum#2623 §4). Both have more than one install pushing them
-by construction: every proposer pushes the inbox, and every steward and
-compiling install pushes the bench. They are synced by the sequence in §4,
-with no compile step: lock, snapshot, fetch, integrate, push, retry. The same
-rejected-push rule applies (§4.2), and so does the rule for a rewritten
+A store's bench and raw location are repositories named under `locations:` in
+its declaration (athenaeum#2623 §4). Both have more than one install pushing
+them by construction: every proposer pushes a raw location, and every install
+that compiles or answers pushes the bench. They are synced by the sequence in
+§4, with no compile step: lock, snapshot, fetch, integrate, push, retry. The
+same rejected-push rule applies (§4.2), and so does the rule for a rewritten
 remote (§4.4).
 
-Neither location is indexed (athenaeum#2623 §9), and neither merge calls a
-model.
+Neither location is added to the recall index (athenaeum#2623 §9), and neither
+merge calls a model.
 
-### 8.1 The inbox
+### 8.1 Raw intake: the raw location and the bench's `raw/`
 
-The inbox is **append-only by construction**. This note places one
-requirement on the proposal format (athenaeum#2625, athenaeum#2626): each
-proposal is its own file, its name contains a random id, and it is never
-edited after it is written.
+There is no inbox (athenaeum#2806 point 3). What the raw location holds, and
+what the bench holds under `raw/`, is the store's raw intake: records waiting
+for a compiling install. Sync moves them and does not interpret them.
+
+Raw intake in a shared location is **append-only by construction**. This note
+places one requirement on the record format (athenaeum#2625, athenaeum#2626):
+each record is its own file, its name contains a random id, and it is never
+edited after it is written. An answer record already has that shape
+(`src/athenaeum/decision_answers.py`).
 
 | Case | Result |
 |---|---|
-| Two proposers each add a proposal | Different paths. Both are kept. This is the "changed on one side only" case of §4.1, for every file. |
-| A compiling install removes a proposal it has acted on, while a proposer adds another | Both changes are kept. |
-| Two compiling installs remove the same proposal | Removed. Each has compiled it into pages; the page merge (§5) settles whatever they both wrote. |
-| The same proposal path is changed on both sides | Should not happen. Held by the default rule (§5). |
+| Two installs each add a record | Different paths. Both are kept. This is the "changed on one side only" case of §4.1, for every file. |
+| A compiling install removes a record it has consumed, while another install adds one | Both changes are kept. |
+| Two compiling installs remove the same record | Removed. Each has processed it; the record merge (§5.3) settles the ledger rows they both wrote, and the page merge (§5) settles any page. |
+| The same record path is changed on both sides | Should not happen. Held by the default rule (§5). |
 
-A proposer's install runs this sequence on the inbox and on nothing else. It
-is not a writer and never integrates the pages.
+Removing a consumed record is not losing it. The install that consumed it has
+recorded what it did with it, in the store's ledger on the bench or in its own
+state (athenaeum#2626 §4.4), and the record stays in the location's history.
+
+A proposer's install runs this sequence on its raw location and on nothing
+else. It is not a writer and never integrates the pages.
 
 ### 8.2 The bench
 
-The bench holds the decision queue, the answers to it and the review cursors.
+The bench holds the store's operational state (the decision queue, the raise
+and acceptance ledgers, the review cursors) and, under `raw/`, the raw intake
+written by installs that compile or answer, including answers.
 
 | File | Rule |
 |---|---|
 | The decision queue (the pending questions and merges lists, their archives) | Record merge by decision id through the sanctioned parser (§5.3). |
-| Answer files | Paired by the `decision_id` inside the file, never by path (below). |
+| The raise and acceptance ledgers (athenaeum#2626) | Record merge through their own parsers (§5.3). |
+| Answer records, under `raw/answers/` | Raw intake: never merged as files (§8.1). Paired by the `decision_id` inside the file, never by path (below). |
 | A review cursor (the last source revision reviewed) | If both sides moved it, take the **earlier** revision. Reviewing a change twice is harmless; skipping one is not. |
 
-**Two stewards answer the same item.** An answer file is named from a
+**Two people answer the same item.** An answer record is named from a
 timestamp, the decision type and the decision id
 (`src/athenaeum/decision_answers.py`, the `stem` built before
 `atomic_write_text`), so two answers usually have different paths and git sees
@@ -607,7 +688,7 @@ Either way the answers are then compared by decision id:
 
 | Case | Result |
 |---|---|
-| The answers agree | The decision is applied once. Both answer files are kept as the record. |
+| The answers agree | The decision is applied once. Both answer records are kept as the record. |
 | The answers differ, and neither has been applied | Neither is applied. The item stays open and is shown to the compile role with both answers and who gave them. It closes when one more answer says which stands. |
 | The answers differ, and the first has already been applied to the pages | The applied answer stands. The second is raised as a new decision, to reopen or not. Nothing is undone by rule. |
 
@@ -621,10 +702,10 @@ treats as identical.
 
 ### 8.3 Order within a run
 
-A compiling install syncs the inbox and the bench before it compiles, so it
-sees every proposal and every answer, then the pages, then the bench again
-after compiling, to publish the decisions it raised. A failure to sync one
-location is reported for that location and does not stop the others.
+A compiling install syncs the raw location and the bench before it compiles,
+so it sees every waiting record and every answer, then the pages, then the
+bench again after compiling, to publish the decisions it raised. A failure to
+sync one location is reported for that location and does not stop the others.
 
 ---
 
@@ -644,7 +725,7 @@ both installs changed.
 - The run lock (`runlock.py:RunLock`, backed by
   `store.py:FilesystemStore.lease`) keeps serialising processes that share a
   knowledge root. The whole sequence in §4 runs inside it.
-- That lock is at the knowledge root. A store's pages, bench and inbox are
+- That lock is at the knowledge root. A store's pages, bench and raw location are
   different directories, and two installs on one machine could mount the same
   clone. So each repository in `integrate` mode also takes a lease on a lock file
   **inside that repository's git directory** for steps 2 to 7. A file there
@@ -698,7 +779,7 @@ the record format has a version line (§6.3) so it can change.
 | The model returns text that is on neither side | The check fails and the page is held (§6.2). |
 | Two installs minted one uid | The local page is re-minted before it is published (§7.4). |
 | Two stores each published a page with one uid | An install that mounts both keeps both pages, answers a bare-uid lookup as ambiguous, and reports it (§7.5). |
-| Two stewards answered one item differently | Neither answer is applied by rule; the item stays open with both (§8.2). |
+| Two people answered one item differently | Neither answer is applied by rule; the item stays open with both (§8.2). |
 | A file of a kind nobody registered is changed on both sides | Held; the remote version stays (§5). |
 | The remote history was rewritten | Stop; no merge, no push (§4.4). |
 | A writer on an older release that only fast-forwards | It never merges. Once diverged it stops pushing and reports the failure it reports today. It cannot damage the store. It needs upgrading to write again. |
@@ -787,12 +868,12 @@ the record format has a version line (§6.3) so it can change.
 - **Trust and poisoning across writers** (athenaeum#2628, held for external
   review): whether one writer's change should be believed over another's,
   what a hostile writer can do, and any control on store-carried
-  instructions (§15, question 3). Nothing here weighs writers.
-- **Access**: who is in the compile role, who the stewards are and where the
-  bench is (athenaeum#2623). Page audience is a separate axis that sync never
+  instructions (§15, ruling 3). Nothing here weighs writers.
+- **Access**: who holds compile, who holds answer and where the bench is
+  (athenaeum#2623). Page audience is a separate axis that sync never
   changes (§5.1).
-- **The proposal format** in the inbox (athenaeum#2625, athenaeum#2626),
-  beyond the one requirement in §8.1.
+- **The format of a raw intake record** addressed to a store (athenaeum#2625,
+  athenaeum#2626), beyond the one requirement in §8.1.
 - **Routing a fact to a store and raising between stores** (athenaeum#2625,
   athenaeum#2626).
 - **Encryption** (athenaeum#2627), beyond not blocking it (§10).
@@ -822,94 +903,123 @@ A dependency written `athenaeum#2623 S7` is a slice of that note.
 | **S8** | The held-page decision: a new kind in the store's decision queue, with list and apply. | S7; athenaeum#2623 S7 (the per-store queue) and, with several compiling installs, athenaeum#2623 S8 (the bench mount) |
 | **S9** | Uid collision handling at integrate: detect, re-mint the local page, rewrite local references, record it (§7.4). | S1, S7 |
 | **S10** | The adjudicator: the prompt file, its registry entry and golden, the `sync_adjudicate` knob, reason codes, the answer check, budget deferral and the `sync.always_ask` list (§6). | S7, S8 |
-| **S11** | The per-repository lease inside the git directory, for pages, bench and inbox (§9). | S7 |
+| **S11** | The per-repository lease inside the git directory, for pages, bench and raw location (§9). | S7 |
 | **S12** | A guide for several installs writing one store. Docs only. The interim one-writer rule is lifted by athenaeum#2623 S13, not here. | S7 to S11, S13, S14 |
-| **S13** | Sync for the bench and the inbox: the sequence without a compile step, the append-only inbox rule, and the record merge of the decision queue on the bench (§8.1, §8.2). | S4, S5b, S6a; athenaeum#2623 S8 |
+| **S13** | Sync for the bench and the raw location: the sequence without a compile step, the append-only rule for raw intake records, and the record merge of the decision queue on the bench (§8.1, §8.2). | S4, S5b, S6a; athenaeum#2623 S8 |
 | **S14** | Concurrent answers and review cursors on the bench: pair answers by decision id, the three cases for two answers to one item, and the earlier-cursor rule (§8.2). | S13; athenaeum#2623 S7 |
 | **S15** | The same uid in two stores: the cross-store check before publishing, store-qualified lookup, and an ambiguous result in place of `AmbiguousPageUidError` (§7.5). | S2; athenaeum#2623 S1 (for `store_id`) |
 | **S16** | The erasure mark: the erasing path writes `Athenaeum-Erasure` on its deletion commit and integrate honours it (§5.1). | S7 |
+| **S17** | *Proposed, pending operator review (§4.3).* The filing checks before a push: run the deterministic filing checks on the units a merge would newly publish, and hold a unit that fails. Not to be filed as an issue until the operator rules. | S7, S8 |
 
 S7 is the first slice that makes a two-writer store converge. A deployment
 could run on S1 to S9 with no model adjudication at all, with every contested
 page going to a person.
 
-**What athenaeum#2623 needs from here.** Its S9 (stewards answering on the
-bench) needs S13 and S14. Its S13 (lifting the one-writer rule) needs S7 for
-the pages and S13 for the bench.
+**What athenaeum#2623 needs from here.** Its S9 (answering from a second
+install, on the bench) needs S13 and S14. Its S13 (lifting the one-writer
+rule) needs S7 for the pages and S13 for the bench.
+
+**Trust (athenaeum#2806 point 7).** The trust design (athenaeum#2628) is on
+hold. Until it reports, **no slice may rely on a writer being trusted or
+untrusted.** Under that rule S1 to S16 may all be built. None takes a measure
+of how far a writer is believed as an input: the rules of §5 treat both sides
+alike, and the adjudicator is not shown which writer made a change (§6.1).
+What may not be built before the trust design reports has no slice here:
+weighting one writer's change over another's, and any instructions for
+settling conflicts that a store carries (§15, ruling 3). The eval that would
+later show a store resists a hostile writer is named as a placeholder in
+athenaeum#2623 §12. For this note its subject would be a hostile writer's
+edits passing through the page merge and the adjudicator.
 
 ---
 
-## 15. Open questions for the operator
+## 15. Operator rulings
 
-Only calls that depend on what the operator values. Each has a recommended
-answer, and the design above is written to that answer.
+No question is open. The note put four questions. The operator accepted the
+recommended answer to each on 2026-11-18, recorded on athenaeum#2631. They are
+stated below as rulings, with the options that were not chosen kept for the
+record. The design above is written to them.
 
-### 1. While a conflict waits for a person, which version do readers see?
+### Ruling 1. While a conflict waits for a person, readers see the version already published
 
-Two installs changed the same sentence in different ways and the librarian
-could not choose. A person will decide later. Until then the page has to say
-something.
+Other installs already have it, so nobody's page changes under them. The other
+version is kept in history and named in the decision (§6.4). Not chosen:
+showing both versions on the page marked as disputed, which makes assistants
+recall two contradictory statements; and holding back the whole push, which
+lets one disputed sentence stop everything else that install compiled.
 
-- **Show the version that was already published (recommended).** Other
-  installs already have it, so nobody's page changes under them. The other
-  version is kept in history and named in the decision. Cost: the newer local
-  edit is invisible until someone decides.
-- **Show both versions on the page, marked as disputed.** Nothing is hidden.
-  Cost: assistants will recall two contradictory statements as if both were
-  knowledge, and the page is no longer clean text.
-- **Hold back the whole push until a person decides.** No reader ever sees an
-  unresolved page. Cost: one disputed sentence stops everything else that
-  install compiled from reaching anyone, possibly for days.
+### Ruling 2. The librarian settles conflicts on its own, except page types a store lists as "always ask"
 
-### 2. May the librarian settle a conflict on its own, or only propose?
+Every decision is one recorded, undoable commit, and it can only choose
+between existing texts. A store names the page types that always go to a
+person in `sync.always_ask` in its declaration (§3.3, §6). Not chosen:
+settling everything with no exception list; and only proposing, with a person
+approving each one.
 
-The ruling says a librarian adjudicates. The question is how far that goes
-without a person looking.
+### Ruling 3. A store may not carry its own conflict-settling instructions
 
-- **It settles on its own, except for page types the store lists as "always
-  ask" (recommended).** Most conflicts clear with no queue. Every decision is
-  one recorded, undoable commit, and it can only choose between existing
-  texts. A store can name sensitive types (say, HR records) that always go to
-  a person, in `sync.always_ask` in its declaration (§3.3). Cost: a wrong
-  choice is live until someone notices.
-- **It settles everything on its own.** Simplest and least queue. Cost: no
-  way to protect a sensitive type.
-- **It only proposes; a person approves each one.** Safest. Cost: every
-  conflict becomes a queue item, which is the load the ruling was meant to
-  remove.
+Only the built-in prompt is used (§6.5). The ruling holds until the trust
+design (athenaeum#2628) reports. A file that steers every later decision is a
+way to poison a store, and what would make it safe is that design's subject.
+This note designs no control for it and builds nothing for it. Not chosen, and
+recorded for that design: a file under `_store/` that every writer's librarian
+reads; and instructions per install, in each install's own config.
 
-### 3. May a shared store carry its own instructions for settling conflicts?
+### Ruling 4. A page removed by one install and added to by another is kept, and the removal is raised again
 
-The adjudication prompt ships with athenaeum. A team might want its own rules
-on top, for example "the HR manager's wording wins on policy pages".
+The page stays with the new fact, and the removal becomes a decision (§5.1).
+Erasure for privacy is separate and always wins. Not chosen: honouring the
+removal and moving or dropping the new fact; and letting the librarian choose
+case by case.
 
-**This question is deferred to the external review in athenaeum#2628.** A
-file that steers every later decision is a way to poison a store, and what
-would make it safe is that review's subject. This note designs no control for
-it and builds nothing for it. The options are recorded so the review has
-them.
+---
 
-- **Not until the review reports: only the built-in prompt (recommended for
-  now).** Nothing in a store can steer the librarian. Cost: no team-specific
-  rules; every such case goes to a person.
-- **Yes, as a file under `_store/` that every writer's librarian reads.** All
-  writers settle conflicts by the same rules, versioned with the store. Cost:
-  anyone who can change that file can steer every later decision.
-- **Yes, but per install, in each install's own config.** No shared file to
-  attack. Cost: two installs can settle the same conflict in opposite ways.
+## 16. How this note meets the north star
 
-### 4. One install removed a page and another added to it. Which wins?
+Sections are those of [North star](../north-star.md).
 
-One librarian retired a page, or merged it into another, while a second
-librarian was adding a new fact to it. (Erasure for privacy is separate and
-always wins.)
+**§2.1, one way in and one way out.** Sync adds no way in. A page reaches a
+shared store only after an install compiled it from raw intake, and sync moves
+finished pages between installs that hold compile. It moves raw intake
+records, in the raw location and under the bench's `raw/`, without reading
+them (§8.1). The merge writes no text of its own: every merged unit is text
+that one side already filed (§6.2). Sync adds no way out: it never reads or
+serves the index (§10).
 
-- **Keep the page with the new fact, and raise the removal again as a
-  decision (recommended).** Knowledge is never dropped silently. Cost: a page
-  someone meant to remove comes back until a person confirms.
-- **Honour the removal and attach the new fact to wherever the page was
-  merged, or drop it if it was retired.** The store stays tidy. Cost: a fact
-  can vanish with nobody told.
-- **Let the librarian choose case by case.** Fewer decisions for people.
-  Cost: the outcome is less predictable, and a wrong removal is the harder
-  mistake to notice.
+**§2.2, one ladder; conformance sets depth, never admission.** A conflict
+climbs the same ladder as everything else: rules first (§5), then a model that
+may only choose (§6), then a person (§6.4). Nothing is refused: a unit that
+cannot be settled is held, and the push goes ahead. The model that adjudicates
+is set by its own routing knob (§6.5), so that its tier is chosen by measured
+accuracy on this class of question and not climbed by price.
+
+**§2.8, one queue of questions, answered through the one way in.** A held
+page is one more kind of item in the store's decision queue, shown in the one
+listing (athenaeum#2623 §7). An answer is a record in the store's raw intake,
+under the bench's `raw/answers/`, applied deterministically by a compiling
+install (§8.2). When two people answer differently, the second answer is a
+record too, and no rule picks between them.
+
+**§2.12, filing is verification.** The merge is one of the librarian's own
+maintenance paths, so §2.12 binds it. Two guarantees hold today by
+construction: no value is invented, because a merged unit is byte-identical to
+one side; and `access` and `audience` are never changed by a rule or a model
+(§5.1). Whether the filing checks also run on the merged page before the push
+is the proposal in §4.3, pending the operator. Contradiction detection is a
+later pass by the operator's view, and is not a filing check.
+
+---
+
+## 17. Points settled by athenaeum#2806
+
+| Point | Answer | Where |
+|---|---|---|
+| 1. Store identifier | `store_id` (athenaeum#2623 §5). A store-qualified page reference is the pair of `store_id` and uid. | §7.5 |
+| 2. Role names | Writer, proposer and steward are described by rights and are not names in any file or interface. | §3.4 |
+| 3. Where proposals wait | No inbox. Sync moves raw intake records in the raw location and under the bench's `raw/`, append-only. | §8.1 |
+| 4. Source rank of a raised copy | Not set here. The merge never ranks a source. athenaeum#2626 §5.1. | — |
+| 5. Checks before a write is published | Contradiction detection is a later pass (settled). Filing checks before the push are **proposed, pending operator review**. | §4.3 |
+| 6. One conformance format | Proposed in athenaeum#2626 §6.1. This note requires only one file per record, never edited. | §8.1 |
+| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S16 may be built. | §14 |
+| 8. One queue across stores | A held page is an item in its store's queue, shown in the one listing. | §6.4, §16 |
+| 9. Small mismatches | Sync in `integrate` mode requires git; the access model does not. | §3.3 |
