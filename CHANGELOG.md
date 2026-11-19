@@ -18,6 +18,11 @@ share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
 [support policy](docs/guides/install.md#support-policy).
 
+The bundled `promptwitness` package is experimental: it is not part of the
+athenaeum public API, is not covered by semver, and is subject to change
+without notice. From the release after 0.27.2 on, changes to it get their own
+`promptwitness` line in the release section, separate from `athenaeum` entries.
+
 ## [Unreleased]
 
 ### Added

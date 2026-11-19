@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """promptwitness — a harness-agnostic prompt witness ledger (athenaeum#2147).
 
-**Experimental.** This package and its console script are not part of
-``athenaeum.__all__`` and do not carry its semver compatibility promise; their
-flags, formats and import paths may change in a minor release.
+**Experimental.** This package is experimental: it is not part of the
+athenaeum public API, is not covered by semver, and is subject to change
+without notice.
 
 This package is written to be extractable later as a standalone OSS library
 and CLI (athenaeum#2162): it imports nothing from ``athenaeum`` (enforced by

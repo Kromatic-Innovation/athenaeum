@@ -375,6 +375,9 @@ majors, and only the locked release and the newest one are tested.
 - The Python floor and the dependency floors move up whenever that is
   convenient, with no advance notice.
 - Breaking changes ship without a deprecation period or a warn-first release.
+- The bundled `promptwitness` package is experimental: it is not part of the
+  athenaeum public API, is not covered by semver, and is subject to change
+  without notice.
 - If you need a longer deprecation notice, or support for an older Python or
   dependency version, open an issue asking for it.
 
