@@ -103,6 +103,12 @@ Before you start, have all of these:
    Slim server images often omit it: `apt-get install git`.
 8. **A scheduler** — systemd timers or cron. No Claude Code `SessionStart` hook runs
    on a server, so nothing compiles or reindexes unless you schedule it.
+8. **`curl`, or an equivalent, for the verification steps.** This guide checks the
+   provider's discovery document and your public endpoints with `curl`, which slim
+   server images often lack. Install it, or use Python, which athenaeum already needs:
+   `python3 -c "import sys,urllib.request as u; print(u.urlopen(sys.argv[1]).read()[:400].decode())" https://id.example.net/.well-known/openid-configuration`.
+   For the status-code check, `urllib.request.urlopen` raises `urllib.error.HTTPError`
+   on the refused call; its `.code` is the `401` that `curl` prints.
 
 A loopback dry run first is worth the five minutes, because it separates athenaeum
 configuration errors from proxy and provider errors:
@@ -113,6 +119,31 @@ athenaeum serve --path ~/knowledge --transport http --port 8000 --profile remote
 
 That binds `127.0.0.1` only and needs no auth block at all. Confirm it starts and
 prints its transport line, then stop it and configure the rest.
+
+### The one outbound request at startup
+
+`athenaeum serve --transport http` makes one outbound request when it starts:
+`GET https://pypi.org/pypi/fastmcp/json`. It is FastMCP's update check, run while it
+prints its startup banner, and it only decides whether to show an "Update available"
+box. athenaeum itself makes no request here. It appears in the log as
+`INFO httpx2 ... HTTP Request: GET https://pypi.org/pypi/fastmcp/json`. FastMCP caches
+the answer under its home directory (`version_cache.json`, 12 hours), so a restart
+inside that window sends nothing.
+
+On a host with restricted egress, turn it off with an environment variable on the
+serve process (for example `Environment=FASTMCP_CHECK_FOR_UPDATES=off` in the systemd
+unit below):
+
+```bash
+FASTMCP_CHECK_FOR_UPDATES=off athenaeum serve --path ~/knowledge --transport http --port 8000 --profile remote
+```
+
+The value is `off`. `false`, `0` and `no` are not accepted: FastMCP refuses to start
+with a validation error. `FASTMCP_SHOW_SERVER_BANNER=false` also stops the request,
+because the check runs only when the banner is shown. This was checked against
+FastMCP 4.0.11 with a fresh FastMCP home directory: without the variable the log shows
+the `GET https://pypi.org/pypi/fastmcp/json` line and a lookup of `pypi.org`; with
+`FASTMCP_CHECK_FOR_UPDATES=off` neither appears.
 
 ## What your authorization server must provide
 
