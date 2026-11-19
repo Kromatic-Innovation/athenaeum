@@ -5,25 +5,31 @@
 **Status:** DESIGN, not built (Vitruvius Specify, 2026-11-18). The design note
 athenaeum#2626 asks for, a child of the federation design epic athenaeum#2631.
 Nothing here is running code. The note ends in build slices (§14) and in the
-operator's rulings on its six questions (§15). None is still open.
+operator's rulings on its six questions (§15). It was reconciled with the
+other three federation notes by athenaeum#2806 (§17), and the operator ruled
+on its last two open points on 2026-11-19: the checks around an automatic
+acceptance (§4.4) and the record format (§6.1). No question in this note is
+open.
 
 Code anchors are `path:symbol` on `develop` at `759e3b64`.
 
 **Builds on, and does not redesign:**
 
 - **The store access model**, [Federation: store access](federation-store-access.md)
-  (athenaeum#2623): grants, the inbox, the bench, scheduled review and the
-  review criteria file. Its terms are used here unchanged (§3).
+  (athenaeum#2623): the four rights, where a store's raw intake is kept, the
+  bench, scheduled review and the review criteria file. Its terms are used
+  here unchanged (§3).
 - **Multi-writer sync**, [Federation: multi-writer sync](federation-multi-writer-sync.md)
-  (athenaeum#2624): the sync sequence, the append-only inbox, record merge,
-  uids, the same uid in two stores and the erasure mark.
+  (athenaeum#2624): the sync sequence, append-only raw intake records, record
+  merge, uids, the same uid in two stores and the erasure mark.
 
 **Does not decide:**
 
 - **Which store a fact goes to at intake**, a store's `intake` rules and the
-  proposer's notice (athenaeum#2625, the intake routing note, written in
-  parallel). This note says where it depends on that one and specifies nothing
-  of it. It does supply the message that note's propose path sends (§6.3).
+  proposer's notice, and how intake handles a record addressed to a store
+  (athenaeum#2625, the intake routing note). This note says where it depends
+  on that one and specifies nothing of it. It does supply the message that
+  note's propose path sends (§6.3).
 - **Which facts deserve raising.** That is the review criteria file of
   athenaeum#2623 §8 for a scheduled review, and a person's choice otherwise.
 - **Trust and poisoning across writers** (athenaeum#2628) and **routing a
@@ -38,9 +44,10 @@ Code anchors are `path:symbol` on `develop` at `759e3b64`.
 ## 1. Summary
 
 1. **A raise is a copy.** The raising install takes one page of the *origin*
-   store, strips everything that points back into the origin, and sends the
-   result to the *target* store as a proposal. If the target's compile role
-   accepts it, the target gains a new page with its own uid.
+   store, strips everything that points back into the origin, and delivers
+   the result into the *target* store's raw intake as a record. If the
+   target's compile role accepts it, the target gains a new page with its own
+   uid. There is no inbox: the record enters the way every write enters.
 2. **The copy carries a provenance record and no link.** The part on the copy
    names the origin store by its opaque `store_id`, the proposer as the
    target's own declaration names them, a hash of the copied content, and the
@@ -64,8 +71,8 @@ Code anchors are `path:symbol` on `develop` at `759e3b64`.
    itself.** Pages in the target that depend on a withdrawn copy are listed in
    one decision for the target's compile role (§8).
 6. **Push and pull are one protocol.** A member raising a page by hand and a
-   librarian raising on a schedule write the same proposal to the same three
-   places (§9).
+   librarian raising on a schedule write the same record to the same three
+   places, all of them the target's raw intake (§9).
 7. **This note adds no model call and no prompt.** Every rule below is
    deterministic. The only model call near it is the review of
    athenaeum#2623 §8, which selects pages and writes no page text.
@@ -75,7 +82,7 @@ Code anchors are `path:symbol` on `develop` at `759e3b64`.
 | Criterion | Where |
 |---|---|
 | The provenance record, and that it discloses nothing a target reader may not see | §5 |
-| The proposal format, and where proposals wait | §6 |
+| The record format, and where a record waits | §6 |
 | Retract and supersede: who emits, how they find the raised page, dependent pages | §7, §8 |
 | The source store unreachable, or the proposer losing their grant | §10 |
 | Push-based and scheduled pull-based raising | §9 |
@@ -117,16 +124,18 @@ Two things follow for this note.
 
 ## 3. Terms
 
-The terms of athenaeum#2623 (store, install, principal, group, compile role,
-host, pages, inbox, bench, steward, decision queue, review, criteria) and of
-athenaeum#2624 (writer, proposer, integrate, record merge) are used unchanged.
-This note adds:
+The terms of athenaeum#2623 (store, `store_id`, install, principal, group, the
+four rights, compile role, host, pages, raw location, bench, raw intake,
+steward, decision queue, review, criteria) and of athenaeum#2624 (writer,
+proposer, integrate, record merge) are used unchanged. The engine ships no
+role names: "compile role", "proposer" and "steward" describe principals by
+the rights they hold. This note adds:
 
 | Term | Meaning |
 |---|---|
 | **Origin** | The store a raised page is copied from. |
 | **Target** | The store that receives the copy. |
-| **Raiser** | The install that raises. It holds read on the origin and propose or compile on the target. |
+| **Raiser** | The install that raises. Its owner holds read on the origin and propose or compile on the target. |
 | **Projection** | The deterministic function of §4.2 that reduces a page to what a raise carries. It is applied to the source page, and again to the copy. |
 | **Payload** | The content that travels: the projection of one page of the origin. |
 | **Payload hash** | The hash of a projection (§4.2). |
@@ -134,27 +143,27 @@ This note adds:
 | **`raise_id`** | An opaque random id for one raise, minted by the raiser. It is the only name the two sides share. |
 | **Raise ledger** | The raiser's record of what it raised: `raise_id`, source page, target, and the hash it last sent. |
 | **Acceptance ledger** | The target compile role's record of what arrived and what it did with it. |
-| **Message** | One file in the format of §6: a raise, a propose-fact, a supersede, a retract, a lapse or an attest. |
+| **Message** | One raw intake record in the format of §6, addressed to a store: a raise, a propose-fact, a supersede, a retract, a lapse or an attest. |
 
 "Personal store" and "item" are used as athenaeum#2625 defines them: the
 install's own default surface, whose only reader is its owner, and one fact
 inside a raw note.
 
 "Raise" does not imply a direction. Access is storage RBAC and not a hierarchy
-(athenaeum#2631), so a raise goes from any store to any store where the grants
+(athenaeum#2631), so a raise goes from any store to any store where the rights
 of §4.1 hold.
 
 ---
 
 ## 4. The raise
 
-### 4.1 Which grants a raise needs
+### 4.1 Which rights a raise needs
 
 | On | The raiser's principal needs | Why |
 |---|---|---|
-| The **origin**, for a raise a member makes by hand | Membership of its compile role | Operator ruling 5 (§15). |
+| The **origin**, for a raise a member makes by hand | The compile right | Operator ruling 5 (§15). |
 | The **origin**, for a raise made by a review | A read grant declared with `purpose: review`, and the review must be one the **target** declares with `source` equal to this origin | Operator ruling 5 (§15). |
-| The **target** | Propose or compile | The raise is a proposal to the target (athenaeum#2623 §4). |
+| The **target** | Propose or compile | The raise is a record proposed to the target's raw intake (athenaeum#2623 §4). |
 
 Read alone lets a person copy text out of a store by hand, and nothing in
 athenaeum can stop that. The question is what the engine will do for them. The
@@ -183,16 +192,17 @@ usual case. Its owner's install may therefore raise from it, which is what the
 smallest case in §9.1 and the propose path of athenaeum#2625 both do. An
 install that mounts an undeclared store `read_only` is a reader of it and may
 not raise from it; that is the local flag deciding, as athenaeum#2623 §5
-says it does. An undeclared store has no `store_id`, so the install mints one
-the first time it raises from the store and keeps it in its own state. A
+says it does. An undeclared store has no `store_id`, so the install mints one,
+in the `st_` shape of athenaeum#2623 §5, the first time it raises from the
+store and keeps it in its own state. A
 declaration committed later carries that same id.
 
-**A raiser needs no read on the target.** Propose does not imply read
+**A raiser needs no read on the target.** Propose does not require read
 (athenaeum#2623 §4), and the protocol never asks the raiser to look at the
 target's pages. A propose-only raiser therefore cannot read the target's
 declaration either. It learns the two things it needs, the target's `store_id`
 and its `intake` rules, from the proposer's notices athenaeum#2625 defines:
-append-only files `_store/propose/notice-<n>.yaml` in the inbox, written by
+append-only files `_store/propose/notice-<n>.yaml` in the raw location, written by
 the compile role, of which the newest wins. A propose-only install with no
 notice it can parse sends nothing to that store. Whether it really holds
 propose is the host's answer when it pushes, and the compile role's check when
@@ -292,12 +302,15 @@ are dropped by rule.
   accepts, the `type` and the `tags`, because a type vocabulary belongs to a
   store (athenaeum#2625 §4.4). The adjustment is recorded in the acceptance
   ledger and applied again to every later payload for the same `raise_id`.
-  Any other editing, merging with an existing target page and de-duplication
-  happen afterwards, through the target's ordinary compile and its ordinary
-  merge proposals, which never cross a store.
-- **Uid:** derived, not minted at random:
-  `sha256("athenaeum-raise-v1" ‖ target store_id ‖ raise_id)`, first 16 hex
-  characters. Two reasons. Two compiling installs that accept the same
+  Any other editing, and merging with an existing target page, happen
+  afterwards, through the target's ordinary compile and its ordinary merge
+  proposals, which never cross a store. De-duplication happens afterwards
+  too (below).
+- **Uid:** derived, not minted at random: the first 16 hex characters of
+  `sha256("athenaeum-raise-v1" + "\x00" + target store_id + "\x00" + raise_id)`.
+  The separator is one NUL byte, which no part can contain, so two different
+  pairs never give the same input (athenaeum#2806 point 9; athenaeum#2798
+  implements it). Two reasons for deriving. Two compiling installs that accept the same
   proposal at the same moment produce the same page at the same path, which
   athenaeum#2624 §7.4 already merges as "the same thing added twice with a uid
   supplied from outside". And a later message finds the copy from its
@@ -325,7 +338,55 @@ declaration at the time the compile role acts; the payload has no link, no
 `related` row and no `parent`; the page parses and has `type` and `name`; the
 `content_hash` matches the payload; the `raise_id` is not already rejected. A
 message that fails is not applied. It is recorded with a reason code and, for
-anything other than a duplicate, raised as a decision.
+anything other than a duplicate, raised as a decision. That is the ladder of
+[North star](../north-star.md) §2.2: a record that cannot be applied by rule
+is not refused, it goes up.
+
+**What happens around an acceptance with no person looking** (`auto`, below).
+Two rules answer athenaeum#2806 point 5 (operator ruling 2026-11-19).
+
+1. **The filing checks run after the raise is accepted, never before.** A
+   raise that passes the rule checks above keeps `auto`: the copy is created
+   and published with no hold. The accepting install then runs the
+   deterministic filing checks of North star §2.12 on the copy, against the
+   target's own pages, read through the store seam: a contact value already
+   attributed to another page of the target; an address whose local part
+   names a different person; a person-shaped value on an organisation's page.
+   The fourth check, a value absent from the source it cites, holds by
+   construction: the copy cites `raise:<raise_id>`, its body is the payload's
+   body accepted whole, and the `content_hash` was checked. A failed check
+   opens a decision or a correction in the target's decision queue, naming
+   the copy. The copy stays as published until that item is settled, and the
+   fix is an ordinary follow-up commit. The same holds after a supersede
+   replaces an untouched copy without asking (§7.4).
+2. **De-duplication happens after the copy is a page, not before.** Before
+   the page exists the only de-duplication is by identity: one `raise_id`
+   gives one uid and so one page, however often the record is delivered.
+   Whether the payload says the same thing as a page the target already has is
+   judged afterwards, by the target's ordinary merge proposals, once both are
+   pages of the one store.
+
+*Why de-duplication waits.* The copy's derived uid is what lets a later
+retract or supersede find it with no index and no scan (§7.2), and what makes
+two compiling installs produce the same page. Folding a payload into an
+existing page at acceptance would leave nothing at that uid, and a later
+retract would meet the problem of §6.3: no rule can tell which words on the
+page came from the raise, so every withdrawal would become a person's job. A
+merge made afterwards leaves a tombstone at the derived uid, which §7.2
+follows and §8 lists. Judging "the same thing" also needs a model, and
+acceptance stays deterministic. The cost is stated plainly: between the push
+and the merge, readers of the target may see two pages that say the same
+thing.
+
+*Alternatives rejected.* A pre-publish hold, running the filing checks before
+the copy is created and withdrawing `auto` from a payload that fails: the
+operator rejected it (2026-11-19), because it makes acceptance wait on a check
+when a follow-up commit corrects the same value. And de-duplicating before the
+copy becomes a page, for the reasons above.
+
+Contradiction between pages is not checked at acceptance at all. By the
+operator's view (2026-11-18) it is a later pass, because it can only be judged
+once everything on a topic is on one page.
 
 **The store's `intake` rules are applied here too.** athenaeum#2625 §7 gives a
 store ordered accept and refuse rules over type and tags, and asks that they
@@ -360,7 +421,7 @@ listed in `raise.always_ask` is always asked, whatever the route. The defaults
 shown are operator ruling 2 (§15).
 
 `raise.always_ask` is its own list. It does not reuse `sync.always_ask`: the
-operator's ruling on that list (athenaeum#2624, question 2) is about settling
+operator's ruling on that list (athenaeum#2624, ruling 2) is about settling
 conflicts between writers, and a store may want different types watched for
 the two purposes. The two lists have the same shape and are read by the same
 code.
@@ -396,6 +457,7 @@ type: principle
 name: Year-end PTO usage report
 sources: ["raise:rs_k3v9t2hq8m4xw7pd5n6b"]
 raised_from:
+  v: 1                          # the version of this block
   raise_id: rs_k3v9t2hq8m4xw7pd5n6b
   origin: st_f2n8rb5hjc3t
   proposer: "group:department-heads"
@@ -408,8 +470,22 @@ raised_from:
 
 `raised_from` is system metadata. It is left out of the projection (§4.2), and
 S3 also leaves it out of `src/athenaeum/verdicts.py:content_hash`, so stamping
-or updating it changes neither hash. The `sources` entry uses the existing typed
-form (`src/athenaeum/provenance.py:SourceRef`) with a new type, `raise`.
+or updating it changes neither hash. The block carries its own version key,
+`v`, so that its shape can change later; a block whose `v` this build does not
+know is malformed (athenaeum#2806 point 9).
+
+The `sources` entry uses the existing typed form
+(`src/athenaeum/provenance.py:SourceRef`) with a new type, `raise`.
+
+**The precedence rank of the `raise` source type is unset.**
+`src/athenaeum/precedence.py:source_rank` gives a type that no tier lists the
+lowest rank, so as the code stands a value on a raised copy would lose a
+conflict to any listed source. That is the default for an unlisted type and
+not a decision about raises. The operator ruled (2026-11-18, athenaeum#2806
+point 4) that the rank of a raised copy is not decided here: it belongs to the
+trust design (athenaeum#2789). Until then athenaeum#2799 records the source
+type, leaves the precedence table alone, and says that the rank is unset.
+**No slice may rely on a raised copy winning or losing a conflict.**
 
 ### 5.2 Why each field discloses nothing new
 
@@ -424,16 +500,16 @@ nothing else, already see this?
 | `via` | `proposer`, or the name of a review | A review's name is in the target's declaration. |
 | `content_hash` | The payload hash of the copy as the target accepted it | A reader can compute it themselves: it is the hash of the projection (§4.2) of the version of this page that the accepting commit created, and that version is in the target's own history. It is **not** a hash of the source page. |
 | `raised_on` | The day on the proposal | It is a day, not a time, and it is the proposal's day, not a date from the source page. |
-| `seq`, `watch` | Protocol state | They describe the copy. |
+| `v`, `seq`, `watch` | The block's version, and protocol state | They describe the copy. |
 
 Three choices in that table are deliberate, and each closes a leak.
 
 - **The proposer is recorded as declared, and not always as an individual.**
   A store may give propose to a group whose members are held in an external
-  directory, and athenaeum#2623 gives each proposer their own inbox when a
-  proposer cannot read the store. Printing the individual on the published
-  page would tell every reader what the separate inboxes were built to keep
-  apart. The individual's identity is kept in the acceptance ledger, which
+  directory, and athenaeum#2623 gives each proposer their own raw location
+  when a proposer cannot read the store. Printing the individual on the
+  published page would tell every reader what the separate raw locations were
+  built to keep apart. The individual's identity is kept in the acceptance ledger, which
   only the compile role can fetch. This is operator ruling 1 (§15).
 - **The hash is of the accepted content, never of the source.** A hash of a
   source page would let a reader test guesses about text they cannot read. The
@@ -455,45 +531,34 @@ raise between those two stores.
 **The proposer field is a claim.** athenaeum does not verify that a message
 came from the principal it names
 ([Writer identity](writer-identity.md)). Where each proposer has their own
-inbox, the host decides who can push there. Verified writer identity on a
+raw location, the host decides who can push there. Verified writer identity on a
 shared store is athenaeum#2628 and is not designed here.
 
 ---
 
-## 6. The proposal format and where proposals wait
+## 6. The record format, and where a record waits
 
 ### 6.1 Format
 
-One message is one file. It is markdown with YAML frontmatter, so the page
-text travels as text.
+**A message is a record in the one conformance format, and not an envelope of
+its own** (operator ruling 2026-11-19). This answers athenaeum#2806 point 6.
 
-```markdown
----
-athenaeum_raise: 1
-kind: raise                       # raise | propose-fact | supersede | retract | lapse | attest
-raise_id: rs_k3v9t2hq8m4xw7pd5n6b
-seq: 1
-message_id: rm_7d2c9w4kq8t3h6vx5pnb
-origin: st_f2n8rb5hjc3t
-target: st_q7m2xk4vwz9d
-proposer: {iss: "https://git.example.net", sub: "1203"}
-via: proposer
-sent_at: 2026-11-18T09:30:00Z
-content_hash: "sha256:…"
-page:
-  type: principle
-  name: Year-end PTO usage report
-  description: Every employee files a PTO usage report by 31 December.
-  aliases: []
-  tags: [policy]
-  access: open
----
-Every employee files a PTO usage report by 31 December. …
+[North star](../north-star.md) §2.2 says there is exactly one conformance
+format. It is the envelope-first JSONL batch of
+[Field corrections](field-corrections.md) §3: a file in the ordinary raw
+intake tree, `raw/<source>/<timestamp>-<uuid8>.jsonl`, whose first line is the
+batch envelope and which is recognised by that shape. A message uses it
+unchanged. The raise protocol adds record kinds to it and no envelope, version
+key or file-name rule of its own.
+
+```jsonl
+{"record":"batch","schema_version":1,"submitter":"raise","batch_id":"20261118T093000Z-9f3ac1d2","created_at":"2026-11-18T09:30:00Z"}
+{"record":"raise","raise_id":"rs_k3v9t2hq8m4xw7pd5n6b","seq":1,"message_id":"rm_7d2c9w4kq8t3h6vx5pnb","origin":"st_f2n8rb5hjc3t","target":"st_q7m2xk4vwz9d","proposer":{"iss":"https://git.example.net","sub":"1203"},"via":"proposer","sent_at":"2026-11-18T09:30:00Z","content_hash":"sha256:…","page":{"type":"principle","name":"Year-end PTO usage report","description":"Every employee files a PTO usage report by 31 December.","aliases":[],"tags":["policy"],"access":"open"},"body":"Every employee files a PTO usage report by 31 December. …"}
 ```
 
-| Kind | Carries | Meaning |
+| `record` | Carries | Meaning |
 |---|---|---|
-| `raise` | A payload, `seq: 1` | Propose a new copy of a whole page. |
+| `raise` | A payload (`page` and `body`), `seq: 1` | Propose a new copy of a whole page. |
 | `propose-fact` | One item, with a suggested type and tags, `seq: 1` | Propose a single routed fact (§6.3). |
 | `supersede` | A payload and a higher `seq`; or `successor: <raise_id>` and no payload | The raised content has a newer version (§7.1). |
 | `retract` | A `reason` code, and no payload | The raise is withdrawn. |
@@ -502,13 +567,22 @@ Every employee files a PTO usage report by 31 December. …
 
 Rules of the format:
 
-- **File name:** `raise/<raise_id>-<seq>-<message_id>.md`. An attest is
-  `raise/attest-<message_id>.md`. Each name contains a random id, each file is
-  written once and never edited. Those are the three requirements
-  athenaeum#2624 §8.1 places on the proposal format, and they make the inbox
-  append-only by construction.
+- **The envelope is the one in Field corrections §3.2**, with its single
+  definition of a valid envelope. Whether the new record kinds arrive under a
+  higher `schema_version` is the codec slice's call (S2), under that
+  document's rule that a version a build cannot process is a fallthrough and
+  never an error.
+- **File name:** the ordinary one, `raise/<timestamp>-<uuid8>.jsonl`, under
+  the root of whichever place holds the store's raw intake (§6.2). The name
+  contains a random id, and the file is written once and never edited. Those
+  are the requirements athenaeum#2624 §8.1 places on a raw intake record in a
+  shared location. A file may carry several messages from one run of one
+  raiser. The raiser's ledger row records the `batch_id` its message went out
+  in.
 - **`raise_id` and `message_id`** are a prefix and 20 lowercase base32
   characters (100 random bits), minted with `secrets`.
+- **Page text travels in `body`**, as one JSON string, exactly as the
+  projection rendered it (§4.2).
 - **A supersede carries the whole new payload**, never a difference. A missed
   message therefore costs nothing: the target applies the highest `seq` it has
   and ignores anything lower than the one it applied.
@@ -519,47 +593,78 @@ Rules of the format:
   choice for the same reason.
 - **Nothing in any message names the source page.** No uid, path, revision or
   source hash crosses.
+- **A file that does not conform is not refused.** No valid envelope, an
+  unknown record kind, or a record with an unknown key: each is a fallthrough.
+  The file goes up the ladder as athenaeum#2625 §4.5 says, to a decision in
+  the queue of the store whose raw intake it is in. The handler reads every
+  file in a store's raw intake, conformant or not, so no file is seen by
+  nothing.
 
-The envelope has a `kind` key so that a later note can add a kind.
+*Rationale.* The first draft gave a message its own envelope (a markdown file
+with an `athenaeum_raise: 1` key) and its own place to wait. The operator's
+ruling on point 3 removed the place: a message waits in raw intake. Keeping a
+private envelope there would leave two formats at the one gate, each with its
+own version key, its own definition of "valid" and its own rule for what
+happens to a file that fails. §2.2 names that as the thing not to do: "there
+is exactly one conformance format". Using the existing envelope means one
+version rule, one definition of a valid envelope and one fallthrough rule
+cover corrections and raises alike, and a later record family adds a kind and
+nothing else.
+
+*Alternative rejected.* Keep the markdown envelope, recognised by its
+`raise_id` the way an answer record is recognised by its `decision_id`
+(`src/athenaeum/decision_answers.py`). Page text would travel as plain text
+and a waiting message would be easier to read by eye. Rejected because it is a
+second format at the gate, and the readability it buys matters only to someone
+reading a waiting file by hand, which the `raise` decision already does better
+by showing the payload.
 
 ### 6.2 Where a message waits
 
-The table of athenaeum#2623 §8 already answers this for a review. It holds for
-every raise, whoever makes it:
+There is no inbox (operator ruling 2026-11-18, athenaeum#2806 point 3). A
+message waits in the target's raw intake, which athenaeum#2623 §4 keeps in up
+to three places. Which one depends on the rights the raiser holds on the
+target, whoever the raiser is:
 
 | The raiser holds, on the target | The message is written to | Who can fetch it there |
 |---|---|---|
-| compile, and the target has a bench | The bench, under `raise/` | The compile role |
-| compile, and the target has no bench (one compiling install, no stewards) | That install's own state, in the local waiting place athenaeum#2625 defines, `raw/_stores/<store_id>/` | That install |
-| propose only | The target's inbox, under `raise/`. The proposer's own inbox where proposers have separate ones (athenaeum#2623, operator ruling 1). | The compile role, and whoever may fetch that inbox |
+| compile or answer, and the target has a bench | The bench, under `raw/raise/` | The compile role |
+| compile, and the target has no bench (one compiling install, nobody else answering) | That install's own raw tree for the store, `raw/_stores/<store_id>/raise/` (athenaeum#2625 §8.1) | That install |
+| propose, and neither compile nor answer | The target's raw location, under `raise/`. The proposer's own raw location where proposers have separate ones (athenaeum#2623, operator ruling 1). | The principals who hold compile, and whoever may fetch that raw location |
 
-In every row the message waits where only the target's compile role acts on
-it, and in none of them is it a page. Neither location is indexed
-(athenaeum#2623 §9).
+In every row the message is raw intake of the target, only the target's
+compile role acts on it, and it is not a page. None of the three places is
+added to the recall index (athenaeum#2623 §9).
+
+**What a proposer may read back** is fixed by athenaeum#2623 §4: the
+proposer's notices, and their own messages until they are consumed. Nothing
+else.
 
 The **acceptance ledger** is kept on the bench, or in the single compiling
 install's own state when there is no bench. That is the placement
 athenaeum#2623 §7 gives the decision queue, for the same reason: it is for the
-compile role only.
+compile role only. It is also where each message's one recorded disposition
+lives (North star §2.3): accepted, rejected with a reason code, or held for a
+decision.
 
-**Order in a run.** A compiling install syncs the inbox and the bench before
-it compiles (athenaeum#2624 §8.3), so it sees every waiting message. It
+**Order in a run.** A compiling install syncs the raw location and the bench
+before it compiles (athenaeum#2624 §8.3), so it sees every waiting message. It
 processes messages per `raise_id` in `seq` order, then compiles. It removes a
-message file once the acceptance ledger records what was done with it. Two
-compiling installs that process the same message record the same ledger row
-and create the same page, and both merges are by rule (athenaeum#2624 §5.3,
-§7.4).
+file once the acceptance ledger records what was done with every message in
+it. Two compiling installs that process the same message record the same
+ledger row and create the same page, and both merges are by rule
+(athenaeum#2624 §5.3, §7.4).
 
-**What the raiser learns.** Its message file disappearing from the inbox means
-the compile role acted. It is not told whether the raise was accepted. A
+**What the raiser learns.** Its file disappearing from the raw location means
+a compiling install acted. It is not told whether the raise was accepted. A
 raiser that also reads the target can compute the copy's uid (§4.4) and look.
 A raiser that cannot read the target is told nothing about it, which is what
-"propose does not imply read" requires.
+"propose does not require read" demands.
 
 ### 6.3 A single routed fact: `propose-fact`
 
-athenaeum#2625 routes each new fact to a store. When the install holds only
-propose on the destination, or is a steward of it, intake hands this note
+athenaeum#2625 routes each new fact to a store. When the install's owner holds
+propose or answer on the destination, and not compile, intake hands this note
 three things: the item, its suggested type and tags, and the destination
 `store_id`. The message that carries them is `propose-fact`.
 
@@ -568,25 +673,13 @@ operator's ruling on athenaeum#2625 the sender keeps the fact in their
 personal store as well, where it may be one line on a page that holds other
 personal facts. Raising that page would send all of them.
 
-```markdown
----
-athenaeum_raise: 1
-kind: propose-fact
-raise_id: rs_p8d3m6wq2t9hx4vk7c5n
-seq: 1
-message_id: rm_4h8t2k9wq6d3x7vp5cnb
-origin: st_b6t3kd9wq2mx
-target: st_q7m2xk4vwz9d
-proposer: {iss: "https://git.example.net", sub: "1318"}
-via: intake
-sent_at: 2026-11-18T10:05:00Z
-content_hash: "sha256:…"
-fact:
-  type: person            # a suggestion; the compile role fixes the type
-  tags: [hr]
----
-Sam Ortega moves to the Leeds office on 1 December.
+```jsonl
+{"record":"batch","schema_version":1,"submitter":"raise","batch_id":"20261118T100500Z-4b7e21c9","created_at":"2026-11-18T10:05:00Z"}
+{"record":"propose-fact","raise_id":"rs_p8d3m6wq2t9hx4vk7c5n","seq":1,"message_id":"rm_4h8t2k9wq6d3x7vp5cnb","origin":"st_b6t3kd9wq2mx","target":"st_q7m2xk4vwz9d","proposer":{"iss":"https://git.example.net","sub":"1318"},"via":"intake","sent_at":"2026-11-18T10:05:00Z","content_hash":"sha256:…","fact":{"type":"person","tags":["hr"]},"body":"Sam Ortega moves to the Leeds office on 1 December."}
 ```
+
+The `fact.type` and `fact.tags` are a suggestion; the compile role fixes the
+type.
 
 | Aspect | A `raise` | A `propose-fact` |
 |---|---|---|
@@ -604,7 +697,7 @@ a later `retract` names the `raise_id` like any other.
 
 | A retract for a `propose-fact` arrives when | Action |
 |---|---|
-| The fact is still waiting | Both files are removed. Nothing was compiled. |
+| The fact is still waiting | Both messages are consumed, and the ledger records the fact as withdrawn. Nothing was compiled. |
 | The fact has been compiled | Nothing is removed by rule. The fact is now part of the target's own pages, possibly one sentence among others. One `retraction` decision names the pages the acceptance ledger recorded and the reason code. |
 
 **No supersede is emitted by rule for a fact.** The raiser pass (§7.1)
@@ -618,8 +711,8 @@ can tell which words on a page came from the fact. The decision is marked
 urgent and placed at the head of the store's decision queue, and a person
 removes the sentence. That is operator ruling 6 (§15).
 
-The file name rule, the three requirements of athenaeum#2624 §8.1 and the
-waiting places of §6.2 apply unchanged. Nothing in the message is read from
+The file name rule, the requirements of athenaeum#2624 §8.1 and the places of
+§6.2 apply unchanged. Nothing in the message is read from
 the sender's index.
 
 ---
@@ -671,7 +764,7 @@ consulted and no page is scanned.
 | The copy, with a matching `raised_from.raise_id` | Apply the message (§7.3, §7.4). |
 | A tombstone | The copy was folded into another target page. Follow `src/athenaeum/models.py:tombstone_target`. The page it names is a dependent (§8); the tombstone is the copy. |
 | Nothing, and the acceptance ledger says the raise was accepted | The target removed the copy itself. Record the message and stop. |
-| Nothing, and the raise is still waiting | A retract withdraws the waiting raise: both files are removed. A supersede replaces it: the lower `seq` is dropped. |
+| Nothing, and the raise is still waiting | A retract withdraws the waiting raise: both messages are consumed and the ledger records it as withdrawn. A supersede replaces it: the lower `seq` is dropped. |
 | Nothing, and the raise was rejected or is unknown | Record the message and stop. |
 | A page with a different `raise_id`, or none | Never touched. A decision is raised. |
 
@@ -681,9 +774,9 @@ A retract or a supersede is applied by rule only when it arrives **through the
 same location as the raise it names, and names the same proposer**. The
 acceptance ledger holds both. Anything else becomes a decision.
 
-Where each proposer has their own inbox, the host decides who can push to that
-location, so the rule is backed by the host. A shared inbox exists only where
-every proposer can also read the store (athenaeum#2623, operator ruling 1),
+Where each proposer has their own raw location, the host decides who can push
+to that location, so the rule is backed by the host. A shared raw location
+exists only where every proposer can also read the store (athenaeum#2623, operator ruling 1),
 and there the proposer named in a message is an unverified claim: one proposer
 can send a retract that names another's raise. That is a question of verified
 writer identity. It is athenaeum#2628's, and this note designs nothing for it.
@@ -726,7 +819,7 @@ was rejected, the message is treated as a retract with reason
 `superseded_at_source`.
 
 While any message waits for a person, readers see the version already
-published (operator ruling on athenaeum#2624, question 1).
+published (athenaeum#2624, operator ruling 1).
 
 ---
 
@@ -776,7 +869,7 @@ the ledger of §4.3. They differ in who decides what to raise.
 A person, or an agent acting for them, names a page and a target:
 `athenaeum store raise <uid> --to <store>`.
 
-1. The install checks the grants of §4.1. For the origin it reads the
+1. The install checks the rights of §4.1. For the origin it reads the
    declaration, or uses the implicit one of an undeclared store. For the
    target it reads the declaration when it holds the pages, and the newest
    proposer's notice when it only proposes. It also applies the target's
@@ -785,7 +878,7 @@ A person, or an agent acting for them, names a page and a target:
 2. It builds the payload (§4.2), mints a `raise_id`, and writes the ledger row
    and the message.
 3. It syncs the location the message went to (athenaeum#2624 §8). For a
-   propose-only raiser that is the inbox and nothing else.
+   propose-only raiser that is the raw location and nothing else.
 4. From then on, each of the raiser's runs performs the check of §7.1.
 
 The smallest case needs no shared location at all. One person raises from
@@ -796,8 +889,8 @@ install is its compile role.
 
 The epic's worked example is a push. Dana Whitlock, HR manager at Acme Corp,
 sets the rule that every employee files a PTO usage report at year end. It is
-compiled into the HR store. Her install, which is in the HR store's compile
-role and holds propose on the general wiki, raises that page. The general
+compiled into the HR store. Her install, which holds compile on the HR store
+and propose on the general wiki, raises that page. The general
 wiki's compile role accepts it, and every employee's install receives the copy
 at its next pull. When Dana later changes the deadline, her next run emits a
 supersede.
@@ -923,17 +1016,18 @@ index at all.**
 - The target finds a copy by computing its uid (§4.4). It finds dependents by
   reading pages through the store seam (§8).
 - Both ledgers are record files read through their own parsers. Messages are
-  files in the inbox, the bench or raw intake. None of those locations is
-  indexed (athenaeum#2623 §9).
+  files in the store's raw intake: the raw location, the bench's `raw/`, or
+  the compiling install's own raw tree for the store. None of those is added
+  to the recall index (athenaeum#2623 §9).
 - Nothing in the protocol asks an index who may see what. An install's index
   is built only from stores that install holds.
 
 Requirements this note places on athenaeum#2627:
 
-- **The inbox needs write without read.** A proposer must be able to seal a
+- **A raw location needs write without read.** A proposer must be able to seal a
   message that only the compile role can open. With a shared key, every
   proposer could open every other proposer's message, which the separate
-  inboxes exist to prevent.
+  raw locations exist to prevent.
 - **Ids in the clear.** The `Athenaeum-Raise` commit line holds a `raise_id`
   and a sequence number. Whether that is acceptable on an encrypted store is
   for athenaeum#2627, as it is for the commit lines of athenaeum#2624 §6.3.
@@ -950,16 +1044,16 @@ Requirements this note places on athenaeum#2627:
 | Component | Owns | Does not own |
 |---|---|---|
 | **Raise projection** (new, pure) | Page to payload, the payload hash, the derived uid. No I/O. | Choosing what to raise. |
-| **Message codec** (new, pure) | Parse, validate and render the six message kinds. | Where a message is written. |
+| **Message codec** (new, pure) | Parse, validate and render the six message kinds, as records of the one conformance format (§6.1). | Where a message is written. |
 | **Raise ledger and acceptance ledger** (new) | Their record shapes and parsers, registered in `src/athenaeum/store.py:ARTIFACT_REGISTRY` so record merge has a rule for them. | Sync. athenaeum#2624 owns it. |
 | **Raiser pass** (new, in the run) | The source check of §7.1 and emitting messages. | Reading the target. |
 | **Acceptance pass** (new, in the run) | The checks of §4.4, applying messages, the dependent decision. | Judging whether content is true or fits. |
-| **Store access** (athenaeum#2623) | Who holds which grant, the three locations, the review and its criteria. | Message contents. |
-| **Sync** (athenaeum#2624) | Moving the inbox, the bench and the pages between installs; the page merge. | What a message means. |
-| **Intake routing** (athenaeum#2625) | Which store a fact goes to, a store's `intake` rules and their accept check, the proposer's notices, and compiling a received `propose-fact`. | The message format, the ledgers and retraction. |
+| **Store access** (athenaeum#2623) | Who holds which right, where a store's raw intake is kept, the review and its criteria. | Message contents. |
+| **Sync** (athenaeum#2624) | Moving the raw location, the bench and the pages between installs; the page merge. | What a message means. |
+| **Intake routing** (athenaeum#2625) | Which store a fact goes to, a store's `intake` rules and their accept check, the proposer's notices, reading a store's raw intake and handing each message to this note's acceptance pass, and compiling a received `propose-fact`. | The message format, the ledgers and retraction. |
 
-Data flows one way: source page → projection → message → the target's waiting
-place → acceptance pass → copy. Nothing flows back except through the raiser's
+Data flows one way: source page → projection → message → the target's raw
+intake → acceptance pass → copy. Nothing flows back except through the raiser's
 own reading of a target it happens to hold.
 
 ### 12.2 Repository split
@@ -973,7 +1067,7 @@ sibling service shares this construct.
 
 | Failure | Outcome |
 |---|---|
-| A crash after the ledger row is written and before the message is | The next run finds a `sent` row with no message at the waiting place and writes it again. The `raise_id` is the same, so the target sees one raise. |
+| A crash after the ledger row is written and before the message is | The next run finds a `sent` row whose `batch_id` is not in the target's raw intake and writes it again. The `raise_id` is the same, so the target sees one raise. |
 | The same message is delivered twice, or processed by two compiling installs | The same ledger row and the same page, merged by rule (§6.2). |
 | A message is lost | A supersede carries the whole payload, so the next one repairs it. A lost retract is sent again while the ledger row is not `retracted`. |
 | Messages arrive out of order | Applied by `seq`. Lower than the applied `seq` is ignored. |
@@ -990,12 +1084,12 @@ sibling service shares this construct.
 | An install meets a declaration with a `version` it does not support | It treats the store as read-only and accepts no raise (§4.4). |
 | A retract arrives for a fact already compiled into the target's pages | A decision naming the pages; nothing is removed by rule (§6.3). |
 | The origin is erased | A retract with reason `erasure` removes the copy by rule and marks the commit. |
-| A proposer in a shared inbox retracts another proposer's raise | Applied only if the message names the same proposer. A false claim is not detected. Bounded by an ordinary revert; owned by athenaeum#2628 (§7.3). |
+| A proposer in a shared raw location retracts another proposer's raise | Applied only if the message names the same proposer. A false claim is not detected. Bounded by an ordinary revert; owned by athenaeum#2628 (§7.3). |
 | A hostile source page steers a review into selecting it | Contained to a proposal that waits for the target's compile role. Anything further is athenaeum#2628. |
 
 **Erasure reaches only the working tree.** A retract for erasure removes the
 copy. The copy's text remains in the target's git history, and the payload
-remains in the history of the inbox or bench it travelled through. Erasure
+remains in the history of the raw location or bench it travelled through. Erasure
 that rewrites a shared store's history is not designed in athenaeum#2624 (its
 §13), and it is not designed here. Sync stops safely when it sees a rewritten
 remote; that is all that is promised.
@@ -1048,9 +1142,10 @@ promotion is "a coordinate edit, never a file move".
   the target's decision.
 - **Failure narrows.** A delivered retract is always honoured; a raise from a
   principal who lost the grant never is.
-- **Reuse the seams.** The inbox, the bench, record merge, the page merge, the
-  retirement mechanics, the tombstone, `superseded_by` and the `retraction`
-  decision type are all existing or already designed.
+- **Reuse the seams.** Raw intake and its one conformance format, the bench,
+  record merge, the page merge, the retirement mechanics, the tombstone,
+  `superseded_by` and the `retraction` decision type are all existing or
+  already designed.
 
 **Rejected.**
 
@@ -1078,14 +1173,17 @@ promotion is "a coordinate edit, never a file move".
 7. **A receipt telling the raiser whether its raise was accepted.** Rejected:
    it reports the state of a store to a principal who may not read it.
 8. **A secret, sent with the raise, that a later retract must present.**
-   Rejected for now: in a shared inbox every proposer can fetch the retract
-   and read the secret, so it proves nothing there, and where inboxes are
-   separate the host already answers the question. Proof of who sent a message
+   Rejected for now: in a shared raw location every proposer can fetch the
+   retract and read the secret, so it proves nothing there, and where raw
+   locations are separate the host already answers the question. Proof of who sent a message
    is athenaeum#2628.
 9. **Removing every copy when its raiser loses a grant.** Rejected as the
    default: the target accepted the content when it was properly offered, and
    a change of staffing would silently delete knowledge. It remains an option
    the operator considered and did not choose (§15, ruling 4).
+10. **A separate inbox for messages, outside raw intake.** This was the first
+    draft. Rejected by operator ruling (2026-11-18): it is a second way in. A
+    message is raw intake of the store it is addressed to (§6.2).
 
 ---
 
@@ -1098,11 +1196,11 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | Slice | What it delivers | Needs |
 |---|---|---|
 | **S1** | The pure raise projection: page to projection by the table in §4.2, its rendering, the payload hash, `raise_id` and `message_id` minting, and the derived uid. No I/O. Includes the test that a payload accepted into a copy and projected again gives the same hash. | none |
-| **S2** | The message codec: parse, validate and render `raise`, `propose-fact`, `supersede`, `retract`, `lapse` and `attest`, the file name rule and the fixed reason codes. Fails closed. | S1 |
-| **S3** | The `raised_from` block: parse and validate it, leave it out of `verdicts.py:content_hash`, accept `raise` as a source type, and a lint for a page whose `raised_from` is malformed. No behaviour change. | none |
+| **S2** | The message codec: parse, validate and render `raise`, `propose-fact`, `supersede`, `retract`, `lapse` and `attest` and the fixed reason codes. A message that does not conform is reported as a fallthrough, never raised as an error. The record form is the one conformance format (§6.1). | S1 |
+| **S3** | The `raised_from` block: parse and validate it, including its `v` key, leave it out of `verdicts.py:content_hash`, accept `raise` as a source type with its precedence rank left unset (§5.1), and a lint for a page whose `raised_from` is malformed. No behaviour change. | none |
 | **S4** | The raise ledger: record shape, parser, registry entry, kept in the install's own state. | S1 |
 | **S5** | The acceptance ledger: record shape (including an adjustment of type and tags, and the page uids written for a fact), parser, registry entry, kept in the install's own state. | S2 |
-| **S6** | Push, on one install: `athenaeum store raise`; the grant checks of §4.1, including compile role on the origin, the implicit declaration of an undeclared store and minting its `store_id`; the courtesy `intake` check; the ledger row; and the message written to the install's own state. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 S5 (the `intake` accept check), and S15 (the local waiting place `raw/_stores/<store_id>/`) |
+| **S6** | Push, on one install: `athenaeum store raise`; the rights checks of §4.1, including compile on the origin, the implicit declaration of an undeclared store and minting its `store_id`; the courtesy `intake` check; the ledger row; and the message written to the install's own raw tree for the store. | S1, S2, S4; athenaeum#2623 S1 and S2; athenaeum#2625 S5 (the `intake` accept check), and S15 (the store's raw intake on its single compiling install, `raw/_stores/<store_id>/`) |
 | **S7a** | Acceptance, asking every time: the rule checks of §4.4, the store's `intake` rules, the `raise` decision kind, the adjustment of type and tags and its ledger record, creating the copy at its derived uid with `raised_from`, and the `Athenaeum-Raise` commit line. | S3, S5; athenaeum#2623 S7 (the per-store decision queue); athenaeum#2625 S5 |
 | **S7b** | Rejection and holds: reject with a reason code, drop later messages for a rejected `raise_id`, the taken-uid hold, and the decision for a message that fails a check. | S7a |
 | **S8** | The `raise:` block in the declaration, with the higher declaration `version` it arrives under: `raise.accept`, `raise.always_ask`, and acceptance without asking. | S7a; athenaeum#2623 S1; athenaeum#2624 S10 (the always-ask list and its type matching, shared by both lists); athenaeum#2772 (an unsupported `version` leaves the store read-only); ruling 2 |
@@ -1111,12 +1209,13 @@ build table, and likewise `athenaeum#2624 S13` and `athenaeum#2625 S5`.
 | **S11** | Apply a retract in the target: find the copy by derived uid, follow a tombstone, compare by projection, remove an untouched copy with the retirement mechanics, raise a decision for an edited one, set `watch: ended` when kept. | S7a; ruling 3 |
 | **S12** | Dependents: the one `retraction` decision per affected copy, listing pages found by the four reference shapes and by the tombstone, and the cascade extension for a merge that absorbed a copy. | S11 |
 | **S13** | Apply a supersede in the target: replace an untouched copy, applying the recorded adjustment again; three-way merge for an edited one, with contested units held; the `access` and `audience` hold; the successor form. | S7a; athenaeum#2624 S3 (the page merge) and S5a (read a file at a revision) |
-| **S14** | Shared locations: write messages to the target's inbox or bench, keep both ledgers on a bench where one exists, remove a message once recorded, apply the same-location rule of §7.3, and have a propose-only raiser read the target's `store_id` and `intake` rules from the newest proposer's notice. | S6, S7a; athenaeum#2623 S8 (mounting the bench and inbox); athenaeum#2624 S4 (record merge) and S13 (bench and inbox sync); athenaeum#2625 S7 (the proposer's notices) |
-| **S15** | Pull, from the selection onward: take the list of page uids a review selected and turn each into a message and a ledger row beside the cursor, run the raiser pass with the review, and emit `no_longer_selected`. It makes no model call. | S9; athenaeum#2623 S10, with the `purpose: review` check athenaeum#2772 adds, and S11 (the review run that produces the selection); S14 for a bench or an inbox |
+| **S14** | Shared locations: write messages to the target's raw intake in its raw location or on its bench under `raw/`, keep both ledgers on a bench where one exists, remove a message once recorded, apply the same-location rule of §7.3, and have a propose-only raiser read the target's `store_id` and `intake` rules from the newest proposer's notice. | S6, S7a; athenaeum#2623 S8 (mounting the bench and raw location); athenaeum#2624 S4 (record merge) and S13 (bench and raw location sync); athenaeum#2625 S7 (the proposer's notices) |
+| **S15** | Pull, from the selection onward: take the list of page uids a review selected and turn each into a message and a ledger row beside the cursor, run the raiser pass with the review, and emit `no_longer_selected`. It makes no model call. | S9; athenaeum#2623 S10, with the `purpose: review` check athenaeum#2772 adds, and S11 (the review run that produces the selection); S14 for a bench or a raw location |
 | **S16** | Lapse: emit and apply the `lapse` message; detect a lost read from a refused fetch or the `max_offline` unmount; set `watch: lapsed` for the causes of §10.2; raise one decision per origin; always apply a delivered retract or lapse; never apply a raise or supersede from a principal without propose. | S11, S13; athenaeum#2623 S2, S4 and S6; ruling 4 |
 | **S17** | `raise.max_silence` and the `attest` message. | S14, S16 |
 | **S18** | A three-store test harness that proves a retract travels two hops, one per run. | S9, S11; athenaeum#2624 S6a (the two-clone harness) |
 | **S19** | A guide: raising between stores, and what a reader sees on a copy. Docs only. | S14, S15 |
+| **S21** | The filing checks after acceptance (§4.4): once a copy has been created or replaced, run the deterministic filing checks on it against the target's pages, and open a decision or a correction in the target's decision queue for each failure. Never a hold: an `auto` raise keeps `auto`. | S7a; S13 for a replaced copy |
 | **S20** | The single routed fact (§6.3): the entry point intake calls with an item, its suggested type and tags and a `store_id`, which writes the `propose-fact` message and the sender's ledger row; the acceptance ledger row that records the pages compiled from it; a retract that withdraws a waiting fact or raises a decision for a compiled one, urgent and at the head of the queue when the reason is erasure; and the fact row in the raiser pass. | S2, S4, S5, S11 |
 
 **Who owns what at the two hand-offs.**
@@ -1137,13 +1236,29 @@ S6, S7a, S7b, S9, S11 and S13 together give one install a working raise,
 retract and supersede between two stores it holds, with no shared location and
 nothing from athenaeum#2624 except the pure page merge.
 
+**Trust (athenaeum#2806 point 7).** The trust design (athenaeum#2628) is on
+hold. Until it reports, **no slice may rely on a writer being trusted or
+untrusted.** Under that rule S1 to S21 may all be built. No trust score is an
+input to any rule in this note. Automatic acceptance (S8) is switched by the
+route a record arrived by, which the target's own declaration sets, and not by
+who wrote the source page; a store that wants a person to look declares `ask`.
+What may not be built before the trust design reports has no slice here:
+verified proposer identity (§5.2, §7.3), a proof that a retract comes from the
+raiser of the raise it names (§13, rejected alternative 8), and the precedence
+rank of a raised copy (§5.1, athenaeum#2789). No slice may rely on a raised
+copy winning or losing a conflict. The eval that would later show a store
+resists a hostile writer is named as a placeholder in athenaeum#2623 §12. For
+this note its subject would be a hostile source page reaching a target through
+a review, and a proposer naming someone else in a retract.
+
 ---
 
-## 15. Open questions for the operator
+## 15. Operator rulings
 
-No question is open. The note put five questions, and a sixth after review.
-The operator accepted the recommended answer to each, recorded on
-athenaeum#2631. They are stated below as rulings, with the options that were
+No question the note put is open. It put five questions, and a sixth after
+review. The operator accepted the recommended answer to each on 2026-11-18,
+recorded on athenaeum#2631. (The two rulings of 2026-11-19, in §4.4 and §6.1,
+come from athenaeum#2806 and are not among these six.) They are stated below as rulings, with the options that were
 not chosen kept for the record.
 
 ### Ruling 1. A copy names the proposer as the receiving store's access list does
@@ -1176,7 +1291,7 @@ silently.
 
 ### Ruling 5. Only a store's compile role, and reviewers it declares, may raise its pages
 
-A member raising by hand must be in the origin's compile role. A reviewer's
+A member raising by hand must hold compile on the origin. A reviewer's
 exemption covers only the output of a review that the receiving store
 declares against that origin, and only where the origin's grant says
 `purpose: review` (§4.1). A reviewer cannot use that grant to raise a page by
@@ -1196,3 +1311,56 @@ that person acts. Not chosen: automatically removing every page the fact was
 compiled into, which takes unrelated content with it; and compiling every
 single fact onto a page of its own, which fills the store with one-sentence
 pages.
+
+---
+
+## 16. How this note meets the north star
+
+Sections are those of [North star](../north-star.md).
+
+**§2.1, one way in and one way out.** A raise does not write a page in another
+store. It delivers a record into that store's raw intake, and an install that
+holds compile there files it (§4.4, §6.2). Retract, supersede, lapse and
+attest travel the same way. There is no inbox and no direct write. Nothing is
+read out of a store except by an install that holds it: the raiser reads the
+origin it mounts, the target reads its own pages, and no index is consulted
+(§11).
+
+**§2.2, one ladder; conformance sets depth, never admission.** A message
+conforms to a shape the librarian understands, so it is applied at the
+deterministic tier with no model call (§4.4, §7). One that fails a check, or
+does not conform at all, is not refused: it goes up to a decision (§4.4,
+§6.1). A message has no envelope of its own: it is a record kind in the one
+conformance format (§6.1, operator ruling 2026-11-19).
+
+**§2.8, one queue of questions, answered through the one way in.** Every
+question this protocol asks is an item in the target store's decision queue: a
+`raise` to accept, an edited copy to remove or keep, dependents of a withdrawn
+copy, lapsed copies per origin (§4.4, §7.4, §8, §10.3). They appear in the one
+listing, which spans every store an install's owner may answer for
+(athenaeum#2623 §7). An answer is a record in that store's raw intake.
+
+**§2.12, filing is verification.** The accepting librarian owns what it files.
+Three guarantees hold by rule today: the payload's hash is checked, its body
+is accepted whole so no text is invented, and `access` and `audience` are
+never widened or narrowed (§4.4, §7.4). The filing checks against the target's
+own pages run after acceptance, and a failure opens a decision or a correction
+in the target's queue (§4.4, operator ruling 2026-11-19). An origin's word
+changes only the copy; every other page
+in the target is the target librarian's to judge (§8).
+
+---
+
+## 17. Points settled by athenaeum#2806
+
+| Point | Answer | Where |
+|---|---|---|
+| 1. Store identifier | `origin` and `target` are `store_id`s in the `st_` shape. An undeclared store mints one in the same shape. | §4.1, §5 |
+| 2. Role names | Rights, not role names: compile on the origin, propose or compile on the target. | §3, §4.1 |
+| 3. Where proposals wait | No inbox. A message waits in the target's raw intake. What a proposer may read back is athenaeum#2623 §4. | §6.2 |
+| 4. Source rank of a raised copy | Unset. The `raise` source type is recorded and the precedence table is left alone. No slice may rely on a raised copy winning or losing a conflict. | §5.1 |
+| 5. Checks before a write is published | None beyond the rule checks. The filing checks run after acceptance, an `auto` raise keeps `auto`, and a failure opens a decision or a correction with the fix as a follow-up commit. De-duplication runs after the copy is a page. Contradiction detection is a later pass (operator ruling 2026-11-19). | §4.4 |
+| 6. One conformance format | A message is a record kind in the one envelope-first JSONL format (operator ruling 2026-11-19). | §6.1 |
+| 7. Writer trust | No slice may rely on a writer being trusted or untrusted. S1 to S21 may be built. | §14 |
+| 8. One queue across stores | Every question of the protocol is an item in the target's queue, shown in the one listing. | §16 |
+| 9. Small mismatches | The derived uid joins its parts with a NUL byte. The `raised_from` block has a version key, `v`. | §4.4, §5.1 |
