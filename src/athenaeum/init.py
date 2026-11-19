@@ -111,10 +111,26 @@ def _is_identity_error(exc: subprocess.CalledProcessError) -> bool:
     return "user.name" in stderr or "user.email" in stderr or exc.returncode == 128
 
 
+#: athenaeum#2778: the one-line message when no ``git`` binary is on PATH.
+_GIT_MISSING_MESSAGE = (
+    "athenaeum init: git is not installed or not on PATH. "
+    "Install it (e.g. `apt-get install git`, `brew install git`) and retry."
+)
+
+
 def _git(cmd: list[str], cwd: Path) -> None:
-    """Run a git command; turn a failure into a short ``SystemExit`` message."""
+    """Run a git command; turn a failure into a short ``SystemExit`` message.
+
+    A missing ``git`` binary surfaces here, on the first call (``git init``),
+    as ``FileNotFoundError``. It becomes a one-line hint instead of a
+    traceback, and ``init_knowledge_dir``'s rollback removes everything this
+    call created, so a retry after installing git starts clean
+    (athenaeum#2778).
+    """
     try:
         subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise SystemExit(_GIT_MISSING_MESSAGE) from exc
     except subprocess.CalledProcessError as exc:
         raise _git_failure(exc) from exc
 
@@ -139,21 +155,6 @@ def _rollback(root: Path, created: list[Path]) -> None:
             pass
 
 
-def _git_available() -> bool:
-    """Return whether a ``git`` binary can be executed from ``PATH``.
-
-    Probes by running ``git --version`` rather than ``shutil.which``, so the
-    answer is what the later ``subprocess.run(["git", ...])`` calls will see
-    (and is not changed by code that stubs ``shutil.which`` to hide some other
-    binary).
-    """
-    try:
-        subprocess.run(["git", "--version"], check=False, capture_output=True)
-    except OSError:
-        return False
-    return True
-
-
 def init_knowledge_dir(path: Path) -> Path:
     """Create and initialize a knowledge directory at *path*.
 
@@ -169,13 +170,6 @@ def init_knowledge_dir(path: Path) -> Path:
     Returns the resolved *path* for convenience.
     """
     path = path.expanduser().resolve()
-    # athenaeum#2778: every git call below is on this path, so detect a missing
-    # binary BEFORE creating anything (no half-state, no FileNotFoundError).
-    if not (path / ".git").exists() and not _git_available():
-        raise SystemExit(
-            "athenaeum init: git is not installed or not on PATH. "
-            "Install it (e.g. `apt-get install git`, `brew install git`) and retry."
-        )
     created: list[Path] = []
     try:
         _scaffold(path, created)
