@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Fail fast, by name, on a pyproject.toml/requirements-ci.lock exact-pin
+"""Fail fast, by name, on a pyproject.toml/requirements-ci.txt exact-pin
 duplicate (issue athenaeum#2324).
 
 WHY THIS EXISTS. `pyproject.toml` exact-pins a handful of dev/type-check
 tools with `==` (currently `ruff`) so lint/type results are deterministic
 run-to-run. Twice now (athenaeum#1922, hand-fixed in athenaeum#1929; and
 athenaeum#2284) a Dependabot PR bumped that `==` pin in `pyproject.toml`
-without touching `requirements-ci.lock`, which had frozen its own stale copy
-of the same package at the old version. `requirements-ci.lock` is applied as
-a CONSTRAINTS file (`pip install -e ".[dev,vector]" -c requirements-ci.lock`),
+without touching `requirements-ci.txt`, which had frozen its own stale copy
+of the same package at the old version. `requirements-ci.txt` is applied as
+a CONSTRAINTS file (`pip install -e ".[dev,vector]" -c requirements-ci.txt`),
 so the two disagreeing `==` pins made every install step in CI die with
 `ResolutionImpossible` before a single test ran -- and the check that
 actually failed (`CI Required`, via a skipped `Coverage` job) never named the
 real cause.
 
 THE FIX this check enforces. For a direct dependency `pyproject.toml` already
-exact-pins, `requirements-ci.lock` has nothing to add -- duplicating that pin
+exact-pins, `requirements-ci.txt` has nothing to add -- duplicating that pin
 only creates a second place for it to go stale. So the rule is: no package
-`pyproject.toml` pins with `==` may ALSO appear in `requirements-ci.lock`.
+`pyproject.toml` pins with `==` may ALSO appear in `requirements-ci.txt`.
 That makes a `ruff`-shaped bump unable to desync by construction: there is
 nothing left in the lock to fall out of step with. See
-`requirements-ci.lock`'s own header and `docs/design/security-posture.md`
+`requirements-ci.txt`'s own header and `docs/design/security-posture.md`
 §3.1 for the full rationale and the alternatives this was chosen over.
 
 WHY A STANDALONE SCRIPT, NOT A PYTEST CASE. This has to run BEFORE the
-expensive `pip install -e ".[dev,vector]" -c requirements-ci.lock` step --
+expensive `pip install -e ".[dev,vector]" -c requirements-ci.txt` step --
 that install is exactly what died in athenaeum#1922/#2284, so a check that
 only runs *after* it (inside the pytest suite those jobs install first) can
 never catch this class early. Pure stdlib (`tomllib`, `re`), so the
@@ -47,7 +47,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
-LOCKFILE = REPO_ROOT / "requirements-ci.lock"
+LOCKFILE = REPO_ROOT / "requirements-ci.txt"
 
 # `pip freeze` output: `name==version`, optionally followed by a comment.
 # Mirrors tests/test_ci_lock_parity.py's `_LOCK_LINE_RE` so the two checks
@@ -70,7 +70,7 @@ def canonicalize(name: str) -> str:
 
 
 def parse_lock(lock_text: str) -> dict[str, str]:
-    """`requirements-ci.lock` text -> {canonical name: pinned version}."""
+    """`requirements-ci.txt` text -> {canonical name: pinned version}."""
     pins: dict[str, str] = {}
     for raw_line in lock_text.splitlines():
         line = raw_line.strip()
@@ -114,7 +114,7 @@ def check_parity(pyproject_text: str, lock_text: str) -> list[str]:
     """Return one violation message per exact pin duplicated into the lock.
 
     Empty means parity holds: nothing `pyproject.toml` exact-pins is ALSO
-    frozen into `requirements-ci.lock`.
+    frozen into `requirements-ci.txt`.
     """
     violations: list[str] = []
     lock_pins = parse_lock(lock_text)
@@ -124,11 +124,11 @@ def check_parity(pyproject_text: str, lock_text: str) -> list[str]:
             continue
         violations.append(
             f"{name}: pyproject.toml exact-pins {name}=={pyproject_version}, but "
-            f"requirements-ci.lock ALSO pins {name}=={lock_version} -- duplicate "
+            f"requirements-ci.txt ALSO pins {name}=={lock_version} -- duplicate "
             "exact pins drift out of sync on every bump (athenaeum#1922, "
-            "athenaeum#2284, athenaeum#2324). Remove the requirements-ci.lock "
+            "athenaeum#2284, athenaeum#2324). Remove the requirements-ci.txt "
             "entry so pyproject.toml stays the single source of truth for "
-            f"{name}'s version (see requirements-ci.lock's header and "
+            f"{name}'s version (see requirements-ci.txt's header and "
             "docs/design/security-posture.md §3.1)."
         )
     return violations
@@ -140,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     if violations:
         for message in violations:
             print(f"::error::{message}")
-        print(f"FAILED: {len(violations)} exact-pin duplicate(s) between pyproject.toml and requirements-ci.lock")
+        print(f"FAILED: {len(violations)} exact-pin duplicate(s) between pyproject.toml and requirements-ci.txt")
         return 1
-    print("OK: no pyproject.toml exact pin is duplicated in requirements-ci.lock")
+    print("OK: no pyproject.toml exact pin is duplicated in requirements-ci.txt")
     return 0
 
 

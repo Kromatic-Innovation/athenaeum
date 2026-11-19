@@ -353,7 +353,7 @@ the only way to find out is to notice that recall feels stale, or to run
 | `anthropic` | `>=0.39.0,<3.0` |
 
 These are the ranges the package metadata accepts. The tested set is
-`requirements-ci.lock` in the repository: CI installs it, so the exact
+`requirements-ci.txt` in the repository: CI installs it, so the exact
 versions pinned there are what the test suite runs against. One CI job also
 installs the package with no lock at all, which exercises the newest releases
 the ranges allow. Versions inside a range but older than the lock are not
