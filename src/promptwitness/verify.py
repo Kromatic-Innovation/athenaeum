@@ -182,20 +182,12 @@ def _lookup_witness_line(
     session: str | None,
     text: str,
 ) -> ledger.WitnessLine | None:
-    """Preferred lookup by ``prompt_id``; falls back to ``(session,
-    prompt_digest)`` when no ``prompt_id`` is given or it is not found --
-    the same two-key shape :class:`~promptwitness.ledger.LedgerIndex` itself
-    indexes by."""
-    if prompt_id:
-        line = ledger_index.by_prompt_id(str(prompt_id))
-        if line is not None:
-            return line
-    if session:
-        digest = canon.digest(canon.normalize(text))
-        candidates = ledger_index.by_session_digest(str(session), digest)
-        if candidates:
-            return candidates[0]
-    return None
+    """Delegates to :meth:`~promptwitness.ledger.LedgerIndex.resolve`, the
+    one lookup rule (id first, disambiguated by digest; else session+digest)."""
+    digest = canon.digest(canon.normalize(text))
+    return ledger_index.resolve(
+        str(prompt_id) if prompt_id else None, str(session) if session else None, digest
+    )
 
 
 def verify_transcript(

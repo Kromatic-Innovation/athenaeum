@@ -313,6 +313,35 @@ def held_stuck_summary(
     }
 
 
+def latest_failure(
+    ledger: dict[str, dict[str, Any]],
+    raw_files: list[Any],
+) -> dict[str, Any] | None:
+    """The most recent failure among *raw_files* still pending (athenaeum#2763).
+
+    The ledger drops a file's entry once it compiles, so an entry whose raw is
+    still on disk is a file whose LAST compile attempt failed. Returns
+    ``{"ref", "failed_at", "error", "detail", "files_failing"}`` for the entry
+    with the latest ``last_failed``, or ``None`` when none is failing.
+    """
+    pending = {raw.ref for raw in raw_files}
+    failing = [
+        (ref, entry)
+        for ref, entry in ledger.items()
+        if ref in pending and isinstance(entry.get("last_failed"), str)
+    ]
+    if not failing:
+        return None
+    ref, entry = max(failing, key=lambda kv: kv[1]["last_failed"])
+    return {
+        "ref": ref,
+        "failed_at": entry["last_failed"],
+        "error": entry.get("last_error"),
+        "detail": entry.get("last_error_detail"),
+        "files_failing": len(failing),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Never-ingest window hold-out ledger (issue athenaeum#2363 addendum).
 # ---------------------------------------------------------------------------

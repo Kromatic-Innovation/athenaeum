@@ -12,10 +12,21 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
+Release cadence and support: releases ship when their changes are ready, on
+no fixed schedule, so sometimes several land close together (two minors can
+share a date). Only the latest release is supported, and breaking changes
+ship without a deprecation period. See the
+[support policy](docs/guides/install.md#support-policy).
+
 ## [Unreleased]
 
 ### Changed
 
+- Documented the project's status and release cadence. README gains a "Project status" section (maintained by Kromatic, security reports go to the mailbox in `SECURITY.md`, and a discontinued project is archived with a README notice). The CHANGELOG preamble states that releases ship when ready, sometimes several close together, with only the latest supported. CONTRIBUTING now says releases have no fixed schedule and explains the automatic "bump version" merge commits between releases (athenaeum#2722).
+- Renamed the CI constraints lock `requirements-ci.lock` to `requirements-ci.txt` so GitHub's dependency graph recognises it as a pip manifest. Dependabot alerts previously covered only the 38 direct dependencies; the full pinned set of 136 packages is now scanned. Contents are unchanged and it is still the single source of truth, applied with `-c requirements-ci.txt` in CI, `scripts/deploy-guard.sh` and `scripts/deploy-sync.sh`. If you install with `-c requirements-ci.lock`, switch to the new name (athenaeum#2784).
+- The witness-ledger lookup now survives a `prompt_id` that several lines share. `LedgerIndex` keeps every line per id and one resolver (`LedgerIndex.resolve`), used by both intake and `promptwitness verify`, picks among them by digest, so a prompt typed while a turn is running no longer makes the earlier prompt report `digest-mismatch`. `LedgerIndex.human_lines()` now returns every turn line, including displaced ones and ones with no id (athenaeum#2759).
+- Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
+- README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
 - Moved the per-type librarian guidance code (loading, state fingerprint, rendering and the precedence-clause prompt) out of `athenaeum.tiers` into the new `athenaeum.type_guidance` module (and the shared size-capped, defanged schema-fragment reader into the leaf `athenaeum.schema_text`), shrinking `tiers.py` by 185 lines. Pure refactor: every name remains importable from `athenaeum.tiers`, prompt text and hashes are unchanged, and the prompt registry entry is now `type_guidance.type_guidance_prompt`. (athenaeum#2731)
 - `athenaeum import-memory` now estimates cost per file instead of from file
   bytes. The first real-login run measured about 2,800 tokens per file (two
@@ -30,6 +41,37 @@ kept as they were written.
 
 ### Added
 
+- First-person auto-memory notes now reach the owner page. With an owner configured and its page resolving, each `user`-type auto-memory note is bridged, once per content, into a derived raw note under `raw/owner-memory-bridge/`; the entity tier then offers the owner candidate and the owner-verify merge files the fact under `## Preferences`. The bridge itself makes no model call, the entity-tier calls run inside `max_api_calls` and are deferred (never dropped) when it is spent, and bridge notes have owner-only scope: every tier-2 classification except the owner is dropped by code before tier 3. A body-hash `owner_routed` marker is stamped into the source note only after the bridge write succeeds, so an edited note is bridged again once. The new `owner.bridge_memory_types` key (default `["user"]`, `[]` disables; `feedback` is excluded by default because those notes are standing assistant instructions) is documented in the configuration reference, and the run summary's auto-memory entry reports `owner_bridged=N` (athenaeum#2690).
+
+- Answering a decision now applies it straight away by default
+  (athenaeum#2531, part of athenaeum#2489). `athenaeum decisions answer`
+  and the `resolve_question`, `resolve_merge` and `review_audit_item` MCP
+  tools take `apply: immediate | deferred` (CLI: `--apply`, default
+  `immediate`). Immediate writes the `raw/answers` record first, then applies
+  only that one file through the new
+  `athenaeum.decision_answers.apply_decision_answer_file`, so other unapplied
+  answer files stay for the next `ingest-answers` tick. The result reports the
+  outcome synchronously: `applied`, `refused` (with the applier's error code;
+  the CLI exits 1, the MCP tools return `ok: false`), or `held`. An answer
+  that needs the run lock (coordinate, an approved page-recompile, and a merge
+  when the verdict ledger is on) waits up to `--wait SECONDS` (MCP: `wait`;
+  default `ATHENAEUM_LOCK_TIMEOUT` / `librarian.lock_timeout`, else 0) like
+  `ingest-answers`; if the lock is still held, the answer is recorded, falls
+  back to deferred and says so, and does not fail. An applier that raises
+  leaves the record for the next tick. Pass `--apply deferred` (or
+  `apply="deferred"`) for the previous record-only behaviour. No answer-record
+  fields were added.
+- The decision queue can push. A librarian run now runs a user-configured
+  command with the decision digest JSON on stdin, so a host that cannot poll
+  still hears that something needs a decision (athenaeum#2533, design
+  athenaeum#2489). Push is off unless the per-user `notify.yaml` sets
+  `decisions.attention` to `push` or `both`. Core ships one notifier,
+  `command` (argv, never a shell); `trigger`, `quiet_hours`,
+  `min_interval_minutes` and `payload: counts` are honoured, sends are
+  deduplicated on `digest_id`, and a failing command is logged and backed off,
+  not retried in a loop. Settings are read only from the per-user file; a
+  `decisions.notify` block in a knowledge base's `athenaeum.yaml` is refused
+  with a warning and never run.
 - The decision queue has a digest, the poll surface a host reads to learn what
   needs a human decision now (athenaeum#2529). `athenaeum decisions digest
   [--json]`, the `queue_digest` MCP tool and `athenaeum.decision_digest.queue_digest`
@@ -52,6 +94,8 @@ kept as they were written.
   such as `raw/manual/` that `recall` could not see until the next compile, so
   the note is returned by a pre-compile `recall`, labelled `[uncompiled]`
   (athenaeum#2764).
+- A failing `claude` provider call now reports its real cause. When the CLI prints its error on stdout and leaves stderr empty, the error carries that text (bounded) instead of `(no stderr)`. The not-logged-in case reads as one line naming `/login` (run `claude`, then `/login`) and the `ANTHROPIC_API_KEY` alternative, and `athenaeum run` logs it without a traceback unless debug logging is on. `athenaeum status` shows a `Last compile: FAILED` line with the reason while a raw file is still failing (athenaeum#2763).
+- `athenaeum doctor` `key_mode` and `athenaeum init` no longer report a Claude Code login when only the `claude` binary exists. With `llm.provider: claude-cli` they now run `claude auth status` (a local read, no model call); a logged-out CLI fails `key_mode` with the fix "run `claude` and `/login`, or set ANTHROPIC_API_KEY", and `init` prints that finding instead of the plan-usage disclosure. With no `claude` binary and no key, both name the missing binary and the install step and say compiles cannot run (athenaeum#2762).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no
@@ -140,6 +184,10 @@ kept as they were written.
   bodies. Re-run `athenaeum registry` to build it; a corpus without the
   sidecar behaves as before. `with_pii` gating is unchanged.
 
+### Security
+
+- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
+
 ## [0.26.0] - 2026-11-16
 
 **Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian
@@ -171,7 +219,7 @@ athenaeum test-mcp             # smoke-test remember/recall, no API key needed
 ```
 
 The per-merge Added / Fixed entries are in
-[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.26.0-build-notes.md).
+[docs/changelog/0.26.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.26.0/docs/changelog/0.26.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Added
@@ -242,7 +290,7 @@ athenaeum relevance-policy     # show the active capture rules, if any
 ```
 
 The per-merge Added / Changed / Fixed entries are in
-[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.25.0-build-notes.md).
+[docs/changelog/0.25.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.25.0/docs/changelog/0.25.0-build-notes.md).
 They are reference material; this section is the release.
 
 ### Changed
@@ -474,7 +522,7 @@ athenaeum recompile list       # see what page recompile has planned or applied
 ```
 
 The per-merge Added / Changed / Fixed / Removed entries are in
-[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.24.0-build-notes.md).
+[docs/changelog/0.24.0-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.24.0/docs/changelog/0.24.0-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.23.5] - 2026-11-12
@@ -558,7 +606,7 @@ announced as the removal release for `athenaeum merges` and `athenaeum questions
 
 The full release digest, the per-merge Added / Changed / Fixed / Internal entries
 and the never-published 0.23.0 build notes are in
-[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/changelog/0.23.5-build-notes.md).
+[docs/changelog/0.23.5-build-notes.md](https://github.com/Kromatic-Innovation/athenaeum/blob/v0.23.5/docs/changelog/0.23.5-build-notes.md).
 They are reference material; this section is the release.
 
 ## [0.22.43] - 2026-10-25

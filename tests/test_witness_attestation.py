@@ -1004,3 +1004,87 @@ class TestWitnessAnchorSource:
         outcome = attest(index, **_good_attest_kwargs())  # type: ignore[arg-type]
         assert outcome.witness_anchored is True
         assert outcome.witness_anchor_source == "local-clock"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2759: a prompt_id shared by queued prompts resolves by digest
+# ---------------------------------------------------------------------------
+
+_FIRST_TEXT = "summarise the release notes"
+_SECOND_TEXT = "also list the open questions"
+
+
+def _pair_ledger(d: Path, *, session: str = "s-demo") -> None:
+    for turn, text in enumerate((_FIRST_TEXT, _SECOND_TEXT)):
+        _append_turn(
+            d,
+            session=session,
+            turn=turn,
+            prompt_id="p-100",
+            prompt_digest=canon.digest(canon.normalize(text)),
+            raw_digest=canon.digest(text),
+            prompt_chars=len(text),
+        )
+
+
+def _pair_kwargs(text: str, *, prompt_id: str | None = "p-100") -> dict[str, object]:
+    return _good_attest_kwargs(
+        prompt_id=prompt_id,
+        origin_session_id="s-demo",
+        claim=text,
+        utterance_digest=hashlib.sha256(canon.normalize(text).encode("utf-8")).hexdigest(),
+        matched_record_text=text,
+    )
+
+
+class TestSharedPromptId:
+    @pytest.mark.parametrize("queued_record_id", ["p-100", "p-101"])
+    def test_both_prompts_of_a_shared_id_attest(
+        self, tmp_path: Path, queued_record_id: str
+    ) -> None:
+        _pair_ledger(tmp_path)
+        index = AttestationIndex.load(tmp_path)
+        first = attest(index, **_pair_kwargs(_FIRST_TEXT))  # type: ignore[arg-type]
+        second = attest(index, **_pair_kwargs(_SECOND_TEXT, prompt_id=queued_record_id))  # type: ignore[arg-type]
+        assert first.hit, first.miss_reason
+        assert second.hit, second.miss_reason
+
+    def test_text_matching_neither_line_is_digest_mismatch(self, tmp_path: Path) -> None:
+        _pair_ledger(tmp_path)
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_pair_kwargs("something nobody typed"))  # type: ignore[arg-type]
+        assert not outcome.hit
+        assert outcome.miss_reason == "digest-mismatch"
+
+    def test_single_line_with_edited_record_is_digest_mismatch(self, tmp_path: Path) -> None:
+        _append_turn(
+            tmp_path,
+            session="s-demo",
+            prompt_id="p-100",
+            prompt_digest=canon.digest(canon.normalize(_FIRST_TEXT)),
+        )
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_pair_kwargs("summarise the release notes, edited"))  # type: ignore[arg-type]
+        assert not outcome.hit
+        assert outcome.miss_reason == "digest-mismatch"
+
+    def test_other_session_line_sharing_id_and_digest_does_not_attest(self, tmp_path: Path) -> None:
+        _pair_ledger(tmp_path, session="s-other")
+        index = AttestationIndex.load(tmp_path)
+        outcome = attest(index, **_pair_kwargs(_FIRST_TEXT))  # type: ignore[arg-type]
+        assert not outcome.hit
+        assert outcome.miss_reason == "session-mismatch"
+
+    def test_lookup_delegates_to_the_one_resolver(self, tmp_path: Path) -> None:
+        _pair_ledger(tmp_path)
+        index = AttestationIndex.load(tmp_path)
+        calls: list[tuple[object, ...]] = []
+
+        class _Spy:
+            def resolve(self, *args: object) -> str:
+                calls.append(args)
+                return "sentinel"
+
+        index._ledger_index = _Spy()  # type: ignore[assignment]
+        assert index.lookup("p-100", "s-demo", "d") == "sentinel"
+        assert calls == [("p-100", "s-demo", "d")]

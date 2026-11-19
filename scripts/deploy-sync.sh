@@ -91,8 +91,8 @@
 #                           the MCP server + librarian's vector search need)
 #
 # CI-versus-deploy dependency parity (athenaeum#1960): when the deploy
-# checkout carries requirements-ci.lock, the reinstall step above passes
-# `-c requirements-ci.lock` so the deploy venv resolves under the SAME
+# checkout carries requirements-ci.txt, the reinstall step above passes
+# `-c requirements-ci.txt` so the deploy venv resolves under the SAME
 # constraints CI tested, instead of pyproject.toml's open ranges resolving
 # fresh. Absent that file (e.g. an older checkout mid-fast-forward), the
 # reinstall is unconstrained exactly as before. See _ds_constraints_flag and
@@ -114,13 +114,13 @@ _ds_python() { printf '%s' "${ATHENAEUM_PYTHON:-python3}"; }
 
 # CI-versus-deploy dependency parity (athenaeum#1960) — mirrors
 # deploy-guard.sh's _dg_constraints_flag: when the deploy tree carries
-# requirements-ci.lock, constrain the reinstall to the same versions CI
+# requirements-ci.txt, constrain the reinstall to the same versions CI
 # tested instead of letting pip resolve pyproject.toml's open ranges fresh.
 # Echoes "" when the file is absent.
 _ds_constraints_flag() {
   local dir="${1:-.}"
-  if [ -f "$dir/requirements-ci.lock" ]; then
-    printf ' -c requirements-ci.lock'
+  if [ -f "$dir/requirements-ci.txt" ]; then
+    printf ' -c requirements-ci.txt'
   fi
 }
 
@@ -247,7 +247,7 @@ if [ "${ATHENAEUM_SYNC_REINSTALL:-1}" != "0" ]; then
     extras="${ATHENAEUM_DEPLOY_EXTRAS:-mcp,vector}"
     constraints="$(_ds_constraints_flag "$dir")"
     # shellcheck disable=SC2086 # intentional: $constraints is either empty
-    # or "-c requirements-ci.lock" and must split into two argv words.
+    # or "-c requirements-ci.txt" and must split into two argv words.
     ( cd "$dir" && "$venv_pip" install -q -e ".[${extras}]" $constraints )
   else
     echo "deploy-sync: no venv pip at $venv_pip — skipping reinstall" >&2
