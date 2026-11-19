@@ -589,6 +589,22 @@ Details specific to remote mode:
   or `personal`, whether by intake screening or in its own frontmatter, is not
   stamped and stays readable by the owner only. Under `--audience owner` nothing
   is stamped, because the owner reads every page already.
+- **When the server replaces your frontmatter, the reply says so.** If a note's own
+  `audience:` differs from the server's pin, or a restricted note carries an
+  `audience:` grant, or the note says `access: open`, the server changes it as
+  described above and the `remember` reply gains a `Note:` line after
+  `Saved to ...` naming what was replaced or dropped. The server also logs it at info
+  level. A note that carried no such frontmatter, or an `audience:` equal to the
+  pin, gets the bare `Saved to ...` reply.
+- **Notes saved before 0.27.2 stay untagged, and nothing retags them in place.**
+  Under a restricted `--audience` those notes are still withheld from every
+  restricted audience, including the one that wrote them; the owner still reads
+  them. No command rewrites an existing note's audience, and raw notes are
+  write-once. The one step that works is to save the note again through the remote
+  `remember`: the new copy is stamped with the pinned audience and is recallable by
+  it as soon as the index has refreshed. The old copy stays where it is, still
+  withheld from restricted audiences, and the owner will see both until you remove
+  the old file yourself.
 - **A remote `remember` reply names the saved file relative to the corpus root**
   (`raw/remote-session/<file>.md`), never an absolute server path, because every
   value returned to the host is egress. A local stdio server keeps the absolute path.

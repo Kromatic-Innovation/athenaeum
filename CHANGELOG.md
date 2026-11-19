@@ -22,6 +22,7 @@ ship without a deprecation period. See the
 
 ### Changed
 
+- A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
 
 ## [0.27.2] - 2026-11-19
