@@ -533,6 +533,9 @@ Two details specific to remote mode:
   `remember` argument, and replaces any `audience:` written in the note itself; a
   note's own `access: open` is dropped. Under `--audience owner` nothing is
   stamped, because the owner reads every page already.
+- **A remote `remember` reply names the saved file relative to the corpus root**
+  (`raw/remote-session/<file>.md`), never an absolute server path, because every
+  value returned to the host is egress. A local stdio server keeps the absolute path.
 - **Wiki-level sources default to `remote:inferred`** under `--transport http`, not
   `claude:inferred`. That is the string to select on when you want to know what
   arrived over the remote endpoint.

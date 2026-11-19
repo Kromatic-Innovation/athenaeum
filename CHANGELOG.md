@@ -170,6 +170,10 @@ ship without a deprecation period. See the
   bodies. Re-run `athenaeum registry` to build it; a corpus without the
   sidecar behaves as before. `with_pii` gating is unchanged.
 
+### Security
+
+- Under `--transport http`, the `remember` reply no longer returns the server's absolute filesystem path. It names the saved file relative to the corpus root (`Saved to raw/remote-session/<file>.md`), so a remote caller and its host provider no longer learn the deployment's directory layout. The stdio reply is byte-identical to before (athenaeum#2781).
+
 ## [0.26.0] - 2026-11-16
 
 **Summary.** 0.26.0 is a MINOR release on 0.25.0. It adds per-type librarian
