@@ -363,6 +363,45 @@ class TestSessionSubdirPerTransport:
         assert len(_written(corpus, default)) == 1
         assert not (corpus / "raw" / "manual").exists()
 
+    @pytest.mark.parametrize(
+        ("transport", "default"),
+        [(None, "claude-session"), ("http", "remote-session")],
+    )
+    def test_a_dropped_source_is_flagged_in_the_reply_and_the_log(
+        self,
+        corpus: Path,
+        transport: str | None,
+        default: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """athenaeum#2900: the caller learns the supplied ``source`` was dropped."""
+        with caplog.at_level("WARNING", logger="athenaeum.mcp_server"):
+            reply = _tool(_server(corpus, transport=transport), "remember")(
+                content="A fact.", source="manual"
+            )
+        assert reply.startswith("Saved to ")
+        assert "supplied `source` was ignored" in reply
+        assert repr(default) in reply
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "ignoring caller-supplied source" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "'manual'" in warnings[0].getMessage()
+
+    @pytest.mark.parametrize("supplied", [None, "claude-session"])
+    def test_no_dropped_source_note_when_nothing_was_dropped(
+        self, corpus: Path, supplied: str | None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Counter-example: omitting ``source`` (or naming the default itself) is silent."""
+        kwargs = {} if supplied is None else {"source": supplied}
+        with caplog.at_level("WARNING", logger="athenaeum.mcp_server"):
+            reply = _tool(_server(corpus), "remember")(content="A fact.", **kwargs)
+        assert reply.startswith("Saved to ")
+        assert "\n" not in reply
+        assert "ignored" not in reply
+        assert not [r for r in caplog.records if "caller-supplied source" in r.getMessage()]
+
     @pytest.mark.parametrize("transport", [None, "http"])
     def test_an_empty_source_still_errors(
         self, corpus: Path, transport: str | None
