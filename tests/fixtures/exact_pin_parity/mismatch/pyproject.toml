@@ -1,5 +1,5 @@
 # Counter-example fixture (athenaeum#2324 AC3): pyproject.toml exact-pins
-# `ruff` to a NEWER version than requirements-ci.lock's stale duplicate --
+# `ruff` to a NEWER version than requirements-ci.txt's stale duplicate --
 # the exact shape of the athenaeum#1922/athenaeum#2284 incidents. This pair
 # must make check_parity() report exactly one violation, naming `ruff` and
 # both versions.

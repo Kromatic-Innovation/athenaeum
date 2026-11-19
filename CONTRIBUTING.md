@@ -141,7 +141,7 @@ The properties enforced mechanically, by name, are:
 ### The clean-venv CI job
 
 `.github/workflows/ci.yml`'s `clean-venv` job installs exactly what step 2
-above installs — `pip install -e ".[dev]"`, **without** `requirements-ci.lock`
+above installs — `pip install -e ".[dev]"`, **without** `requirements-ci.txt`
 — then collects the whole suite, runs a dependency-surface smoke subset, and
 runs `scripts/check_declared_imports.py`. It exists because the undeclared-
 `httpx` incident (athenaeum#2136) was invisible to every other job: CI installs
@@ -306,7 +306,7 @@ Athenaeum uses a develop-first flow, matching the rest of the Kromatic repos:
 
 There is no `staging` branch — unlike our deploy-pipeline repos, athenaeum is a library, and PyPI releases are handled separately via [`release.yml`](.github/workflows/release.yml).
 
-The running MCP server records the commit it is on in `dist/.build-sha`, kept in sync via [`scripts/deploy-guard.sh`](scripts/deploy-guard.sh) (the automated path `hestia redeploy` runs against the main-pinned deploy worktree at `~/local-deploys/athenaeum`) or [`scripts/deploy-sync.sh`](scripts/deploy-sync.sh) (the manual, single-checkout equivalent), so cross-repo deploy-lag reporting can see how far behind `main` the deployed instance is — see [`docs/measurements/deploy-sha-stamp.md`](docs/measurements/deploy-sha-stamp.md). Both scripts also constrain that refresh under `requirements-ci.lock` when it is present in the deploy tree, for dependency parity with CI; after a fast-forward, run the [post-ship re-sync check](docs/measurements/deploy-sha-stamp.md#post-ship-re-sync-athenaeum1960) to confirm it landed.
+The running MCP server records the commit it is on in `dist/.build-sha`, kept in sync via [`scripts/deploy-guard.sh`](scripts/deploy-guard.sh) (the automated path `hestia redeploy` runs against the main-pinned deploy worktree at `~/local-deploys/athenaeum`) or [`scripts/deploy-sync.sh`](scripts/deploy-sync.sh) (the manual, single-checkout equivalent), so cross-repo deploy-lag reporting can see how far behind `main` the deployed instance is — see [`docs/measurements/deploy-sha-stamp.md`](docs/measurements/deploy-sha-stamp.md). Both scripts also constrain that refresh under `requirements-ci.txt` when it is present in the deploy tree, for dependency parity with CI; after a fast-forward, run the [post-ship re-sync check](docs/measurements/deploy-sha-stamp.md#post-ship-re-sync-athenaeum1960) to confirm it landed.
 
 ## Versioning and releases
 
