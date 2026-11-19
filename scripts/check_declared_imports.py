@@ -9,7 +9,7 @@ WHY THIS EXISTS. `tests/test_batch_mode.py`, `tests/test_retry.py`,
 `pyproject.toml`. It arrived only as a transitive of `anthropic`, so the suite
 worked for as long as the resolver happened to pick an `anthropic` that still
 depended on it. `anthropic` 1.17.0 switched to `httpx2`; a contributor following
-CONTRIBUTING.md (`pip install -e ".[dev]"`, no `requirements-ci.lock`) then got
+CONTRIBUTING.md (`pip install -e ".[dev]"`, no `requirements-ci.txt`) then got
 three collection ERRORs and zero tests run. CI never saw it, because CI installs
 with the lock, which pins the older `anthropic` that still carries `httpx`.
 
