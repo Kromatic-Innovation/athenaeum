@@ -2953,6 +2953,7 @@ def remember_write(
     stamp_env_provenance: bool = True,
     explicit_request: bool = False,
     audit_transport: str = "stdio",
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -3068,6 +3069,16 @@ def remember_write(
             never dropped by a ``never`` rule.
         audit_transport: Client transport (``stdio`` / ``http``) recorded in
             the override audit record. This function does not branch on it.
+        pinned_audience: The caller's server-side pinned read audience
+            (athenaeum#2779). When non-empty, the written raw is stamped
+            ``audience: [<roles>]`` — REPLACING any ``audience:`` in *content*
+            and dropping a caller-written ``access: open`` — so a restricted
+            caller can recall its own write. A note whose ``access:`` is
+            ``internal``/``confidential``/``personal`` (from intake screening
+            or the note itself) is not stamped and stays owner-only.
+            ``None`` (default) stamps nothing. Never a tool argument: the MCP
+            ``remember`` tool passes the server's pin, under
+            ``--transport http`` only.
 
     When *wiki_root* is given and the final raw carries the explicit-remember
     marker (stamped by *explicit_request* or already in *content*'s own
@@ -3172,7 +3183,12 @@ def remember_write(
         return f"Error: invalid `screening` config: {exc}"
 
     final_content = _inject_provenance_frontmatter(
-        content, wiki_source, field_sources_map, extras, screened_access=screened_access
+        content,
+        wiki_source,
+        field_sources_map,
+        extras,
+        screened_access=screened_access,
+        pinned_audience=pinned_audience,
     )
     if wiki_root is not None:
         override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
@@ -3230,12 +3246,20 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
+#: ``access:`` levels that are owner-only for a restricted caller unless an
+#: ``audience:`` grant opens them (``models.effective_audience``). A remote
+#: ``remember`` never stamps its pinned audience onto a note carrying one of
+#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
+_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
+
+
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
     field_sources_map: dict | None,
     extras: dict | None = None,
     screened_access: str | None = None,
+    pinned_audience: set[str] | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -3257,6 +3281,7 @@ def _inject_provenance_frontmatter(
         and field_sources_map is None
         and not extras
         and not screened_access
+        and not pinned_audience
     ):
         return content
 
@@ -3279,6 +3304,25 @@ def _inject_provenance_frontmatter(
         existing_access = meta.get("access")
         existing = existing_access if isinstance(existing_access, str) else ""
         meta["access"] = more_restrictive(existing, screened_access)
+    if pinned_audience:
+        # athenaeum#2779: the server-side pin is authoritative. Overwrite (never
+        # merge with) a caller-written `audience:`, and drop `access: open`,
+        # which would make the note world-readable and so widen the stamp.
+        access_value = meta.get("access")
+        access_level = (
+            access_value.strip().lower() if isinstance(access_value, str) else ""
+        )
+        if access_level == "open":
+            del meta["access"]
+            access_level = ""
+        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+            # A restrictive `access:` (set by intake screening, or written in
+            # the note itself) is owner-only, and an `audience:` grant is the
+            # one thing that would open it to a role. Fail closed: stamp
+            # nothing, and drop any caller-written grant too.
+            meta.pop("audience", None)
+        else:
+            meta["audience"] = sorted(pinned_audience)
 
     if has_frontmatter:
         return render_frontmatter(meta) + body
@@ -4782,6 +4826,12 @@ def create_server(
             stamp_env_provenance=_transport_defaults.env_session_attribution,
             explicit_request=explicit_request,
             audit_transport="http" if transport == "http" else "stdio",
+            # athenaeum#2779: a remote write is stamped with the server-side
+            # pin so the caller's own audience can recall it. Stdio and an
+            # owner (unpinned) server stamp nothing.
+            pinned_audience=(
+                caller_audience if transport == "http" and caller_audience else None
+            ),
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(

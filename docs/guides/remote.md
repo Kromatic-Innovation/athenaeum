@@ -571,13 +571,24 @@ tick with nothing new costs no model calls and no index work. It is what closes 
 write-then-recall gap for a remote caller, and running it every few minutes is
 cheaper than running `reindex --full` once.
 
-Two details specific to remote mode:
+Details specific to remote mode:
 
 - **A remote `remember` lands in `raw/remote-session/`**, not `raw/claude-session/`.
   `athenaeum init` creates it and registers it as a `recall.extra_intake_roots`
-  default, so a note written there is recallable in the same session as the write.
-  If you are scheduling against an older store, confirm that root exists before
-  assuming a remote write is being picked up.
+  default, so the note is indexed and recallable by the next `recall` once the
+  index has refreshed. If you are scheduling against an older store, confirm that
+  root exists before assuming a remote write is being picked up.
+- **A remote `remember` is stamped with the server's pinned audience.** Under
+  `--audience ops` the saved note carries `audience: [ops]`, so the caller that
+  wrote it, and everyone else holding the `ops` role, can recall it. It is not
+  visible to a server pinned to a different role. These saves are visible to the
+  caller's whole audience **without review**: nothing screens or approves the note
+  before it is recallable. The stamp comes from the server-side pin, never from a
+  `remember` argument, and replaces any `audience:` written in the note itself; a
+  note's own `access: open` is dropped. A note marked `internal`, `confidential`
+  or `personal`, whether by intake screening or in its own frontmatter, is not
+  stamped and stays readable by the owner only. Under `--audience owner` nothing
+  is stamped, because the owner reads every page already.
 - **A remote `remember` reply names the saved file relative to the corpus root**
   (`raw/remote-session/<file>.md`), never an absolute server path, because every
   value returned to the host is egress. A local stdio server keeps the absolute path.
