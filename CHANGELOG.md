@@ -20,6 +20,15 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Added
+
+- `athenaeum.store_access` parses and validates a store's declaration,
+  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
+  naming each offending key, and nothing reads it yet so no install behaves
+  differently. `_store/` files are registered as `config` artifacts, and a
+  `_`-prefixed directory of any surface is no longer yielded as a page by
+  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+
 ### Changed
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).

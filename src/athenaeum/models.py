@@ -304,6 +304,18 @@ def parse_asserter(meta: dict[str, object] | None) -> dict[str, object]:
     return normalized
 
 
+def underscore_segment_excluded(parts: Iterable[str]) -> bool:
+    """True when any path segment in *parts* starts with ``_``.
+
+    The ONE segment rule behind the underscore-prefix convention: operational
+    subdirectories (``wiki/_quarantine/``, a surface's ``_store/``) are never
+    scanned as pages. ``athenaeum.search._wiki_relpath_excluded`` (the wiki
+    scan), :meth:`PageLocator.iter_surface_pages` and the index build's
+    surface walk all call it, so the rule has no second copy.
+    """
+    return any(part.startswith("_") for part in parts)
+
+
 def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]:
     """Derive the durable identity key from an ``asserter`` block.
 
@@ -3668,13 +3680,20 @@ class PageLocator:
         yield from self.iter_surface_pages()
 
     def iter_surface_pages(self) -> "Iterator[tuple[str, Path]]":
-        """Yield ``(key, path)`` for the pages on the extra surfaces only."""
+        """Yield ``(key, path)`` for the pages on the extra surfaces only.
+
+        A page under a ``_``-prefixed directory of a surface (such as
+        ``_store/``) is never yielded, the same segment rule the wiki scan
+        applies (:func:`underscore_segment_excluded`).
+        """
         for prefix, root in self.surfaces:
             if not root.is_dir():
                 continue
             for fpath in sorted(root.rglob("*.md")):
                 rel = fpath.relative_to(root)
                 if fpath.name.startswith("_") or any(p.startswith(".") for p in rel.parts):
+                    continue
+                if underscore_segment_excluded(rel.parent.parts):
                     continue
                 yield f"{prefix}/{rel.as_posix()}", fpath
 
