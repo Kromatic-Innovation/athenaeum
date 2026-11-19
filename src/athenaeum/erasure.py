@@ -249,13 +249,14 @@ def erasure_content_hash(text: str, *, key: bytes) -> str:
 # AC2 — opaque, uid-based person-entity slugs and pair ids
 # ---------------------------------------------------------------------------
 
-#: The shape :func:`athenaeum.models.generate_uid` produces (8-char lowercase
-#: hex from ``uuid4().hex[:8]``) — the SAME opaque identity primitive the
+#: The shape :func:`athenaeum.models.generate_uid` produces (16-char lowercase
+#: hex from ``secrets.token_hex(8)``; pages minted before athenaeum#2771 carry
+#: 8-char uids, which stay valid) — the SAME opaque identity primitive the
 #: rest of the codebase already uses (:class:`athenaeum.models.EntityIndex`,
 #: :func:`athenaeum.pii.uid_on_record`), not a new id scheme. This module
 #: only adds NAME-FREE renderings of it for erasure-class ledgers/filenames;
 #: it does not mint uids itself.
-_UID_RE = re.compile(r"^[0-9a-f]{8}$")
+_UID_RE = re.compile(r"^(?:[0-9a-f]{8}|[0-9a-f]{16})$")
 
 
 class OpaqueIdentityError(ValueError):
@@ -269,7 +270,7 @@ class OpaqueIdentityError(ValueError):
 def _require_uid(uid: str) -> str:
     if not isinstance(uid, str) or not _UID_RE.match(uid):
         raise OpaqueIdentityError(
-            "uid must be an 8-char lowercase-hex id "
+            "uid must be an 8- or 16-char lowercase-hex id "
             "(athenaeum.models.generate_uid() shape); got "
             f"{uid!r} — erasure-class identity references must never be "
             "name-derived (AC2)"
