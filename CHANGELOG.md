@@ -89,6 +89,7 @@ ship without a deprecation period. See the
 
 ### Fixed
 
+- `athenaeum init` on a host without `git` (a slim container image, say) now prints one line naming git and how to install it, instead of a `FileNotFoundError` traceback, and removes everything it had created so a retry starts clean. The install and remote guides now list git as a prerequisite (athenaeum#2778).
 - `athenaeum doctor` `search_index` no longer FAILs on an `[mcp]`-only install after `session-end`. With `search_backend: vector` and chromadb absent, an existing fts5 index is accepted as OK, with a detail naming the fts5 fallback and the missing `[vector]` extra; before any index exists it still FAILs. The README now says what `doctor` shows after the quick start (`hooks` is the one FAIL left, since the recall hook is optional), and a test pins that sentence to `doctor`'s output over a stock install (athenaeum#2765).
 - The `remember` tool no longer suggests `source: "manual"` or describes a
   session directory, and tells callers to omit `source`. A `source` a caller
