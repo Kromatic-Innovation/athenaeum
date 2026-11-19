@@ -414,6 +414,66 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("vector", tmp_path)
         assert capsys.readouterr().err == ""
 
+    def test_vector_without_chromadb_checks_the_fts5_index(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """athenaeum#2780: vector falls back to fts5; its index is the one judged."""
+        import importlib.util
+
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
+
+        real = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a, **k: None if name == "chromadb" else real(name, *a, **k),
+        )
+        (tmp_path / "wiki-index.db").write_bytes(b"")
+        _warn_if_backend_cache_missing("vector", tmp_path)
+        assert capsys.readouterr().err == ""
+
+    def test_vector_without_chromadb_and_no_fts5_index_warns(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import importlib.util
+
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
+
+        real = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a, **k: None if name == "chromadb" else real(name, *a, **k),
+        )
+        # A leftover vector dir must not satisfy the check: it is not what serves.
+        (tmp_path / "wiki-vectors").mkdir()
+        _warn_if_backend_cache_missing("vector", tmp_path)
+        err = capsys.readouterr().err
+        assert "search_backend=fts5" in err
+        assert "wiki-index.db" in err
+        assert "reindex" in err
+
+    def test_vector_with_chromadb_still_judges_the_vector_dir(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import importlib.util
+
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
+
+        monkeypatch.setattr(importlib.util, "find_spec", lambda *a, **k: object())
+        (tmp_path / "wiki-index.db").write_bytes(b"")
+        _warn_if_backend_cache_missing("vector", tmp_path)
+        assert "search_backend=vector" in capsys.readouterr().err
+
     def test_unknown_backend_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

@@ -947,12 +947,11 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         intake_hit=True,
         intake_miss_reason_prefix=None,
     ),
-    # Live observation (athenaeum#2161, claude 2.1.326): the hook classifies
-    # and records the slash line correctly, but the transcript record of a
-    # slash command carries NO ``promptSource`` (``origin.kind`` is
-    # ``human``), so intake reports a clean ``transcript-promptsource:absent``
-    # miss -- never a false "witnessed". The row pins that safe miss; flip it
-    # to a hit once intake accepts a slash record without ``promptSource``.
+    # Live observation (athenaeum#2161, claude 2.1.326): the transcript record
+    # of a slash command carries NO ``promptSource`` but states
+    # ``origin.kind == "human"``. Intake accepts an absent ``promptSource`` for
+    # a slash-command line on that explicit human origin (athenaeum#2769), so
+    # the row is a hit.
     EntryPathCase(
         id="slash-command-with-args",
         description="slash command with args",
@@ -960,8 +959,8 @@ ENTRY_PATH_CASES: tuple[EntryPathCase, ...] = (
         expected_channel="interactive",
         expected_segment_kinds=("slash-args",),
         expect_resumed=False,
-        intake_hit=False,
-        intake_miss_reason_prefix="transcript-promptsource:absent",
+        intake_hit=True,
+        intake_miss_reason_prefix=None,
     ),
     EntryPathCase(
         id="pasted-content",
@@ -1497,7 +1496,11 @@ def test_entry_path(case: EntryPathCase, tmp_path: Path) -> None:
     assert outcome.hit is case.intake_hit
     if case.intake_hit:
         assert outcome.miss_reason is None
+        # athenaeum#2770: a detected paste is marked, never counted against
+        # the human attestation; every other hit row carries no marker.
+        assert outcome.witness_paste == ("detected" if case.id == "pasted-content" else None)
     else:
+        assert outcome.witness_paste is None
         assert outcome.miss_reason is not None
         expected_reason = case.intake_miss_reason_prefix
         assert expected_reason is not None
