@@ -12,7 +12,9 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
-Support policy: only the current release is supported, and breaking changes
+Release cadence and support: releases ship when their changes are ready, on
+no fixed schedule, so sometimes several land close together (two minors can
+share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
 [support policy](docs/guides/install.md#support-policy).
 
@@ -20,6 +22,7 @@ ship without a deprecation period. See the
 
 ### Changed
 
+- Documented the project's status and release cadence. README gains a "Project status" section (maintained by Kromatic, security reports go to the mailbox in `SECURITY.md`, and a discontinued project is archived with a README notice). The CHANGELOG preamble states that releases ship when ready, sometimes several close together, with only the latest supported. CONTRIBUTING now says releases have no fixed schedule and explains the automatic "bump version" merge commits between releases (athenaeum#2722).
 - Renamed the CI constraints lock `requirements-ci.lock` to `requirements-ci.txt` so GitHub's dependency graph recognises it as a pip manifest. Dependabot alerts previously covered only the 38 direct dependencies; the full pinned set of 136 packages is now scanned. Contents are unchanged and it is still the single source of truth, applied with `-c requirements-ci.txt` in CI, `scripts/deploy-guard.sh` and `scripts/deploy-sync.sh`. If you install with `-c requirements-ci.lock`, switch to the new name (athenaeum#2784).
 - The witness-ledger lookup now survives a `prompt_id` that several lines share. `LedgerIndex` keeps every line per id and one resolver (`LedgerIndex.resolve`), used by both intake and `promptwitness verify`, picks among them by digest, so a prompt typed while a turn is running no longer makes the earlier prompt report `digest-mismatch`. `LedgerIndex.human_lines()` now returns every turn line, including displaced ones and ones with no id (athenaeum#2759).
 - Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
