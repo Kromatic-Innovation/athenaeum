@@ -39,6 +39,9 @@ ALLOWED_BOLD_OPENERS = ("**Summary.**", "**Upgrading from ")
 _BUILD_NOTES_MAIN_RE = re.compile(r"blob/main/docs/changelog/[^\s)]*-build-notes\.md")
 
 _RELEASE_RE = re.compile(r"^## \[(\d+)\.(\d+)\.(\d+)\]", re.MULTILINE)
+_BUILD_NOTES_DIR = REPO_ROOT / "docs" / "changelog"
+_ISSUE_REF_RE = re.compile(r"athenaeum#(\d+)")
+
 _UNRELEASED_LINK_RE = re.compile(r"^\[Unreleased\]:\s*(\S+)\s*$", re.MULTILINE)
 
 
@@ -157,6 +160,35 @@ def build_notes_main_links(text: str) -> list[str]:
     ]
 
 
+def cited_issues(text: str) -> set[str]:
+    """Return the set of ``athenaeum#NNN`` issue numbers ``text`` cites."""
+    return set(_ISSUE_REF_RE.findall(text))
+
+
+def build_notes_violations(text: str, notes_dir: Path) -> list[str]:
+    """Compare the newest release section that has build notes with them.
+
+    Walks the release sections newest first and checks the first one for which
+    ``<notes_dir>/<version>-build-notes.md`` exists. The section and its notes
+    must cite the same set of ``athenaeum#NNN`` issue numbers, so the two
+    sources of truth cannot drift apart. Returns one message per mismatch.
+    """
+    for version, body in _releases(text):
+        name = _version_str(version)
+        notes = notes_dir / f"{name}-build-notes.md"
+        if not notes.is_file():
+            continue
+        in_changelog = cited_issues(body)
+        in_notes = cited_issues(notes.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        for number in sorted(in_changelog - in_notes, key=int):
+            problems.append(f"[{name}] athenaeum#{number} is in CHANGELOG.md, not the build notes")
+        for number in sorted(in_notes - in_changelog, key=int):
+            problems.append(f"[{name}] athenaeum#{number} is in the build notes, not CHANGELOG.md")
+        return problems
+    return []
+
+
 @pytest.fixture(scope="module")
 def changelog_text() -> str:
     return CHANGELOG.read_text(encoding="utf-8")
@@ -190,6 +222,16 @@ def test_changelog_footer_links_are_current(changelog_text: str) -> None:
 
 def test_build_notes_links_are_tag_pinned(changelog_text: str) -> None:
     assert build_notes_main_links(changelog_text) == []
+
+
+def test_release_section_and_build_notes_cite_the_same_issues(changelog_text: str) -> None:
+    assert build_notes_violations(changelog_text, _BUILD_NOTES_DIR) == []
+
+
+def test_build_notes_check_is_not_vacuous(changelog_text: str) -> None:
+    """Guard against a check that silently finds no build notes to compare."""
+    versions = [_version_str(v) for v, _ in _releases(changelog_text)]
+    assert any((_BUILD_NOTES_DIR / f"{v}-build-notes.md").is_file() for v in versions)
 
 
 def test_systemd_fix_is_under_fixed_in_0_26_0(changelog_text: str) -> None:
@@ -323,3 +365,26 @@ def test_fails_on_build_notes_link_through_blob_main() -> None:
 def test_build_notes_link_pinned_to_a_tag_passes() -> None:
     text = f"[notes]({REPO_URL}/blob/v1.0.0/docs/changelog/1.0.0-build-notes.md)\n"
     assert build_notes_main_links(text) == []
+
+
+def _notes_pair(tmp_path: Path, notes_text: str) -> str:
+    (tmp_path / "1.1.0-build-notes.md").write_text(notes_text, encoding="utf-8")
+    return _changelog("\n### Added\n\n- A feature (athenaeum#101).\n- Another (athenaeum#102).\n")
+
+
+def test_build_notes_matching_pair_passes(tmp_path: Path) -> None:
+    text = _notes_pair(tmp_path, "- Detail (athenaeum#102) and (athenaeum#101).\n")
+    assert build_notes_violations(text, tmp_path) == []
+
+
+def test_fails_when_build_notes_cite_a_different_set(tmp_path: Path) -> None:
+    text = _notes_pair(tmp_path, "- Detail (athenaeum#101) and (athenaeum#103).\n")
+    assert build_notes_violations(text, tmp_path) == [
+        "[1.1.0] athenaeum#102 is in CHANGELOG.md, not the build notes",
+        "[1.1.0] athenaeum#103 is in the build notes, not CHANGELOG.md",
+    ]
+
+
+def test_build_notes_check_skips_a_release_with_no_notes(tmp_path: Path) -> None:
+    text = _changelog("\n### Added\n\n- A feature (athenaeum#101).\n")
+    assert build_notes_violations(text, tmp_path) == []
