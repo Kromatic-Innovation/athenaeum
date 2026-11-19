@@ -4599,6 +4599,30 @@ carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
 `athenaeum.models.asserter_identity_key` to key on; a non-dict or
 empty block is inert.
 
+### `resolve_owner_bridge_memory_types`
+
+- **YAML path:** `owner.bridge_memory_types`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `['user']`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Return the auto-memory ``memory_type`` values bridged to the owner page.
+
+Read from ``owner.bridge_memory_types`` in ``athenaeum.yaml``. A first-person
+auto-memory note otherwise compiles only into ``wiki/auto-*.md``; every
+note whose author-set ``memory_type`` is in this list is also handed to the
+entity tier once per content, where the owner candidate classify and the
+owner-verify merge file it on the owner page. It does nothing unless an
+owner is configured (``owner.uid``) and that page resolves.
+
+Default ``["user"]``: ``user`` is the type an author gives a note about the
+person themselves. ``feedback`` is excluded on purpose, since those notes
+are mostly standing instructions to the assistant and would flood the
+owner's Preferences section with operating rules. An explicitly empty list
+disables the bridge. Unknown type names are ignored; an absent key, or a
+value that is not a list, falls back to the default.
+
 ## `person_registry`
 
 ### `resolve_person_registry_root`
