@@ -130,8 +130,12 @@ class TestCallerCannotWidenTheStamp:
         assert BODY not in _recall(_http(corpus, {"finance"}))
 
     def test_a_caller_chosen_source_does_not_escape_the_stamp(self, corpus: Path) -> None:
+        # The remember tool ignores a caller-supplied source and files the
+        # note under the transport default (athenaeum#2764), so the note lands
+        # in raw/remote-session/ and still carries the server's pinned stamp.
         _remember(_http(corpus, {"ops"}), source="elsewhere")
-        assert _only_meta(corpus, "elsewhere")["audience"] == ["ops"]
+        assert not (corpus / "raw" / "elsewhere").exists()
+        assert _only_meta(corpus, "remote-session")["audience"] == ["ops"]
 
 
 class TestStdioUnchanged:
