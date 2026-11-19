@@ -20,6 +20,10 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Fixed
+
+- Six vector-backend tests (in `test_doctor.py`, `test_cli.py::TestWarnIfBackendCacheMissing` and `test_indexed_surfaces.py`) now skip instead of failing under a `[dev]`-only install without chromadb (athenaeum#2905).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
