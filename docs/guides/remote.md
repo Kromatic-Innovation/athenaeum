@@ -84,6 +84,14 @@ Before you start, have all of these:
    built: `athenaeum init`, then at least one `athenaeum run` and
    `athenaeum reindex`. A remote host pointed at an unindexed store gets empty
    `recall` results and no error.
+
+   Which index that is depends on your install. The `mcp` extra alone serves
+   **FTS5 keyword search**: with `search_backend: vector` (the default) and no
+   `chromadb`, both `reindex` and `recall` fall back to FTS5, and the startup check
+   looks for the FTS5 index (`wiki-index.db`). Semantic (vector) search needs the
+   `vector` extra as well, installed alongside `mcp`; see
+   [Install](install.md#i-want-semantic-vector-recall-not-just-keyword-search) and
+   [Vector search](vector-search.md).
 3. **A DNS name you control**, resolving to the host — `memory.example.net` below.
 4. **A TLS certificate** for that name, and a reverse proxy to terminate it.
 5. **An OAuth 2.1 / OIDC authorization server** meeting the requirements in the next
@@ -622,7 +630,10 @@ What you get from startup lines, and what you do not:
   `recall` will return nothing.** It is the single most common silent remote-mode
   failure: the server resolved a different `ATHENAEUM_CACHE_DIR` than the compiler
   wrote to. Fix the cache directory, do not ignore the warning — nothing downstream
-  reports it again.
+  reports it again. The `search_backend=` it names is the backend that will actually
+  answer: on an install without the `vector` extra a `vector` setting is reported as
+  `fts5` and the path is the FTS5 index, because that is what `reindex` built and
+  `recall` reads.
 - **Startup lines name the whole resolved configuration**: the `[auth]` line carries
   the issuer, the audience and the allowed-identity count; `[remote-policy]` carries
   the profile and the excluded-fields pin; `[transport]` carries the bind and the
