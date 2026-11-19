@@ -33,6 +33,10 @@ ship without a deprecation period. See the
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
 
+### Fixed
+
+- `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never

@@ -58,6 +58,10 @@ wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 > without it search falls back to `fts5` with a one-time warning, never a failure.
 > See [Install](docs/guides/install.md) for both extras.
 
+> **Troubleshooting `init`:** `athenaeum init` makes its seed commit with git
+> hooks disabled, so a global `core.hooksPath` commit hook (for example a
+> protected-branch guard) does not block it.
+
 Want to confirm it works before wiring anything up or spending API budget?
 
 ```bash
