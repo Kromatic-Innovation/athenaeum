@@ -49,7 +49,10 @@ show FAILs, and that is expected.** Right after the commands above it is
 expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
 `key_mode` when neither an API key nor the `claude` CLI is available)
 until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start, and it should come back clean.
+once you have finished the quick start (through `athenaeum session-end`):
+`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
+because the per-turn recall hook is optional and the quick start does not
+wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.

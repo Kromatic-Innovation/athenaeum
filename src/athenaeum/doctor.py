@@ -61,6 +61,7 @@ creates no graph edge at all; see ``tests/test_import_graph_acyclic.py``'s
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -652,6 +653,21 @@ def check_search_index(
                 name="search_index",
                 status="ok",
                 detail=f"vector index present at {vector_dir}",
+            )
+        # `[mcp]`-only install: `session-end` / `recall` fall back to fts5 when
+        # chromadb is absent (same `find_spec` probe the librarian uses), so an
+        # fts5 index is the index this install actually serves from.
+        from athenaeum.search import fts5_index_available
+
+        if importlib.util.find_spec("chromadb") is None and fts5_index_available(cache_dir):
+            return CheckResult(
+                name="search_index",
+                status="ok",
+                detail=(
+                    f"search_backend=vector but chromadb is not installed; using the "
+                    f"fts5 fallback index at {cache_dir} (install the [vector] extra "
+                    "for semantic search)"
+                ),
             )
         return CheckResult(
             name="search_index",
