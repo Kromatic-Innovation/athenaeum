@@ -139,6 +139,21 @@ def _rollback(root: Path, created: list[Path]) -> None:
             pass
 
 
+def _git_available() -> bool:
+    """Return whether a ``git`` binary can be executed from ``PATH``.
+
+    Probes by running ``git --version`` rather than ``shutil.which``, so the
+    answer is what the later ``subprocess.run(["git", ...])`` calls will see
+    (and is not changed by code that stubs ``shutil.which`` to hide some other
+    binary).
+    """
+    try:
+        subprocess.run(["git", "--version"], check=False, capture_output=True)
+    except OSError:
+        return False
+    return True
+
+
 def init_knowledge_dir(path: Path) -> Path:
     """Create and initialize a knowledge directory at *path*.
 
@@ -156,7 +171,7 @@ def init_knowledge_dir(path: Path) -> Path:
     path = path.expanduser().resolve()
     # athenaeum#2778: every git call below is on this path, so detect a missing
     # binary BEFORE creating anything (no half-state, no FileNotFoundError).
-    if not (path / ".git").exists() and shutil.which("git") is None:
+    if not (path / ".git").exists() and not _git_available():
         raise SystemExit(
             "athenaeum init: git is not installed or not on PATH. "
             "Install it (e.g. `apt-get install git`, `brew install git`) and retry."
