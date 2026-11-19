@@ -22,6 +22,10 @@ ship without a deprecation period. See the
 
 ### Added
 
+- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
+  fact (capture, store, type, reason code), now called by the three capture gates in both
+  pipeline transports. Only its capture answer is used and it is the one the gates computed
+  before, so no install captures, drops or places anything differently (athenaeum#2625).
 - The relevance policy table gains an optional `Store` column and a `route`
   verdict. A `route` row names a `store_id` or `personal`; `RelevancePolicy.match_route`
   answers the destination question, and `match` / `resolve` still consider only
