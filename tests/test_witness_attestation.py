@@ -299,6 +299,113 @@ class TestSlashCommandHit:
         assert outcome.miss_reason == "digest-mismatch"
 
 
+class TestSlashCommandAbsentPromptSource:
+    """athenaeum#2769: Claude Code writes no `promptSource` on a slash
+    command's record. For a `slash-command` line an absent value attests only
+    on an explicit `origin.kind == "human"`; `human` lines are unchanged."""
+
+    _ARGS_TEXT = TestSlashCommandHit._ARGS_TEXT
+    _PROMPT = TestSlashCommandHit._PROMPT
+    _record_via_real_producer = TestSlashCommandHit._record_via_real_producer
+
+    def _attest(self, tmp_path: Path, **overrides: object) -> Any:
+        kwargs: dict[str, object] = {
+            "prompt_id": "p1",
+            "origin_session_id": "s1",
+            "claim": self._ARGS_TEXT,
+            "utterance_digest": _UTTERANCE_DIGEST,
+            "matched_record_text": self._PROMPT,
+            "transcript_origin_kind": "human",
+            "transcript_prompt_source": None,
+            "transcript_is_sidechain": False,
+        }
+        kwargs.update(overrides)
+        return attest(AttestationIndex.load(tmp_path), **kwargs)  # type: ignore[arg-type]
+
+    def test_absent_prompt_source_with_human_origin_attests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path)
+        assert outcome.hit is True
+        assert outcome.witness_tag == "slash-args"
+        assert outcome.miss_reason is None
+
+    def test_absent_prompt_source_without_origin_misses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path, transcript_origin_kind=None)
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:absent"
+
+    def test_other_present_value_still_misses_with_human_origin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(tmp_path, transcript_prompt_source="sdk")
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:sdk"
+
+    @pytest.mark.parametrize("source", [None, "typed", "sdk"])
+    def test_claim_outside_args_span_is_digest_mismatch_whatever_the_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        outcome = self._attest(
+            tmp_path, claim="typo-reporting policy", transcript_prompt_source=source
+        )
+        assert outcome.hit is False
+        assert outcome.miss_reason == "digest-mismatch"
+
+    def test_slash_line_without_args_segment_is_kind_not_human(self, tmp_path: Path) -> None:
+        _append_turn(tmp_path, prompt_kind="slash-command")
+        outcome = self._attest(tmp_path)
+        assert outcome.hit is False
+        assert outcome.miss_reason == "kind-not-human:slash-command"
+
+    def test_human_line_absent_source_still_misses_even_with_human_origin(
+        self, tmp_path: Path
+    ) -> None:
+        _append_turn(tmp_path)
+        outcome = attest(
+            AttestationIndex.load(tmp_path),
+            **_good_attest_kwargs(  # type: ignore[arg-type]
+                transcript_prompt_source=None, transcript_origin_kind="human"
+            ),
+        )
+        assert outcome.hit is False
+        assert outcome.miss_reason == "transcript-promptsource:absent"
+
+    def test_end_to_end_through_attest_user_stated_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.transcript_receipts import attest_user_stated_records
+
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        record: dict[str, Any] = {
+            "type": "user",
+            "promptId": "p1",
+            "origin": {"kind": "human"},
+            "message": {"role": "user", "content": self._PROMPT},
+        }
+        index = AttestationIndex.load(tmp_path)
+        outcome, _digest, origin_kind = attest_user_stated_records(
+            [record], origin_session_id="s1", claim=self._ARGS_TEXT, index=index
+        )
+        assert outcome is not None and outcome.hit is True
+        assert outcome.witness_tag == "slash-args"
+        assert origin_kind == "human"
+
+        # The same record without `origin` is not a human record to intake
+        # at all: nothing is attested.
+        no_origin = {k: v for k, v in record.items() if k != "origin"}
+        outcome2, _d, _o = attest_user_stated_records(
+            [no_origin], origin_session_id="s1", claim=self._ARGS_TEXT, index=index
+        )
+        assert outcome2 is None
+
+
 # ---------------------------------------------------------------------------
 # The eleven original forgery pins — each isolates exactly one failing
 # condition. The twelfth miss reason, `witness-strength-mismatch`, is NOT
@@ -1088,3 +1195,138 @@ class TestSharedPromptId:
         index._ledger_index = _Spy()  # type: ignore[assignment]
         assert index.lookup("p-100", "s-demo", "d") == "sentinel"
         assert calls == [("p-100", "s-demo", "d")]
+
+
+class TestWitnessPaste:
+    """athenaeum#2770: a detected paste is marked on the outcome as metadata
+    only. The line is built through the REAL producer so the segments are
+    exactly what the hook records."""
+
+    _PASTED = "the vendor reply: we cannot ship before March"
+    _WRAPPED = f"here is it: <pasted_content id=1>{_PASTED}</pasted_content> draft an answer"
+    _SHORT_PASTE = "we cannot ship before March"  # no wrapper: below claude's threshold
+
+    def _record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+    ) -> ledger.WitnessLine:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_has_tty", lambda pid: True)
+        raw = json.dumps({"prompt": prompt, "session_id": "s1", "prompt_id": "p1"})
+        env = {"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"}
+        return claude_code.record_turn(raw, env)
+
+    def _attest(self, tmp_path: Path, prompt: str, claim: str):  # type: ignore[no-untyped-def]
+        digest = hashlib.sha256(canon.normalize(prompt).encode("utf-8")).hexdigest()
+        return attest(
+            AttestationIndex.load(tmp_path),
+            prompt_id="p1",
+            origin_session_id="s1",
+            claim=claim,
+            utterance_digest=digest,
+            matched_record_text=prompt,
+            transcript_origin_kind="human",
+            transcript_prompt_source="typed",
+            transcript_is_sidechain=False,
+        )
+
+    def test_typed_pasted_typed_hit_is_marked_detected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        line = self._record(tmp_path, monkeypatch, self._WRAPPED)
+        assert [s.kind for s in line.segments] == ["typed", "pasted", "typed"]
+        outcome = self._attest(tmp_path, self._WRAPPED, "draft an answer")
+        assert outcome.hit is True
+        assert outcome.witness_paste == "detected"
+
+    def test_marked_hit_is_still_human_typed_tag_and_no_miss_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ruling: a paste counts as human. A claim lying entirely
+        inside the pasted span attests too."""
+        self._record(tmp_path, monkeypatch, self._WRAPPED)
+        for claim in ("draft an answer", "we cannot ship before March"):
+            outcome = self._attest(tmp_path, self._WRAPPED, claim)
+            assert outcome.hit is True
+            assert outcome.witness_tag == "typed"
+            assert outcome.miss_reason is None
+            assert outcome.witness_paste == "detected"
+
+    def test_single_typed_segment_hit_has_no_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prompt = "just a plain typed sentence"
+        line = self._record(tmp_path, monkeypatch, prompt)
+        assert [s.kind for s in line.segments] == ["typed"]
+        outcome = self._attest(tmp_path, prompt, "plain typed")
+        assert outcome.hit is True
+        assert outcome.witness_paste is None
+
+    def test_short_unwrapped_paste_is_recorded_as_typed_documented_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DOCUMENTED LIMIT, not a guarantee of typing: a paste below
+        claude's wrapper threshold reaches the hook as plain text, so the
+        line has one ``typed`` segment and no marker."""
+        prompt = f"quoting the vendor: {self._SHORT_PASTE}"
+        line = self._record(tmp_path, monkeypatch, prompt)
+        assert [s.kind for s in line.segments] == ["typed"]
+        outcome = self._attest(tmp_path, prompt, self._SHORT_PASTE)
+        assert outcome.hit is True
+        assert outcome.witness_paste is None
+
+    def test_slash_command_hit_has_no_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prompt = (
+            "<command-message>review</command-message><command-name>review</command-name>"
+            "<command-args>fix the typo</command-args>\nboilerplate"
+        )
+        line = self._record(tmp_path, monkeypatch, prompt)
+        assert line.prompt_kind == "slash-command"
+        outcome = self._attest(tmp_path, prompt, "fix the typo")
+        assert outcome.hit is True
+        assert outcome.witness_paste is None
+
+    def test_every_miss_has_no_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record(tmp_path, monkeypatch, self._WRAPPED)
+        digest = hashlib.sha256(canon.normalize(self._WRAPPED).encode("utf-8")).hexdigest()
+        base: dict[str, Any] = {
+            "prompt_id": "p1",
+            "origin_session_id": "s1",
+            "claim": "draft an answer",
+            "utterance_digest": digest,
+            "matched_record_text": self._WRAPPED,
+            "transcript_origin_kind": "human",
+            "transcript_prompt_source": "typed",
+            "transcript_is_sidechain": False,
+        }
+        index = AttestationIndex.load(tmp_path)
+        for override in (
+            {"origin_session_id": "other"},  # session-mismatch
+            {"utterance_digest": "0" * 64},  # digest-mismatch
+            {"transcript_is_sidechain": True},  # sidechain
+            {"transcript_prompt_source": "pasted"},  # transcript-promptsource
+            {"prompt_id": "nope", "origin_session_id": "other"},  # no-entry
+        ):
+            outcome = attest(index, **{**base, **override})
+            assert outcome.hit is False
+            assert outcome.witness_paste is None
+
+    def test_ledger_with_a_pasted_segment_attests_marked_without_modification(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ledger written before the field existed (the line format is
+        unchanged) yields the marker when attested now; no line is touched
+        and the chain still verifies."""
+        self._record(tmp_path, monkeypatch, self._WRAPPED)
+        part = _single_partition(tmp_path)
+        before = part.read_bytes()
+        outcome = self._attest(tmp_path, self._WRAPPED, "draft an answer")
+        assert outcome.witness_paste == "detected"
+        assert part.read_bytes() == before
+        assert ledger.verify_chain(tmp_path).first_break_seq is None
+
+    def test_no_miss_reason_was_added_for_paste(self) -> None:
+        assert not [r for r in MISS_REASONS if "paste" in r]

@@ -3,7 +3,7 @@
 
 Mirrors `tests/test_clean_venv_ci_wiring.py`'s shape: a job that exists but
 is missing from `CI Required`'s `needs:` blocks nothing, and the whole point
-of this job (catch a pyproject.toml/requirements-ci.lock exact-pin mismatch
+of this job (catch a pyproject.toml/requirements-ci.txt exact-pin mismatch
 BY NAME before any of `test`/`types`/`clean-venv` pay for `pip install`) is
 silently defeated if it ever grows an install step of its own, or is wired to
 depend on one of those heavier jobs. Neither regression shows up as a test

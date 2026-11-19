@@ -129,11 +129,11 @@ single-checkout path.
 ## Post-ship re-sync (athenaeum#1960)
 
 CI installs athenaeum's dependencies under the full transitive constraints
-file `requirements-ci.lock` (`pip install -e ".[dev,vector]" -c
-requirements-ci.lock`). `scripts/deploy-guard.sh`'s default install and
+file `requirements-ci.txt` (`pip install -e ".[dev,vector]" -c
+requirements-ci.txt`). `scripts/deploy-guard.sh`'s default install and
 `scripts/deploy-sync.sh`'s reinstall step now constrain the deploy refresh
-the same way: when `requirements-ci.lock` is present in the deploy tree, each
-appends `-c requirements-ci.lock` to its editable install automatically. A
+the same way: when `requirements-ci.txt` is present in the deploy tree, each
+appends `-c requirements-ci.txt` to its editable install automatically. A
 green CI run and the deployed venv therefore resolve the same dependency
 versions, not merely versions that both happen to satisfy the same open
 `pyproject.toml` ranges.
@@ -145,7 +145,7 @@ a fast-forward (whether via `deploy-guard.sh`'s automated sync or
 result:
 
 1. Refresh the deploy checkout's venv under the constraints file — this is
-   exactly what the sync scripts above already do when `requirements-ci.lock`
+   exactly what the sync scripts above already do when `requirements-ci.txt`
    is present, so a plain re-run of whichever one manages the deploy checkout
    (`scripts/deploy-guard.sh` or `scripts/deploy-sync.sh`) is sufficient; no
    separate manual `pip install` is needed.

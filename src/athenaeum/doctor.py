@@ -61,11 +61,13 @@ creates no graph edge at all; see ``tests/test_import_graph_acyclic.py``'s
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -474,6 +476,40 @@ _API_KEY_FIX = (
 )
 
 
+_LOGIN_FIX = "run `claude` and `/login`, or set ANTHROPIC_API_KEY"
+
+#: Seconds allowed for ``claude auth status`` (a local read, no model call).
+_LOGIN_PROBE_TIMEOUT = 20
+
+
+def _claude_login_missing() -> bool:
+    """True only when ``claude auth status`` positively reports no login.
+
+    The same free probe ``import-memory`` uses (a local read; it never makes a
+    billed model call). A probe that cannot answer (timeout, spawn error,
+    unparseable output) is NOT treated as a missing login: a flaky probe must
+    not turn a working login into a FAIL.
+    """
+    binary = os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
+    try:
+        proc = subprocess.run(
+            [binary, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_LOGIN_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return True
+    try:
+        status = json.loads(proc.stdout or "")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(status, dict) and status.get("loggedIn") is False
+
+
 def check_key_mode(
     config: dict[str, object] | None, cache_dir: Path
 ) -> CheckResult:
@@ -507,18 +543,28 @@ def check_key_mode(
 
     if provider == "claude-cli":
         error = preflight_provider("claude-cli")
+        if error is None and _claude_login_missing():
+            return CheckResult(
+                name="key_mode",
+                status="fail",
+                detail=(
+                    "llm.provider=claude-cli but Claude Code is not logged in "
+                    "(`claude auth status` reports no login); compiles cannot run"
+                ),
+                fix=_LOGIN_FIX,
+            )
         if error is None:
             return CheckResult(
                 name="key_mode",
                 status="ok",
-                detail="llm.provider=claude-cli; Claude Code login detected",
+                detail="llm.provider=claude-cli; Claude Code login confirmed",
             )
         return CheckResult(
             name="key_mode",
             status="fail",
             detail=(
-                "topic extraction (and every other LLM call) will fall back "
-                f"to the regex extractor: {error}"
+                "llm.provider=claude-cli but the `claude` binary is not on "
+                "PATH; compiles cannot run"
             ),
             fix=error,
         )
@@ -531,6 +577,21 @@ def check_key_mode(
             name="key_mode",
             status="ok",
             detail="ANTHROPIC_API_KEY is set; topic extraction uses the API",
+        )
+    if shutil.which(os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude") is None:
+        return CheckResult(
+            name="key_mode",
+            status="fail",
+            detail=(
+                "no ANTHROPIC_API_KEY (process env or cached "
+                f"{cache_dir / 'config.env'}) and no `claude` binary on PATH; "
+                "compiles cannot run"
+            ),
+            fix=(
+                "install Claude Code (https://claude.com/claude-code), then "
+                f"{_LOGIN_FIX} — see "
+                "examples/claude-code/README.md#supplying-an-api-key"
+            ),
         )
     return CheckResult(
         name="key_mode",
@@ -592,6 +653,21 @@ def check_search_index(
                 name="search_index",
                 status="ok",
                 detail=f"vector index present at {vector_dir}",
+            )
+        # `[mcp]`-only install: `session-end` / `recall` fall back to fts5 when
+        # chromadb is absent (same `find_spec` probe the librarian uses), so an
+        # fts5 index is the index this install actually serves from.
+        from athenaeum.search import fts5_index_available
+
+        if importlib.util.find_spec("chromadb") is None and fts5_index_available(cache_dir):
+            return CheckResult(
+                name="search_index",
+                status="ok",
+                detail=(
+                    f"search_backend=vector but chromadb is not installed; using the "
+                    f"fts5 fallback index at {cache_dir} (install the [vector] extra "
+                    "for semantic search)"
+                ),
             )
         return CheckResult(
             name="search_index",

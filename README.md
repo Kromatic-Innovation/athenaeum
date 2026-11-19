@@ -49,7 +49,10 @@ show FAILs, and that is expected.** Right after the commands above it is
 expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
 `key_mode` when neither an API key nor the `claude` CLI is available)
 until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start, and it should come back clean.
+once you have finished the quick start (through `athenaeum session-end`):
+`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
+because the per-turn recall hook is optional and the quick start does not
+wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.
@@ -72,10 +75,16 @@ the compiled wiki. A round-trip looks like this:
 Nothing is in the wiki yet — `remember` only appends. Compile it:
 
 ```bash
-export ANTHROPIC_API_KEY=...     # or configure the claude-cli backend
 athenaeum run                    # add --dry-run to inspect without writing
 athenaeum status
 ```
+
+`athenaeum init` already chose the compile provider and printed it. If it
+found a logged-in `claude` CLI it selected `claude-cli`, and compiles use that
+login with no key (they draw on your Claude Code plan's usage limits; about
+3,800 to 4,400 tokens and 30 s per note, see [Install](docs/guides/install.md)).
+An Anthropic API key is the alternative: `export ANTHROPIC_API_KEY=...` before
+`athenaeum run` if `init` told you no login was found.
 
 The librarian creates or updates Jordan's entity page, creates Priya's, and links them.
 A later session asking *"who is Priya?"* gets the compiled page back from `recall`.
@@ -243,6 +252,12 @@ minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
   command-by-command mapping and the [CHANGELOG](CHANGELOG.md) for the full list.
 - **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
   for supported versions and how to report a vulnerability.
+
+## Project status
+
+Athenaeum is maintained by Kromatic. Security reports go to the mailbox named
+in [SECURITY.md](SECURITY.md). If the project is ever discontinued, the
+repository will be archived and this README will say so at the top.
 
 ## Where to go next
 

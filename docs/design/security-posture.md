@@ -394,11 +394,11 @@ Auto-merge is wired in `.github/workflows/dependabot-auto-merge.yml`. The policy
   - `chromadb` — minor bumps have migrated SQLite schemas (data loss on downgrade).
 - **Major updates** never auto-merge — and most would exceed the pyproject.toml upper bounds anyway, so Dependabot can't propose them within current caps.
 
-#### 3.1.1 Why an exact-pinned tool bump can't desync `requirements-ci.lock` (athenaeum#2324)
+#### 3.1.1 Why an exact-pinned tool bump can't desync `requirements-ci.txt` (athenaeum#2324)
 
 `pyproject.toml` exact-pins a couple of dev/type-check tools with `==`
 (`ruff` today) so lint/type results are deterministic run-to-run.
-`requirements-ci.lock` (see its own header) is a separate, full freeze of the
+`requirements-ci.txt` (see its own header) is a separate, full freeze of the
 transitive dependency tree, applied to CI installs as a **constraints**
 file. Twice — athenaeum#1922 (hand-fixed in athenaeum#1929) and
 athenaeum#2284 — a Dependabot PR bumped the `pyproject.toml` pin without
@@ -413,8 +413,8 @@ Three designs were weighed to close this:
 
 - **(A) Single source of truth — chosen.** A direct dependency
   `pyproject.toml` already exact-pins has nothing to gain from a duplicate
-  entry in `requirements-ci.lock`; the duplicate is the defect, not the fix.
-  `requirements-ci.lock` no longer carries a `ruff` line at all — see its
+  entry in `requirements-ci.txt`; the duplicate is the defect, not the fix.
+  `requirements-ci.txt` no longer carries a `ruff` line at all — see its
   header. A `ruff` bump then cannot desync *by construction*: there is
   nothing left to fall out of step with, which satisfies both "a bump either
   gets the lock updated automatically, or never ships out of step" and "a
@@ -451,7 +451,7 @@ Three designs were weighed to close this:
   part of (A) — `pin-parity` — rather than treated as a standalone fix.
 
 Locking `mypy` is out of scope here (it is currently unpinned by
-`requirements-ci.lock` and stays that way); the rule above generalizes to it
+`requirements-ci.txt` and stays that way); the rule above generalizes to it
 automatically if that ever changes — `scripts/check_exact_pin_parity.py`
 scans every exact `==` pin anywhere in `pyproject.toml`, not just `ruff`.
 
@@ -477,7 +477,7 @@ Quarterly (next: 2026-08-06):
 
 1. Confirm `anthropic` is still < 1.0 (or update strategy if 1.0 ships).
 2. Confirm `chromadb` minor releases haven't introduced an SQLite migration that would break consumers downgrading.
-3. **Partial gap:** no `pip-audit` (or equivalent dependency-vulnerability scan) runs anywhere in CI yet — verified against `.github/workflows/*` (no `pip-audit` reference in any workflow). The lockfile half is now closed: a CI-only `requirements-ci.lock` pins the full transitive dependency tree for reproducible CI (athenaeum#556), so a future `pip-audit -r requirements-ci.lock` step would have a concrete resolved set to scan. Wiring that scan step is still open. This line exists so the remaining gap stays visible at each quarterly review rather than being silently assumed covered.
+3. **Partial gap:** no `pip-audit` (or equivalent dependency-vulnerability scan) runs anywhere in CI yet — verified against `.github/workflows/*` (no `pip-audit` reference in any workflow). The lockfile half is now closed: a CI-only `requirements-ci.txt` pins the full transitive dependency tree for reproducible CI (athenaeum#556), so a future `pip-audit -r requirements-ci.txt` step would have a concrete resolved set to scan. Wiring that scan step is still open. This line exists so the remaining gap stays visible at each quarterly review rather than being silently assumed covered.
 4. Confirm action SHA pins are still up-to-date with their semver tags.
 5. Re-evaluate hold list. If any pre-1.0 dep has stabilized (e.g. Anthropic 1.0), remove from hold list.
 6. Re-verify the dependency-cap table in §1 against `pyproject.toml` — copy the live ranges verbatim; do not let this doc drift from the source of truth.

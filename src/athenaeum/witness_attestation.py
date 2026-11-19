@@ -11,6 +11,14 @@ does not normally touch — see ``docs/design/witness-ledger.md``'s security
 boundary, reproduced in ``docs/design/conflict-resolution.md`` §14) and
 upgrades the receipt's channel to ``witnessed`` on a hit.
 
+**Pasted text is attested as human (athenaeum#2770).** By operator ruling a
+paste is the human's intent. A hit whose ledger line has a ``pasted`` segment
+carries ``witness_paste == "detected"`` as metadata only; ``witness_tag``,
+the hit rule and the miss vocabulary are unchanged. The marker means "pasted
+where detectable": a paste below Claude Code's wrapper threshold is recorded
+as ``typed``, so ``typed`` and ``witness_paste is None`` mean "no paste
+wrapper", never "keystrokes".
+
 **This does not prove a human typed the prompt.** It proves only that a
 witness-ledger line exists whose digest, channel, chain position and
 transcript cross-fields all agree with the claimed transcript record — see
@@ -49,8 +57,13 @@ human-and-interactive (``transcript_origin == "human"`` and
    expose it, so the chain alone reports it intact; tail tamper-evidence
    is what anchoring provides (``witness_anchored`` on the outcome);
 7. the transcript record's ``origin.kind`` is ``"human"`` when present;
-8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``
-   (absent fails);
+8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``.
+   Absent fails for a ``human`` line. For a ``slash-command`` line, absent
+   passes only when the record states ``origin.kind == "human"`` explicitly
+   (Claude Code writes no ``promptSource`` on a slash command's record, and
+   ``origin`` is what separates a human-typed one from the rest;
+   athenaeum#2769); absent with no origin fails, and any other present
+   value fails for both kinds;
 9. the transcript record's ``isSidechain`` is not ``True``.
 
 Each failing condition reports exactly one of the fixed
@@ -207,6 +220,17 @@ class AttestationOutcome:
     silently flipping it from a hit to a miss — the attestation's whole
     point (provenance: did a human type this) is orthogonal to whether its
     optional signing claim can be substantiated.
+
+    **Paste marker (athenaeum#2770, additive).** ``witness_paste`` is
+    ``"detected"`` on a hit whose ledger line has at least one segment of
+    kind ``pasted``, and ``None`` otherwise (every miss, a slash-command
+    line, a line with no ``pasted`` segment). ``None`` does NOT mean the
+    prompt was typed: Claude Code wraps a paste only above a size threshold,
+    so a short paste reaches the hook as plain text and is recorded as
+    ``typed``. The marker is per prompt, not per claim, and it is never an
+    input to any hit condition: pasted text counts as human by operator
+    ruling, ``witness_tag`` stays ``"typed"``, and no miss reason exists
+    for it.
     """
 
     hit: bool
@@ -218,6 +242,7 @@ class AttestationOutcome:
     transcript_entrypoint: str | None = None
     witness_strength_verified: str | None = None
     witness_anchor_source: str | None = None
+    witness_paste: str | None = None
 
 
 class AttestationIndex:
@@ -594,13 +619,31 @@ def attest(
             return miss("digest-mismatch", line, entrypoint)
         witness_tag = "typed"
 
+    # athenaeum#2770: a marker only, read from the line already in hand. Not
+    # an input to any condition below and never a miss reason; set for the
+    # ``human`` kind alone (a slash-command line carries no ``pasted`` span
+    # that attestation reads).
+    witness_paste = (
+        "detected"
+        if slash_segment is None and any(s.kind == "pasted" for s in line.segments)
+        else None
+    )
+
     if not index.chain_intact_through(line.seq):
         return miss("chain-broken", line, entrypoint)
 
     if transcript_origin_kind is not None and transcript_origin_kind != "human":
         return miss("transcript-origin-not-human", line, entrypoint)
 
-    if transcript_prompt_source not in ("typed", "queued"):
+    # A slash-command record carries no ``promptSource`` at all, so absent is
+    # accepted for that kind alone, and only on an explicit human origin
+    # (athenaeum#2769). Any present value must still be typed/queued.
+    absent_slash_ok = (
+        slash_segment is not None
+        and transcript_prompt_source is None
+        and transcript_origin_kind == "human"
+    )
+    if transcript_prompt_source not in ("typed", "queued") and not absent_slash_ok:
         value = transcript_prompt_source if transcript_prompt_source is not None else "absent"
         return miss(f"transcript-promptsource:{value}", line, entrypoint)
 
@@ -635,4 +678,5 @@ def attest(
         miss_reason=mismatch_reason,
         witness_strength_verified=verified_strength,
         witness_anchor_source=index.anchor_source(line.ledger_id, line.seq),
+        witness_paste=witness_paste,
     )
