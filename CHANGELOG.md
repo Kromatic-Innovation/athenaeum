@@ -22,6 +22,12 @@ ship without a deprecation period. See the
 
 ### Added
 
+- `athenaeum.store_access` parses and validates a store's declaration,
+  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
+  naming each offending key, and nothing reads it yet so no install behaves
+  differently. `_store/` files are registered as `config` artifacts, and a
+  `_`-prefixed directory of any surface is no longer yielded as a page by
+  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
 - `athenaeum.page_merge.merge_page(base, local, remote, spec)` is a pure
   three-way merge of one page by unit (frontmatter key, H2 section, lines in
   a section) using the multi-writer sync design's rule table. It returns the
@@ -32,12 +38,6 @@ ship without a deprecation period. See the
   command and calls no model, and nothing calls it yet. The section and list
   helpers it shares with the structured upsert moved to `athenaeum.page_text`
   (athenaeum#2773).
-- `athenaeum.store_access` parses and validates a store's declaration,
-  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
-  naming each offending key, and nothing reads it yet so no install behaves
-  differently. `_store/` files are registered as `config` artifacts, and a
-  `_`-prefixed directory of any surface is no longer yielded as a page by
-  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
 
 ### Changed
 

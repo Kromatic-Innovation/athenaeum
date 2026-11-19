@@ -552,24 +552,24 @@ def test_a_section_added_on_one_side_is_kept() -> None:
 
 def test_a_section_title_containing_a_hash_still_matches_its_rule() -> None:
     spec = StructuredUpsertSpec(
-        sections=("Issue #12",),
-        replace_sections=frozenset({"issue #12"}),
+        sections=("C# notes",),
+        replace_sections=frozenset({"c# notes"}),
     )
-    b = page(body="# Jordan Reyes\n\n## Issue #12\n\nopen\n")
-    local = page(body="# Jordan Reyes\n\n## Issue #12\n\nclosed\n")
-    remote = page(body="# Jordan Reyes\n\n## Issue #12\n\nwontfix\n")
+    b = page(body="# Jordan Reyes\n\n## C# notes\n\nopen\n")
+    local = page(body="# Jordan Reyes\n\n## C# notes\n\nclosed\n")
+    remote = page(body="# Jordan Reyes\n\n## C# notes\n\nwontfix\n")
     r = merge_page(b, local, remote, spec)
     # A replace section changed differently is contested; a truncated key
     # ("issue ") would have fallen back to a line merge and also contested, so
     # also pin the append rule, which only a matching key can apply.
-    assert r.contested == ("section:issue #12",)
-    append = StructuredUpsertSpec(sections=("Issue #12",), append_sections=frozenset({"issue #12"}))
-    b2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\n")
-    l2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\nb\n")
-    r2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\nc\n")
+    assert r.contested == ("section:c# notes",)
+    append = StructuredUpsertSpec(sections=("C# notes",), append_sections=frozenset({"c# notes"}))
+    b2 = page(body="# Jordan Reyes\n\n## C# notes\n\na\n")
+    l2 = page(body="# Jordan Reyes\n\n## C# notes\n\na\nb\n")
+    r2 = page(body="# Jordan Reyes\n\n## C# notes\n\na\nc\n")
     merged = merge_page(b2, l2, r2, append)
     clean(merged)
-    assert merged.resolvers["section:issue #12"] == "append"
+    assert merged.resolvers["section:c# notes"] == "append"
 
 
 def test_duplicate_headings_stay_separate_units() -> None:
