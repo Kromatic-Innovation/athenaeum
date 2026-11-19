@@ -81,6 +81,7 @@ ship without a deprecation period. See the
 
 ### Fixed
 
+- `docs/guides/remote.md` now names the one outbound request `athenaeum serve --transport http` makes at startup (`GET https://pypi.org/pypi/fastmcp/json`, FastMCP's update check), how to disable it (`FASTMCP_CHECK_FOR_UPDATES=off`, verified with a run with the variable set; `false` is rejected), and lists `curl` or a Python equivalent as a prerequisite of its verification steps (athenaeum#2782).
 - `athenaeum serve` no longer prints a false `search_backend=vector but no index at .../wiki-vectors` warning on an install without `chromadb`. The startup check now uses the backend that resolves after the FTS5 fallback, so it looks for `wiki-index.db` there and still warns when that index is missing. `docs/guides/remote.md` says the `vector` extra gives semantic search and that a plain install serves FTS5 (athenaeum#2780).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
