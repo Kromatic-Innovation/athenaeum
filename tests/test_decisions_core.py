@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from athenaeum.answers import PendingQuestion
 from athenaeum.decisions import (
     _fallback_title,
@@ -334,3 +336,15 @@ def test_quarantine_item_withheld_from_restricted_caller(tmp_path: Path) -> None
 
     decisions = list_pending_decisions(wiki, caller_audience={"Operations"})
     assert not any(d["type"] == "quarantine" for d in decisions)
+
+
+class TestUidPrefixWidths:
+    """``_UID_PREFIX_RE`` strips both the legacy 8-hex and the 16-hex uid prefix."""
+
+    @pytest.mark.parametrize("uid", ["3fa8c2d1", "7b2e9a04c1d85f36"])
+    def test_strips_prefix(self, uid: str) -> None:
+        from athenaeum.decisions import _UID_PREFIX_RE
+
+        m = _UID_PREFIX_RE.match(f"{uid}-acme-corp.md")
+        assert m is not None
+        assert m.group("rest") == "acme-corp.md"

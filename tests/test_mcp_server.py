@@ -1658,6 +1658,64 @@ class TestRecallUncompiledClaudeSessionNotes:
         assert "ZX-9942" in out
         assert "[uncompiled]" in out
 
+    @pytest.mark.parametrize("transport", [None, "http"])
+    def test_remember_tool_with_manual_source_is_recallable_uncompiled(
+        self, tmp_path: Path, transport: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2764: a model that passes ``source="manual"`` to the
+        ``remember`` TOOL (what the old description suggested) must still get a
+        note that a pre-compile `recall` returns, labelled ``[uncompiled]``.
+        """
+        import asyncio
+
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.mcp_server import create_server
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        server = create_server(
+            raw_root=raw,
+            wiki_root=wiki,
+            search_backend="fts5",
+            cache_dir=cache,
+            transport=transport,
+        )
+
+        async def _remember() -> str:
+            return (await server.get_tool("remember")).fn(
+                content="The launch code for Project Zephyr is ZX-9942.",
+                source="manual",
+                sources="user-stated:test",
+            )
+
+        assert asyncio.run(_remember()).startswith("Saved to")
+        assert not (raw / "manual").exists()
+        out = recall_search(
+            wiki,
+            "Zephyr launch code",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=resolve_extra_intake_roots(knowledge),
+        )
+        assert "ZX-9942" in out
+        assert "[uncompiled]" in out
+
+    def test_remember_tool_description_does_not_advertise_a_session_dir(
+        self, tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        from athenaeum.mcp_server import create_server
+
+        _k, wiki, raw, _c = self._init_knowledge(tmp_path)
+        server = create_server(raw_root=raw, wiki_root=wiki)
+        tool = asyncio.run(server.get_tool("remember"))
+        desc = (tool.description or "") + json.dumps(tool.parameters)
+        assert "manual" not in desc
+        assert "raw/<session>" not in desc
+        assert "Leave this out" in desc
+
     def test_keyword_backend_cannot_see_extra_roots_preexisting_gap(
         self, tmp_path: Path
     ) -> None:

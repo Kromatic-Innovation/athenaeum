@@ -480,6 +480,48 @@ def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | No
     return None
 
 
+#: ``memory_type`` values an auto-memory file can carry (the filename prefix or
+#: its own ``metadata.type``); the allowed members of the owner bridge list.
+OWNER_BRIDGE_MEMORY_TYPES: frozenset[str] = frozenset(
+    {"feedback", "project", "reference", "user", "recall"}
+)
+
+
+def resolve_owner_bridge_memory_types(config: dict[str, Any] | None) -> list[str]:
+    """Return the auto-memory ``memory_type`` values bridged to the owner page (athenaeum#2690).
+
+    Read from ``owner.bridge_memory_types`` in ``athenaeum.yaml``. A first-person
+    auto-memory note otherwise compiles only into ``wiki/auto-*.md``; every
+    note whose author-set ``memory_type`` is in this list is also handed to the
+    entity tier once per content, where the owner candidate classify and the
+    owner-verify merge file it on the owner page. It does nothing unless an
+    owner is configured (``owner.uid``) and that page resolves.
+
+    Default ``["user"]``: ``user`` is the type an author gives a note about the
+    person themselves. ``feedback`` is excluded on purpose, since those notes
+    are mostly standing instructions to the assistant and would flood the
+    owner's Preferences section with operating rules. An explicitly empty list
+    disables the bridge. Unknown type names are ignored; an absent key, or a
+    value that is not a list, falls back to the default.
+    """
+    default = ["user"]
+    if not isinstance(config, dict):
+        return default
+    owner = config.get("owner")
+    if not isinstance(owner, dict) or "bridge_memory_types" not in owner:
+        return default
+    raw = owner.get("bridge_memory_types")
+    if not isinstance(raw, list):
+        return default
+    out: list[str] = []
+    for item in raw:
+        name = str(item).strip().lower() if item is not None else ""
+        if name in OWNER_BRIDGE_MEMORY_TYPES and name not in out:
+            out.append(name)
+    return out
+
+
+
 def owner_addresses(owner: dict[str, Any] | None) -> set[str]:
     """Return the owner's own mailbox addresses, lowercased (issue athenaeum#1739).
 
@@ -5982,6 +6024,10 @@ search_backend: vector
 #     of these onto a page that is not the owner's, so a contaminated import
 #     fragment cannot attribute the operator's mailbox to an unrelated
 #     contact (issue athenaeum#1739).
+#   bridge_memory_types: auto-memory ``memory_type`` values whose notes are
+#     also routed to the owner's page (default ["user"]; [] disables). A
+#     routed note is bridged into the entity tier once per content and only
+#     the owner's page can be edited from it. Needs ``uid``.
 # owner:
 #   uid: <owner-person-uid>
 #   google_contact: people/<google-contact-id>
