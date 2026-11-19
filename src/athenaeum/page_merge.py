@@ -192,9 +192,9 @@ def merge_page(
         b_body: str | None = None
     else:
         b_meta, b_body = parse_frontmatter(base)
-        if not b_meta:
+        if not isinstance(b_meta, dict) or not b_meta:
             b_meta, b_body = None, None  # an unparseable ancestor is no ancestor
-    if not l_meta or not r_meta:
+    if not isinstance(l_meta, dict) or not isinstance(r_meta, dict) or not l_meta or not r_meta:
         # A side without parseable frontmatter has no units to merge. Hold the
         # whole page and keep the remote text.
         run.hold("page", REASON_UNPARSEABLE)
@@ -377,18 +377,23 @@ def _norm_text(text: str) -> str:
     return text if not text or text.endswith("\n") else text + "\n"
 
 
-def _units(body: str | None) -> tuple[str, dict[str, _Unit]]:
-    """(preamble, ordered section units keyed by casefolded title)."""
+_SectionKey = tuple[str, int]  # (casefolded title, 1-based occurrence of that title)
+
+
+def _unit_name(key: _SectionKey) -> str:
+    return f"section:{key[0]}" if key[1] == 1 else f"section:{key[0]}#{key[1]}"
+
+
+def _units(body: str | None) -> tuple[str, dict[_SectionKey, _Unit]]:
+    """(preamble, ordered section units keyed by (casefolded title, occurrence))."""
     if body is None:
         return "", {}
     preamble, sections = split_sections(body)
-    out: dict[str, _Unit] = {}
+    out: dict[_SectionKey, _Unit] = {}
+    seen: dict[str, int] = {}
     for sec in sections:
-        key = sec.key
-        n = 2
-        while key in out:  # a repeated heading is its own unit
-            key = f"{sec.key}#{n}"
-            n += 1
+        seen[sec.key] = seen.get(sec.key, 0) + 1  # a repeated heading is its own unit
+        key = (sec.key, seen[sec.key])
         out[key] = _Unit(_norm_text(sec.heading), _norm_text(sec.text))
     return _norm_text(preamble), out
 
@@ -427,11 +432,11 @@ def _merge_body(
     keys += [k for k in r_secs if k not in b_secs]
     keys += [k for k in l_secs if k not in b_secs and k not in r_secs]
     for key in keys:
-        unit = f"section:{key}"
+        unit = _unit_name(key)
         b = b_secs.get(key)
         lu = l_secs.get(key)
         ru = r_secs.get(key)
-        base_key = key.split("#")[0]
+        base_key = key[0]
         text, heading, keep = _merge_section(
             run,
             unit,

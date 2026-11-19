@@ -548,3 +548,52 @@ def test_a_section_added_on_one_side_is_kept() -> None:
     clean(r)
     assert "## History" in body(r)
     assert r.resolvers["section:history"] == "local-only"
+
+
+def test_a_section_title_containing_a_hash_still_matches_its_rule() -> None:
+    spec = StructuredUpsertSpec(
+        sections=("Issue #12",),
+        replace_sections=frozenset({"issue #12"}),
+    )
+    b = page(body="# Jordan Reyes\n\n## Issue #12\n\nopen\n")
+    local = page(body="# Jordan Reyes\n\n## Issue #12\n\nclosed\n")
+    remote = page(body="# Jordan Reyes\n\n## Issue #12\n\nwontfix\n")
+    r = merge_page(b, local, remote, spec)
+    # A replace section changed differently is contested; a truncated key
+    # ("issue ") would have fallen back to a line merge and also contested, so
+    # also pin the append rule, which only a matching key can apply.
+    assert r.contested == ("section:issue #12",)
+    append = StructuredUpsertSpec(sections=("Issue #12",), append_sections=frozenset({"issue #12"}))
+    b2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\n")
+    l2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\nb\n")
+    r2 = page(body="# Jordan Reyes\n\n## Issue #12\n\na\nc\n")
+    merged = merge_page(b2, l2, r2, append)
+    clean(merged)
+    assert merged.resolvers["section:issue #12"] == "append"
+
+
+def test_duplicate_headings_stay_separate_units() -> None:
+    dup = "# Jordan Reyes\n\n## Notes\n\none\n\n## Notes\n\ntwo\n"
+    b = page(body=dup)
+    r = merge_page(b, page(body=dup.replace("one", "ONE")), page(body=dup.replace("two", "TWO")))
+    clean(r)
+    assert "ONE" in body(r) and "TWO" in body(r)
+
+
+@pytest.mark.parametrize("which", ["local", "remote", "base"])
+@pytest.mark.parametrize("bad", ["---\n- a\n- b\n---\nbody\n", "---\njust a string\n---\nbody\n"])
+def test_non_mapping_frontmatter_is_held_not_a_crash(which: str, bad: str) -> None:
+    b, loc, rem = page(), page(role="CTO"), page(role="CFO")
+    if which == "local":
+        loc = bad
+    elif which == "remote":
+        rem = bad
+    else:
+        b = bad
+    r = merge_page(b, loc, rem)
+    if which == "base":
+        # An unusable ancestor is no ancestor: differences are contested, not a crash.
+        assert r.text is not None
+    else:
+        assert r.held == (HeldUnit("page", "unparseable"),)
+        assert r.text == rem
