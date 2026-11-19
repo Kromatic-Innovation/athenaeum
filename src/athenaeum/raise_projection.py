@@ -61,9 +61,9 @@ _MESSAGE_ID_RE = re.compile(r"^rm_[a-z2-7]{20}\Z")
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]*))?\]\]")
 _MD_LINK_RE = re.compile(r"\[([^\[\]\n]*)\]\(\s*<?([^)<>\s]+)>?\s*\)")
 
-# A page uid: 16 hex characters, or the 8 hex characters older pages carry.
-_UID_SHAPED_RE = re.compile(r"^(?:[0-9a-f]{16}|[0-9a-f]{8})\Z")
-_UID_FILENAME_RE = re.compile(r"^(?:[0-9a-f]{16}|[0-9a-f]{8})-.+\.md\Z")
+# A page reference stem: a uid (16 hex characters, or the 8 hex characters
+# older pages carry), optionally followed by ``-<slug>``.
+_UID_STEM_RE = re.compile(r"^(?:[0-9a-f]{16}|[0-9a-f]{8})(?:-.+)?\Z")
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
@@ -75,12 +75,24 @@ class Projection:
     body: str = ""
 
 
+def _names_a_page_by_uid(target: str) -> bool:
+    """True when *target* (anchor/query ignored) is a uid or ``<uid>-<slug>`` page.
+
+    Any directory prefix and a trailing ``.md`` are ignored.
+    """
+    path = target.split("#", 1)[0].split("?", 1)[0].strip()
+    base = path.rsplit("/", 1)[-1]
+    if base.endswith(".md"):
+        base = base[: -len(".md")]
+    return _UID_STEM_RE.match(base) is not None
+
+
 def _wikilink_sub(m: re.Match[str]) -> str:
     target = m.group(1).strip()
     label = m.group(2)
     if label is not None and label.strip():
         return label.strip()
-    if _UID_SHAPED_RE.match(target) or _UID_FILENAME_RE.match(target):
+    if _names_a_page_by_uid(target):
         return ""
     return target
 
@@ -90,7 +102,7 @@ def _md_link_sub(m: re.Match[str]) -> str:
     if _URL_SCHEME_RE.match(target):
         return m.group(0)
     page = target.split("#", 1)[0].split("?", 1)[0]
-    if page.endswith(".md"):
+    if page.endswith(".md") or _names_a_page_by_uid(page):
         return m.group(1)
     return m.group(0)
 

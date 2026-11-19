@@ -125,6 +125,41 @@ def test_no_identifier_of_another_page_survives() -> None:
     assert OTHER_UID not in render(project(page))
 
 
+@pytest.mark.parametrize(
+    "link",
+    [
+        f"[[{OTHER_UID}]]",
+        f"[[{OTHER_UID}-year-end-pto]]",
+        f"[[{OTHER_UID}-year-end-pto.md]]",
+        f"[[people/{OTHER_UID}-x.md]]",
+        f"[[people/{OTHER_UID}-x]]",
+        f"[[{OTHER_UID}#Section]]",
+        f"[[{OTHER_UID}-x.md#Section]]",
+        f"[[{OTHER_UID}|Label]]",
+        f"[PTO]({OTHER_UID}-year-end-pto.md)",
+        f"[PTO]({OTHER_UID}-year-end-pto)",
+        f"[PTO](../people/{OTHER_UID})",
+        f"[PTO](../people/{OTHER_UID}.md#Section)",
+        f"[PTO]({OTHER_UID}-x?v=1)",
+    ],
+)
+def test_uid_absent_from_every_reference_shape(link: str) -> None:
+    rendered = render(project(_page({"name": "x"}, f"before {link} after\n")))
+    assert OTHER_UID not in rendered
+
+
+def test_non_uid_targets_unchanged() -> None:
+    body = (
+        "[[Year-end PTO usage report]] and [handbook](https://docs.example.net/handbook) "
+        "and ![chart](images/chart.png)\n"
+    )
+    out = project(_page({"name": "x"}, body)).body
+    assert out == (
+        "Year-end PTO usage report and [handbook](https://docs.example.net/handbook) "
+        "and ![chart](images/chart.png)\n"
+    )
+
+
 def test_unlabelled_links() -> None:
     body = "a [[5e1d09c3a7b24f86]] b [[Year-end PTO usage report]] c\n"
     proj = project(_page({"name": "x"}, body))
