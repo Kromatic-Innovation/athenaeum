@@ -20,6 +20,16 @@ ship without a deprecation period. See the
 
 ## [Unreleased]
 
+### Changed
+
+- The per-turn push no longer fires on text the harness injected into the prompt
+  channel (background-task notices, messages from other agents, system
+  reminders). A wholly injected submission is skipped and recorded as one push
+  ledger row with `skip_reason: harness_injected`; a submission mixing injected
+  and user text is queried on the user text only. The Claude Code adapter
+  supplies the patterns and the engine supplies the skip
+  (athenaeum#2914).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never
