@@ -37,6 +37,8 @@ ship without a deprecation period. See the
 
 ### Added
 
+- First-person auto-memory notes now reach the owner page. With an owner configured and its page resolving, each `user`-type auto-memory note is bridged, once per content, into a derived raw note under `raw/owner-memory-bridge/`; the entity tier then offers the owner candidate and the owner-verify merge files the fact under `## Preferences`. The bridge itself makes no model call, the entity-tier calls run inside `max_api_calls` and are deferred (never dropped) when it is spent, and bridge notes have owner-only scope: every tier-2 classification except the owner is dropped by code before tier 3. A body-hash `owner_routed` marker is stamped into the source note only after the bridge write succeeds, so an edited note is bridged again once. The new `owner.bridge_memory_types` key (default `["user"]`, `[]` disables; `feedback` is excluded by default because those notes are standing assistant instructions) is documented in the configuration reference, and the run summary's auto-memory entry reports `owner_bridged=N` (athenaeum#2690).
+
 - Answering a decision now applies it straight away by default
   (athenaeum#2531, part of athenaeum#2489). `athenaeum decisions answer`
   and the `resolve_question`, `resolve_merge` and `review_audit_item` MCP
