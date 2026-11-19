@@ -97,14 +97,14 @@ jobs:
           python-version: "3.13"
 
       # Keyed on the chromadb version actually resolved via
-      # requirements-ci.lock (not hardcoded), so a chromadb bump that ships a
+      # requirements-ci.txt (not hardcoded), so a chromadb bump that ships a
       # new ONNX artifact invalidates the cache automatically.
       - name: Resolve chromadb version for cache key
         id: chromadb-version
         run: |
-          version="$(grep -m1 '^chromadb==' requirements-ci.lock | cut -d= -f3)"
+          version="$(grep -m1 '^chromadb==' requirements-ci.txt | cut -d= -f3)"
           if [ -z "$version" ]; then
-            echo "::error::could not resolve a pinned chromadb version from requirements-ci.lock"
+            echo "::error::could not resolve a pinned chromadb version from requirements-ci.txt"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -119,7 +119,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Same reproducible-CI lock ci.yml's `test` job uses (athenaeum#556).
-          pip install -e ".[dev,vector]" -c requirements-ci.lock
+          pip install -e ".[dev,vector]" -c requirements-ci.txt
 
       - name: Run MiniLM-dependent suite
         run: pytest tests/ -m embedding -v --tb=short --no-cov

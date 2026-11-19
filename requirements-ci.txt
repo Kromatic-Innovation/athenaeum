@@ -1,4 +1,4 @@
-# requirements-ci.lock — CI-only dependency lock (athenaeum#556)
+# requirements-ci.txt — CI-only dependency lock (athenaeum#556)
 #
 # WHAT THIS IS: a constraints lock pinning the FULL transitive dependency tree
 # resolved from `pip install -e ".[dev,vector]"`, so a green CI run at a given
@@ -12,7 +12,7 @@
 # installs (the deliberate upper bounds are unchanged). This lock only pins what
 # CI installs, and is applied as a CONSTRAINTS file, not a requirements file:
 #
-#     pip install -e ".[dev,vector]" -c requirements-ci.lock
+#     pip install -e ".[dev,vector]" -c requirements-ci.txt
 #
 # pip still resolves the dependency graph from pyproject per Python version
 # (3.11 / 3.12 / 3.13), then pins each package it installs to the version below.
@@ -21,7 +21,7 @@
 # whole matrix.
 #
 # ALSO CONSTRAINS THE DEPLOY REFRESH (athenaeum#1960): scripts/deploy-guard.sh
-# and scripts/deploy-sync.sh both pass `-c requirements-ci.lock` to their
+# and scripts/deploy-sync.sh both pass `-c requirements-ci.txt` to their
 # editable install/reinstall whenever this file is present in the deploy tree,
 # so the deployed venv resolves the SAME versions CI tested rather than
 # re-resolving pyproject.toml's open ranges fresh. A green CI run now means
@@ -32,13 +32,20 @@
 #
 # REGENERATE (from a clean venv on the lowest supported Python, 3.11):
 #     python -m venv .venv && .venv/bin/pip install -e ".[dev,vector]"
-#     .venv/bin/pip freeze --exclude-editable | sort -f > requirements-ci.lock
+#     .venv/bin/pip freeze --exclude-editable | sort -f > requirements-ci.txt
 #     # then restore this header
 #
 # Dependabot proposes bumps against pyproject.toml's ranges (see
 # .github/workflows/dependabot-auto-merge.yml and docs/design/security-posture.md
 # §3.1); regenerate this lock when a TRANSITIVE dependency bump lands so CI
 # tracks it.
+#
+# WHY `.txt` (athenaeum#2784): GitHub's dependency graph (and so Dependabot
+# alerts) only parses files named `requirements*.txt` for pip. Under the old
+# `.lock` name the ~100 transitive pins were invisible to it. This file holds
+# only plain `name==version` lines (no hashes, `--` options or markers) so it
+# stays parseable; keep it that way when regenerating. It is the single source
+# of truth for the pinned set -- there is no second, generated export.
 #
 # EXACT-PINNED DIRECT DEPS ARE DELIBERATELY NOT DUPLICATED HERE (athenaeum#2324):
 # pyproject.toml exact-pins a couple of dev/type-check tools with `==` (`ruff`

@@ -1,5 +1,5 @@
 # Positive control (athenaeum#2324 AC3): the same exact-pinned `ruff` as the
-# `mismatch` fixture, but requirements-ci.lock carries no duplicate of it --
+# `mismatch` fixture, but requirements-ci.txt carries no duplicate of it --
 # the fixed shape this issue's check enforces.
 [project]
 name = "demo"

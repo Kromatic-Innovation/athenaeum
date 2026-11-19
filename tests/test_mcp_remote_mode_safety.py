@@ -349,14 +349,19 @@ class TestSessionSubdirPerTransport:
         # half alone.
         assert not (corpus / "raw" / "claude-session").exists()
 
-    def test_an_explicit_source_still_picks_the_subdirectory(
-        self, corpus: Path
+    @pytest.mark.parametrize(
+        ("transport", "default"),
+        [(None, "claude-session"), ("http", "remote-session")],
+    )
+    def test_a_supplied_source_is_rerouted_to_the_transport_default(
+        self, corpus: Path, transport: str | None, default: str
     ) -> None:
-        _tool(_server(corpus, transport="http"), "remember")(
+        """athenaeum#2764: a model-supplied ``source`` is not a directory."""
+        _tool(_server(corpus, transport=transport), "remember")(
             content="A fact.", source="manual"
         )
-        assert len(_written(corpus, "manual")) == 1
-        assert not (corpus / "raw" / "remote-session").exists()
+        assert len(_written(corpus, default)) == 1
+        assert not (corpus / "raw" / "manual").exists()
 
     @pytest.mark.parametrize("transport", [None, "http"])
     def test_an_empty_source_still_errors(

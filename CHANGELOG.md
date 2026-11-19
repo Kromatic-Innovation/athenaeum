@@ -12,7 +12,9 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
-Support policy: only the current release is supported, and breaking changes
+Release cadence and support: releases ship when their changes are ready, on
+no fixed schedule, so sometimes several land close together (two minors can
+share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
 [support policy](docs/guides/install.md#support-policy).
 
@@ -20,6 +22,10 @@ ship without a deprecation period. See the
 
 ### Changed
 
+- New pages now get a 16-hex page uid (64 random bits, `secrets.token_hex(8)`) instead of an 8-hex one, because 32 bits collide at roughly 116 pairs per million pages and installs sharing a store cannot check each other's uids. Existing 8-hex uids stay valid and are never rewritten; the erasure uid check and `push_metrics.opaque_push_id_from_filename` now accept both widths, and a guard test fails if a new exact-8-hex uid pattern is added to `src/athenaeum` (athenaeum#2771).
+- The plan-usage disclosure in `athenaeum init` and `docs/guides/install.md` now carries magnitude: measured 2026-11-18 on 0.26.0, one note compiles in about 3 to 4 model calls, 3,800 to 4,400 tokens (in plus out) and 28 to 36 s; five notes in one run took 13 calls, 19,433 tokens and 139 s. It also states the per-run caps that exist (`athenaeum run` 50 files / 800 API calls, `athenaeum session-end` 20 files / 100 API calls); no separate first-run cap ships. The README compile step no longer tells a `claude-cli` user to export an API key first (athenaeum#2766).
+- Documented the project's status and release cadence. README gains a "Project status" section (maintained by Kromatic, security reports go to the mailbox in `SECURITY.md`, and a discontinued project is archived with a README notice). The CHANGELOG preamble states that releases ship when ready, sometimes several close together, with only the latest supported. CONTRIBUTING now says releases have no fixed schedule and explains the automatic "bump version" merge commits between releases (athenaeum#2722).
+- Renamed the CI constraints lock `requirements-ci.lock` to `requirements-ci.txt` so GitHub's dependency graph recognises it as a pip manifest. Dependabot alerts previously covered only the 38 direct dependencies; the full pinned set of 136 packages is now scanned. Contents are unchanged and it is still the single source of truth, applied with `-c requirements-ci.txt` in CI, `scripts/deploy-guard.sh` and `scripts/deploy-sync.sh`. If you install with `-c requirements-ci.lock`, switch to the new name (athenaeum#2784).
 - The witness-ledger lookup now survives a `prompt_id` that several lines share. `LedgerIndex` keeps every line per id and one resolver (`LedgerIndex.resolve`), used by both intake and `promptwitness verify`, picks among them by digest, so a prompt typed while a turn is running no longer makes the earlier prompt report `digest-mismatch`. `LedgerIndex.human_lines()` now returns every turn line, including displaced ones and ones with no id (athenaeum#2759).
 - Raised the `fastmcp` floor to 3.4.3, the first release whose `FastMCP.run_http_async` accepts `host_origin_protection` (verified from the PyPI wheels), and removed the `_fastmcp_supports_host_origin_guard` probe and its fail-closed fallback from `athenaeum serve`, which the floor makes unreachable. Set ruff's `target-version` to `py313` to match `requires-python`, and documented why the wide `anthropic` range is kept. The install guide gains "Supported dependency ranges" and "Support policy" sections, and README states the supported Python versions. (athenaeum#2728)
 - README quick start now comes before the hero image and "What is this?", names the first-compile prerequisite (`ANTHROPIC_API_KEY` or a logged-in `claude` CLI) and the `[mcp]` requirement for `serve` and `test-mcp` in prose, shortens the extras paragraph to a callout linking the install guide, and links the upgrading guide. Build-notes links for tagged releases in this file now pin the release tag (`blob/v0.26.0/`, not `blob/main/`), checked by `tests/test_changelog_contract.py`. (athenaeum#2727)
@@ -36,6 +42,8 @@ ship without a deprecation period. See the
   the run shows the first five and a count of the rest (athenaeum#2737).
 
 ### Added
+
+- First-person auto-memory notes now reach the owner page. With an owner configured and its page resolving, each `user`-type auto-memory note is bridged, once per content, into a derived raw note under `raw/owner-memory-bridge/`; the entity tier then offers the owner candidate and the owner-verify merge files the fact under `## Preferences`. The bridge itself makes no model call, the entity-tier calls run inside `max_api_calls` and are deferred (never dropped) when it is spent, and bridge notes have owner-only scope: every tier-2 classification except the owner is dropped by code before tier 3. A body-hash `owner_routed` marker is stamped into the source note only after the bridge write succeeds, so an edited note is bridged again once. The new `owner.bridge_memory_types` key (default `["user"]`, `[]` disables; `feedback` is excluded by default because those notes are standing assistant instructions) is documented in the configuration reference, and the run summary's auto-memory entry reports `owner_bridged=N` (athenaeum#2690).
 
 - Answering a decision now applies it straight away by default
   (athenaeum#2531, part of athenaeum#2489). `athenaeum decisions answer`
@@ -82,6 +90,17 @@ ship without a deprecation period. See the
 ### Fixed
 
 - `promptwitness` now fills `harness_version` on witness-ledger lines from the hook environment, trying `CLAUDE_CODE_VERSION`, then `AI_AGENT` (`claude-code_<a>-<b>-<c>_agent`), then a bare-version last path component of `CLAUDE_CODE_EXECPATH`, and records the winner in `signals.harness_version_source`. Values must match one anchored, length-capped version pattern; no subprocess is run and no file is read. Earlier lines keep their empty value. The assumed hook-environment presence is settled by the next live entry-path run (athenaeum#2760).
+- `athenaeum init` on a host without `git` (a slim container image, say) now prints one line naming git and how to install it, instead of a `FileNotFoundError` traceback, and removes everything it had created so a retry starts clean. The install and remote guides now list git as a prerequisite (athenaeum#2778).
+- `athenaeum doctor` `search_index` no longer FAILs on an `[mcp]`-only install after `session-end`. With `search_backend: vector` and chromadb absent, an existing fts5 index is accepted as OK, with a detail naming the fts5 fallback and the missing `[vector]` extra; before any index exists it still FAILs. The README now says what `doctor` shows after the quick start (`hooks` is the one FAIL left, since the recall hook is optional), and a test pins that sentence to `doctor`'s output over a stock install (athenaeum#2765).
+- The `remember` tool no longer suggests `source: "manual"` or describes a
+  session directory, and tells callers to omit `source`. A `source` a caller
+  still supplies is now filed under the transport default (`claude-session`
+  under stdio, `remote-session` under HTTP) instead of an invented directory
+  such as `raw/manual/` that `recall` could not see until the next compile, so
+  the note is returned by a pre-compile `recall`, labelled `[uncompiled]`
+  (athenaeum#2764).
+- A failing `claude` provider call now reports its real cause. When the CLI prints its error on stdout and leaves stderr empty, the error carries that text (bounded) instead of `(no stderr)`. The not-logged-in case reads as one line naming `/login` (run `claude`, then `/login`) and the `ANTHROPIC_API_KEY` alternative, and `athenaeum run` logs it without a traceback unless debug logging is on. `athenaeum status` shows a `Last compile: FAILED` line with the reason while a raw file is still failing (athenaeum#2763).
+- `athenaeum doctor` `key_mode` and `athenaeum init` no longer report a Claude Code login when only the `claude` binary exists. With `llm.provider: claude-cli` they now run `claude auth status` (a local read, no model call); a logged-out CLI fails `key_mode` with the fix "run `claude` and `/login`, or set ANTHROPIC_API_KEY", and `init` prints that finding instead of the plan-usage disclosure. With no `claude` binary and no key, both name the missing binary and the install step and say compiles cannot run (athenaeum#2762).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no
@@ -169,6 +188,10 @@ ship without a deprecation period. See the
   `athenaeum registry` writes beside `registry.json`, so no query scans page
   bodies. Re-run `athenaeum registry` to build it; a corpus without the
   sidecar behaves as before. `with_pii` gating is unchanged.
+
+### Security
+
+- Documented that on an authenticated server (`serve.auth.issuer` set) the Host/Origin guard is off and bearer-token validation is the only DNS-rebinding defence, including the `[transport] Host/Origin guard: off` startup line, and listed the remote-mode checks (required `exp`, no future `nbf`/`iat`, `serve.auth.allowed_clients` pinning with read-only clients, `--profile remote` refusing an unset audience) as in-scope in `SECURITY.md`. No behaviour change (athenaeum#2726).
 
 ## [0.26.0] - 2026-11-16
 
