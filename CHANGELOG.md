@@ -84,6 +84,7 @@ ship without a deprecation period. See the
 
 ### Fixed
 
+- `athenaeum init` on a host without `git` (a slim container image, say) now stops before creating anything and prints one line naming git and how to install it, instead of a `FileNotFoundError` traceback. The install and remote guides now list git as a prerequisite (athenaeum#2778).
 - A healthy `athenaeum import-memory` run no longer prints warnings that read
   like a failure. Files staged by import-memory are left out of the
   origin-recovery-yield denominator (they are verbatim copies with no

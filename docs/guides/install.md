@@ -4,7 +4,9 @@
 
 ## I want to install the package
 
-Requires Python 3.13+. The fastest way to get that, regardless of what your
+Requires Python 3.13+ and `git` on your `PATH` (`athenaeum init` creates a git
+repository for your knowledge directory; slim container images often lack it, so
+`apt-get install git` or `brew install git` first). The fastest way to get that, regardless of what your
 system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash

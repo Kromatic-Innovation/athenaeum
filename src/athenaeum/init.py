@@ -31,6 +31,7 @@ created, never pre-existing content — a first-run UX concern.
 from __future__ import annotations
 
 import importlib.resources
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -127,7 +128,6 @@ def _git_failure(exc: subprocess.CalledProcessError) -> SystemExit:
 
 def _rollback(root: Path, created: list[Path]) -> None:
     """Remove only what this call created, newest first; never pre-existing content."""
-    import shutil
 
     for p in reversed(created):
         try:
@@ -154,6 +154,13 @@ def init_knowledge_dir(path: Path) -> Path:
     Returns the resolved *path* for convenience.
     """
     path = path.expanduser().resolve()
+    # athenaeum#2778: every git call below is on this path, so detect a missing
+    # binary BEFORE creating anything (no half-state, no FileNotFoundError).
+    if not (path / ".git").exists() and shutil.which("git") is None:
+        raise SystemExit(
+            "athenaeum init: git is not installed or not on PATH. "
+            "Install it (e.g. `apt-get install git`, `brew install git`) and retry."
+        )
     created: list[Path] = []
     try:
         _scaffold(path, created)
