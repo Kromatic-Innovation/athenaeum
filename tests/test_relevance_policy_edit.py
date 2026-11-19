@@ -366,3 +366,28 @@ class TestRouteRule:
         )
         assert http["error_code"] == "invalid_rule"
         assert list_pending_proposals(kb / "wiki") == []
+
+
+class TestRouteRuleOverStrayCells:
+    """Seer review on athenaeum#2959: widening must not turn a stray cell into a Store."""
+
+    STRAY = (
+        "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n"
+        "| never | | personal | | old note |\n"
+    )
+
+    def test_widening_is_refused_clearly_and_nothing_is_written(self, kb: Path) -> None:
+        _policy_file(kb).write_text(self.STRAY)
+        assert load_relevance_policy(kb / "wiki").resolve(tags=["personal"]) == "never"
+        out = _call(_server(kb), "set_capture_rule", verdict="route", tag="hr", store=STORE)
+        assert out["ok"] is False and out["error_code"] == "invalid_rule"
+        assert "line 3" in out["message"] and "old note" in out["message"]
+        assert "must leave Store blank" not in out["message"]
+        assert _policy_file(kb).read_text() == self.STRAY
+        assert read_audit(kb / "wiki") == []
+
+    def test_a_non_route_edit_over_stray_cells_is_unaffected(self, kb: Path) -> None:
+        _policy_file(kb).write_text(self.STRAY)
+        out = _call(_server(kb), "set_capture_rule", verdict="always", tag="personal/travel")
+        assert out["ok"] is True
+        assert _policy_file(kb).read_text().startswith(self.STRAY)

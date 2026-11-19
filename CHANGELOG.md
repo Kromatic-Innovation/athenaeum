@@ -22,10 +22,12 @@ ship without a deprecation period. See the
 
 ### Added
 
-- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
-  fact (capture, store, type, reason code), now called by the three capture gates in both
-  pipeline transports. Only its capture answer is used and it is the one the gates computed
-  before, so no install captures, drops or places anything differently (athenaeum#2625).
+- `athenaeum.store_access` parses and validates a store's declaration,
+  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
+  naming each offending key, and nothing reads it yet so no install behaves
+  differently. `_store/` files are registered as `config` artifacts, and a
+  `_`-prefixed directory of any surface is no longer yielded as a page by
+  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
 - The relevance policy table gains an optional `Store` column and a `route`
   verdict. A `route` row names a `store_id` or `personal`; `RelevancePolicy.match_route`
   answers the destination question, and `match` / `resolve` still consider only
@@ -33,12 +35,10 @@ ship without a deprecation period. See the
   The hash, read-back, `relevance_policy` tool and `set_capture_rule` (new
   `store` argument) carry the store. Nothing acts on a `route` row yet
   (athenaeum#2625).
-- `athenaeum.store_access` parses and validates a store's declaration,
-  `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
-  naming each offending key, and nothing reads it yet so no install behaves
-  differently. `_store/` files are registered as `config` artifacts, and a
-  `_`-prefixed directory of any surface is no longer yielded as a page by
-  `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
+  fact (capture, store, type, reason code), now called by the three capture gates in both
+  pipeline transports. Only its capture answer is used and it is the one the gates computed
+  before, so no install captures, drops or places anything differently (athenaeum#2625).
 
 ### Changed
 
@@ -85,8 +85,13 @@ decision-queue digest and an opt-in push notifier, and routes first-person
 auto-memory notes to the owner page. The documentation and packaging fixes
 asked for by the 0.25.0/0.26.0 release review are in: README quick start
 order, project status and release cadence, supported dependency ranges, and
-the remote-mode security notes. `athenaeum.__all__` is unchanged. There are no
-breaking changes to the public API; the behaviour changes are listed below.
+the remote-mode security notes. `athenaeum.__all__` is unchanged. One change is
+breaking and data-mutating for scripted callers: answering a decision
+(`athenaeum decisions answer` and the `resolve_question`, `resolve_merge` and
+`review_audit_item` MCP tools) now applies the answer at once by default, where
+it used to only record it (athenaeum#2531). Scripts that relied on the old
+record-only behaviour must pass `--apply deferred` (MCP: `apply="deferred"`);
+see upgrade step 3. The behaviour changes are listed below.
 
 Behaviour changes an existing install will notice:
 
@@ -120,9 +125,11 @@ decision push (`notify.yaml`), the `apply` option on decision answers, the
    `fastmcp` yourself, it must be 3.4.3 or later.
 2. If you install with `-c requirements-ci.lock`, switch to
    `-c requirements-ci.txt`.
-3. If you script decision answers and rely on them staying unapplied until the
-   next `ingest-answers` tick, add `--apply deferred` (MCP:
-   `apply="deferred"`).
+3. If you script `athenaeum decisions answer`, or call the `resolve_question`,
+   `resolve_merge` or `review_audit_item` MCP tools, and rely on answers staying
+   unapplied until the next `ingest-answers` tick, add `--apply deferred` (MCP:
+   `apply="deferred"`) to keep the previous record-only behaviour. Without it,
+   each answer mutates the knowledge base at once.
 4. If you have an owner configured and do not want auto-memory notes bridged to
    the owner page, set `owner.bridge_memory_types: []`.
 5. Optional: re-run `athenaeum registry` to build the
