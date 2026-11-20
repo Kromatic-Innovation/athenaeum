@@ -243,6 +243,29 @@ That's a separate integration — see [Claude Code auto-memory
 integration](claude-code.md). It's complementary to the per-turn recall
 hooks above and can be run alongside them.
 
+## I want a scheduled or scripted run to skip the per-turn push
+
+Some runs carry all of their input in the prompt: a scheduled routine, or a
+script that sends the same templated prompt (a classifier, an extractor, a
+planner) every time. The per-turn push matches pages on that template's own
+words, so it adds context the run did not need.
+
+For those runs, have the routine's launcher set `AUTO_RECALL=false` in the
+environment it starts the run with:
+
+```bash
+AUTO_RECALL=false claude -p "$(cat classify-prompt.md)"
+```
+
+The per-turn push is then skipped for that run. The explicit `recall` tool
+still works, so a routine that does want memory can still ask for it.
+
+The setting is per process. The hook reads `AUTO_RECALL` from the environment
+it was started with. When it loads `~/.cache/athenaeum/config.env`, it never
+overwrites a key that environment already has, so a launcher value beats the
+cached config. Interactive sessions and other routines are unaffected and keep
+pushing. To turn the push back on for a routine, stop setting the value.
+
 ## I want to know which knobs the hooks read
 
 The hooks read `AUTO_RECALL` (per-turn recall on/off) and `SEARCH_BACKEND`

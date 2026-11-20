@@ -27,6 +27,11 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- The sidecar guide and the environment reference describe how a scheduled or
+  scripted run whose prompt carries all its input skips the per-turn push:
+  its launcher sets `AUTO_RECALL=false` for that run, the explicit `recall`
+  tool still works, and the launcher value beats the cached config
+  (athenaeum#2977).
 - The per-turn push applies the push-path relevance floor
   (`recall.relevance_floor.push.<backend>`, or
   `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`) before the count cap. FTS5 and
