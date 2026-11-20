@@ -117,6 +117,17 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
 - The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
 - The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
+- `athenaeum doctor` now reports the first-run setup checks (`mcp`, `hooks`,
+  `key_mode`, `search_index`) as `WARN` with "setup pending" and the command
+  that finishes setup, instead of `FAIL`, so a fresh `athenaeum init` exits
+  `0`. Present-but-broken state (unparseable `settings.json` or
+  `.claude.json`, a hook whose script is missing, an unreadable fts5 index, an
+  unrecognised `llm.provider`) is still `FAIL`. The README Quick start now runs
+  `doctor` after `test-mcp` with sample output. Topic extraction also logs a
+  one-time-per-process warning when it falls back to the regex extractor
+  because no LLM credential is available, naming how to enable LLM extraction
+  (athenaeum#2906).
+
 - The per-turn push no longer fires on text the harness injected into the prompt
   channel (background-task notices, messages from other agents, system
   reminders). A wholly injected submission is skipped and recorded as one push
@@ -128,6 +139,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Fixed
 
 - `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
+
+- Six vector-backend tests (in `test_doctor.py`, `test_cli.py::TestWarnIfBackendCacheMissing` and `test_indexed_surfaces.py`) now skip instead of failing under a `[dev]`-only install without chromadb (athenaeum#2905).
+
+### Security
+
+- `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
+- Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
 
 ## [0.27.2] - 2026-11-19
 

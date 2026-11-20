@@ -49,12 +49,12 @@ _LOGGED_OUT = 'echo "Not logged in · Please run /login"; exit 1'
 _LOGGED_IN = 'echo \'{"loggedIn": true}\'; exit 0'
 
 
-def test_binary_present_but_logged_out_fails_key_mode(
+def test_binary_present_but_logged_out_is_pending_key_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _fake_claude(tmp_path, monkeypatch, _LOGGED_OUT)
     result = doctor.check_key_mode(_CLAUDE_CFG, tmp_path / "cache")
-    assert result.status == "fail"
+    assert result.status == "warn"
     assert "not logged in" in result.detail
     assert result.fix == "run `claude` and `/login`, or set ANTHROPIC_API_KEY"
 
@@ -68,12 +68,12 @@ def test_binary_present_and_logged_in_is_ok(
     assert "login confirmed" in result.detail
 
 
-def test_logged_in_false_json_with_exit_zero_fails(
+def test_logged_in_false_json_with_exit_zero_is_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _fake_claude(tmp_path, monkeypatch, 'echo \'{"loggedIn": false}\'; exit 0')
     result = doctor.check_key_mode(_CLAUDE_CFG, tmp_path / "cache")
-    assert result.status == "fail"
+    assert result.status == "warn"
 
 
 def test_unanswerable_probe_does_not_fail_a_working_login(
@@ -113,7 +113,7 @@ def test_no_binary_no_key_names_binary_install_and_that_compiles_cannot_run(
 ) -> None:
     _no_claude_binary(monkeypatch)
     result = doctor.check_key_mode(None, tmp_path / "cache")
-    assert result.status == "fail"
+    assert result.status == "warn"
     assert "`claude` binary" in result.detail
     assert "compiles cannot run" in result.detail
     assert "topic extraction" not in result.detail
@@ -132,6 +132,6 @@ def test_claude_cli_provider_with_missing_binary_says_compiles_cannot_run(
 ) -> None:
     _no_claude_binary(monkeypatch)
     result = doctor.check_key_mode(_CLAUDE_CFG, tmp_path / "cache")
-    assert result.status == "fail"
+    assert result.status == "warn"
     assert "compiles cannot run" in result.detail
     assert "topic extraction" not in result.detail

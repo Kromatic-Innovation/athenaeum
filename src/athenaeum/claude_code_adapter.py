@@ -233,6 +233,7 @@ arrays generally, per the sources cited above.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -770,6 +771,13 @@ def main(argv: list[str] | None = None) -> int:
     matches the zero-argument console-script calling convention; the hook
     input is read from stdin, per the ``UserPromptSubmit`` contract.
     """
+    # A bare `logging.warning` with no handler falls to `logging.lastResort`,
+    # which writes to stderr -- and this hook must never write to stderr
+    # (fail-safe axis above). A NullHandler on the package logger stops that
+    # for every library warning (e.g. query_topics' one-time regex-fallback
+    # notice, athenaeum#2906) without touching the CLI path, which keeps its
+    # own logging setup.
+    logging.getLogger("athenaeum").addHandler(logging.NullHandler())
     try:
         cache_dir = resolve_cache_dir(None)
         # Issue athenaeum#2538 (AC8): a pure Path computation, no I/O -- the
