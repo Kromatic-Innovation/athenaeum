@@ -293,3 +293,14 @@ def test_no_rewriting_git_command_is_ever_run(diverged, monkeypatch) -> None:
     flat = [arg for c in seen for arg in c]
     assert "--amend" not in flat
     assert not any(a in ("--force", "-f", "--force-with-lease") or a.startswith("+") for a in flat)
+
+
+def test_capabilities_for_unversioned_surface_of_multi_writer_store(pair, tmp_path: Path) -> None:
+    _, _, b = pair
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    fs = store.FilesystemStore(b, {"wiki": b / "wiki", "loose": loose})
+    assert fs.capabilities.multi_writer
+    assert fs.capabilities_for("wiki").multi_writer
+    unversioned = fs.capabilities_for("loose")
+    assert not unversioned.versioned and not unversioned.multi_writer

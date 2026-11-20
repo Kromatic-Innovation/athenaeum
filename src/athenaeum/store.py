@@ -1729,10 +1729,15 @@ class FilesystemStore:
         declared otherwise. Every other flag is the store-level value. The
         store-level :attr:`capabilities` stays the default-surface (knowledge
         root) profile, unchanged, so existing callers keep working.
+        ``has_remote`` and ``multi_writer`` follow the surface's own repository.
         """
+        repo = self._surface_repo(surface)
+        has_remote = repo is not None and _repo_has_remote(repo)
         return replace(
             self.capabilities,
-            versioned=self._surface_repo(surface) is not None,
+            versioned=repo is not None,
+            has_remote=has_remote,
+            multi_writer=has_remote,
             purgeable=surface not in self._non_purgeable,
         )
 
