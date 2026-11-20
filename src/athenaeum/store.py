@@ -1041,6 +1041,21 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="store-review-state",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="knowledge root",
+        source_ref=(
+            "store_reviews.py:REVIEW_STATE_DIRNAME '_store_reviews/<store_id>.jsonl' "
+            "(issue athenaeum#2992; docs/design/federation-store-access.md §8, slice "
+            "S10) — one run record per completed cross-store review: review name, "
+            "source store id, time, the source revision reviewed (the cursor) and "
+            "integer counts. No source text. Durable and not reconstructible, the "
+            "install's own state outside every store's wiki and raw roots; keeping "
+            "it on a bench is a later slice (S8)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="drop-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
