@@ -867,11 +867,13 @@ class TestAC6TriggerThreshold:
         ``librarian.page_size_threshold_chars`` as the setting that decides
         which pages this pass picks up."""
         repo = Path(__file__).resolve().parents[1]
-        readme = (repo / "README.md").read_text(encoding="utf-8")
+        nightly = (repo / "docs" / "guides" / "nightly-cost.md").read_text(
+            encoding="utf-8"
+        )
         guide = (repo / "docs" / "guides" / "daily-operation.md").read_text(
             encoding="utf-8"
         )
-        for text in (readme, guide):
+        for text in (nightly, guide):
             assert "librarian.page_size_threshold_chars" in text
 
 
@@ -1552,8 +1554,14 @@ class TestAC11Documentation:
         return Path(__file__).resolve().parents[1]
 
     def test_readme_has_the_section(self) -> None:
-        readme = self._repo() / "README.md"
-        text = readme.read_text(encoding="utf-8")
+        # The README keeps a stub that links the guide holding the detail.
+        readme = (self._repo() / "README.md").read_text(encoding="utf-8")
+        assert "Page recompile" in readme
+        assert "on by default" in readme.lower()
+        assert "docs/guides/nightly-cost.md" in readme
+        text = (self._repo() / "docs" / "guides" / "nightly-cost.md").read_text(
+            encoding="utf-8"
+        )
         assert "Page recompile" in text
         # On by default, what it does, that it costs model calls nightly,
         # and the ONE setting that turns it off.

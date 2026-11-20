@@ -6,17 +6,19 @@
 
 **Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
-**Before you install:** `git` must be installed, and for compiling you need either
-`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI. Python 3.13+ is required
-(`--python 3.13` below lets `uv` fetch it if needed).
+## Quick start
 
 ```bash
 uv tool install --python 3.13 'athenaeum[mcp]'
+athenaeum --version
+athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir
 ```
 
-Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
-
-## Quick start
+**That block needs no API key.** `test-mcp` runs against a scratch directory,
+so you can confirm the install works before wiring anything up or spending API
+budget. Python 3.13+ is required (`--python 3.13` lets `uv` fetch it if needed)
+and `git` must be installed. Compiling later needs either `ANTHROPIC_API_KEY`
+set or a logged-in `claude` CLI.
 
 See [Install](docs/guides/install.md) for the `PATH` setup `uv tool install`
 needs, and the wrong-interpreter warning to check against if `athenaeum --version`
@@ -26,30 +28,15 @@ Only the current release is supported; see the [support policy](docs/guides/inst
 Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
 
 The `[mcp]` extra in the install command above is required by `athenaeum serve` and
-`athenaeum test-mcp`.
+`athenaeum test-mcp`. Now set up your knowledge directory:
 
 ```bash
-# (Install first, as shown at the top of this page.)
-
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
 
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
-
-# Check the setup (read-only). FAILs are expected at this point; see below.
-athenaeum doctor
 ```
-
-`athenaeum doctor` is a read-only health check. **On a fresh install it will
-show FAILs, and that is expected.** Right after the commands above it is
-expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
-`key_mode` when neither an API key nor the `claude` CLI is available)
-until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start (through `athenaeum session-end`):
-`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
-because the per-turn recall hook is optional and the quick start does not
-wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.
@@ -59,13 +46,42 @@ wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 > hooks disabled, so a global `core.hooksPath` commit hook (for example a
 > protected-branch guard) does not block it.
 
-Want to confirm it works before wiring anything up or spending API budget?
+Then check the install (read-only):
 
 ```bash
-athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
+athenaeum doctor
 ```
 
-That gives your agent two tools: `remember` to write an observation, `recall` to search
+On a fresh install, steps you have not done yet show as `WARN` with
+`setup pending` and the command that finishes each one; `doctor` still exits
+`0`. Only something present but broken (an unparseable `settings.json`, a hook
+whose script is missing, an unreadable index) is a `FAIL` and exits non-zero.
+Abridged output right after `athenaeum init`, before `claude mcp add` (paths
+shortened):
+
+```text
+Athenaeum Doctor
+========================================
+[OK] package_version: running 0.27.4; latest release is 0.27.4
+[OK] interpreter: Python 3.13.1
+[WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
+    fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+[WARN] hooks: setup pending: no Claude Code settings file found at ~/.claude/settings.json
+    fix: merge examples/claude-code/settings-snippet.json into ~/.claude/settings.json ...
+[WARN] key_mode: setup pending: llm.provider=claude-cli but Claude Code is not logged in ...
+    fix: run `claude` and `/login`, or set ANTHROPIC_API_KEY
+[WARN] search_index: setup pending: no vector index found under ~/.cache/athenaeum/wiki-vectors
+    fix: run `athenaeum reindex --path <knowledge-root>` to build it, ...
+...
+All checks passed, with 4 warning(s).
+```
+
+Run it again once you have finished the quick start (through
+`athenaeum session-end`): `mcp` and `search_index` are then OK. `hooks` stays
+a `WARN` because the per-turn recall hook is optional and the quick start does
+not wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
+
+Once wired up, your agent has two tools: `remember` to write an observation, `recall` to search
 the compiled wiki. A round-trip looks like this:
 
 > **You:** Jordan's partner is Priya; they met at Stanford GSB.
@@ -179,34 +195,9 @@ bad day into an unbounded bill, and two overlapping runs writing the same store 
 correctness bug. Every run takes a single-writer lock and enforces a hard per-run API
 budget. → [modules/librarian](docs/modules/librarian.md)
 
-**Page recompile restructures oversized pages automatically, on by default.** A page that
-keeps growing becomes a page nobody can read and the compiler cannot merge into cleanly.
-Every night the
-librarian looks for pages over `librarian.page_size_threshold_chars` (the one setting that
-decides which pages are picked up) and cuts the biggest few into a parent page plus linked
-sub-pages. **This costs model calls every night**: up to
-`librarian.page_recompile.max_pages_per_run` pages a run (3, or `opening_max_pages_per_run` —
-10 — while any page is still over the hard ceiling), bounded further by
-`max_input_chars_per_run` and `max_api_calls_per_run`. A plan that only restructures the page
-itself — nothing moved to another page, nothing attached, no alias moved — is applied right
-then, with no question asked; a plan that touches another page, or names a page `type:` you
-listed in `never_auto_types`, is still raised in `athenaeum decisions` as a `page-recompile`
-item for you to approve or reject, and stops raising new ones once `max_open_items` (5) are
-unanswered. **See what the pass has done** with `athenaeum recompile list --applied` or
-`athenaeum status` (which fills "applied in the last 7 days"); **undo one** with
-`athenaeum recompile undo <plan-id>` — reversible either way, auto-applied or
-operator-approved. **To ask before every write, or turn it off entirely, set
-`librarian.page_recompile.mode`:**
-
-```yaml
-librarian:
-  page_recompile:
-    mode: queue   # off | shadow | queue | auto (default) -- queue asks before every write
-```
-
-`shadow` keeps drafting plans and recording them without asking or writing, which is the
-cheapest way to see what the pass would do.
-→ [guides/daily-operation](docs/guides/daily-operation.md)
+**Page recompile restructures oversized pages automatically, on by default.** It costs
+model calls every night; the cost, bounds and off switch are in
+[guides/nightly-cost](docs/guides/nightly-cost.md).
 
 **Recall happens without being asked.** Memory an agent has to remember to look things up
 in is memory that goes unused. A sidecar injects the relevant slice of the wiki into

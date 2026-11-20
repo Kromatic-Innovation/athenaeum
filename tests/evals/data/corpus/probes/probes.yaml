@@ -42,7 +42,7 @@
   must_not_rank: [client-northgate]
   distractor_terms: ["confidentiality", "client disclosure"]
   answer_tokens: ["Harrowvex"]
-  answer_markers: {policy-confidentiality: "Nadia Frost"}
+  answer_markers: {policy-confidentiality: "never discloses one client's engagement details"}
   note: >-
     must_not_rank (athenaeum#1777): Northgate's own page shares "client" and
     "engagement" with the query and states it "carries additional
@@ -389,7 +389,7 @@
   must_not_rank: [team-keelbridge-desk]
   distractor_terms: ["Keelbridge", "programme", "berth scheduling"]
   answer_tokens: ["Vulmarsh"]
-  answer_markers: {project-keelbridge: "240 thousand GBP per year"}
+  answer_markers: {project-keelbridge: "quayside handheld app"}
   note: >-
     Redundancy probe. Both expected pages are the SAME entity written down
     twice; retrieving only one is the measurable cost of the entity split,
@@ -669,7 +669,7 @@
   must_not_rank: [client-alderway]
   distractor_terms: ["Bramfield Crestwood", "retainer renewal", "renewal timeline"]
   answer_tokens: ["Glimmerhollow"]
-  answer_markers: {client-bramfield-crestwood: "monthly touchpoint"}
+  answer_markers: {client-bramfield-crestwood: "eighteen-month"}
   note: >-
     Long-page tier (athenaeum#1779). The renewal-cycle question sits in the
     page's title and opening paragraph; the reference tag sits past
@@ -730,7 +730,7 @@
   must_not_rank: [decision-ticketing-vendor-gilcrest]
   distractor_terms: ["Triform", "vendor consolidation", "master agreement"]
   answer_tokens: ["Thistlemere"]
-  answer_markers: {decision-vendor-consolidation-triform: "quarterly usage review clause"}
+  answer_markers: {decision-vendor-consolidation-triform: "bundled discount"}
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the three probes above.
     must_not_rank (athenaeum#1777): the Gilcrest ticketing-vendor decision

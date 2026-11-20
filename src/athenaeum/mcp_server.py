@@ -3183,6 +3183,7 @@ def remember_write(
     except ValueError as exc:
         return f"Error: invalid `screening` config: {exc}"
 
+    replaced_notes: list[str] = []
     final_content = _inject_provenance_frontmatter(
         content,
         wiki_source,
@@ -3190,13 +3191,16 @@ def remember_write(
         extras,
         screened_access=screened_access,
         pinned_audience=pinned_audience,
+        replaced=replaced_notes,
     )
     if wiki_root is not None:
         override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
         if override_error:
             return override_error
     filepath = write_raw_intake(target_dir, final_content)
-    return f"Saved to {filepath}"
+    # athenaeum#2922: the reply's first line stays the bare ``Saved to <path>``;
+    # any frontmatter the server replaced rides on following ``Note:`` lines.
+    return "\n".join([f"Saved to {filepath}", *(f"Note: {n}" for n in replaced_notes)])
 
 
 def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
@@ -3206,12 +3210,13 @@ def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
     the result reads ``Saved to raw/<session>/<file>.md``. A path that is not
     under the corpus root falls back to the file name alone, never absolute.
     """
-    written = Path(result[len("Saved to ") :])
+    first, sep, rest = result.partition("\n")
+    written = Path(first[len("Saved to ") :])
     try:
         shown = written.relative_to(raw_root.resolve().parent)
     except ValueError:
         shown = Path(written.name)
-    return f"Saved to {shown.as_posix()}"
+    return f"Saved to {shown.as_posix()}{sep}{rest}"
 
 
 def _audit_relevance_override(wiki_root: Path, final_content: str, transport: str) -> str | None:
@@ -3247,6 +3252,12 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
+def _audience_roles(value: object) -> set[str]:
+    """The role names a frontmatter ``audience:`` value (list or scalar) carries."""
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {str(i).strip() for i in items if str(i).strip()}
+
+
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
@@ -3254,6 +3265,7 @@ def _inject_provenance_frontmatter(
     extras: dict | None = None,
     screened_access: str | None = None,
     pinned_audience: set[str] | None = None,
+    replaced: list[str] | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -3266,6 +3278,12 @@ def _inject_provenance_frontmatter(
     frontmatter injection (``source_type`` / ``source_ref`` / ``model``
     / ``on_behalf_of`` / ``asserter``) — the on-disk names the read-side
     parsers (``models.parse_asserter`` etc.) look for.
+
+    When the server-side *pinned_audience* replaces or drops caller-written
+    ``audience:`` / ``access: open`` (athenaeum#2922), each change is logged at
+    info level and appended to *replaced* (when given) as a sentence the
+    ``remember`` reply surfaces, so the caller can tell their frontmatter was
+    not honoured. A caller ``audience:`` equal to the pin is not a change.
 
     No-op when all inputs are absent — used for ``sources=None`` after
     the default-inferred-source path has supplied ``wiki_source``.
@@ -3306,9 +3324,14 @@ def _inject_provenance_frontmatter(
         access_level = (
             access_value.strip().lower() if isinstance(access_value, str) else ""
         )
+        changes: list[str] = []
         if access_level == "open":
             del meta["access"]
             access_level = ""
+            changes.append(
+                "the note's own `access: open` was dropped, because a remote save "
+                "is never world-readable"
+            )
         if access_level in OWNER_ONLY_ACCESS_LEVELS:
             # Same set ``models.effective_audience`` treats as owner-only; a
             # remote ``remember`` never widens it (athenaeum#2779, athenaeum#2924).
@@ -3316,9 +3339,25 @@ def _inject_provenance_frontmatter(
             # the note itself) is owner-only, and an `audience:` grant is the
             # one thing that would open it to a role. Fail closed: stamp
             # nothing, and drop any caller-written grant too.
+            if "audience" in meta:
+                changes.append(
+                    "the note's own `audience:` was dropped, because its `access:` "
+                    "is restricted and the note stays owner-only"
+                )
             meta.pop("audience", None)
         else:
-            meta["audience"] = sorted(pinned_audience)
+            stamp = sorted(pinned_audience)
+            written = meta.get("audience")
+            if written is not None and _audience_roles(written) != set(stamp):
+                changes.append(
+                    "the note's own `audience:` was replaced by the server's "
+                    "pinned audience"
+                )
+            meta["audience"] = stamp
+        for change in changes:
+            log.info("remember: %s", change)
+            if replaced is not None:
+                replaced.append(change[0].upper() + change[1:] + ".")
 
     if has_frontmatter:
         return render_frontmatter(meta) + body

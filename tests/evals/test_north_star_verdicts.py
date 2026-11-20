@@ -83,7 +83,7 @@ OTHER_ANSWER_MARKER = "25 days per year"
 OTHER_PROBE_ID_2 = "confidentiality_rule"
 OTHER_ANSWER_TOKEN_2 = "Harrowvex"
 OTHER_UID_2 = "policy-confidentiality"
-OTHER_ANSWER_MARKER_2 = "Nadia Frost"
+OTHER_ANSWER_MARKER_2 = "never discloses one client's engagement details"
 ABSTENTION_PROBE_ID = "abstain_unknown_person"
 
 VERDICT_ARM = Arm.PUSH_BREADCRUMB_PULL

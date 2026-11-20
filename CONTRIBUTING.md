@@ -15,7 +15,7 @@ The `[dev,vector]` install matches what CI installs
 same test set CI runs — nothing is silently skipped. The `vector` extra pulls
 in `chromadb`, which the vector-search and clustering tests need. If you don't
 intend to touch search or clustering, `[dev]` alone works and those tests skip
-automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
+automatically (vector-backend tests skip without the `vector` extra); MCP server tests need `fastmcp` (already included in `[dev]`).
 
 Read the next section before you file a bug about a red suite: a handful of
 tests depend on properties of your MACHINE rather than of athenaeum, and they
