@@ -21,7 +21,8 @@ Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 See [Install](docs/guides/install.md) for the `PATH` setup `uv tool install`
 needs, and the wrong-interpreter warning to check against if `athenaeum --version`
 ever looks stale. No git identity is needed (`init` sets a repo-local one if you have none).
-Only the current release is supported; see the [support policy](docs/guides/install.md#support-policy).
+Only the current release is supported; see the [support policy](docs/guides/install.md#support-policy) and
+[what counts as stable](docs/guides/stability.md).
 Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
 
 The `[mcp]` extra in the install command above is required by `athenaeum serve` and

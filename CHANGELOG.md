@@ -67,6 +67,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   fact (capture, store, type, reason code), now called by the three capture gates in both
   pipeline transports. Only its capture answer is used and it is the one the gates computed
   before, so no install captures, drops or places anything differently (athenaeum#2625).
+- New guide `docs/guides/stability.md` says which surfaces count as stable beyond `athenaeum.__all__` (CLI, config keys, MCP tools, file formats), which are experimental and which are internal; the README links it beside the support policy (athenaeum#2908).
 
 ### Changed
 
