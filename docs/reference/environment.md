@@ -71,6 +71,18 @@ exports in your shell profile beat the cached config. Intentional (lets you
 A/B-test a backend without editing `athenaeum.yaml`), but it's the first
 thing to check when the hook "ignores" a config change.
 
+**Scheduled and scripted runs.** A routine whose prompt already carries all
+of its input (a templated classifier, extractor or planner prompt) gains
+nothing from the per-turn push: the pages it matches are matched on the
+template's own words. The routine's launcher sets `AUTO_RECALL=false` in the
+environment it starts that run with, and the per-turn push is skipped for
+that run only. The explicit `recall` tool still works in that run, so a
+routine that does want memory can still ask for it. The setting is per
+process: the hook reads it from the environment it was started with, and
+when it loads `~/.cache/athenaeum/config.env` it never overwrites a key the
+process environment already has. So a launcher value beats the cached config,
+and other sessions keep whatever their own environment or the cache says.
+
 **Debugging the per-turn hook.** `user-prompt-recall.sh` is a thin launcher
 for the packaged `athenaeum.claude_code_adapter`, and that adapter is
 fail-silent by design — a recall failure, a missing index, or no matching
