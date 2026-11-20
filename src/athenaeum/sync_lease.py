@@ -32,7 +32,8 @@ import threading
 from contextlib import AbstractContextManager
 from pathlib import Path
 
-from athenaeum.store import FilesystemStore, Lease, LeaseHeldError, git_dir
+from athenaeum.storage import open_store
+from athenaeum.store import Lease, LeaseHeldError, git_dir
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ def acquire_repo_lease(repo: Path) -> tuple[str, str]:
     with _guard:
         if key in _held:
             return LEASE_TAKEN, ""
-        lease = FilesystemStore(gdir, {}).lease(LEASE_FILE, _TTL_SECONDS)
+        lease = open_store(None, gdir).lease(LEASE_FILE, _TTL_SECONDS)
         try:
             lease.__enter__()
         except LeaseHeldError:
