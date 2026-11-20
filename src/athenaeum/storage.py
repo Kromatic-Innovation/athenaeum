@@ -846,6 +846,13 @@ def _is_within(inner: Path, outer: Path) -> bool:
     return inner == outer or outer in inner.parents
 
 
+#: Directory under ``raw/`` holding one raw-intake directory per store a single
+#: compiling install compiles (``raw/_stores/<store_id>/``; intake routing S15,
+#: ``docs/design/federation-intake-routing.md`` §8.1). It is raw intake of that
+#: store, never an indexed surface.
+STORE_RAW_DIRNAME = "_stores"
+
+
 def validate_indexed_surfaces(
     indexed: Sequence[IndexedSurface],
     non_indexed: Mapping[str, Path],
@@ -897,6 +904,20 @@ def validate_indexed_surfaces(
                     f"non-indexed surface {ex_name!r} ({ex_root}): it equals, "
                     "contains, or sits inside it, so excluded pages could enter "
                     "the index -- move one of them"
+                )
+    if wiki_root is not None:
+        # Intake routing S15 (§8.1): a store's raw intake is never indexed -- a
+        # message waiting for a store is not something the member's assistant
+        # recalls. Refuse a root that is, holds or sits inside it, however it
+        # got on the list (a surface, or ``recall.extra_intake_roots``).
+        store_raw = (wiki_root.parent / "raw" / STORE_RAW_DIRNAME).resolve()
+        for label, root in checked:
+            if _is_within(root.resolve(), store_raw) or _is_within(store_raw, root.resolve()):
+                raise IndexedSurfaceError(
+                    f"indexed root {root} ({label!r}) equals, contains, or sits inside "
+                    f"{store_raw}, a store's raw intake: messages waiting for a store "
+                    "are never indexed or recalled -- remove it (for example from "
+                    "recall.extra_intake_roots)"
                 )
 
 
