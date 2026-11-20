@@ -29,6 +29,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Install](guides/install.md) — Python 3.13+, extras, first `init`.
 - [Daily operation](guides/daily-operation.md) — `run`, `ingest`, `reindex`, `session-end`,
   `status`, and which one to reach for.
+- [Nightly cost and page recompile](guides/nightly-cost.md) — what the unattended nightly run spends, and how to bound or turn it off.
 - [Answering decisions](guides/decisions.md) — working the pending-questions and
   pending-merges queue.
 - [Sidecar](guides/sidecar.md) — passive recall on every turn.
