@@ -138,6 +138,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Security
 
 - `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
+- Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
 
 ## [0.27.2] - 2026-11-19
 

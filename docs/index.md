@@ -131,6 +131,8 @@ does not answer.
   persisted one, and what stays true across mid-run page writes.
 - [Native-memory baseline](design/native-memory-baseline.md) — the comparison against the
   host agent's own memory that decides whether the project continues.
+- [Push behaviour for self-contained prompts](design/push-self-contained-prompts.md) — declared skip
+  for programmatic runs, then a measured relevance floor on the push path.
 - [Prompts](design/prompts.md)
 - [Sensitivity class vocabulary](design/sensitivity-class-vocabulary.md)
 - [Sensitivity value routing](design/sensitivity-value-routing.md)
