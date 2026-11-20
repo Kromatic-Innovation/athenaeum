@@ -27,6 +27,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.store_rights`: the `DirectoryAdapter` protocol, the built-in `static`
+  adapter (reads the declaration's `groups:` block) and `resolve_rights`, which
+  returns the subset of read, propose, compile and answer an owner holds on a
+  store, keyed by `asserter_identity_key` and never a role name. A directory that
+  cannot answer resolves as a reader only. Nothing calls it yet, so no install
+  behaves differently (athenaeum#2933).
+
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is
   refused), pins `raise:<raise_id>` as a typed source, and backs a new
