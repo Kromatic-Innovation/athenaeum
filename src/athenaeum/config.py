@@ -6600,6 +6600,12 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     never written or pushed. Every write path refuses it with
     ``ReadOnlySurfaceError``.
 
+    An entry that mounts a store with a ``_store/access.yaml`` declaration may
+    carry ``store_id`` (athenaeum#2989), the id that declaration must carry. The
+    install does not mount the store (it is not indexed or recalled, and nothing
+    is deleted) when the ids differ, or when the declaration does not grant
+    ``owner.asserter`` read. A store with no declaration mounts as before.
+
     An entry may carry an integer ``visibility`` (athenaeum#2619): how widely
     the surface is shared, higher = more widely shared, default 0 (the most
     private, same as the built-in wiki surface). A page may not link to a page

@@ -6,7 +6,7 @@ This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.
 python scripts/gen_cli_reference.py
 ```
 
-`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `drops`, `entity`, `measure`, `memory-class`, `owner`, `provenance`, `push-metrics`, `receipts`, `recompile`, `relevance-policy`, `schedule`, `schema`, `storage`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. The following top-level commands (`attribution`, `authority`, `axiom`, `calibration`, `decisions`, `dedupe`, `description`, `dimensions`, `drops`, `entity`, `measure`, `memory-class`, `owner`, `provenance`, `push-metrics`, `receipts`, `recompile`, `relevance-policy`, `schedule`, `schema`, `storage`, `store`, `store`, `triage`, `verdicts`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -149,13 +149,17 @@ python scripts/gen_cli_reference.py
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - [`athenaeum storage move-type`](#athenaeum-storage-move-type) (command) — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+- [`athenaeum store`](#athenaeum-store) (group) — Store access: 'store access check' compares each declared store's rights with local config and this install's last fetch and push. Read-only.
 - [`athenaeum store-link-lint`](#athenaeum-store-link-lint) (command) — Read-only: list every link from a page to a page on a more private store (lower visibility rank). A link to a more shared store is fine.
+- [`athenaeum store access`](#athenaeum-store-access) (group) — Access to declared stores.
+- [`athenaeum store access check`](#athenaeum-store-access-check) (command) — Read-only: report declared rights, local read_only, the recorded last fetch and push per location, and any difference or refused declaration. Exits 2 on any finding.
 - [`athenaeum subject-population`](#athenaeum-subject-population) (command) — Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
 - [`athenaeum test-mcp`](#athenaeum-test-mcp) (command) — Smoke-test MCP remember/recall against a synthetic knowledge dir
 - [`athenaeum triage`](#athenaeum-triage) (group) — Agent triage lane over the unified decision queue: prepares authority items for the human, absorbs research-resolvable competence items through the same `decisions answer` interface. Modes: run, report.
 - [`athenaeum triage report`](#athenaeum-triage-report) (command) — Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-rolling-quarter threshold state.
 - [`athenaeum triage run`](#athenaeum-triage-run) (command) — Walk the pending-decisions queue once: prepare authority items for the human, submit whatever the default researcher resolves for a competence question item.
+- [`athenaeum uid-collision-lint`](#athenaeum-uid-collision-lint) (command) — Read-only: list every uid carried by more than one page inside a single surface (tombstones count). The same uid on two different surfaces is not reported. Exits 2 when any collision is found.
 - [`athenaeum usage-report`](#athenaeum-usage-report) (command) — Per-claim usage report (pushed / referenced / last-referenced) computed from the push-metrics ledgers — ids-only, no content.
 - [`athenaeum verdicts`](#athenaeum-verdicts) (group) — Inspect the verdict ledger (`wiki/_verdicts/`) — pairwise comparison verdicts with their justification basis. Four modes: count, list-by-verdict, show-one-pair, show-stale.
 - [`athenaeum verdicts count`](#athenaeum-verdicts-count) (command) — Print the live verdict count.
@@ -1956,9 +1960,34 @@ Move every wiki page of one entity type into a configured, indexed surface that 
 | `--to` | — | — | Target surface: a storage.adapters name (embedded: true, own git repo). |
 | `--undo` | — | — | Undo a previous --apply: RECORD is the record id --apply printed (found in the cache dir) or the path of its JSON file. Restores both repositories to their pre-move snapshots. |
 
+## `athenaeum store`
+
+Store access: 'store access check' compares each declared store's rights with local config and this install's last fetch and push. Read-only.
+
+Subcommands:
+
+- `athenaeum store access` — Access to declared stores.
+
 ## `athenaeum store-link-lint`
 
 Read-only: list every link from a page to a page on a more private store (lower visibility rank). A link to a more shared store is fine.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum store access`
+
+Access to declared stores.
+
+Subcommands:
+
+- `athenaeum store access check` — Read-only: report declared rights, local read_only, the recorded last fetch and push per location, and any difference or refused declaration. Exits 2 on any finding.
+
+## `athenaeum store access check`
+
+Read-only: report declared rights, local read_only, the recorded last fetch and push per location, and any difference or refused declaration. Exits 2 on any finding.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
@@ -2032,6 +2061,16 @@ Walk the pending-decisions queue once: prepare authority items for the human, su
 | `--dry-run` | off (flag absent) | — | Report what would be absorbed without submitting or sampling anything. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum uid-collision-lint`
+
+Read-only: list every uid carried by more than one page inside a single surface (tombstones count). The same uid on two different surfaces is not reported. Exits 2 when any collision is found.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Emit machine-readable JSON (collisions with page paths and tombstone flags) instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--surface` | — | — | Scan only this surface (wiki or a configured surface name). Default: each surface on its own. |
 
 ## `athenaeum usage-report`
 
