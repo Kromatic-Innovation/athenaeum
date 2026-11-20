@@ -189,6 +189,7 @@ MODULE_LAYER: dict[str, int] = {
     # (L4) and _cmd_drops.py (L5), both strictly above.
     "drops": 3,
     "relevance_policy": 2,  # issue athenaeum#2643
+    "intake_destination": 3,  # issue athenaeum#2999: decision store -> write root
     "intake_decision": 2,  # issue athenaeum#2797: pure decide(); a leaf
     "erasure": 3,
     "fingerprint": 3,
