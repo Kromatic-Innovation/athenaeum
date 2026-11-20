@@ -1250,15 +1250,15 @@ _ACCESS_PUBLIC = "open"
 # the backends test the same marker instead of hardcoding a literal.
 AUDIENCE_PUBLIC_TOKEN = "__access_open__"
 
-# Words that are access levels / the internal public sentinel, NOT audience
-# roles. Dropped from any ``audience:`` list so a mislabeled entry can never be
-# read as a role grant (and can never forge the public marker).
 # The ``access:`` levels that are owner-only: they contribute no audience role,
 # so a restricted caller is shut out unless an explicit ``audience:`` grant opens
 # the page (see :func:`effective_audience`). The single definition of the set;
 # ``mcp_server`` imports it rather than keeping its own copy (athenaeum#2924).
 OWNER_ONLY_ACCESS_LEVELS: frozenset[str] = frozenset({"internal", "confidential", "personal"})
 
+# Words that are access levels / the internal public sentinel, NOT audience
+# roles. Dropped from any ``audience:`` list so a mislabeled entry can never be
+# read as a role grant (and can never forge the public marker).
 _RESERVED_AUDIENCE_ROLES: frozenset[str] = frozenset(
     {_ACCESS_PUBLIC, AUDIENCE_PUBLIC_TOKEN} | OWNER_ONLY_ACCESS_LEVELS
 )
