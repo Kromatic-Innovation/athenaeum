@@ -486,6 +486,7 @@ def test_missing_search_index_fails_and_names_fix(healthy_install: dict) -> None
 def test_vector_backend_missing_index_fails(
     healthy_install: dict,
 ) -> None:
+    pytest.importorskip("chromadb")  # without it the vector backend falls back to fts5
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
         "search_backend: vector\n", encoding="utf-8"
     )

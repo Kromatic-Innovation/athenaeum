@@ -1447,3 +1447,44 @@ artifacts and none are described by this document; see `CHANGELOG.md` and
 `docs/guides/upgrading.md` for what changed and where their old files sit.
 This adapter-provenance ledger is the one ledger of that review that was
 kept and, as of this issue, exposed.
+
+## 14. The `raised_from` block of a raised copy (athenaeum#2799)
+
+A page that a raise created in a target store carries a `raised_from` block in
+its frontmatter and lists `raise:<raise_id>` in `sources`. The reasoning for
+every field, and why each discloses nothing a reader of the target could not
+already see, is in `docs/design/federation-raise-retract.md` §5 and §5.2; this
+section states only what the engine reads.
+
+| Key | Rule |
+|---|---|
+| `v` | The integer `1`. Required; any other value is malformed. |
+| `raise_id` | `rs_` and 20 lowercase base32 characters. |
+| `origin` | A store id: `st_` and 12 lowercase base32 characters. |
+| `proposer` | A mapping with non-empty `iss` and `sub`, or `group:<name>`. |
+| `via` | `proposer`, or `review:<name>`. |
+| `content_hash` | `sha256:` and 64 lowercase hex characters. |
+| `raised_on` | A calendar date; a time of day is refused. |
+| `seq` | An integer of 1 or more. |
+| `watch` | `active`, `lapsed` or `ended`; `active` when absent. |
+
+Any other key is refused (`unknown_key`): the block names no source uid and no
+source path, and that is what keeps a raised copy free of a link back down.
+`athenaeum.raise_provenance.parse_raised_from` fails closed on a present but
+invalid block and returns `None` when there is none.
+
+`raised_from` is in `verdicts.SYSTEM_METADATA_KEYS`, so changing `seq` or
+`watch` on a copy does not change `content_hash`.
+
+**The `raise` source type.** `raise:<raise_id>` already parses as a typed
+`SourceRef`; `raise_provenance.raise_source_ref` builds it. **Its precedence
+rank is unset.** `precedence.source_rank` gives a type that no tier lists the
+lowest rank, which is the default for an unlisted type and not a decision about
+raises. The rank belongs to the trust design (athenaeum#2789). Nothing may rely
+on a raised copy winning or losing a conflict.
+
+`athenaeum raised-from-lint` is the read-only check. It reports, per page uid,
+`malformed_block`, `unknown_key`, `missing_raise_source` (a valid block with no
+`raise:<raise_id>` source) or `raise_source_mismatch` (a `raise:` source naming a
+different `raise_id`). A page with a `raise:` source and no block is not
+reported: it was compiled from a single routed fact and is the target's own page.
