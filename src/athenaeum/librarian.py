@@ -92,7 +92,15 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, pii_attribution, push_state, spend, sync_integrate, zero_yield
+from athenaeum import (
+    batch_state,
+    pii_attribution,
+    push_state,
+    spend,
+    sync_integrate,
+    sync_lease,
+    zero_yield,
+)
 from athenaeum import drops as drops_mod
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
@@ -879,7 +887,19 @@ def _maybe_pull_before_run(
         surface_sync.record(surfaces, "pull", "ok" if ok else "failed")
 
 
-def _maybe_push_after_run(
+def _maybe_push_after_run(*args: Any, **kwargs: Any) -> None:
+    """:func:`_push_after_run`, then drop any repository lease this run still holds.
+
+    The sync lease (athenaeum#2997) spans the compile, and a run that does not push
+    never reaches ``push_after_compile``, which would have dropped it.
+    """
+    try:
+        _push_after_run(*args, **kwargs)
+    finally:
+        sync_lease.release_all_leases()
+
+
+def _push_after_run(
     knowledge_root: Path,
     *,
     config: dict | None,

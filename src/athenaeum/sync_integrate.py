@@ -8,6 +8,8 @@ install may narrow that locally (``sync_mode: fast_forward``) and may never
 widen it. :func:`resolve_sync_mode` is the whole rule. For a repository in
 integrate mode the run does:
 
+* the repository lease (:mod:`athenaeum.sync_lease`), taken by
+  :func:`sync_before_compile` and dropped by :func:`push_after_compile`;
 * :func:`sync_before_compile` -- snapshot uncommitted work as a local commit,
   fetch, then integrate (step 2 to 4 of section 4);
 * the normal compile, which commits as today;
@@ -94,6 +96,7 @@ from athenaeum.store_access import (
 )
 from athenaeum.store_boundary import link_forbidden
 from athenaeum.store_links import extract_link_refs
+from athenaeum.sync_lease import LEASE_HELD, LEASE_TAKEN, acquire_repo_lease, release_repo_lease
 from athenaeum.sync_machine_local import check_repo as _check_machine_local
 
 log = logging.getLogger(__name__)
@@ -127,6 +130,7 @@ RETRY_WAIT_RANGE = (0.2, 1.5)
 
 REASON_CONTENDED = "contended"
 REASON_INTEGRATE_BLOCKED = "integrate-blocked"
+REASON_LEASE_HELD = "lease-held"
 
 # Why an integrate was held or blocked.
 HELD_STORE_FILE = "store-file"
@@ -311,6 +315,8 @@ def sync_before_compile(
     """
     cfg = settings or SyncSettings()
     report = SyncReport()
+    if not _take_lease(repo, report):
+        return report
     _report_machine_local(repo, report)
     try:
         sha = commit_repo(repo, "athenaeum sync: snapshot before integrate")
@@ -333,6 +339,22 @@ def sync_before_compile(
     return report
 
 
+def _take_lease(repo: Path, report: SyncReport) -> bool:
+    """Section 9: the repository lease inside the git directory; ``False`` to skip.
+
+    Another process holds it: the repository is skipped and reported, never
+    integrated concurrently. Where no lease can be taken (no ``flock``) the sync goes
+    on unguarded, as the run lock does.
+    """
+    status, reason = acquire_repo_lease(repo)
+    if status == LEASE_HELD:
+        report.add("lease", "skipped", reason)
+        report.add("integrate", "skipped", reason)
+        return False
+    report.add("lease", "ok" if status == LEASE_TAKEN else "skipped", reason)
+    return True
+
+
 def _report_machine_local(repo: Path, report: SyncReport) -> None:
     """Section 5, S6b: a tracked machine-local file is a ``machine-local-files`` row.
 
@@ -353,6 +375,31 @@ def _report_machine_local(repo: Path, report: SyncReport) -> None:
 
 
 def push_after_compile(
+    repo: Path,
+    branch: str,
+    settings: SyncSettings | None = None,
+    report: SyncReport | None = None,
+) -> PushOutcome:
+    """Steps 6 and 7 under the repository lease (section 9); see :func:`_push_after_compile`.
+
+    The lease is taken here when the run did not already hold it, and dropped on the
+    way out: the push ends the sequence. A lease held by another process means no
+    push: ``reason=lease-held``.
+    """
+    status, reason = acquire_repo_lease(repo)
+    if status == LEASE_HELD:
+        outcome = PushOutcome(False, 0, REASON_LEASE_HELD, reason)
+        if report is not None:
+            report.push = outcome
+            report.add("push", "failed", REASON_LEASE_HELD)
+        return outcome
+    try:
+        return _push_after_compile(repo, branch, settings, report)
+    finally:
+        release_repo_lease(repo)
+
+
+def _push_after_compile(
     repo: Path,
     branch: str,
     settings: SyncSettings | None = None,

@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- Sync: each repository in `sync.mode: integrate` now takes a lease on a lock file inside its own git directory (`athenaeum-sync.lock`, never tracked or committed) for the integrate and push steps, inside the run lock, through the existing single-machine `flock` lease. A second process on the same clone skips the repository and reports `lease-held`; separate clones and `fast_forward` repositories are unaffected. (athenaeum#2997)
 - Sync: a repository in `sync.mode: integrate` is now checked, before each integrate, for tracked machine-local files (the artifact registry's `operational` / `machine-local` entries). A finding is a `machine-local-files` row in the run summary and a log warning; the sync goes on and nothing is untracked. `athenaeum machine-local-check` runs the same check read-only and exits 2 on a finding. (athenaeum#2994)
 
 ## [0.28.0] - 2026-11-20
