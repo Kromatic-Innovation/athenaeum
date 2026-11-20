@@ -1218,6 +1218,12 @@ def record_context_push(
 #: (issue athenaeum#2914).
 SKIP_REASON_HARNESS_INJECTED = "harness_injected"
 
+#: Skip reason recorded when the caller declared the per-turn push off for
+#: this run (``AUTO_RECALL`` set to anything but ``true``; issue
+#: athenaeum#2976). The row keeps a declared-off turn in the push-metrics
+#: denominator instead of reading as a turn that never ran the hook.
+SKIP_REASON_DECLARED = "declared"
+
 
 def split_injected_text(prompt: str, patterns: Sequence[str]) -> tuple[str, bool]:
     """Remove harness-injected spans from *prompt*.
@@ -1251,6 +1257,10 @@ def record_context_skip(
 ) -> bool:
     """Write one skip row (no items, ``skip_reason`` set) to the push ledger.
 
+    An empty *prompt* writes an empty ``query_hash`` rather than the digest
+    of the empty string, so a row written without any prompt in hand (the
+    declared skip, issue athenaeum#2976) carries nothing derived from one.
+
     Best-effort like :func:`record_context_push`: never raises.
     """
     try:
@@ -1261,7 +1271,7 @@ def record_context_skip(
         record = push_metrics.PushRecord(
             session_id=session_id,
             ts=push_metrics.now_iso(),
-            query_hash=push_metrics._query_hash(prompt),
+            query_hash=push_metrics._query_hash(prompt) if prompt else "",
             backend="",
             items=[],
             source="sidecar",
@@ -1273,6 +1283,27 @@ def record_context_skip(
     except Exception:  # must never break the turn
         log.debug("context: skip-row instrumentation failed", exc_info=True)
         return False
+
+
+def record_declared_skip(
+    session_id: str,
+    *,
+    cache_dir: Path,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Record one ``declared`` skip row for a turn whose caller turned the
+    per-turn push off (issue athenaeum#2976).
+
+    The row carries the reason, the session id and the timestamp only: no
+    prompt text, no query hash, no query terms and no page ids. Like the
+    harness-injected skip, nothing is written while the recall kill switch
+    is on. Best-effort: never raises.
+    """
+    if _recall_disabled(cache_dir):
+        return False
+    return record_context_skip(
+        "", session_id, SKIP_REASON_DECLARED, cache_dir=cache_dir, config=config
+    )
 
 
 def _seen_file(cache_dir: Path, session_id: str) -> Path:

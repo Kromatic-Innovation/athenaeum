@@ -128,6 +128,27 @@ and `<system-reminder>` spans. A span must have its closing tag to match, so a
 person typing a lone opening tag is never skipped. With no patterns (the
 default for any other caller) behaviour is as before.
 
+## Per-turn push: a declared-off turn is recorded as a skip
+
+A caller that knows its run is self-contained turns the per-turn push off by
+setting `AUTO_RECALL=false` for that run. The hook then does not push (the
+witness call still runs), and the push ledger gets one row with an empty
+`items` list, `"pushed_count": 0` and `skip_reason` `declared`. The row holds
+only the reason, the session id and the timestamp: its `query_hash` and
+`backend` are empty, and it carries no query terms or page ids. No row is
+written while the recall kill switch is on, and none when `AUTO_RECALL` is
+unset or `true`.
+
+`athenaeum push-metrics baseline` reports skips as their own figure:
+`skipped_turns` (with a per-reason breakdown, `skipped_by_reason`) and
+`skip_only_sessions`, the sessions in the window whose only rows are skips.
+An `--exclude-session` drops that session's skips as well; they are counted in
+`excluded_skipped_turns`, and the session is listed in `excluded_sessions` even
+when it has no push rows.
+Neither is folded into `push_records` or `sessions`. Reference determination
+gives a skip-only session the reason `push-skipped` rather than
+`no-push-records`.
+
 Skip rows live in the same ledger file but are not pushes:
 `push_metrics.read_push_records` omits them by default (so baseline, coverage,
 liveness and usage reports count real pushes only), and

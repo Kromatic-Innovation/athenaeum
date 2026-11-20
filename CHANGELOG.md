@@ -32,6 +32,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   its launcher sets `AUTO_RECALL=false` for that run, the explicit `recall`
   tool still works, and the launcher value beats the cached config
   (athenaeum#2977).
+- The per-turn push writes one skip row with reason `declared` when the
+  caller turns it off with `AUTO_RECALL=false`, so a declared-off turn is
+  counted as skipped rather than read as a turn the hook never saw. The row
+  holds only the reason, session id and timestamp. `athenaeum push-metrics
+  baseline` reports skipped turns (`skipped_turns`, `skipped_by_reason`,
+  `skip_only_sessions`) separately from pushes, and a session whose only rows
+  are skips gets the reference reason `push-skipped` instead of
+  `no-push-records` (athenaeum#2976).
 - The per-turn push applies the push-path relevance floor
   (`recall.relevance_floor.push.<backend>`, or
   `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`) before the count cap. FTS5 and
