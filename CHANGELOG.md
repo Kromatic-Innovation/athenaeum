@@ -56,6 +56,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   The hash, read-back, `relevance_policy` tool and `set_capture_rule` (new
   `store` argument) carry the store. Nothing acts on a `route` row yet
   (athenaeum#2625).
+- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
+  fact (capture, store, type, reason code), now called by the three capture gates in both
+  pipeline transports. Only its capture answer is used and it is the one the gates computed
+  before, so no install captures, drops or places anything differently (athenaeum#2625).
 
 ### Changed
 

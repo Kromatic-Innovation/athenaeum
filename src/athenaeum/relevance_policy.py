@@ -89,6 +89,13 @@ from typing import Any
 
 import yaml
 
+from athenaeum.intake_decision import (
+    CAPTURE_DROP,
+    CONFIDENCE_HIGH,
+    Description,
+    RuleLike,
+    decide,
+)
 from athenaeum.models import load_schema_list, parse_frontmatter
 from athenaeum.schemas import KNOWN_TYPES
 from athenaeum.store_access import is_store_id
@@ -410,7 +417,6 @@ _EXCERPT_CHARS = 500
 #: Confidence value the classifier (and the reasoning tier) must emit for a
 #: category to be acted on without escalation (athenaeum#2647). Any other value,
 #: or none, is *unsure*.
-CONFIDENCE_HIGH = "high"
 CONFIDENCE_LOW = "low"
 CONFIDENCES: frozenset[str] = frozenset({CONFIDENCE_HIGH, CONFIDENCE_LOW})
 
@@ -430,7 +436,7 @@ EXPLICIT_REMEMBER_KEY = "explicit_remember"
 class RelevanceDrop:
     """One item a ``never`` rule covered, and the rule that decided it."""
 
-    rule: RelevanceRule
+    rule: RuleLike
     item_index: int
     excerpt: str
 
@@ -607,14 +613,26 @@ def gate_raw_content(
     overrides: list[RelevanceDrop] = []
     kept: list[str] = []
     for index, item in enumerate(items):
-        rule = policy.match(*_declared(item.meta))
-        if rule is not None and rule.verdict == "never":
-            hit = RelevanceDrop(rule, index, item.text.strip()[:_EXCERPT_CHARS])
-            if note_explicit or _is_explicit_remember(item.meta):
-                overrides.append(hit)  # explicit human request beats ``never``
-                kept.append(item.text)
-            else:
-                drops.append(hit)
+        type_, tags, subject = _declared(item.meta)
+        decision = decide(
+            Description(
+                type_,
+                tuple(tags),
+                subject,
+                explicit=note_explicit or _is_explicit_remember(item.meta),
+            ),
+            policy,
+        )
+        if decision.overridden is not None:
+            # explicit human request beats ``never``
+            overrides.append(
+                RelevanceDrop(decision.overridden, index, item.text.strip()[:_EXCERPT_CHARS])
+            )
+            kept.append(item.text)
+        elif decision.capture == CAPTURE_DROP and decision.rule is not None:
+            drops.append(
+                RelevanceDrop(decision.rule, index, item.text.strip()[:_EXCERPT_CHARS])
+            )
         else:
             kept.append(item.text)
     if not drops:
@@ -668,7 +686,7 @@ class NeverMatch:
     """One existing wiki page a ``never`` rule covers (athenaeum#2650)."""
 
     path: str
-    rule: RelevanceRule
+    rule: RuleLike
     type: str | None
     tags: tuple[str, ...]
     uid: str | None
@@ -709,7 +727,7 @@ def report_never_matches(policy: RelevancePolicy, wiki_root: Path) -> list[Never
         if not isinstance(meta, dict):
             continue  # a list/scalar frontmatter declares nothing to match
         type_, tags, uid = declared_facts(meta)
-        rule = policy.match(type_, tags, uid)
-        if rule is not None and rule.verdict == "never":
-            out.append(NeverMatch(path.name, rule, type_, tuple(tags), uid))
+        decision = decide(Description(type_, tuple(tags), uid), policy)
+        if decision.capture == CAPTURE_DROP and decision.rule is not None:
+            out.append(NeverMatch(path.name, decision.rule, type_, tuple(tags), uid))
     return out

@@ -364,9 +364,11 @@ def test_read_back_shows_the_store():
     assert "never tag=personal\n" in text
 
 
-def test_no_production_caller_of_match_route():
+def test_match_route_has_one_production_caller():
+    # athenaeum#2796 shipped with no caller; athenaeum#2797's ``decide`` is the
+    # only one, and no gate reads a route row to place a fact.
     src = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
     users = sorted(
         p.name for p in src.rglob("*.py") if "match_route" in p.read_text(encoding="utf-8")
     )
-    assert users == ["relevance_policy.py"]
+    assert users == ["intake_decision.py", "relevance_policy.py"]
