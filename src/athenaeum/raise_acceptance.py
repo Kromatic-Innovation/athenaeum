@@ -40,16 +40,22 @@ policy.
 **No precedence.** Nothing here ranks a raised copy against any other source;
 no code may rely on it winning or losing a conflict (§5.1).
 
+**The filing checks run after acceptance, never before** (S21,
+:mod:`athenaeum.raise_filing_checks`): once the copy is committed and its
+acceptance recorded, :func:`accept_raise` runs them on the copy and a failure
+opens a ``filing-check`` item naming it. They are never a reason to hold, ask
+about or reject a raise, and the outcome of an acceptance never depends on them.
+
 Out of scope here: rejection mechanics, dropping later messages and the detail
-of the taken-uid hold (S7b), the ``raise:`` declaration block and acceptance
-without asking (S8), and the filing checks after acceptance (S21).
+of the taken-uid hold (S7b), and the ``raise:`` declaration block and acceptance
+without asking (S8).
 
 Layering: L3 (service). Imports :mod:`athenaeum.raise_acceptance_ledger` (L3),
 :mod:`athenaeum.store_decisions`, :mod:`athenaeum.store_intake`,
 :mod:`athenaeum.store_rights`, :mod:`athenaeum.store_access`,
 :mod:`athenaeum.raise_messages`, :mod:`athenaeum.raise_projection`,
-:mod:`athenaeum.raise_provenance` (L2), :mod:`athenaeum.models` and
-:mod:`athenaeum.store` (L1).
+:mod:`athenaeum.raise_provenance` (L2), :mod:`athenaeum.raise_filing_checks`
+(L3), :mod:`athenaeum.models` and :mod:`athenaeum.store` (L1).
 """
 
 from __future__ import annotations
@@ -77,6 +83,7 @@ from athenaeum.raise_acceptance_ledger import (
     is_rejected,
     record_acceptance,
 )
+from athenaeum.raise_filing_checks import RaiseFilingResult, run_after_publish
 from athenaeum.raise_messages import (
     KIND_RAISE,
     Fallthrough,
@@ -98,7 +105,7 @@ from athenaeum.raise_provenance import (
     parse_raised_from,
     raise_source_ref,
 )
-from athenaeum.store import blob_id, commit_paths
+from athenaeum.store import blob_id, commit_paths, repo_head
 from athenaeum.store_access import (
     StoreDeclaration,
     StoreDeclarationInvalid,
@@ -157,6 +164,9 @@ class Outcome:
     row: AcceptanceRow | None = None
     uid: str | None = None
     commit: str | None = None
+    #: The filing checks run on the copy after it was published (raise S21); never
+    #: a reason the status differs. ``None`` when no copy was published.
+    filing: RaiseFilingResult | None = None
 
 
 def commit_line(raise_id: str, seq: int) -> str:
@@ -627,4 +637,17 @@ def accept_raise(
     resolve_decision(
         knowledge_root, store_id=target_store_id, decision_id=decision_id, disposition="accepted"
     )
-    return Outcome(ACCEPTED, None, rec, row, uid, commit)
+    # The copy is published and its acceptance recorded; only now do the filing
+    # checks run (S21). They never change this outcome.
+    filing = run_after_publish(
+        knowledge_root,
+        target_store_id=target_store_id,
+        target_root=Path(target_root),
+        copy_path=path,
+        commit=commit or repo_head(Path(target_root)),
+        raise_id=msg.raise_id,
+        created=True,  # also after a crash: the copy found at the uid is this raise's
+        mounts=mounts,
+        asserter=asserter,
+    )
+    return Outcome(ACCEPTED, None, rec, row, uid, commit, filing)

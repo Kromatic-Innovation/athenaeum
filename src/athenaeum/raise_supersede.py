@@ -55,15 +55,15 @@ Layering: L3 (service). Imports :mod:`athenaeum.raise_acceptance` (L3),
 :mod:`athenaeum.raise_messages`, :mod:`athenaeum.raise_projection`,
 :mod:`athenaeum.raise_provenance` (L2), :mod:`athenaeum.store_decisions`,
 :mod:`athenaeum.store_intake`, :mod:`athenaeum.store_access`,
-:mod:`athenaeum.atomic_io` (L0), :mod:`athenaeum.models` and
-:mod:`athenaeum.store` (L1).
+:mod:`athenaeum.raise_filing_checks` (L3), :mod:`athenaeum.atomic_io` (L0),
+:mod:`athenaeum.models` and :mod:`athenaeum.store` (L1).
 """
 
 from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -101,6 +101,7 @@ from athenaeum.raise_acceptance_ledger import (
     iter_rows,
     record_acceptance,
 )
+from athenaeum.raise_filing_checks import run_after_publish
 from athenaeum.raise_messages import (
     KIND_RAISE,
     KIND_RETRACT,
@@ -373,7 +374,51 @@ def apply_supersede(
     *specs* maps a page type to its :class:`StructuredUpsertSpec` for the page
     merge. *apply_retract* receives the retract a rejected successor turns the
     message into (raise S11); without it the message is held.
+
+    Once a copy is replaced (:data:`APPLIED`), the filing checks run on what changed
+    (raise S21, :mod:`athenaeum.raise_filing_checks`); their result is the outcome's
+    ``filing`` and never changes its status.
     """
+    outcome = _apply_supersede(
+        knowledge_root, record, target_store_id=target_store_id, target_root=target_root,
+        cache_dir=cache_dir, location=location, specs=specs, apply_retract=apply_retract,
+        mounts=mounts, asserter=asserter, now=now,
+    )
+    if outcome.status != APPLIED or outcome.uid is None:
+        return outcome
+    parsed = parse_message(record)
+    raise_id = parsed.raise_id if not isinstance(parsed, Fallthrough) else None
+    copies = _pages_at_uid(Path(target_root), outcome.uid)
+    if not copies or raise_id is None:
+        return outcome
+    filing = run_after_publish(
+        knowledge_root,
+        target_store_id=target_store_id,
+        target_root=Path(target_root),
+        copy_path=copies[0],
+        commit=outcome.commit,
+        raise_id=raise_id,
+        mounts=mounts,
+        asserter=asserter,
+    )
+    return replace(outcome, filing=filing)
+
+
+def _apply_supersede(
+    knowledge_root: Path,
+    record: object,
+    *,
+    target_store_id: str,
+    target_root: Path,
+    cache_dir: Path,
+    location: str,
+    specs: Mapping[str, StructuredUpsertSpec] | None = None,
+    apply_retract: Callable[[RaiseMessage], Outcome] | None = None,
+    mounts: Any = None,
+    asserter: Any = None,
+    now: datetime | None = None,
+) -> Outcome:
+    """:func:`apply_supersede` before the filing checks."""
     parsed = parse_message(record)
     if isinstance(parsed, Fallthrough) or parsed.kind != KIND_SUPERSEDE:
         decision = _file_held(
