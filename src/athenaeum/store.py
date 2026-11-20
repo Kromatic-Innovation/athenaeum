@@ -1794,7 +1794,9 @@ def list_tracked_files(repo: Path) -> list[str]:
     listed. Raises ``subprocess.CalledProcessError`` outside a git repository.
     """
     raw = _git_out(repo, "ls-files", "-z")
-    return sorted(p.decode() for p in raw.split(b"\0") if p)
+    # ``replace``: a filename that is not UTF-8 must not abort a sync; the caller
+    # matches on ASCII base names and prints the path.
+    return sorted(p.decode(errors="replace") for p in raw.split(b"\0") if p)
 
 
 def list_files_at_revision(repo: Path, rev: str, prefix: str = "") -> list[str]:

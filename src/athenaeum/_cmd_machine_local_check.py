@@ -41,7 +41,7 @@ def cmd_machine_local_check(args: argparse.Namespace) -> int:
     found = any(r["tracked"] for r in results)
     errored = any(r["error"] for r in results)
     if args.json:
-        sys.stdout.write(json.dumps({"ok": not found, "repos": results}) + "\n")
+        sys.stdout.write(json.dumps({"ok": not found and not errored, "repos": results}) + "\n")
     else:
         if not results:
             print("no repository in integrate mode to check")
