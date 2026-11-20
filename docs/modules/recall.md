@@ -163,6 +163,34 @@ plain-text view prints a `terms=` line under the row), and `athenaeum demo`
 shows them under "last turn", falling back to the local topics trace for older
 rows.
 
+## Per-turn push: an optional relevance floor
+
+The per-turn push can drop candidates that score below a floor before the
+count cap is applied. The floor is the push-path relevance floor
+(`recall.relevance_floor.push.<backend>` in `athenaeum.yaml`, or
+`ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` in the environment). It is set
+separately from the floor on an explicit `recall` call, and it is off by
+default: with no floor set, the push is exactly what it was.
+
+- Each candidate is judged in its own backend's units and direction: an FTS5
+  candidate by its BM25 rank, a vector candidate by its cosine distance. Lower
+  is better for both, and a candidate exactly at the floor is kept. The vector
+  distance is used for this check only and does not appear in the envelope.
+- A dropped candidate does not take a slot, and it is not counted in the
+  "N more matching results were withheld" line. A page below the floor is not
+  a relevant result.
+- The floor only removes candidates. It never reorders or rescores the ones
+  it keeps.
+- Only the per-turn push applies it (`build_context_for_turn`, and
+  `athenaeum context`, which runs the same sequence). A direct
+  `build_context` call, the static-refresh adapter for example, never does.
+
+The packaged per-turn hook does not read `athenaeum.yaml` itself, so it
+picks up a floor from its environment (the launcher's environment, or
+`config.env`) through `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`. A vector floor
+is yaml-only, so it reaches the hook only through a caller that passes the
+loaded config.
+
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the

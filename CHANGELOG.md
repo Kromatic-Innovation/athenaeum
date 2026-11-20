@@ -25,6 +25,17 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- The per-turn push applies the push-path relevance floor
+  (`recall.relevance_floor.push.<backend>`, or
+  `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`) before the count cap. FTS5 and
+  vector candidates are each judged in their own direction. A dropped
+  candidate is not counted in the overflow line. The floor stays off by
+  default, and with no floor set the envelope is unchanged. Direct
+  `build_context` callers, such as the static-refresh adapter, are not
+  affected (athenaeum#2978).
+
 ## [0.27.6] - 2026-11-20
 
 **Summary.** 0.27.6 is a PATCH release on 0.27.2 (0.27.3 to 0.27.5 were
