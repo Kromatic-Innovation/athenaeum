@@ -150,7 +150,11 @@ def _sync_paths(tmp_path: Path, cfg: dict[str, Any] | None) -> set[str]:
     wiki.mkdir(parents=True)
     _apply_tier3_results(
         ProcessingResult(raw_file=_raw(root)),
-        new_entities=[_entity("concept", "c-1"), _entity("project", "n-1"), _entity("company", "k-1")],
+        new_entities=[
+            _entity("concept", "c-1"),
+            _entity("project", "n-1"),
+            _entity("company", "k-1"),
+        ],
         pending_updates=[],
         updated_uids=[],
         escalations=[],
