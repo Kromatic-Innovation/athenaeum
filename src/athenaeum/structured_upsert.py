@@ -19,7 +19,8 @@ frontmatter.
 
 Layering: L2 primitive, a sibling of :mod:`athenaeum.intake`. Imports only
 :mod:`athenaeum.config` (L2), :mod:`athenaeum.models` / :mod:`athenaeum.schemas`
-(L1) and :mod:`athenaeum.atomic_io` (L0); imported by the L4 librarian and batch.
+(L1), :mod:`athenaeum.page_text` (L0) and :mod:`athenaeum.atomic_io` (L0); imported by
+the L4 librarian and batch.
 
 Lives in its own module (re-exported from :mod:`athenaeum.librarian`) so that
 :mod:`athenaeum.batch` can call it without importing the librarian, the same
@@ -64,7 +65,6 @@ Contract:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -79,6 +79,11 @@ from athenaeum.config import (
     resolve_structured_upsert,
 )
 from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.page_text import Section as _Section
+from athenaeum.page_text import as_list as _as_list
+from athenaeum.page_text import ends_in_open_fence as _ends_in_open_fence
+from athenaeum.page_text import norm_line as _norm_line
+from athenaeum.page_text import split_sections as _split_sections
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.storage import ReadOnlySurfaceError, require_writable_path
 from athenaeum.store_links import admit_page_write
@@ -109,10 +114,6 @@ REASON_STORE_BOUNDARY = "store-boundary"
 #: untouched and the raw stays on disk -- see ``tier0_structured_upsert``'s
 #: ``field_group_misfits`` output, which names what to propose.
 REASON_FIELD_GROUP_MISFIT = "field-group-misfit"
-
-_H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*#*[ \t]*$")
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_BULLET_RE = re.compile(r"^[-*+][ \t]+")
 
 
 @dataclass(frozen=True)
@@ -152,67 +153,6 @@ class StructuredUpsertOutcome:
     @property
     def skipped_label(self) -> str:
         return f"structured-upsert-{self.reason}"
-
-
-@dataclass
-class _Section:
-    title: str
-    heading: str
-    text: str
-
-    @property
-    def key(self) -> str:
-        return self.title.casefold()
-
-
-def _advance_fence(line: str, state: tuple[str, int] | None) -> tuple[str, int] | None:
-    """CommonMark fence tracking: the state after *line*.
-
-    A fence opens on three or more backticks or tildes (a backtick opener's info
-    string may not contain a backtick) and closes only on the same character, at
-    least as long as the opener, with nothing after it but whitespace.
-    """
-    m = _FENCE_RE.match(line.rstrip("\n"))
-    if m is None:
-        return state
-    run, rest = m.group(1), m.group(2)
-    if state is None:
-        if run[0] == "`" and "`" in rest:
-            return None
-        return (run[0], len(run))
-    if run[0] == state[0] and len(run) >= state[1] and not rest.strip():
-        return None
-    return state
-
-
-def _ends_in_open_fence(body: str) -> bool:
-    state: tuple[str, int] | None = None
-    for line in body.replace("\r\n", "\n").splitlines():
-        state = _advance_fence(line, state)
-    return state is not None
-
-
-def _split_sections(body: str) -> tuple[str, list[_Section]]:
-    """Split *body* into (preamble, H2 sections), ignoring ``##`` inside fences."""
-    preamble: list[str] = []
-    sections: list[_Section] = []
-    fence: tuple[str, int] | None = None
-    cur: _Section | None = None
-    for line in body.replace("\r\n", "\n").splitlines(keepends=True):
-        match = None if fence else _H2_RE.match(line.rstrip("\n"))
-        fence = _advance_fence(line, fence)
-        if match:
-            cur = _Section(title=match.group(1).strip(), heading=line, text="")
-            sections.append(cur)
-        elif cur is None:
-            preamble.append(line)
-        else:
-            cur.text += line
-    return "".join(preamble), sections
-
-
-def _norm_line(line: str) -> str:
-    return _BULLET_RE.sub("", line.strip()).casefold()
 
 
 def _raw_section_map(sections: list[_Section]) -> dict[str, str]:
@@ -333,12 +273,6 @@ def _merge_body(
     pre = preamble.rstrip("\n")
     lead = f"{pre}\n\n" if pre.strip() else preamble
     return lead + "\n".join(blocks)
-
-
-def _as_list(value: object) -> list[object]:
-    if value is None or value == "":
-        return []
-    return list(value) if isinstance(value, list) else [value]
 
 
 def _rank_regressed(
