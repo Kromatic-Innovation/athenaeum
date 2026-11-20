@@ -41,6 +41,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   remote branch, find the common ancestor of two revisions, read a file at a
   revision, list paths changed between two revisions, and detect rewritten
   remote history. Read-only; pull and push are unchanged (athenaeum#2930).
+- `athenaeum.store_rights`: the `DirectoryAdapter` protocol, the built-in `static`
+  adapter (reads the declaration's `groups:` block) and `resolve_rights`, which
+  returns the subset of read, propose, compile and answer an owner holds on a
+  store, keyed by `asserter_identity_key` and never a role name. A directory that
+  cannot answer resolves as a reader only. A librarian run resolves the owner's
+  rights on its surfaces at start and logs one INFO line each; nothing acts on
+  the result and a failure is swallowed, so no run behaves differently
+  (athenaeum#2933).
+
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is
   refused), pins `raise:<raise_id>` as a typed source, and backs a new
