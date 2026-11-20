@@ -313,10 +313,22 @@ def sync_before_compile(
     Never raises for a git or network failure; each is reported as a failed step and
     the run proceeds against the local tree, as it does today.
     """
-    cfg = settings or SyncSettings()
     report = SyncReport()
     if not _take_lease(repo, report):
         return report
+    try:
+        return _sync_before_compile(repo, branch, settings, report)
+    except BaseException:
+        # An exception here would otherwise leave the lease held until the process
+        # ends; a normal return keeps it, because the compile and push follow.
+        release_repo_lease(repo)
+        raise
+
+
+def _sync_before_compile(
+    repo: Path, branch: str, settings: SyncSettings | None, report: SyncReport
+) -> SyncReport:
+    cfg = settings or SyncSettings()
     _report_machine_local(repo, report)
     try:
         sha = commit_repo(repo, "athenaeum sync: snapshot before integrate")

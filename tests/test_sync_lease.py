@@ -168,3 +168,18 @@ def test_fast_forward_repository_is_unaffected(tmp_path: Path) -> None:
     state = _run_second(kr, cfg)
     assert not (git_dir(h.second.root) / LEASE_FILE).exists()
     assert not any(r["op"] == "lease" for r in state.results)
+
+
+def test_an_exception_mid_integrate_releases_the_lease(
+    install: Install, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum import sync_integrate
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("integrate crashed")
+
+    monkeypatch.setattr(sync_integrate, "integrate_remote", boom)
+    with pytest.raises(RuntimeError, match="integrate crashed"):
+        sync_before_compile(install.root, install.branch, SyncSettings())
+    with other_process_holds(install.root):  # the lease was dropped, not leaked
+        pass
