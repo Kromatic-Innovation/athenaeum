@@ -233,7 +233,12 @@ def test_baseline_with_no_skips_reports_zero(cache: Path) -> None:
 def test_push_metrics_cli_prints_skipped_figure(cache: Path) -> None:
     _run_adapter(cache, "sess-pushed", {})
     _run_adapter(cache, "sess-skip-only", {"AUTO_RECALL": "false"})
-    env = {"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin", "HOME": str(cache)}
+    env = {
+        "PYTHONPATH": SRC,
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(cache),
+        "ATHENAEUM_CACHE_DIR": str(cache),
+    }
     base = [sys.executable, "-m", "athenaeum.cli", "push-metrics", "baseline", "--dry-run"]
     base += ["--cache-dir", str(cache)]
     text = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
