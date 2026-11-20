@@ -90,6 +90,12 @@ ORGANISATION_TYPES = frozenset({"company", "organization", "organisation", "org"
 #: A local part shaped like a person: two words of letters joined by ``.``, ``_`` or ``-``.
 _PERSON_SHAPE = re.compile(r"^[a-z]{2,}[._-][a-z]{2,}$")
 _MIN_PHONE_DIGITS = 7
+#: Words that make a compound local part a role inbox (``customer.service``, ``help-desk``),
+#: on top of the single-word role lists of the attribution seam and :mod:`athenaeum.pii`.
+_ROLE_WORDS = frozenset(
+    {"customer", "service", "services", "desk", "enquiries", "inquiries", "orders", "general"}
+)
+_ROLE_TOKENS = ROLE_LOCAL_PARTS | pii.ROLE_LOCALPARTS | _ROLE_WORDS
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,11 @@ def contact_values(text: str) -> list[tuple[str, str]]:
         if norm:
             found.append(("phone", norm))
     return found
+
+
+def _is_role(local: str) -> bool:
+    """A role inbox: the local part, or any word of it, names a role."""
+    return local in _ROLE_TOKENS or any(t in _ROLE_TOKENS for t in re.split(r"[._-]", local))
 
 
 def _split(value: str) -> tuple[str, str]:
@@ -283,7 +294,7 @@ def _check_unit(page: _PageRecord, unit: str, text: str, store: _Store) -> Itera
         named = [r for r in persons if local in r.names or collapsed in r.names]
         if named and not (local in page.names or collapsed in page.names):
             raised.setdefault(CHECK_NAMES_OTHER, {}).setdefault(kind, []).extend(named)
-        if page.type in ORGANISATION_TYPES and local not in ROLE_LOCAL_PARTS:
+        if page.type in ORGANISATION_TYPES and not _is_role(local):
             if named or _PERSON_SHAPE.match(local):
                 raised.setdefault(CHECK_PERSON_ON_ORGANISATION, {}).setdefault(kind, [])
     for check in (CHECK_HELD_ELSEWHERE, CHECK_NAMES_OTHER, CHECK_PERSON_ON_ORGANISATION):

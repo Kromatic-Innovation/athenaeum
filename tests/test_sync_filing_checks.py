@@ -230,6 +230,17 @@ def test_a_role_address_on_an_organisation_page_passes(h: TwoCloneHarness, tmp_p
     assert result.units_checked == 1 and result.findings == []
 
 
+@pytest.mark.parametrize("local", ["customer.service", "help-desk", "sales_team"])
+def test_a_compound_role_address_on_an_organisation_page_passes(
+    h: TwoCloneHarness, tmp_path: Path, local: str
+) -> None:
+    text = contact(f"Email: {local}@acme.example")
+    mine = {"wiki/acme.md": page("company-acme", "Acme Corp", "company", text)}
+    outcome = publish(h, mine, NEUTRAL)
+    result, _kr = run(h, outcome, tmp_path)
+    assert result.units_checked == 1 and result.findings == []
+
+
 def test_only_units_that_differ_from_the_remote_value_are_checked(
     h: TwoCloneHarness, tmp_path: Path
 ) -> None:
