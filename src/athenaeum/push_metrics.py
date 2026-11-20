@@ -1636,6 +1636,10 @@ REFERENCE_REASON_DISABLED = "push-metrics-disabled"
 REFERENCE_REASON_NO_SESSION_ID = "no-session-id"
 REFERENCE_REASON_NO_PUSH_RECORDS = "no-push-records"
 REFERENCE_REASON_NO_PUSHED_IDS = "no-pushed-ids"
+#: The session has skip rows (``skip_reason`` set) and no push rows: every
+#: turn was deliberately not pushed (issue athenaeum#2976), which is not the
+#: same fact as "no push record exists".
+REFERENCE_REASON_PUSH_SKIPPED = "push-skipped"
 REFERENCE_REASON_TRANSCRIPT_NOT_FOUND = "transcript-not-found"
 REFERENCE_REASON_TRANSCRIPT_EMPTY = "transcript-empty"
 
@@ -1646,6 +1650,7 @@ _REFERENCE_NOOP_REASONS = frozenset(
         REFERENCE_REASON_NO_SESSION_ID,
         REFERENCE_REASON_NO_PUSH_RECORDS,
         REFERENCE_REASON_NO_PUSHED_IDS,
+        REFERENCE_REASON_PUSH_SKIPPED,
     }
 )
 
@@ -1973,12 +1978,17 @@ def _determine_references_with_reason(
     """
     from athenaeum.transcript_verify import _iter_session_records, default_projects_root
 
-    records = [
+    session_rows = [
         r
-        for r in read_push_records(cache_dir, wiki_root=wiki_root)
+        for r in read_push_records(cache_dir, wiki_root=wiki_root, include_skips=True)
         if r.get("session_id") == session_id
     ]
+    records = [r for r in session_rows if not r.get("skip_reason")]
     if not records:
+        # Issue athenaeum#2976: a session whose only rows are skips was
+        # deliberately not pushed; say so rather than "no push records".
+        if session_rows:
+            return None, REFERENCE_REASON_PUSH_SKIPPED
         return None, REFERENCE_REASON_NO_PUSH_RECORDS
 
     pushed_ids: list[str] = []
@@ -2231,6 +2241,16 @@ class BaselineWindow:
     (empty/zero when no exclusion was requested) so a contaminated window
     that WAS cleaned is visible in the output, not indistinguishable from a
     window that was never contaminated.
+
+    ``skipped_turn_count``/``skipped_by_reason``/``skip_only_session_count``
+    (issue athenaeum#2976) report skip rows (turns deliberately not pushed,
+    ``skip_reason`` set) as their own figure. They are never folded into
+    ``push_record_count`` or ``session_count``: a skipped turn is not a push,
+    and a session whose only rows are skips is counted in
+    ``skip_only_session_count`` rather than vanishing as "no push". An
+    excluded session's skips are dropped too, counted in
+    ``excluded_skip_record_count``, and the session is listed in
+    ``excluded_sessions`` even when it has no push rows.
     """
 
     start: str
@@ -2244,6 +2264,10 @@ class BaselineWindow:
     excluded_sessions: tuple[str, ...] = ()
     excluded_push_record_count: int = 0
     excluded_reference_record_count: int = 0
+    skipped_turn_count: int = 0
+    skipped_by_reason: dict[str, int] = field(default_factory=dict)
+    skip_only_session_count: int = 0
+    excluded_skip_record_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2257,6 +2281,10 @@ class BaselineWindow:
             "excluded_sessions": list(self.excluded_sessions),
             "excluded_push_records": self.excluded_push_record_count,
             "excluded_reference_records": self.excluded_reference_record_count,
+            "skipped_turns": self.skipped_turn_count,
+            "skipped_by_reason": dict(sorted(self.skipped_by_reason.items())),
+            "skip_only_sessions": self.skip_only_session_count,
+            "excluded_skipped_turns": self.excluded_skip_record_count,
         }
 
 
@@ -2428,10 +2456,12 @@ def compute_baseline(
     does not name, so it keeps resolving under *cache_dir* unchanged.
     """
     now = datetime.now(tz=timezone.utc)
-    pushes = read_push_records(cache_dir, wiki_root=wiki_root)
+    all_rows = read_push_records(cache_dir, wiki_root=wiki_root, include_skips=True)
+    pushes = [r for r in all_rows if not r.get("skip_reason")]
+    skips = [r for r in all_rows if r.get("skip_reason")]
     refs = _read_jsonl(reference_records_path(cache_dir))
     known_session_ids = {
-        sid for r in (pushes + refs) if isinstance(sid := r.get("session_id"), str) and sid
+        sid for r in (all_rows + refs) if isinstance(sid := r.get("session_id"), str) and sid
     }
     exclude_set = _resolve_exclude_sessions(exclude_sessions or (), known_session_ids)
 
@@ -2448,6 +2478,11 @@ def compute_baseline(
 
     excluded_pushes = [r for r in pushes_in if r.get("session_id") in exclude_set]
     excluded_refs = [r for r in refs_in if r.get("session_id") in exclude_set]
+    # Issue athenaeum#2976: skip rows are windowed and excluded the same way,
+    # so an excluded skip-only session is still reported as excluded.
+    skips_window = [r for r in skips if _in_window(r.get("ts"))]
+    excluded_skips = [r for r in skips_window if r.get("session_id") in exclude_set]
+    skips_in = [r for r in skips_window if r.get("session_id") not in exclude_set]
     if exclude_set:
         pushes_in = [r for r in pushes_in if r.get("session_id") not in exclude_set]
         refs_in = [r for r in refs_in if r.get("session_id") not in exclude_set]
@@ -2455,12 +2490,22 @@ def compute_baseline(
     found_excluded_sessions = sorted(
         {
             sid
-            for r in (excluded_pushes + excluded_refs)
+            for r in (excluded_pushes + excluded_refs + excluded_skips)
             if isinstance(sid := r.get("session_id"), str) and sid
         }
     )
 
     sessions = {r.get("session_id") for r in pushes_in if r.get("session_id")}
+
+    # Issue athenaeum#2976: skip rows in the same window, under the same
+    # session denylist, reported as their own figure.
+    skipped_by_reason: dict[str, int] = {}
+    for r in skips_in:
+        reason = str(r.get("skip_reason"))
+        skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+    skip_only_sessions = {
+        sid for r in skips_in if (sid := r.get("session_id")) and sid not in sessions
+    }
 
     precision: float | None = None
     if refs_in:
@@ -2484,6 +2529,10 @@ def compute_baseline(
         excluded_sessions=tuple(found_excluded_sessions),
         excluded_push_record_count=len(excluded_pushes),
         excluded_reference_record_count=len(excluded_refs),
+        skipped_turn_count=len(skips_in),
+        skipped_by_reason=skipped_by_reason,
+        skip_only_session_count=len(skip_only_sessions),
+        excluded_skip_record_count=len(excluded_skips),
     )
 
 
