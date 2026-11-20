@@ -119,7 +119,7 @@ from athenaeum.config import (
 )
 from athenaeum.models import slugify
 from athenaeum.provenance import SourceRef, parse_source
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable, commit_paths, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -906,7 +906,59 @@ def read_redaction_ledger(cache_dir: Path | None = None) -> list[dict[str, Any]]
     return out
 
 
+# ---------------------------------------------------------------------------
+# The erasure mark (sync S16): a commit line that carries a uid and nothing else
+# ---------------------------------------------------------------------------
+
+#: The commit trailer key (design note federation-multi-writer-sync section 5.1).
+ERASURE_COMMIT_KEY = "Athenaeum-Erasure"
+
+_MARK_UID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_MARK_LINE_RE = re.compile(rf"^{ERASURE_COMMIT_KEY}: (\S+)$")
+
+
+def erasure_commit_line(uid: str) -> str:
+    """The one commit line that marks a page's deletion as an erasure: the uid only.
+
+    The redaction ledger lives in the cache directory, so the other side of a
+    merge cannot read it; this line in history is how integrate recognises an
+    erasure. It must never carry a name, a path or a reason.
+    """
+    if not isinstance(uid, str) or not _MARK_UID_RE.fullmatch(uid):
+        raise OpaqueIdentityError(f"an erasure mark carries a bare uid; got {uid!r}")
+    return f"{ERASURE_COMMIT_KEY}: {uid}"
+
+
+def erasure_marks(message: str) -> frozenset[str]:
+    """The uids a commit message marks as erased (one ``Athenaeum-Erasure:`` line each)."""
+    found = (_MARK_LINE_RE.match(line.rstrip()) for line in message.splitlines())
+    return frozenset(m.group(1) for m in found if m)
+
+
+def erase_pages_and_commit(root: Path, pages: Collection[tuple[Path, str]]) -> str | None:
+    """Delete each ``(page path, uid)`` and commit the deletions with the erasure mark.
+
+    One commit, one ``Athenaeum-Erasure: <uid>`` line per page, a fixed subject
+    and nothing else: no name, path or reason is in the message. Returns the new
+    HEAD SHA, or ``None`` when *root* is not in a git repository (the files are
+    still deleted; there is no history to mark).
+    """
+    if not pages:
+        return None
+    lines = [erasure_commit_line(uid) for _, uid in pages]  # validate before any delete
+    paths = [Path(p) for p, _ in pages]
+    for path in paths:
+        path.unlink(missing_ok=True)
+    message = "athenaeum: erasure\n\n" + "\n".join(lines) + "\n"
+    return commit_paths(root, paths, message)
+
+
 __all__ = [
+    # sync S16
+    "ERASURE_COMMIT_KEY",
+    "erasure_commit_line",
+    "erasure_marks",
+    "erase_pages_and_commit",
     # AC1
     "ErasureKeyError",
     "resolve_erasure_key_path",

@@ -617,3 +617,55 @@ class TestWiringBoundary:
             params = inspect.signature(obj).parameters
             assert "client" not in params, f"{name} carries a client param"
             assert "provider" not in params, f"{name} carries a provider param"
+
+
+# -- the erasure mark (sync S16) ---------------------------------------------
+
+
+class TestErasureMark:
+    def test_commit_line_carries_the_uid_only(self) -> None:
+        from athenaeum.erasure import erasure_commit_line
+
+        assert erasure_commit_line("person-abc") == "Athenaeum-Erasure: person-abc"
+
+    @pytest.mark.parametrize("bad", ["", "two words", "uid\nAthenaeum-Erasure: other", "a b"])
+    def test_a_uid_that_is_not_one_token_is_refused(self, bad: str) -> None:
+        from athenaeum.erasure import erasure_commit_line
+
+        with pytest.raises(ValueError):
+            erasure_commit_line(bad)
+
+    def test_marks_read_back_only_whole_mark_lines(self) -> None:
+        from athenaeum.erasure import erasure_marks
+
+        msg = (
+            "subject\n\nAthenaeum-Erasure: u-1\nAthenaeum-Erasure: u-2\n"
+            "note Athenaeum-Erasure: u-3\n"
+        )
+        assert erasure_marks(msg) == frozenset({"u-1", "u-2"})
+
+    def test_erase_pages_commits_one_line_per_page(self, tmp_path: Path) -> None:
+        import subprocess
+
+        from athenaeum.erasure import erase_pages_and_commit
+
+        def run(*a: str) -> str:
+            return subprocess.run(
+                ["git", *a], cwd=tmp_path, check=True, capture_output=True, text=True
+            ).stdout
+
+        run("init", "-q")
+        run("config", "user.email", "t@example.test")
+        run("config", "user.name", "T")
+        for n in ("a", "b"):
+            (tmp_path / f"{n}.md").write_text(n)
+        run("add", "-A")
+        run("commit", "-q", "-m", "seed")
+        sha = erase_pages_and_commit(
+            tmp_path, [(tmp_path / "a.md", "u-1"), (tmp_path / "b.md", "u-2")]
+        )
+        assert sha
+        assert not (tmp_path / "a.md").exists() and not (tmp_path / "b.md").exists()
+        assert run("log", "-1", "--format=%B").split() == [
+            "athenaeum:", "erasure", "Athenaeum-Erasure:", "u-1", "Athenaeum-Erasure:", "u-2",
+        ]
