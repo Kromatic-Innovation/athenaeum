@@ -6,6 +6,10 @@
 
 **Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
+**Before you install:** `git` must be installed, and for compiling you need either
+`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI. Python 3.13+ is required
+(`--python 3.13` below lets `uv` fetch it if needed).
+
 ```bash
 uv tool install --python 3.13 'athenaeum[mcp]'
 ```
@@ -14,55 +18,74 @@ Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 
 ## Quick start
 
-**Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
-`PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
-check against if `athenaeum --version` ever looks stale. `git` must be
-installed; no git identity is needed (`init` sets a repo-local one if you have none).
-Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
-current release is supported; see the [support policy](docs/guides/install.md#support-policy).
+See [Install](docs/guides/install.md) for the `PATH` setup `uv tool install`
+needs, and the wrong-interpreter warning to check against if `athenaeum --version`
+ever looks stale. No git identity is needed (`init` sets a repo-local one if you have none).
+Only the current release is supported; see the [support policy](docs/guides/install.md#support-policy) and
+[what counts as stable](docs/guides/stability.md).
 Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
 
-**Before the first compile** (`athenaeum run`, below) you need either
-`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI.
-
-The `[mcp]` extra in the install command is required by `athenaeum serve` and
+The `[mcp]` extra in the install command above is required by `athenaeum serve` and
 `athenaeum test-mcp`.
 
 ```bash
-# Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
-uv tool install --python 3.13 'athenaeum[mcp]'
-# ...or, into an activated Python 3.13+ environment:
-pip install 'athenaeum[mcp]'
+# (Install first, as shown at the top of this page.)
 
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
 
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
-
-# Check the setup (read-only). FAILs are expected at this point; see below.
-athenaeum doctor
 ```
-
-`athenaeum doctor` is a read-only health check. **On a fresh install it will
-show FAILs, and that is expected.** Right after the commands above it is
-expected to report FAILs for `mcp`, `hooks` and `search_index` (plus
-`key_mode` when neither an API key nor the `claude` CLI is available)
-until the steps below are complete; each FAIL names its fix. Run it again
-once you have finished the quick start (through `athenaeum session-end`):
-`mcp` and `search_index` are then OK, and `hooks` is the one FAIL left,
-because the per-turn recall hook is optional and the quick start does not
-wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.
 > See [Install](docs/guides/install.md) for both extras.
+
+> **Troubleshooting `init`:** `athenaeum init` makes its seed commit with git
+> hooks disabled, so a global `core.hooksPath` commit hook (for example a
+> protected-branch guard) does not block it.
 
 Want to confirm it works before wiring anything up or spending API budget?
 
 ```bash
 athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
 ```
+
+Then check the install (read-only):
+
+```bash
+athenaeum doctor
+```
+
+On a fresh install, steps you have not done yet show as `WARN` with
+`setup pending` and the command that finishes each one; `doctor` still exits
+`0`. Only something present but broken (an unparseable `settings.json`, a hook
+whose script is missing, an unreadable index) is a `FAIL` and exits non-zero.
+Abridged output right after `athenaeum init`, before `claude mcp add` (paths
+shortened):
+
+```text
+Athenaeum Doctor
+========================================
+[OK] package_version: running 0.27.4; latest release is 0.27.4
+[OK] interpreter: Python 3.13.1
+[WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
+    fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+[WARN] hooks: setup pending: no Claude Code settings file found at ~/.claude/settings.json
+    fix: merge examples/claude-code/settings-snippet.json into ~/.claude/settings.json ...
+[WARN] key_mode: setup pending: llm.provider=claude-cli but Claude Code is not logged in ...
+    fix: run `claude` and `/login`, or set ANTHROPIC_API_KEY
+[WARN] search_index: setup pending: no vector index found under ~/.cache/athenaeum/wiki-vectors
+    fix: run `athenaeum reindex --path <knowledge-root>` to build it, ...
+...
+All checks passed, with 4 warning(s).
+```
+
+Run it again once you have finished the quick start (through
+`athenaeum session-end`): `mcp` and `search_index` are then OK. `hooks` stays
+a `WARN` because the per-turn recall hook is optional and the quick start does
+not wire it (see [Passive recall via hooks](docs/guides/sidecar.md)).
 
 That gives your agent two tools: `remember` to write an observation, `recall` to search
 the compiled wiki. A round-trip looks like this:

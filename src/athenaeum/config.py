@@ -3528,6 +3528,39 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_push_record_query_terms(config: dict[str, Any] | None) -> bool:
+    """Resolve whether a push ledger row records its extracted query terms
+    and the extractor that produced them (athenaeum#2916).
+
+    ON by default. The ledger otherwise holds only opaque page ids, a query
+    hash and token counts; these terms are the one free-text-derived field it
+    carries, so the default is a judgement, made for this reason: the terms
+    are what separates "the extractor picked the wrong terms" from "ranking
+    missed", and a measurement field that is off records nothing until
+    someone has already lost the data they needed. The risk is bounded: the
+    prompt itself is never stored, only the few short topic terms the
+    extractor derived from it (at most 12, each cut to 64 characters), in the
+    same local cache-dir ledger as the pushed-page ids, which never enters
+    the wiki corpus. A deployment that treats a topic word as sensitive
+    should set this ``false``: new rows then carry neither field. Precedence:
+    ``ATHENAEUM_PUSH_RECORD_QUERY_TERMS`` env >
+    ``push_metrics.record_query_terms`` yaml > ``True``. Any env value other
+    than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_PUSH_RECORD_QUERY_TERMS")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("push_metrics")
+        if isinstance(cfg, dict):
+            raw = cfg.get("record_query_terms")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
 def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve whether the ingestion gate is enforced (issue athenaeum#968).
 

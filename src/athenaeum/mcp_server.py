@@ -91,6 +91,7 @@ from athenaeum.footnote_markers import INLINE_MARKER_RE, resolve_markers
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
+    OWNER_ONLY_ACCESS_LEVELS,
     SOURCE_TYPES,
     AmbiguousPageUidError,
     PageLocator,
@@ -3246,13 +3247,6 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
-#: ``access:`` levels that are owner-only for a restricted caller unless an
-#: ``audience:`` grant opens them (``models.effective_audience``). A remote
-#: ``remember`` never stamps its pinned audience onto a note carrying one of
-#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
-_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
-
-
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
@@ -3315,7 +3309,9 @@ def _inject_provenance_frontmatter(
         if access_level == "open":
             del meta["access"]
             access_level = ""
-        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+        if access_level in OWNER_ONLY_ACCESS_LEVELS:
+            # Same set ``models.effective_audience`` treats as owner-only; a
+            # remote ``remember`` never widens it (athenaeum#2779, athenaeum#2924).
             # A restrictive `access:` (set by intake screening, or written in
             # the note itself) is owner-only, and an `audience:` grant is the
             # one thing that would open it to a role. Fail closed: stamp
@@ -3735,7 +3731,7 @@ def _remember_session_dir(source: str | None, default_subdir: str) -> str:
     if source is None or source == "":
         return default_subdir if source is None else source
     if source != default_subdir:
-        log.info(
+        log.warning(
             "remember: ignoring caller-supplied source %r; filing under %r",
             source,
             default_subdir,
@@ -4434,7 +4430,8 @@ def create_server(
 
         Issue athenaeum#2643: answers "what are you set to remember?" by
         listing the operator's relevance-policy rules (`always` / `never`,
-        keyed on type, tag and optional subject uid) in evaluation order.
+        keyed on type, tag and optional subject uid, plus `route` rules that
+        name a destination `store`) in evaluation order.
         Read-only: the policy lives in `wiki/_schema/relevance-policy.md` and
         is edited there or through `set_capture_rule`, never through this tool.
 
@@ -4447,7 +4444,8 @@ def create_server(
             is constrained), `hash` (8-hex digest of the effective rules, the
             same value the librarian run summary reports, or null),
             `semantics`, and `rules` — each with `rule`, `line`, `verdict`,
-            `type`, `tag` and `subject`. An invalid file returns `error`
+            `type`, `tag`, `subject` and `store` (null unless a `route` rule).
+            An invalid file returns `error`
             naming each bad rule instead.
         """
         from athenaeum.relevance_policy import (
@@ -4467,6 +4465,7 @@ def create_server(
         tag: str | None = None,
         subject_uid: str | None = None,
         rationale: str = "",
+        store: str | None = None,
     ) -> dict:
         """Record a standing capture rule as POLICY, not as a fact.
 
@@ -4481,12 +4480,18 @@ def create_server(
         rule. This tool does no language parsing. Give `verdict` plus at
         least one of `type`, `tag`, `subject_uid`:
 
-        - `verdict`: `always` (capture matching facts) or `never` (do not).
+        - `verdict`: `always` (capture matching facts) or `never` (do not), or
+          `route` (record where matching facts should go; see `store`).
         - `type`: an entity type from the deployment's type vocabulary.
         - `tag`: a tag from its tag vocabulary; a tag also covers its
           `/`-separated children (`personal` covers `personal/travel`).
         - `subject_uid`: the `uid` (frontmatter) of the entity the rule is
           scoped to.
+        - `store`: required for `route`, and refused for `always` / `never`:
+          the `store_id` of the destination store (`st_` plus 12 lowercase
+          base32 characters) or the reserved word `personal`. Never an
+          adapter name. A `route` rule only records where matching facts
+          should go; nothing acts on it yet, so capture is unchanged.
 
         A rule naming several keys matches only when all of them match. The
         new rule is added LAST and the last matching rule wins, so it
@@ -4500,12 +4505,13 @@ def create_server(
         decisions queue (`mode: "proposed"`) and nothing changes until then.
 
         Args:
-            verdict: `always` or `never`.
+            verdict: `always`, `never` or `route`.
             type: Optional entity type the rule matches.
             tag: Optional tag the rule matches.
             subject_uid: Optional entity uid the rule matches.
             rationale: Optional one-line reason, shown to the operator when
                 the rule is proposed.
+            store: Destination for a `route` rule (a `store_id` or `personal`).
 
         Returns:
             A dict with `ok`, `mode` (`applied` | `proposed`), `changed`
@@ -4530,7 +4536,9 @@ def create_server(
         is_http = transport == "http"
         try:
             if is_http:
-                if rule_edit_is_noop(wiki_root, verdict, type, tag, subject_uid):
+                if rule_edit_is_noop(
+                    wiki_root, verdict, type, tag, subject_uid, store
+                ):
                     # Nothing to approve: the policy already ends with this rule.
                     return {
                         "ok": True,
@@ -4541,7 +4549,13 @@ def create_server(
                         ),
                     }
                 record, created = file_rule_edit_proposal(
-                    wiki_root, verdict, type, tag, subject_uid, rationale=rationale.strip()
+                    wiki_root,
+                    verdict,
+                    type,
+                    tag,
+                    subject_uid,
+                    store,
+                    rationale=rationale.strip(),
                 )
                 return {
                     "ok": True,
@@ -4556,7 +4570,7 @@ def create_server(
                     ),
                 }
             result = apply_rule_edit(
-                wiki_root, verdict, type, tag, subject_uid, transport="stdio"
+                wiki_root, verdict, type, tag, subject_uid, store, transport="stdio"
             )
         except RelevancePolicyError as exc:
             return {"ok": False, "error_code": "invalid_rule", "message": str(exc)}
@@ -4745,7 +4759,8 @@ def create_server(
                 that is the only placement that is searchable by ``recall``
                 before the next compile. A value passed here is ignored and
                 the note is filed in the same place as when it is omitted
-                (issue athenaeum#2764). It is **not** a per-claim provenance
+                (issue athenaeum#2764); the reply says so and the server logs
+                a warning (issue athenaeum#2900). It is **not** a per-claim provenance
                 source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/design/provenance-shape.md``). Three accepted shapes:
@@ -4790,7 +4805,8 @@ def create_server(
                 override is recorded in an audit log. Default ``false``.
 
         Returns:
-            Confirmation message with the file path.
+            Confirmation message with the file path. When a ``source`` was
+            supplied and ignored, a second line says so.
 
         Issue athenaeum#2313 (AC2): on success, when the configured search
         backend is ``fts5`` or ``vector``, this also refreshes that backend's
@@ -4844,6 +4860,18 @@ def create_server(
             # athenaeum#2781: an absolute server path is egress to the host
             # provider; name the file relative to the corpus root instead.
             result = _corpus_relative_saved_reply(result, raw_root)
+        if (
+            result.startswith("Saved to ")
+            and source
+            and source != _transport_defaults.session_subdir
+        ):
+            # athenaeum#2900: the supplied `source` was dropped (athenaeum#2764);
+            # say so in the reply, not only in the server log.
+            result += (
+                f"\nNote: the supplied `source` was ignored; the note was filed "
+                f"under {_transport_defaults.session_subdir!r}. Omit `source`; pass "
+                "`sources` for provenance."
+            )
         return result
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

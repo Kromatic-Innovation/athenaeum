@@ -136,13 +136,38 @@ Rules are one markdown table, read top to bottom:
 | always  |      | personal/travel | |
 ```
 
-- **Verdict** — `always` or `never`.
+- **Verdict** — `always` or `never` (capture), or `route` (destination).
 - **Type** / **Tag** — a value from `types.md` / `tags.md`. Blank or `-` means
   "any". A Tag rule also covers its `/`-separated descendants, so `personal`
   covers `personal/travel`. The tag must itself be listed in `tags.md`.
 - **Subject** — optional entity uid; blank or `-` means any subject.
 - A rule needs at least one of Type, Tag or Subject; naming several means all
   must match.
+- **Store** (optional fifth column) — where a `route` rule sends matching
+  facts: a `store_id` (`st_` plus 12 lowercase base32 characters) or the
+  reserved word `personal`. Never an adapter name. Required on a `route` row,
+  blank on `always` / `never`. A table without the column is valid and has no
+  routes.
+
+**`route` verdict.** A `route` row records a destination, and nothing acts on
+it yet: capture behaves exactly as without it. Capture is the last matching
+`always` / `never` row; destination is the last matching `route` row; neither
+kind of row affects the other's answer, so `never` still wins over `route`.
+A `route` row's tag is not offered to the classifier as a category.
+
+```markdown
+| Verdict | Type | Tag | Subject | Store |
+|---------|------|-----|---------|-------|
+| never   |      | personal | | |
+| route   |      | hr | | st_h4r5n2kd6wq3 |
+| route   |      | hr/health | | personal |
+```
+
+The `Store` cell is part of the policy hash, so changing a destination changes
+the `relevance_policy=` token. A `Store` that is not `personal`, is not shaped
+like a `store_id`, or (when the caller knows the install's stores) names a
+store the install does not map fails validation, naming the rule by number and
+line.
 
 **Order matters: the last matching rule wins.** Put a general rule first and
 its exceptions after it: in the example every `personal` fact is `never`

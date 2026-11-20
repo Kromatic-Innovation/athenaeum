@@ -134,6 +134,8 @@ EPOCH_REGISTRY_FILENAME = "_verdicts_epochs.json"
 #: not exist. Recorded as a reversible default per the dispatch's ambiguity
 #: policy; extend this set (never silently repurpose it) when the dimension
 #: registry lands and defines the real key vocabulary.
+#: ``raised_from`` is here because the raise protocol updates its ``seq`` and
+#: ``watch`` on a copy whose content has not changed (athenaeum#2799).
 SYSTEM_METADATA_KEYS: frozenset[str] = frozenset(
     {
         "coords",
@@ -146,6 +148,7 @@ SYSTEM_METADATA_KEYS: frozenset[str] = frozenset(
         "predicate_instrument",
         "tier",
         "tier_flags",
+        "raised_from",
     }
 )
 

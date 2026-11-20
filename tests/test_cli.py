@@ -398,6 +398,7 @@ class TestWarnIfBackendCacheMissing:
     def test_vector_missing_cache_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        pytest.importorskip("chromadb")  # absent: vector falls back to fts5
         from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         _warn_if_backend_cache_missing("vector", tmp_path)
@@ -408,6 +409,7 @@ class TestWarnIfBackendCacheMissing:
     def test_vector_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        pytest.importorskip("chromadb")  # absent: vector falls back to fts5
         from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         (tmp_path / "wiki-vectors").mkdir()

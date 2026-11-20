@@ -81,6 +81,7 @@ from athenaeum.models import (
     parse_deprecated,
     parse_frontmatter,
     resolve_page_type,
+    underscore_segment_excluded,
     valid_until_expired,
     validity_bound_str,
 )
@@ -499,7 +500,7 @@ def _wiki_relpath_excluded(rel: Path) -> bool:
     filename, so any current or future ``_``-prefixed operational
     subdirectory under ``wiki_root`` is covered by the same one rule.
     """
-    return any(part.startswith("_") for part in rel.parts)
+    return underscore_segment_excluded(rel.parts)
 
 
 def _iter_wiki_entries(wiki_root: Path) -> Iterable[tuple[str, Path]]:
@@ -911,10 +912,18 @@ def _scan_indexed_records(
     for surface, root_name, is_intake in extra_surfaces:
         name_prefix = root_name + "/"
 
-        def _extra_keep(rel: str, _root_name: str = root_name) -> bool:
+        def _extra_keep(
+            rel: str, _root_name: str = root_name, _is_intake: bool = is_intake
+        ) -> bool:
             if not rel.endswith(".md"):
                 return False
             if Path(rel).name in _INTAKE_SKIP_NAMES:
+                return False
+            # A ``_``-prefixed directory of a page store (``_store/``) is
+            # operational, never a page: the same segment rule the wiki scan
+            # applies. A raw-intake root keeps its own layout (auto-memory's
+            # ``_unscoped/`` holds real notes), so it is exempt.
+            if not _is_intake and underscore_segment_excluded(Path(rel).parent.parts):
                 return False
             return _passes_globs(f"{_root_name}/{rel}", include, exclude)
 
@@ -2991,11 +3000,19 @@ class KeywordBackend:
         )
         if extra_roots:
             for item in extra_roots:
-                root = as_indexed_surface(item).root
+                spec = as_indexed_surface(item)
+                root = spec.root
                 if not root.is_dir():
                     continue
+                intake = bool(getattr(spec, "intake", False))
                 count += sum(
-                    1 for p in root.rglob("*.md") if p.name not in _INTAKE_SKIP_NAMES
+                    1
+                    for p in root.rglob("*.md")
+                    if p.name not in _INTAKE_SKIP_NAMES
+                    and (
+                        intake
+                        or not underscore_segment_excluded(p.relative_to(root).parent.parts)
+                    )
                 )
         return count
 

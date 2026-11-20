@@ -21,6 +21,12 @@ one-sided parent/child page relation pairs), each in one of three states:
 - ``"fail"`` -- broken; ``detail`` says what is wrong and ``fix`` names the
   command or doc that fixes it. At least one ``"fail"`` makes
   :func:`exit_code` return non-zero (issue athenaeum#2298 AC2).
+- ``"warn"`` -- first-run setup not done yet ("setup pending": MCP not
+  registered, hooks not wired, no API key, no search index built) or
+  another non-breaking note; ``fix`` names the command that finishes setup.
+  Never flips the exit code (issue athenaeum#2906). Present-but-broken state
+  (unparseable config, a hook whose target is missing, a corrupt index,
+  a bad provider) is still ``"fail"``.
 - ``"skip"`` -- cannot be determined right now and that is NOT a failure
   (the package-version check when offline, or on any network error/timeout
   — issue athenaeum#2298 AC5). A ``"skip"`` never flips the exit code.
@@ -280,8 +286,8 @@ def check_mcp_registered(claude_config_dir: Path, *, home: Path | None = None) -
         locations = " or ".join(str(p) for p in candidates)
         return CheckResult(
             name="mcp",
-            status="fail",
-            detail=f"no {locations} found",
+            status="warn",
+            detail=f"setup pending: no {locations} found",
             fix=_MCP_FIX,
         )
     try:
@@ -297,8 +303,11 @@ def check_mcp_registered(claude_config_dir: Path, *, home: Path | None = None) -
     if not isinstance(servers, dict) or "athenaeum" not in servers:
         return CheckResult(
             name="mcp",
-            status="fail",
-            detail=f"no 'athenaeum' entry under mcpServers in {claude_json_path}",
+            status="warn",
+            detail=(
+                "setup pending: no 'athenaeum' entry under mcpServers in "
+                f"{claude_json_path}"
+            ),
             fix=_MCP_FIX,
         )
     return CheckResult(
@@ -415,8 +424,8 @@ def check_hooks_present(claude_config_dir: Path) -> CheckResult:
     if not settings_path.is_file():
         return CheckResult(
             name="hooks",
-            status="fail",
-            detail=f"no Claude Code settings file found at {settings_path}",
+            status="warn",
+            detail=f"setup pending: no Claude Code settings file found at {settings_path}",
             fix=fix,
         )
     try:
@@ -439,8 +448,8 @@ def check_hooks_present(claude_config_dir: Path) -> CheckResult:
     if not commands:
         return CheckResult(
             name="hooks",
-            status="fail",
-            detail=f"no athenaeum hook commands registered in {settings_path}",
+            status="warn",
+            detail=f"setup pending: no athenaeum hook commands registered in {settings_path}",
             fix=fix,
         )
 
@@ -522,12 +531,14 @@ def check_key_mode(
     the knob the recall hook actually routes through) rather than a second
     guess at which provider is active.
 
-    **The regex fallback is reported as a FAILURE, not a warning
-    (orchestrator ruling for issue athenaeum#2298).** The issue's own
-    motivation names this exact degradation -- a missing key silently
-    dropping topic extraction to regex-only -- as the silent failure this
-    command exists to surface; reporting it as a mere "OK, degraded" note
-    would repeat that same silence under a different command.
+    **A missing credential is a WARN ("setup pending"), never "ok"
+    (issue athenaeum#2906, superseding the athenaeum#2298 ruling that made
+    it a FAIL).** A fresh install has not had a key supplied yet; that is
+    first-run setup, not breakage, so it must not exit non-zero. It still
+    surfaces loudly (the regex fallback is named, with the fix). The same
+    holds for the shipped ``llm.provider: claude-cli`` default when the
+    ``claude`` binary or login is not there yet. An unrecognised
+    ``llm.provider`` value stays a FAIL.
     """
     from athenaeum.provider import ProviderConfigError, preflight_provider, resolve_provider
 
@@ -546,9 +557,9 @@ def check_key_mode(
         if error is None and _claude_login_missing():
             return CheckResult(
                 name="key_mode",
-                status="fail",
+                status="warn",
                 detail=(
-                    "llm.provider=claude-cli but Claude Code is not logged in "
+                    "setup pending: llm.provider=claude-cli but Claude Code is not logged in "
                     "(`claude auth status` reports no login); compiles cannot run"
                 ),
                 fix=_LOGIN_FIX,
@@ -561,9 +572,9 @@ def check_key_mode(
             )
         return CheckResult(
             name="key_mode",
-            status="fail",
+            status="warn",
             detail=(
-                "llm.provider=claude-cli but the `claude` binary is not on "
+                "setup pending: llm.provider=claude-cli but the `claude` binary is not on "
                 "PATH; compiles cannot run"
             ),
             fix=error,
@@ -581,9 +592,9 @@ def check_key_mode(
     if shutil.which(os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude") is None:
         return CheckResult(
             name="key_mode",
-            status="fail",
+            status="warn",
             detail=(
-                "no ANTHROPIC_API_KEY (process env or cached "
+                "setup pending: no ANTHROPIC_API_KEY (process env or cached "
                 f"{cache_dir / 'config.env'}) and no `claude` binary on PATH; "
                 "compiles cannot run"
             ),
@@ -595,11 +606,11 @@ def check_key_mode(
         )
     return CheckResult(
         name="key_mode",
-        status="fail",
+        status="warn",
         detail=(
-            "no ANTHROPIC_API_KEY (process env or cached "
-            f"{cache_dir / 'config.env'}) — topic extraction silently falls "
-            "back to a regex extractor"
+            "setup pending: no ANTHROPIC_API_KEY (process env or cached "
+            f"{cache_dir / 'config.env'}) — topic extraction falls back to a "
+            "regex extractor until a key or Claude Code login is configured"
         ),
         fix=_API_KEY_FIX,
     )
@@ -608,6 +619,25 @@ def check_key_mode(
 # ---------------------------------------------------------------------------
 # Check 6: search index built.
 # ---------------------------------------------------------------------------
+
+
+def _fts5_unreadable_reason(cache_dir: Path) -> str | None:
+    """``None`` when the fts5 DB opens read-only and answers a trivial query,
+    else the reason it does not (a present-but-corrupt index is breakage, not
+    pending setup -- issue athenaeum#2906). Read-only: ``mode=ro`` URI."""
+    import sqlite3
+
+    from athenaeum.search import _DB_NAME
+
+    try:
+        conn = sqlite3.connect(f"file:{cache_dir / _DB_NAME}?mode=ro", uri=True)
+        try:
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return str(exc)
+    return None
 
 
 def check_search_index(
@@ -630,13 +660,24 @@ def check_search_index(
         from athenaeum.search import fts5_index_available
 
         if fts5_index_available(cache_dir):
+            problem = _fts5_unreadable_reason(cache_dir)
+            if problem is not None:
+                return CheckResult(
+                    name="search_index",
+                    status="fail",
+                    detail=f"fts5 index at {cache_dir} is unreadable: {problem}",
+                    fix=(
+                        "delete the index file and rebuild it with "
+                        "`athenaeum reindex --path <knowledge-root>`"
+                    ),
+                )
             return CheckResult(
                 name="search_index", status="ok", detail=f"fts5 index present at {cache_dir}"
             )
         return CheckResult(
             name="search_index",
-            status="fail",
-            detail=f"no fts5 index found under {cache_dir}",
+            status="warn",
+            detail=f"setup pending: no fts5 index found under {cache_dir}",
             fix=fix,
         )
     if backend == "vector":
@@ -671,8 +712,8 @@ def check_search_index(
             )
         return CheckResult(
             name="search_index",
-            status="fail",
-            detail=f"no vector index found under {vector_dir}",
+            status="warn",
+            detail=f"setup pending: no vector index found under {vector_dir}",
             fix=fix,
         )
     # "keyword" (or any other value): scan-on-query, nothing to build.

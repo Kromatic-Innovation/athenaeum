@@ -76,6 +76,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -580,6 +581,16 @@ def _apply_cap(
     return candidates[:ceiling]
 
 
+#: Which extractor produced a push's query terms (issue athenaeum#2916).
+EXTRACTOR_MODEL = "model"
+EXTRACTOR_REGEX_FALLBACK = "regex_fallback"
+EXTRACTOR_REGEX_ONLY = "regex_only"
+
+#: Bounds on the terms recorded in a ledger row (issue athenaeum#2916).
+_RECORDED_TERMS_MAX = 12
+_RECORDED_TERM_CHARS = 64
+
+
 def _extract_terms(
     prompt: str,
     *,
@@ -587,11 +598,17 @@ def _extract_terms(
     stopwords: frozenset[str],
     config: dict[str, Any] | None,
     use_llm: bool,
+    trace: dict[str, Any] | None = None,
 ) -> list[str]:
     """Term extraction: LLM (via the already import-light
     :func:`athenaeum.query_topics.extract_topics`) with a regex+stopword
     fallback. The LLM path is reached lazily — nothing above this function
     call imports :mod:`athenaeum.query_topics` at module scope.
+
+    *trace*, when given, receives ``extractor`` (issue athenaeum#2916):
+    :data:`EXTRACTOR_MODEL` when the model's terms were used,
+    :data:`EXTRACTOR_REGEX_FALLBACK` when the model was tried and yielded
+    nothing, :data:`EXTRACTOR_REGEX_ONLY` when the model was not tried.
     """
     terms: list[str] = []
     if use_llm:
@@ -607,8 +624,12 @@ def _extract_terms(
         terms = _canonical_terms(raw_terms)
 
     if terms:
+        if trace is not None:
+            trace["extractor"] = EXTRACTOR_MODEL
         return terms
 
+    if trace is not None:
+        trace["extractor"] = EXTRACTOR_REGEX_FALLBACK if use_llm else EXTRACTOR_REGEX_ONLY
     return _canonical_terms([prompt], stopwords=stopwords)
 
 
@@ -766,6 +787,7 @@ def build_context(
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -797,6 +819,10 @@ def build_context(
     ``config=None`` as well, the answer is :data:`_DEFAULT_SEARCH_BACKEND`
     without importing the resolver at all — identical value, no import
     cost; see that constant's own comment.
+
+    ``trace`` (issue athenaeum#2916): an optional out-parameter. When given
+    it is filled with ``terms`` and ``extractor`` for the caller to record;
+    it keeps the pinned envelope schema untouched. Absent, nothing changes.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -842,8 +868,15 @@ def build_context(
     stopwords = stopwords if stopwords is not None else _resolve_stopwords(cache_dir)
 
     terms = _extract_terms(
-        prompt, timeout=llm_timeout, stopwords=stopwords, config=config, use_llm=use_llm
+        prompt,
+        timeout=llm_timeout,
+        stopwords=stopwords,
+        config=config,
+        use_llm=use_llm,
+        trace=trace,
     )
+    if trace is not None:
+        trace["terms"] = list(terms)
 
     # Issue athenaeum#1905: both legs fetch to the WINDOW, not to `n`. The
     # extra rows are never rendered — `_apply_cap` below cuts back to `n`
@@ -978,6 +1011,7 @@ def record_context_push(
     cache_dir: Path,
     wiki_root: Path | None = None,
     config: dict[str, Any] | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> bool:
     """Route one rendered envelope's push into the durable push-metrics
     ledger, tagged ``"source": "sidecar"`` (issue athenaeum#1362,
@@ -1008,6 +1042,12 @@ def record_context_push(
     local, never at this module's top level — this module's import-weight
     contract (see the module docstring) is paid by every ``build_context``
     caller on the hot path; this function is not on that path.
+
+    ``trace`` (issue athenaeum#2916): the dict :func:`build_context` filled.
+    When it carries terms and
+    :func:`athenaeum.config.resolve_push_record_query_terms` is on, the row
+    records the extracted terms and the extractor name; the prompt itself is
+    still never stored.
     """
     try:
         candidates = envelope.get("candidates") or []
@@ -1064,6 +1104,14 @@ def record_context_push(
             items=items,
             source="sidecar",
         )
+        if trace and "terms" in trace:
+            from athenaeum.config import resolve_push_record_query_terms
+
+            if resolve_push_record_query_terms(config):
+                record.query_terms = [
+                    str(t)[:_RECORDED_TERM_CHARS] for t in trace["terms"][:_RECORDED_TERMS_MAX]
+                ]
+                record.extractor = str(trace.get("extractor", ""))
         return push_metrics.record_push(
             record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
         )
@@ -1087,6 +1135,67 @@ def record_context_push(
 # for the same input, and the only way that equality can never drift is for
 # both callers to run the SAME code, not two independently-written copies
 # of it. Moved here rather than duplicated.
+
+
+#: Skip reason recorded when a submission is wholly harness-injected text
+#: (issue athenaeum#2914).
+SKIP_REASON_HARNESS_INJECTED = "harness_injected"
+
+
+def split_injected_text(prompt: str, patterns: Sequence[str]) -> tuple[str, bool]:
+    """Remove harness-injected spans from *prompt*.
+
+    *patterns* are regular expressions supplied by the host adapter (the
+    engine knows no host's markup). Returns ``(user_text, matched)``:
+    ``user_text`` is the prompt with every matching span removed and
+    whitespace trimmed; ``matched`` says whether anything was removed. With
+    no patterns the prompt is returned unchanged. A malformed pattern is
+    ignored rather than raised, so a bad adapter pattern degrades to
+    "push as before".
+    """
+    user_text = prompt
+    for pattern in patterns:
+        try:
+            user_text = re.sub(pattern, " ", user_text, flags=re.DOTALL)
+        except re.error:
+            continue
+    matched = user_text != prompt
+    return (user_text.strip() if matched else prompt), matched
+
+
+def record_context_skip(
+    prompt: str,
+    session_id: str,
+    reason: str,
+    *,
+    cache_dir: Path,
+    wiki_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Write one skip row (no items, ``skip_reason`` set) to the push ledger.
+
+    Best-effort like :func:`record_context_push`: never raises.
+    """
+    try:
+        if not session_id:
+            return False
+        from athenaeum import push_metrics
+
+        record = push_metrics.PushRecord(
+            session_id=session_id,
+            ts=push_metrics.now_iso(),
+            query_hash=push_metrics._query_hash(prompt),
+            backend="",
+            items=[],
+            source="sidecar",
+            skip_reason=reason,
+        )
+        return push_metrics.record_push(
+            record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
+        )
+    except Exception:  # must never break the turn
+        log.debug("context: skip-row instrumentation failed", exc_info=True)
+        return False
 
 
 def _seen_file(cache_dir: Path, session_id: str) -> Path:
@@ -1137,6 +1246,7 @@ def build_context_for_turn(
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
+    injected_patterns: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1170,10 +1280,41 @@ def build_context_for_turn(
     ``wiki_root`` is forwarded as-is to :func:`build_context` (issue
     athenaeum#2538 AC8) — ``None`` by default, so a caller that does not
     pass it sees no behavior change at all.
+
+    ``injected_patterns`` (issue athenaeum#2914): regexes the host adapter
+    supplies for text its harness injects into the prompt channel. A
+    submission that is wholly such text (a *pseudo-prompt*) is not pushed:
+    an empty envelope is returned and one skip row
+    (``skip_reason="harness_injected"``) is written to the push ledger. A
+    submission mixing injected and user text is queried on the user text
+    only. ``()`` (the default) leaves behavior unchanged.
     """
+    if injected_patterns:
+        user_text, matched = split_injected_text(prompt, injected_patterns)
+        if matched:
+            if not user_text:
+                if not _recall_disabled(cache_dir):
+                    record_context_skip(
+                        prompt,
+                        session_id,
+                        SKIP_REASON_HARNESS_INJECTED,
+                        cache_dir=cache_dir,
+                        wiki_root=wiki_root,
+                        config=config,
+                    )
+                return _empty_envelope(
+                    prompt,
+                    session_id,
+                    budget if budget is not None else DEFAULT_BUDGET_TOKENS,
+                    search_backend or _DEFAULT_SEARCH_BACKEND,
+                    time.monotonic(),
+                )
+            prompt = user_text
+
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)
 
+    trace: dict[str, Any] = {}
     envelope = build_context(
         prompt,
         session_id,
@@ -1186,6 +1327,7 @@ def build_context_for_turn(
         llm_timeout=llm_timeout,
         config=config,
         wiki_root=wiki_root,
+        trace=trace,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 
@@ -1193,6 +1335,6 @@ def build_context_for_turn(
     # ledger the MCP `recall` path writes, tagged `"source":"sidecar"`.
     # Best-effort — never raises, never affects the envelope this function
     # returns.
-    record_context_push(envelope, cache_dir=cache_dir)
+    record_context_push(envelope, cache_dir=cache_dir, config=config, trace=trace)
 
     return envelope

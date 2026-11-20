@@ -374,3 +374,39 @@ def test_trailing_prose_after_array_still_extracts(
         "Return Path",
         "consulting",
     ]
+
+
+def test_regex_fallback_warns_once_per_process_naming_fix(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """athenaeum#2906: no credential (client is None) is no longer silent --
+    one warning per process names the fallback and how to enable LLM
+    extraction; the return value is unchanged."""
+    import logging
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+    monkeypatch.setattr(query_topics, "_regex_fallback_warned", False)
+    with caplog.at_level(logging.WARNING, logger=query_topics.log.name):
+        assert query_topics.extract_topics("Tell me about Return Path") == []
+        assert query_topics.extract_topics("And what about Acme Corp today") == []
+    hits = [r for r in caplog.records if "regex fallback" in r.getMessage()]
+    assert len(hits) == 1
+    assert "ANTHROPIC_API_KEY" in hits[0].getMessage()
+    assert hits[0].levelno == logging.WARNING
+
+
+def test_no_fallback_warning_when_llm_extraction_works(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(anthropic, "Anthropic", FakeLLMClient(text='["Return Path"]'))
+    monkeypatch.setattr(query_topics, "_regex_fallback_warned", False)
+    with caplog.at_level(logging.WARNING, logger=query_topics.log.name):
+        assert query_topics.extract_topics("Tell me about Return Path") == ["Return Path"]
+    assert not [r for r in caplog.records if "regex fallback" in r.getMessage()]

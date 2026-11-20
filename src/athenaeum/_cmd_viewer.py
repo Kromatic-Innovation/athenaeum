@@ -754,7 +754,16 @@ def enrich_payload(
         # this machine) renders the pre-athenaeum#1530 explicit not-instrumented
         # state rather than an empty box, which would read as "the sidecar
         # thought nothing" -- a different and wrong claim.
-        topics = _load_topics_for_query_hash(query_hash, cache_dir=cache_dir)
+        #
+        # Issue athenaeum#2916: a row written after that change carries its
+        # own `query_terms` and `extractor`, which are preferred over the
+        # trace (same row, no join, and the extractor is only known there).
+        topics: list[str] | None
+        recorded_terms = last_turn_record.get("query_terms")
+        if isinstance(recorded_terms, list):
+            topics = [str(t) for t in recorded_terms]
+        else:
+            topics = _load_topics_for_query_hash(query_hash, cache_dir=cache_dir)
         last_turn = {
             "present": True,
             "ts": last_turn_record.get("ts", ""),
@@ -764,6 +773,7 @@ def enrich_payload(
             "items": turn_items,
             "topics": topics,
             "topics_status": "ok" if topics is not None else "not_instrumented",
+            "extractor": last_turn_record.get("extractor", ""),
         }
 
     payload["pages"] = pages
