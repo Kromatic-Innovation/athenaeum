@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- `athenaeum uid-collision-lint` is a read-only check that reports each uid carried by more than one page inside a single surface, with the page paths and which pages are tombstones. It exits 2 when it finds one and offers `--json`. The same uid on two different surfaces is not reported. Both 8-hex and 16-hex uids are handled. (athenaeum#2993)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
