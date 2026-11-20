@@ -1033,6 +1033,49 @@ def _integrate_before_compile(
     return handled
 
 
+def _filing_checks_after_push(
+    knowledge_root: Path,
+    config: dict | None,
+    plan: "sync_integrate.RepoSyncPlan",
+    outcome: "sync_integrate.PushOutcome",
+    report: "sync_integrate.SyncReport",
+) -> None:
+    """The filing checks on what a successful push published (athenaeum#2928).
+
+    Runs after the push has been recorded and cannot change it: a failure here is a
+    ``filing-checks`` row in the run summary and nothing else.
+    """
+    if not outcome.ok:
+        return
+    try:
+        from athenaeum import sync_filing_checks
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_access import StoreDeclaration, load_store_declaration
+        from athenaeum.store_decisions import resolve_mounts
+
+        roots = plan.settings.page_roots
+        declaration = None
+        for root in roots:
+            declaration = load_store_declaration((plan.repo / root.rel).resolve())
+            if isinstance(declaration, StoreDeclaration):
+                break
+        if not isinstance(declaration, StoreDeclaration):
+            return
+        sync_filing_checks.run_after_push(
+            plan.repo,
+            outcome,
+            roots,
+            knowledge_root=knowledge_root,
+            store_id=declaration.store_id,
+            report=report,
+            mounts=resolve_mounts(knowledge_root, config),
+            asserter=resolve_owner_asserter(config),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the sync for a check
+        log.warning("filing checks after push could not start: %s", type(exc).__name__)
+        report.add("filing-checks", "failed", "check-crashed")
+
+
 def _integrate_push(
     knowledge_root: Path, config: dict | None, surface_sync: SurfaceSyncState
 ) -> set[Path]:
@@ -1050,6 +1093,7 @@ def _integrate_push(
             continue
         report = sync_integrate.SyncReport()
         outcome = sync_integrate.push_after_compile(plan.repo, plan.branch, plan.settings, report)
+        _filing_checks_after_push(knowledge_root, config, plan, outcome, report)
         _report_sync(surface_sync, plan, report)
         if outcome.ok:
             log.info("Pushed %s to %s", plan.label, plan.settings.remote)
