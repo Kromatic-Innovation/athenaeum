@@ -1453,9 +1453,21 @@ class FTS5Backend:
         if db_path.is_file():
             conn = sqlite3.connect(str(db_path))
             try:
-                removed = conn.execute(
-                    "DELETE FROM wiki WHERE surface = ?", (surface,)
-                ).rowcount
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(wiki)")}
+                if "surface" in columns:
+                    removed = conn.execute(
+                        "DELETE FROM wiki WHERE surface = ?", (surface,)
+                    ).rowcount
+                else:
+                    # A pre-surface (v6) index not yet rebuilt: same derivation
+                    # the build uses, applied to the filename column.
+                    doomed = [
+                        (rid,)
+                        for rid, name in conn.execute("SELECT rowid, filename FROM wiki")
+                        if surface_of(str(name)) == surface
+                    ]
+                    conn.executemany("DELETE FROM wiki WHERE rowid = ?", doomed)
+                    removed = len(doomed)
                 conn.commit()
             finally:
                 conn.close()
@@ -2545,6 +2557,13 @@ class VectorBackend:
         """
         removed = 0
         collection = self._open_collection(cache_dir)
+        if collection is None and (cache_dir / _VECTOR_DIR).is_dir():
+            # Pruning the manifest now would leave embeddings that nothing
+            # tracks; fail loudly and leave the manifest as it was.
+            raise RuntimeError(
+                f"vector index at {cache_dir / _VECTOR_DIR} could not be opened; "
+                f"embeddings for surface {surface!r} were not removed"
+            )
         if collection is not None:
             ids = collection.get(where={"surface": surface}, include=[])["ids"]
             if ids:
