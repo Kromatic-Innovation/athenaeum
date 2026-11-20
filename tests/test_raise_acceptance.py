@@ -852,3 +852,14 @@ def test_s7b_reject_refuses_an_accepted_message(env: Env) -> None:
     env.accept(out.decision["id"])  # type: ignore[index]
     with pytest.raises(RaiseAcceptRefused):
         _reject(env, out.decision["id"])  # type: ignore[index]
+
+
+def test_s7b_accepting_removes_the_raw_intake_file_once_settled(env: Env) -> None:
+    # Seer review on PR athenaeum#3027: §6.2 removes a file once every message in it
+    # has its final disposition, accepted included.
+    rec = env.msg()
+    src = _write_raw(env, "acc.jsonl", rec)
+    out = _submit_src(env, rec, src)
+    assert src.exists()
+    env.accept(out.decision["id"])  # type: ignore[index]
+    assert not src.exists()

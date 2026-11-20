@@ -753,6 +753,9 @@ def accept_raise(
     resolve_decision(
         knowledge_root, store_id=target_store_id, decision_id=decision_id, disposition="accepted"
     )
+    # §6.2: a raw intake file goes once every message in it has its final disposition.
+    if detail.get("source"):
+        consume_raw_file(detail["source"], cache_dir)
     # The copy is published and its acceptance recorded; only now do the filing
     # checks run (S21). They never change this outcome.
     filing = run_after_publish(
