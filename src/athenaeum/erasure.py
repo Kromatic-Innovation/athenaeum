@@ -914,7 +914,10 @@ def read_redaction_ledger(cache_dir: Path | None = None) -> list[dict[str, Any]]
 ERASURE_COMMIT_KEY = "Athenaeum-Erasure"
 
 _MARK_UID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-_MARK_LINE_RE = re.compile(rf"^{ERASURE_COMMIT_KEY}: (\S+)$")
+#: Parses only a uid :func:`erasure_commit_line` would itself write, so a
+#: hand-written mark naming anything else is never honoured, and integrate can
+#: always re-emit the mark it read (Seer review on PR athenaeum#3024).
+_MARK_LINE_RE = re.compile(rf"^{ERASURE_COMMIT_KEY}: ({_MARK_UID_RE.pattern})$")
 
 
 def erasure_commit_line(uid: str) -> str:

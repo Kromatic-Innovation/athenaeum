@@ -644,6 +644,16 @@ class TestErasureMark:
         )
         assert erasure_marks(msg) == frozenset({"u-1", "u-2"})
 
+    def test_a_mark_naming_a_uid_no_writer_would_emit_is_not_honoured(self) -> None:
+        """A hand-written mark whose uid fails the writer's shape is ignored, so
+        integrate never reads back a mark it could not re-emit."""
+        from athenaeum.erasure import erasure_commit_line, erasure_marks
+
+        msg = "subject\n\nAthenaeum-Erasure: u:1\nAthenaeum-Erasure: -x\n"
+        assert erasure_marks(msg) == frozenset()
+        for uid in erasure_marks("Athenaeum-Erasure: ok-1\n"):
+            assert erasure_commit_line(uid) == "Athenaeum-Erasure: ok-1"
+
     def test_erase_pages_commits_one_line_per_page(self, tmp_path: Path) -> None:
         import subprocess
 
