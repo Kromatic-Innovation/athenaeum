@@ -85,7 +85,8 @@ LOCATIONS = ("bench", "install_raw", "target_raw")
 #: message can quote it (the same rule as the retract reasons of §6.1). One
 #: code per check of §4.4, plus ``declined`` (the compile role rejected it),
 #: ``store_refuses`` (the store's ``intake`` rules refuse the type and tags)
-#: and ``uid_taken`` (the derived uid belongs to another page).
+#: and ``uid_taken`` (the derived uid belongs to another page). The codes of
+#: applying a ``supersede`` (athenaeum#2940) are listed after them.
 REASON_CODES = frozenset(
     {
         "declined",
@@ -99,6 +100,17 @@ REASON_CODES = frozenset(
         "already_rejected",
         "duplicate",
         "uid_taken",
+        # Applying a ``supersede`` to a copy (athenaeum#2940, slice S13).
+        "access_changed",
+        "edit_contested",
+        "ancestor_unreadable",
+        "sender_mismatch",
+        "stale_seq",
+        "copy_ended",
+        "copy_folded",
+        "copy_removed",
+        "raise_unknown",
+        "superseded_at_source",
     }
 )
 

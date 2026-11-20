@@ -111,6 +111,7 @@ MODULE_LAYER: dict[str, int] = {
     "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
     "raise_acceptance_ledger": 3,  # issue athenaeum#2938: raise acceptance ledger
     "raise_acceptance": 3,  # issue athenaeum#2939: accept a raised page, asking every time
+    "raise_supersede": 3,  # issue athenaeum#2940: apply a supersede to a raised copy
     "store_links": 2,  # issue athenaeum#2619: link guard + lint
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
