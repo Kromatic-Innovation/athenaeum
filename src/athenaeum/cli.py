@@ -236,7 +236,7 @@ _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
          "quarantine", "repair", "reconcile", "decompose-page", "recompile",
          "relate", "correct-notes", "fold-lint", "store-link-lint",
-         "raised-from-lint", "uid-collision-lint",
+         "raised-from-lint", "uid-collision-lint", "machine-local-check",
          "pii-restore", "quiesce", "drain", "storage", "schema", "registry",
          "memory-class", "description", "subject-population"),
     ),
