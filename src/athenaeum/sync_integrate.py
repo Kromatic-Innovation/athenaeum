@@ -879,10 +879,11 @@ def _remint(
     final[renamed] = _rewrite(data.decode("utf-8"), pairs, set()).encode("utf-8")
     # References made in the same unpublished local commits: lines of a locally changed
     # page that neither the common ancestor nor the remote has. A line already published
-    # (in the ancestor or on the remote) is never rewritten.
+    # (in the ancestor or on the remote) is never rewritten. A pending-merges record can
+    # name a page by its ``<uid>-<slug>.md`` file, so records are rewritten like pages.
     for other in sorted(local_changed - {path}):
         current = final.get(other)
-        if current is None or _classify(other, roots)[0] != "page":
+        if current is None or _classify(other, roots)[0] not in ("page", "record"):
             continue
         text, ok = _text(current)
         if text is None or not ok:

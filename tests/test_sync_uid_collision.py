@@ -135,3 +135,15 @@ def test_a_librarian_run_counts_the_re_mint_in_the_run_summary(tmp_path: Path) -
     state: librarian.SurfaceSyncState = _run_second(kr, cfg)
     assert state.as_profile_fields()["uid_reminted"] == 1
     assert h.remote_tip() == h.second.head()
+
+
+def test_a_reference_in_a_locally_changed_record_file_is_rewritten(
+    harness: TwoCloneHarness,
+) -> None:
+    harness.first.commit(f"wiki/{TWIN}-priya-raman.md", page(TWIN, "Priya Raman"))
+    harness.second.commit(f"wiki/{TWIN}-sam-ortiz.md", page(TWIN, "Sam Ortiz"))
+    harness.second.commit("wiki/_pending_merges.md", f"also_affects: {TWIN}-sam-ortiz.md\n")
+    assert push_after_compile(harness.first.root, "main", SETTINGS).ok
+    ((_, new),) = integrate_remote(harness.second.root, "main", SETTINGS).reminted
+    record = (harness.second.root / "wiki" / "_pending_merges.md").read_text()
+    assert record == f"also_affects: {new}-sam-ortiz.md\n"
