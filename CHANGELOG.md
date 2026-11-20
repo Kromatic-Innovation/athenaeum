@@ -72,6 +72,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
 - The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
+- The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
 
 ### Fixed
 
