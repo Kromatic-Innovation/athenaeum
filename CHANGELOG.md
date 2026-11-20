@@ -31,8 +31,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   adapter (reads the declaration's `groups:` block) and `resolve_rights`, which
   returns the subset of read, propose, compile and answer an owner holds on a
   store, keyed by `asserter_identity_key` and never a role name. A directory that
-  cannot answer resolves as a reader only. Nothing calls it yet, so no install
-  behaves differently (athenaeum#2933).
+  cannot answer resolves as a reader only. A librarian run resolves the owner's
+  rights on its surfaces at start and logs one INFO line each; nothing acts on
+  the result and a failure is swallowed, so no run behaves differently
+  (athenaeum#2933).
 
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is

@@ -17,14 +17,16 @@ adapter returns ``None``, the declared adapter is not registered, or a group is
 unknown) the install resolves as a reader only. A declaration that failed to
 validate resolves the same way.
 
-**Never on the recall path.** Resolution is meant to run when a run starts and
-when the check runs. This slice only provides the pure function; nothing calls
-it yet and nothing acts on its result, so no install behaves differently.
+**Never on the recall path.** Resolution runs when a librarian run starts
+(:func:`record_run_start_rights`, called from ``librarian.run``) and, later, when
+``athenaeum store access check`` runs (access S5 adds that caller). The run-start
+call only logs the result; nothing acts on it, so no install behaves differently.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -42,7 +44,10 @@ __all__ = [
     "READER_ONLY",
     "resolve_rights",
     "resolve_surface_rights",
+    "record_run_start_rights",
 ]
+
+log = logging.getLogger(__name__)
 
 #: What an install holds when the directory cannot answer.
 READER_ONLY: frozenset[str] = frozenset({"read"})
@@ -131,3 +136,33 @@ def resolve_surface_rights(
     if isinstance(declaration, StoreDeclarationInvalid):
         return READER_ONLY
     return resolve_rights(declaration, asserter, adapters)
+
+
+def record_run_start_rights(
+    surface_roots: Iterable[Path],
+    asserter: Mapping[str, object] | None,
+) -> dict[str, frozenset[str] | None]:
+    """Resolve and log the owner's rights on each surface; act on nothing.
+
+    One INFO line per surface (``store rights: <surface>: read,compile`` or
+    ``no declaration``). Any failure is logged and swallowed: a broken
+    declaration must not stop or change a run. Returns the result for callers
+    that want to hold it in memory.
+    """
+    out: dict[str, frozenset[str] | None] = {}
+    seen: set[Path] = set()
+    for root in surface_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        try:
+            rights = resolve_surface_rights(root, asserter)
+        except Exception as exc:  # noqa: BLE001 - never let this stop a run
+            log.warning("store rights: %s: resolution failed (%s)", root, type(exc).__name__)
+            continue
+        out[str(root)] = rights
+        if rights is None:
+            log.info("store rights: %s: no declaration", root)
+        else:
+            log.info("store rights: %s: %s", root, ",".join(sorted(rights)) or "none")
+    return out

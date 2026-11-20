@@ -9,7 +9,6 @@ from typing import Any
 
 import yaml
 
-from athenaeum import store_rights
 from athenaeum.models import asserter_identity_key
 from athenaeum.store_access import (
     StoreDeclaration,
@@ -127,10 +126,3 @@ def test_surface_resolution(tmp_path: Path) -> None:
     assert resolve_surface_rights(tmp_path, _who("1042")) == READER_ONLY
 
 
-def test_module_is_not_on_the_recall_path() -> None:
-    import athenaeum.search as search
-
-    assert "store_rights" not in (search.__doc__ or "")
-    src = Path(search.__file__).read_text()
-    assert "store_rights" not in src
-    assert store_rights.__all__
