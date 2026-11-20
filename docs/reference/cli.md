@@ -81,6 +81,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
 - [`athenaeum init`](#athenaeum-init) (command) — Initialize a new knowledge directory
+- [`athenaeum machine-local-check`](#athenaeum-machine-local-check) (command) — Read-only: list machine-local files (per the artifact registry) that a shared repository tracks. Exit 2 when one is found. Changes nothing.
 - [`athenaeum measure`](#athenaeum-measure) (group) — v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity, coordinate-coverage.
 - [`athenaeum measure backlog-price`](#athenaeum-measure-backlog-price) (command) — Backlog price sheet with a decision-inflow sensitivity table.
 - [`athenaeum measure coordinate-coverage`](#athenaeum-measure-coordinate-coverage) (command) — Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
@@ -1052,6 +1053,16 @@ Initialize a new knowledge directory
 | `--templates-dest` | — | — | Override the templates destination directory (default: <path>/templates). |
 | `--with-rules` | off (flag absent) | — | Also copy bundled EXAMPLE shape rules into <path>/rules/. Every example ships 'mode: observe' -- installing them changes nothing until you review wiki/_shape_rule_dispositions.jsonl and edit a copy to 'mode: live'. See docs/design/shape-rules.md. |
 | `--with-templates` | off (flag absent) | — | Also copy bundled entity-author templates (person/company/project/concept/source) into <path>/templates/. |
+
+## `athenaeum machine-local-check`
+
+Read-only: list machine-local files (per the artifact registry) that a shared repository tracks. Exit 2 when one is found. Changes nothing.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Emit JSON instead of text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--repo` | — | — | Check this one git repository instead of the store's integrate-mode ones. |
 
 ## `athenaeum measure`
 

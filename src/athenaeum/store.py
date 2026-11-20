@@ -696,6 +696,11 @@ class ArtifactDeclaration:
     #: constant exists) plus the design note table/paragraph this row
     #: transcribes.
     source_ref: str
+    #: Base names the artifact is stored under, where it is one file with a fixed
+    #: name. Empty when the artifact is a directory, a pattern or an operator-chosen
+    #: name. Read by the S6b check that a machine-local file is not tracked
+    #: (athenaeum#2994).
+    file_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.persistence_class not in PERSISTENCE_CLASSES:
@@ -1123,6 +1128,7 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         location="cache dir",
         source_ref="zero_yield.py:57 STATE_NAME 'zero_yield_state.json' (design note "
         "§5.2 table row 9)",
+        file_names=("zero_yield_state.json",),
     ),
     ArtifactDeclaration(
         name="killswitch-state",
@@ -1130,6 +1136,7 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         operational_scope="machine-local",
         location="cache dir",
         source_ref="killswitch.py:100 state_path() 'disabled' (design note §5.2 table row 9)",
+        file_names=("disabled",),
     ),
     # -- config (design note §5.2 R3 box) --------------------------------
     ArtifactDeclaration(
@@ -1770,6 +1777,16 @@ def blob_id_of(repo: Path, data: bytes) -> str:
         capture_output=True,
         input=data,
     ).stdout.decode().strip()
+
+
+def list_tracked_files(repo: Path) -> list[str]:
+    """Sorted paths git tracks in *repo* right now (its index), relative to the root.
+
+    Read-only. A path that is only untracked or ignored in the working tree is not
+    listed. Raises ``subprocess.CalledProcessError`` outside a git repository.
+    """
+    raw = _git_out(repo, "ls-files", "-z")
+    return sorted(p.decode() for p in raw.split(b"\0") if p)
 
 
 def list_files_at_revision(repo: Path, rev: str, prefix: str = "") -> list[str]:

@@ -144,6 +144,7 @@ MODULE_LAYER: dict[str, int] = {
     "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
     "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
     "sync_integrate": 4,  # athenaeum#2935: integrate mode; imports record_merge (L4)
+    "sync_machine_local": 4,  # athenaeum#2994: tracked machine-local file check (L4)
     "sync_filing_checks": 4,  # athenaeum#2928: filing checks after a push (L4)
     "record_merge": 4,  # athenaeum#2929: sibling of pending_merges (L4), whose parser it calls
     "person_hints": 3,  # issue athenaeum#2653
@@ -443,6 +444,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,
     "_cmd_raised_from_lint": 5,  # issue athenaeum#2799
+    "_cmd_machine_local_check": 5,  # athenaeum#2994
     "_cmd_store_link_lint": 5,  # issue athenaeum#2619
     "_cmd_import_memory": 5,  # issue athenaeum#2316
     "_cmd_index": 5,
