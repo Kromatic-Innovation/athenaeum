@@ -33,7 +33,9 @@ here:
    ``[ "$AUTO_RECALL" = "true" ] || exit 0``
    (``user-prompt-recall.sh:146,698``): unset defaults to enabled, any
    value other than the exact string ``"true"`` disables — no output, exit
-   0.
+   0. A disabled turn still writes one ``declared`` skip row to the push
+   ledger (issue athenaeum#2976; :func:`_record_declared_skip`) carrying
+   only the reason, session id and timestamp.
 3. **``SEARCH_BACKEND`` pass-through.** Read from the (now config.env-aware)
    process env and forwarded to :func:`~athenaeum.context.build_context_for_turn`
    as its ``search_backend`` argument, mirroring the shell default/override
@@ -765,6 +767,23 @@ def _hook_output(additional_context: str) -> str:
     )
 
 
+def _record_declared_skip(cache_dir: Path, session_id: str) -> None:
+    """Write the ``declared`` skip row for an ``AUTO_RECALL``-off turn
+    (issue athenaeum#2976) via :func:`athenaeum.context.record_declared_skip`.
+
+    Its own ``try`` so a failure here (including the lazy import) can never
+    swallow the degradation notice printed just after it. Nothing from the
+    prompt is passed: the row holds only the reason, session id and
+    timestamp.
+    """
+    try:
+        from athenaeum.context import record_declared_skip
+
+        record_declared_skip(session_id, cache_dir=cache_dir)
+    except Exception:  # noqa: BLE001 - telemetry must never block a prompt
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Always returns 0 — see the module docstring's
     fail-safe axis. ``argv`` is accepted (and ignored) only so this
@@ -820,6 +839,10 @@ def main(argv: list[str] | None = None) -> int:
         notice = _safe_session_notice(cache_dir, session_id)
 
         if not _auto_recall_enabled():
+            # Issue athenaeum#2976: a declared-off turn still leaves one
+            # content-free skip row, so it stays in the push-metrics
+            # denominator rather than reading as a turn the hook never saw.
+            _record_declared_skip(cache_dir, session_id)
             if notice:
                 print(_hook_output(notice))
             return 0
