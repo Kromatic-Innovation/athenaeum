@@ -111,6 +111,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
 - The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
 
+- The per-turn push no longer fires on text the harness injected into the prompt
+  channel (background-task notices, messages from other agents, system
+  reminders). A wholly injected submission is skipped and recorded as one push
+  ledger row with `skip_reason: harness_injected`; a submission mixing injected
+  and user text is queried on the user text only. The Claude Code adapter
+  supplies the patterns and the engine supplies the skip
+  (athenaeum#2914).
+
 ### Fixed
 
 - `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
