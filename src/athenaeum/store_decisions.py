@@ -64,6 +64,7 @@ __all__ = [
     "queue_path",
     "file_decision",
     "load_queue",
+    "resolve_decision",
     "render_item",
     "collect_store_decisions",
 ]
@@ -192,6 +193,8 @@ def load_queue(knowledge_root: Path, store_id: str) -> list[dict]:
     """Every record of one store's queue (``[]`` when it has none).
 
     Reads that one file and no other. A line that does not parse is skipped.
+    A resolution line (written by :func:`resolve_decision`) is folded into the
+    record it names: that record's ``disposition`` becomes the resolution's.
     """
     path = queue_path(knowledge_root, store_id)
     if not path.is_file():
@@ -207,7 +210,27 @@ def load_queue(knowledge_root: Path, store_id: str) -> list[dict]:
             continue
         if isinstance(rec, dict):
             records.append(rec)
-    return records
+    resolved = {r["resolves"]: r["disposition"] for r in records if "resolves" in r}
+    return [
+        {**r, "disposition": resolved.get(r.get("id"), r.get("disposition"))}
+        for r in records
+        if "resolves" not in r
+    ]
+
+
+def resolve_decision(
+    knowledge_root: Path, *, store_id: str, decision_id: str, disposition: str
+) -> None:
+    """Mark one decision of *store_id* settled, by appending a resolution line.
+
+    The queue is never rewritten (:func:`file_decision`), so a settled decision
+    is a second line that :func:`load_queue` folds into the first. A settled
+    decision is no longer listed as pending.
+    """
+    if not disposition or disposition == "pending":
+        raise StoreDecisionRefused("a resolution needs a disposition other than pending")
+    line = json.dumps({"resolves": decision_id, "disposition": disposition}, sort_keys=True)
+    append_line_durable(queue_path(knowledge_root, store_id), (line + "\n").encode("utf-8"))
 
 
 def file_decision(
@@ -220,6 +243,7 @@ def file_decision(
     mounts: Mapping[str, Path] | None = None,
     asserter: Mapping[str, object] | None = None,
     created_at: str | None = None,
+    detail: Mapping[str, Any] | None = None,
 ) -> dict:
     """File one decision with the store whose page it would change.
 
@@ -228,7 +252,9 @@ def file_decision(
 
     When *mounts* is given the store must be mounted and the owner (*asserter*)
     must hold ``compile`` on it: only a compiling install raises decisions about
-    a store's pages. Returns the stored record.
+    a store's pages. *detail* is an optional JSON-able mapping kept on the record
+    for the kind's own use (a ``raise`` decision keeps its waiting message there).
+    Returns the stored record.
     """
     if mounts is not None and "compile" not in _rights(store_id, mounts, asserter):
         raise StoreDecisionRefused(
@@ -258,7 +284,7 @@ def file_decision(
         elif (page.store_id, uid) not in seen_other:
             seen_other.add((page.store_id, uid))
             others.append({"store_id": page.store_id, "uid": uid})
-    record = {
+    record: dict[str, Any] = {
         "id": f"{store_id}-{uuid.uuid4().hex[:8]}",
         "store_id": store_id,
         "kind": str(kind),
@@ -268,6 +294,8 @@ def file_decision(
         "pages": quoted,
         "other_pages": others,
     }
+    if detail is not None:
+        record["detail"] = dict(detail)
     # One O_APPEND write per record (review on PR athenaeum#2980): concurrent
     # filers never overwrite each other, and a torn trailing line is skipped by
     # :func:`load_queue`.
@@ -326,6 +354,13 @@ def render_item(
                 entry.update(filled)
                 entry["readable"] = True
         shown.append(entry)
+    payload: dict[str, Any] = {
+        "kind": record.get("kind", "question"),
+        "pages": [dict(p) for p in record.get("pages", [])],
+        "other_pages": shown,
+    }
+    if "detail" in record:
+        payload["detail"] = record["detail"]
     return {
         "type": ITEM_TYPE,
         "id": record["id"],
@@ -333,11 +368,7 @@ def render_item(
         "created_at": record.get("created_at"),
         "summary": record.get("question", ""),
         "confidence": None,
-        "payload": {
-            "kind": record.get("kind", "question"),
-            "pages": [dict(p) for p in record.get("pages", [])],
-            "other_pages": shown,
-        },
+        "payload": payload,
     }
 
 

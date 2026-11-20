@@ -111,6 +111,15 @@ def _strip_links(body: str) -> str:
     return _MD_LINK_RE.sub(_md_link_sub, _WIKILINK_RE.sub(_wikilink_sub, body))
 
 
+def has_link(body: str) -> bool:
+    """True when *body* carries a link the projection would strip (§4.2).
+
+    A copy accepted whole must keep its body unchanged, so acceptance refuses
+    a payload that still has a page link rather than stripping it.
+    """
+    return _strip_links(body) != body
+
+
 def project(page_text: str) -> Projection:
     """Reduce *page_text* to its :class:`Projection` (§4.2). Deterministic."""
     meta, body = parse_frontmatter(page_text)

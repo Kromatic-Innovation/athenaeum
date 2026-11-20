@@ -400,10 +400,14 @@ def iter_rows(cache_dir: Path) -> list[AcceptanceRow]:
 
 
 def disposition_of(cache_dir: Path, message_id: str) -> AcceptanceRow | None:
-    """The latest row for *message_id*: its current disposition, or ``None``."""
+    """The latest row for *message_id*: its current disposition, or ``None``.
+
+    A row with reason ``duplicate`` records a re-delivery of the message; it
+    never replaces the disposition of the delivery it duplicates.
+    """
     match: AcceptanceRow | None = None
     for row in iter_rows(cache_dir):
-        if row.message_id == message_id:
+        if row.message_id == message_id and row.reason != "duplicate":
             match = row
     return match
 
