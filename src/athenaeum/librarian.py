@@ -1028,9 +1028,49 @@ def _integrate_before_compile(
         if plan.branch is None:
             surface_sync.record((plan.label,), "integrate", "skipped", "detached-head")
             continue
-        report = sync_integrate.sync_before_compile(plan.repo, plan.branch, plan.settings)
+        report = sync_integrate.sync_before_compile(
+            plan.repo, plan.branch, _settings_with_held_filing(knowledge_root, config, plan)
+        )
         _report_sync(surface_sync, plan, report)
     return handled
+
+
+def _settings_with_held_filing(
+    knowledge_root: Path, config: dict | None, plan: "sync_integrate.RepoSyncPlan"
+) -> "sync_integrate.SyncSettings":
+    """The plan's settings with the held-page decision filer wired in (athenaeum#2995).
+
+    A repository whose store declares no ``store_id`` (or any failure reading it)
+    keeps the settings as planned: its held pages are still held and kept, only
+    no decision is filed.
+    """
+    try:
+        from dataclasses import replace
+
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_access import StoreDeclaration, load_store_declaration
+        from athenaeum.store_decisions import resolve_mounts
+
+        roots = plan.settings.page_roots
+        declaration = None
+        for root in roots:
+            declaration = load_store_declaration((plan.repo / root.rel).resolve())
+            if isinstance(declaration, StoreDeclaration):
+                break
+        if not isinstance(declaration, StoreDeclaration):
+            return plan.settings
+        filer = sync_integrate.make_held_filer(
+            plan.repo,
+            roots,
+            knowledge_root=knowledge_root,
+            store_id=declaration.store_id,
+            mounts=resolve_mounts(knowledge_root, config),
+            asserter=resolve_owner_asserter(config),
+        )
+        return replace(plan.settings, file_held=filer)
+    except Exception as exc:  # noqa: BLE001 - never fail the sync for a decision
+        log.warning("held-page decisions unavailable: %s", type(exc).__name__)
+        return plan.settings
 
 
 def _filing_checks_after_push(
@@ -1092,7 +1132,9 @@ def _integrate_push(
             surface_sync.record((plan.label,), "push", "skipped", "detached-head")
             continue
         report = sync_integrate.SyncReport()
-        outcome = sync_integrate.push_after_compile(plan.repo, plan.branch, plan.settings, report)
+        outcome = sync_integrate.push_after_compile(
+            plan.repo, plan.branch, _settings_with_held_filing(knowledge_root, config, plan), report
+        )
         _filing_checks_after_push(knowledge_root, config, plan, outcome, report)
         _report_sync(surface_sync, plan, report)
         if outcome.ok:

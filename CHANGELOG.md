@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- A page that integrate mode holds because two installs changed it and the librarian could not settle it is now filed as a `held-page` decision in the owning store's own decision queue, naming the uid, the contested units, the reason codes and the base, local and remote blob ids (no page text from another store). The `Athenaeum-Page` line of the merge commit carries `decision=<id>`, the decision shows in the one decision listing, and `answer_held_decision` applies "keep the published version", "take the local version" or a supplied merged text as one ordinary new commit and closes the decision. The published version stays on the page until then; a `deferred` page is not filed and a page settled by rule files nothing; filing the same held page twice makes one decision (athenaeum#2995)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
