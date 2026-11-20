@@ -349,12 +349,15 @@ def test_an_unregistered_path_changed_on_both_sides_keeps_the_remote_version(
     assert (h.second.root / "extras" / "notes.txt").read_text() == "from first\n"
 
 
-def test_one_uid_on_two_pages_blocks_the_integrate_and_nothing_is_pushed(
+def test_a_uid_already_in_the_ancestor_on_two_pages_still_blocks_and_nothing_is_pushed(
     harness: TwoCloneHarness,
 ) -> None:
     first, second = harness.first, harness.second
-    first.commit("wiki/priya.md", page("person-twin", "Priya Raman"))
-    second.commit("wiki/sam.md", page("person-twin", "Sam Ortiz"))
+    # The uid is in the common ancestor (one page); one install renames it while the other
+    # edits it, so two pages carry it. Section 7.4 cannot re-mint that: it stays blocked.
+    first.commit("wiki/jordan.md", BASE.replace("Acme Corp.", "Acme Corp, Lisbon."))
+    git(second.root, "mv", "wiki/jordan.md", "wiki/jordan-renamed.md")
+    git(second.root, "commit", "-q", "-m", "rename")
     assert push_after_compile(first.root, "main", SETTINGS).ok
     before = second.head()
     result = integrate_remote(second.root, "main", SETTINGS)
@@ -529,3 +532,26 @@ def test_a_surface_repository_keeps_its_own_branch_not_librarian_push_branch(
     cfg["librarian"] = {"push_branch": "elsewhere"}
     plans = [p for p in sync_integrate.plan_repo_syncs(kr, cfg) if p.decision.integrate]
     assert [p.branch for p in plans] == [h.second.branch]
+
+
+def test_sync_records_fetch_and_push_evidence(tmp_path: Path) -> None:
+    """athenaeum#2991: the fetch and push outcome land in the machine-local evidence file."""
+    import subprocess
+
+    from athenaeum import store_access_evidence as evidence
+
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "a.md").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+    nope = str(tmp_path / "nope.git")
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", nope], check=True)
+    from athenaeum.sync_integrate import push_after_compile, sync_before_compile
+
+    sync_before_compile(repo, "main")
+    push_after_compile(repo, "main")
+    entry = evidence.load_evidence()[evidence.location_key(repo)]
+    assert entry["fetch"]["ok"] is False and entry["push"]["ok"] is False
+    assert entry["remote"] == "origin"
