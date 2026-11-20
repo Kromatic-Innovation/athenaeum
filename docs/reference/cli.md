@@ -158,6 +158,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum triage`](#athenaeum-triage) (group) — Agent triage lane over the unified decision queue: prepares authority items for the human, absorbs research-resolvable competence items through the same `decisions answer` interface. Modes: run, report.
 - [`athenaeum triage report`](#athenaeum-triage-report) (command) — Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-rolling-quarter threshold state.
 - [`athenaeum triage run`](#athenaeum-triage-run) (command) — Walk the pending-decisions queue once: prepare authority items for the human, submit whatever the default researcher resolves for a competence question item.
+- [`athenaeum uid-collision-lint`](#athenaeum-uid-collision-lint) (command) — Read-only: list every uid carried by more than one page inside a single surface (tombstones count). The same uid on two different surfaces is not reported. Exits 2 when any collision is found.
 - [`athenaeum usage-report`](#athenaeum-usage-report) (command) — Per-claim usage report (pushed / referenced / last-referenced) computed from the push-metrics ledgers — ids-only, no content.
 - [`athenaeum verdicts`](#athenaeum-verdicts) (group) — Inspect the verdict ledger (`wiki/_verdicts/`) — pairwise comparison verdicts with their justification basis. Four modes: count, list-by-verdict, show-one-pair, show-stale.
 - [`athenaeum verdicts count`](#athenaeum-verdicts-count) (command) — Print the live verdict count.
@@ -2049,6 +2050,16 @@ Walk the pending-decisions queue once: prepare authority items for the human, su
 | `--dry-run` | off (flag absent) | — | Report what would be absorbed without submitting or sampling anything. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum uid-collision-lint`
+
+Read-only: list every uid carried by more than one page inside a single surface (tombstones count). The same uid on two different surfaces is not reported. Exits 2 when any collision is found.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | off (flag absent) | — | Emit machine-readable JSON (collisions with page paths and tombstone flags) instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--surface` | — | — | Scan only this surface (wiki or a configured surface name). Default: each surface on its own. |
 
 ## `athenaeum usage-report`
 

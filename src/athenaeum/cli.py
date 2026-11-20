@@ -138,6 +138,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_raised_from_lint",
         "add_raised_from_lint_subparser",
     ),
+    "uid-collision-lint": (
+        "athenaeum._cmd_uid_collision_lint",
+        "add_uid_collision_lint_subparser",
+    ),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
         "add_recovery_yield_subparser",
@@ -228,7 +232,7 @@ _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
          "quarantine", "repair", "reconcile", "decompose-page", "recompile",
          "relate", "correct-notes", "fold-lint", "store-link-lint",
-         "raised-from-lint",
+         "raised-from-lint", "uid-collision-lint",
          "pii-restore", "quiesce", "drain", "storage", "schema", "registry",
          "memory-class", "description", "subject-population"),
     ),
@@ -380,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_triage import add_triage_subparser
+    from athenaeum._cmd_uid_collision_lint import add_uid_collision_lint_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
     from athenaeum._cmd_viewer import add_viewer_subparser
@@ -417,6 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_store_link_lint_subparser(subparsers)  # store-link-lint (athenaeum#2619)
     add_store_subparser(subparsers)  # store access check (athenaeum#2991)
     add_raised_from_lint_subparser(subparsers)  # raised-from-lint (athenaeum#2799)
+    add_uid_collision_lint_subparser(subparsers)  # uid-collision-lint (athenaeum#2993)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     # questions / merges removed in 0.24.0 (issue athenaeum#2457), as the
     # athenaeum#1992 deprecation announced: `decisions` carries every mode
