@@ -273,9 +273,9 @@ def load_store_declaration(
     an invalid result, never an exception.
     """
     path = Path(surface_root) / DECLARATION_RELPATH
-    if not path.exists() and not path.is_symlink():
-        return None
     try:
+        if not path.exists() and not path.is_symlink():
+            return None
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return StoreDeclarationInvalid(
@@ -288,7 +288,10 @@ def parse_store_declaration(text: str) -> StoreDeclaration | StoreDeclarationInv
     """Validate declaration *text*. Never raises on bad content."""
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+    except Exception as exc:  # noqa: BLE001 - the loader raises more than YAMLError
+        # ``safe_load`` also raises ValueError (an impossible date such as
+        # ``2026-02-30``, ``!!int abc``), AttributeError (``!!timestamp``) and
+        # RecursionError (deep nesting) while constructing a scalar or node.
         return StoreDeclarationInvalid(
             (Problem(DECLARATION_RELPATH, f"malformed YAML: {type(exc).__name__}"),)
         )
@@ -297,7 +300,12 @@ def parse_store_declaration(text: str) -> StoreDeclaration | StoreDeclarationInv
             (Problem(DECLARATION_RELPATH, "must be a mapping of keys to values"),)
         )
     problems: list[Problem] = []
-    result = _build(data, problems)
+    try:
+        result = _build(data, problems)
+    except Exception as exc:  # noqa: BLE001 - defence in depth: bad content never raises
+        return StoreDeclarationInvalid(
+            (Problem(DECLARATION_RELPATH, f"could not be validated: {type(exc).__name__}"),)
+        )
     if problems or result is None:
         return StoreDeclarationInvalid(tuple(problems))
     return result

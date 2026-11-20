@@ -197,6 +197,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
 - Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
 
+### Fixed
+
+- `athenaeum.store_access` no longer raises on a `_store/access.yaml` whose YAML
+  parses but fails to construct a value (an impossible date such as `2026-02-30`,
+  a bad `!!int`, deep nesting): it returns the invalid result naming the parse
+  failure. A `version` written as `1.0` is now invalid too (athenaeum#2772).
+
 ## [0.27.2] - 2026-11-19
 
 **Summary.** 0.27.2 is a PATCH release on 0.27.0 (0.27.1 was never

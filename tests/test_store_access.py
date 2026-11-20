@@ -226,9 +226,17 @@ def _role(rights: Any, members: Any = None) -> dict[str, Any]:
 
 COUNTER_EXAMPLES: list[tuple[str, str, str]] = [
     ("malformed-yaml", "version: 1\nstore_id: [unclosed", "_store/access.yaml"),
+    ("date-impossible-day", "version: 1\nreviews: [{every: 2026-02-30}]", "_store/access.yaml"),
+    ("date-impossible-month", "version: 1\nstore_id: 2026-13-45", "_store/access.yaml"),
+    ("int-tag-not-a-number", "version: !!int abc", "_store/access.yaml"),
+    ("timestamp-tag-garbage", "version: 1\nx: !!timestamp zzz", "_store/access.yaml"),
+    ("deep-nesting", "version: 1\nx: " + "[" * 5000 + "]" * 5000, "_store/access.yaml"),
+    ("complex-key", "? [1, 2]\n: x", "_store/access.yaml"),
+    ("python-object-tag", "version: !!python/object:os.system x", "_store/access.yaml"),
     ("not-a-mapping", "- a\n- b\n", "_store/access.yaml"),
     ("version-3", _bad(version=3), "version"),
     ("version-string", _bad(version="1"), "version"),
+    ("version-float", "version: 1.0\nstore_id: st_q7m2xk4vwz5d\n", "version"),
     ("version-bool", _bad(version=True), "version"),
     ("version-float", _bad(version=1.0), "version"),
     ("version-float-two", _bad(version=2.0), "version"),
@@ -351,6 +359,23 @@ class TestCounterExamples:
         result = _invalid(_doc(intake={"x": 1}))
         assert "intake" in result.keys
         assert "higher version" in result.messages[0]
+
+    def test_non_string_and_odd_values_never_raise(self) -> None:
+        head = "version: 1\nstore_id: st_q7m2xk4vwz5d\n"
+        docs = [
+            head + "1: x\n",
+            head + "roles: {1: {rights: [read], members: []}}\n",
+            head + "roles: {r: {rights: [[1]], members: [[1]]}}\n",
+            head + "roles: {r: {rights: [read], members: [{a: [1]}]}}\n",
+            head + "groups: {g: [{iss: 2026-01-01, sub: 1}]}\n",
+            head + "sync: {mode: [a], always_ask: [[1]]}\n",
+            head + "locations: &l {raw: *l}\n",
+            head + "roles: &r {x: *r}\n",
+            head + "reviews: [[1], null, 3]\n",
+            head + "locations: {raw: [null, 1, [2]]}\n",
+        ]
+        for text in docs:
+            assert isinstance(parse_store_declaration(text), StoreDeclarationInvalid), text
 
     def test_unreadable_file_is_invalid_not_a_raise(self, tmp_path: Path) -> None:
         path = tmp_path / "_store" / "access.yaml"
