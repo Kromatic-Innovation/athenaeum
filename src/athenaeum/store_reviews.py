@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from athenaeum.models import asserter_identity_key
 from athenaeum.store import append_line_durable, now_iso
 from athenaeum.store_access import (
     Review,
@@ -47,7 +48,7 @@ from athenaeum.store_access import (
     is_store_id,
     load_store_declaration,
 )
-from athenaeum.store_rights import DirectoryAdapter, resolve_rights
+from athenaeum.store_rights import DirectoryAdapter, StaticDirectory
 
 __all__ = [
     "REVIEW_STATE_DIRNAME",
@@ -191,6 +192,40 @@ def last_run(runs: list[ReviewRun], review: Review) -> ReviewRun | None:
     return None
 
 
+def _holds_read(
+    declaration: StoreDeclaration,
+    asserter: Mapping[str, object] | None,
+    adapters: Mapping[str, DirectoryAdapter] | None,
+) -> bool:
+    """Whether the declaration itself grants the owner read.
+
+    Unlike :func:`athenaeum.store_rights.resolve_rights`, a directory that
+    cannot answer (no adapter, unknown group) is no grant here: that function
+    falls back to reader-only, which is right for an install's own reads but
+    would let a review run without an explicit grant in the source.
+    """
+    directory: DirectoryAdapter | None
+    if declaration.directory == "static":
+        directory = StaticDirectory(declaration)
+    else:
+        directory = (adapters or {}).get(declaration.directory)
+    identity = asserter_identity_key(dict(asserter) if asserter else None)
+    for role in declaration.roles:
+        if "read" not in role.rights:
+            continue
+        for member in role.members:
+            if member.kind == "any":
+                return True
+            if member.kind == "principal" and member.principal is not None:
+                if identity and member.principal.key == identity:
+                    return True
+            elif member.kind == "group" and member.group is not None and directory is not None:
+                found = directory.members(member.group)
+                if found is not None and identity and identity in found:
+                    return True
+    return False
+
+
 def _state(
     review: Review,
     mounts: Mapping[str, Path],
@@ -205,7 +240,7 @@ def _state(
     declaration = load_store_declaration(root)
     if not isinstance(declaration, StoreDeclaration):
         return NO_GRANT  # no usable declaration grants nothing
-    if "read" not in resolve_rights(declaration, asserter, adapters):
+    if not _holds_read(declaration, asserter, adapters):
         return NO_GRANT
     return RUNNABLE
 

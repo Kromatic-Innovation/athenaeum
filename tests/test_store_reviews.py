@@ -196,3 +196,27 @@ def test_nothing_written_to_the_source(tmp_path: Path, kr: Path) -> None:
     after = sorted(p.relative_to(mounts[SRC]).as_posix() for p in mounts[SRC].rglob("*"))
     assert before == after
     assert not str(state_path(kr, TARGET)).startswith(str(mounts[SRC]))
+
+
+def test_directory_fallback_is_no_grant_and_cursor_not_advanced(tmp_path: Path, kr: Path) -> None:
+    """A group the declaration never defines resolves reader-only in resolve_rights;
+    a review needs an explicit grant, so it must not run."""
+    target = _target(tmp_path, [_review()])
+    mounts = _source(tmp_path, _readers("group:undefined-team"))
+    (status,) = evaluate_reviews(target, mounts, ME, kr, NOW)
+    assert status.state == NO_GRANT
+    with pytest.raises(ReviewRefused):
+        record_review_run(kr, TARGET, status, "rev1", {}, NOW)
+    assert load_review_runs(kr, TARGET) == []
+
+
+def test_unregistered_directory_is_no_grant(tmp_path: Path, kr: Path) -> None:
+    target = _target(tmp_path, [_review()])
+    root = tmp_path / "source"
+    _declare(root, SRC, _readers("group:g"))
+    path = root / "_store" / "access.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["directory"] = "corp-ldap"
+    path.write_text(yaml.safe_dump(data))
+    (status,) = evaluate_reviews(target, {SRC: root}, ME, kr, NOW)
+    assert status.state == NO_GRANT
