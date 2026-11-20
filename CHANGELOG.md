@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- An install no longer mounts a declared store it cannot read. A `storage.adapters` surface whose `_store/access.yaml` does not grant `owner.asserter` read (propose alone does not count), or whose declared `store_id` differs from the entry's new optional `store_id`, is left out of the index and of recall; the refusal is reported per store in the log and the run summary, and nothing is deleted. A store with no declaration mounts as before; an invalid declaration, or a directory that cannot answer, mounts it as a reader and says so (athenaeum#2989)
 - A store's declared rights now narrow the write guard. When a surface carries `_store/access.yaml` and the owner's `owner.asserter` does not hold compile there (a reader, a proposer only, not listed, an invalid declaration, or a directory that cannot answer), every write to that surface's pages is refused with `ReadOnlySurfaceError`, whatever the adapter's `read_only` says. The declaration never widens local config, and a surface with no declaration behaves as before. Rights are resolved once at run start (or on the first write when no run started), never per write and never on the recall path (athenaeum#2988)
 
 ## [0.28.0] - 2026-11-20

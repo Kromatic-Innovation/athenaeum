@@ -22,15 +22,20 @@ validate resolves the same way.
 ``athenaeum store access check`` runs (access S5 adds that caller). The run-start
 call logs the result and holds it in a process-wide table, which the write guard
 (access S3, :func:`declared_surface_rights`) consults: an owner who does not hold
-compile on a declared store is refused on that store's pages. A write path that
-starts without a run (a one-shot CLI command) resolves a surface the first time
-it is asked to write there and holds the answer the same way; reads never ask.
+compile on a declared store is refused on that store's pages. The same table
+answers the mount question (access S4, :func:`declared_mount_state`): a declared
+store on which the owner does not hold read is not mounted, so it is not indexed
+and not recalled. Nothing on disk is deleted. A process that starts without a
+run (a one-shot CLI command, a long-lived server) resolves a surface the first
+time a write or the surface gather asks, and holds the answer; it is never
+resolved per write or per query, and the recall query itself never reads it.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -51,6 +56,9 @@ __all__ = [
     "record_run_start_rights",
     "declared_surface_rights",
     "reset_run_rights",
+    "MountState",
+    "declared_mount_state",
+    "run_start_mounts",
 ]
 
 log = logging.getLogger(__name__)
@@ -75,6 +83,8 @@ def _cache_key(
 def reset_run_rights() -> None:
     """Forget every held resolution (a new run, or a test)."""
     _RUN_RIGHTS.clear()
+    _MOUNTS.clear()
+    _REPORTED.clear()
 
 
 class DirectoryAdapter(Protocol):
@@ -114,6 +124,15 @@ def resolve_rights(
     (registration is a later slice). A declared directory with no adapter
     resolves as a reader only.
     """
+    return _resolve(declaration, asserter, adapters)[0]
+
+
+def _resolve(
+    declaration: StoreDeclaration,
+    asserter: Mapping[str, object] | None,
+    adapters: Mapping[str, DirectoryAdapter] | None,
+) -> tuple[frozenset[str], bool]:
+    """:func:`resolve_rights` plus whether the directory could not answer."""
     directory: DirectoryAdapter | None
     if declaration.directory == _STATIC:
         directory = StaticDirectory(declaration)
@@ -133,13 +152,13 @@ def resolve_rights(
                     granted |= role.rights
             elif member.kind == "group" and member.group is not None:
                 if directory is None:
-                    return READER_ONLY
+                    return READER_ONLY, True
                 found = directory.members(member.group)
                 if found is None:
-                    return READER_ONLY
+                    return READER_ONLY, True
                 if identity and identity in found:
                     granted |= role.rights
-    return frozenset(r for r in RIGHTS if r in granted)
+    return frozenset(r for r in RIGHTS if r in granted), False
 
 
 def resolve_surface_rights(
@@ -214,3 +233,87 @@ def record_run_start_rights(
         else:
             log.info("store rights: %s: %s", root, ",".join(sorted(rights)) or "none")
     return out
+
+
+# -- mounting (access S4) ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MountState:
+    """Whether a configured surface is mounted, and why not (or what to report).
+
+    ``refusal`` is a short reason (``no-read-right`` or ``store-id-mismatch``)
+    when the surface is not mounted; ``note`` is set when it IS mounted but the
+    declaration could only be read as a reader (invalid, or the directory could
+    not answer). Neither carries page text.
+    """
+
+    refusal: str | None = None
+    note: str | None = None
+
+
+_MOUNTS: dict[tuple[Path, tuple[str, ...] | None, str | None], MountState] = {}
+_REPORTED: set[tuple[str, str]] = set()
+
+
+def _compute_mount(
+    root: Path, asserter: Mapping[str, object] | None, store_id: str | None
+) -> MountState:
+    declaration = load_store_declaration(root)
+    if declaration is None:
+        return MountState()
+    if isinstance(declaration, StoreDeclarationInvalid):
+        return MountState(note="declaration-invalid: mounted as a reader")
+    if store_id is not None and store_id != declaration.store_id:
+        return MountState(refusal="store-id-mismatch")
+    rights, degraded = _resolve(declaration, asserter, None)
+    if "read" not in rights:
+        return MountState(refusal="no-read-right")
+    if degraded:
+        return MountState(note="directory-cannot-answer: mounted as a reader")
+    return MountState()
+
+
+def declared_mount_state(
+    name: str,
+    surface_root: Path,
+    asserter: Mapping[str, object] | None,
+    store_id: str | None = None,
+) -> MountState:
+    """Whether the surface *name* at *surface_root* is mounted: resolved once, held.
+
+    A surface with no declaration mounts as it always has. A declaration whose
+    ``store_id`` differs from the adapter entry's ``store_id`` (when the entry
+    carries one) is refused; so is one whose resolved rights do not include
+    read (propose does not imply read). An invalid declaration, or a directory
+    that cannot answer, mounts the store as a reader and says so. A refusal is
+    logged once per process (store name and reason only); nothing is deleted.
+    Failure narrows to read (design note §11), so an unexpected error mounts the
+    store as a reader and reports it.
+    """
+    key = (*_cache_key(surface_root, asserter), store_id)
+    state = _MOUNTS.get(key)
+    if state is None:
+        try:
+            state = _compute_mount(surface_root, asserter, store_id)
+        except Exception as exc:  # noqa: BLE001 - failure narrows to read, never widens
+            state = MountState(
+                note=f"resolution-failed ({type(exc).__name__}): mounted as a reader"
+            )
+        _MOUNTS[key] = state
+    for kind, why in (("not mounted", state.refusal), ("mounted", state.note)):
+        if why and (name, why) not in _REPORTED:
+            _REPORTED.add((name, why))
+            log.warning("store %r %s: %s", name, kind, why)
+    return state
+
+
+def run_start_mounts(
+    surfaces: Mapping[str, tuple[Path, str | None]],
+    asserter: Mapping[str, object] | None,
+) -> dict[str, MountState]:
+    """Resolve the mount state of each ``{name: (root, store_id)}`` at run start."""
+    return {
+        name: declared_mount_state(name, root, asserter, store_id)
+        for name, (root, store_id) in surfaces.items()
+    }
