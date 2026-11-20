@@ -374,6 +374,8 @@ These are the ranges the package metadata accepts. CI tests these versions:
   That job is advisory: a red result there means a floor should be raised, so
   it is not part of the required merge gate.
 
+`requirements-ci.txt` governs CI installs only (it is applied with `-c`); a plain `pip install athenaeum` or `uv tool install athenaeum` resolves from the ranges in the package metadata, and no lockfile (`uv.lock` is git-ignored) is committed or used by CI, so the two can resolve different patch versions.
+
 Versions inside a range but between the floor and the lock are not exercised;
 treat them as best effort. `anthropic` in particular spans many majors, and
 only the floor, the locked release and the newest one are tested.
