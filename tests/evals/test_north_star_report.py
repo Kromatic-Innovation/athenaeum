@@ -30,6 +30,7 @@ from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import Corpus, Page, Probe, build_corpus, deep_hop_uids
 from tests.evals.north_star_report import (
     GRADER_REVISION,
+    ORACLE_CONTROL_FLOOR,
     SIZE_SCALE_ORDER,
     GroupStats,
     NorthStarReport,
@@ -58,6 +59,8 @@ from tests.evals.north_star_report import (
     lexical_overlap,
     load_rollout_rows,
     marker_miss_with_delivery,
+    oracle_control_shortfalls,
+    render_decision_block,
     render_report,
     tag_followed,
     uid_citation_rate,
@@ -656,7 +659,7 @@ def test_correctness_grades_incorrect_on_distractor_marker_without_probes_own_ma
     this probe's -- must not grade correct just because it contains *some*
     recognized marker."""
     pto_probe = _probe("pto_allowance")  # marker: "25 days per year", on policy-pto
-    other_probe = _probe("confidentiality_rule")  # marker: "Nadia Frost", on policy-confidentiality
+    other_probe = _probe("confidentiality_rule")  # marker on policy-confidentiality
     assert pto_probe.answer_markers and other_probe.answer_markers
     assert pto_probe.answer_markers != other_probe.answer_markers
 
@@ -2740,11 +2743,13 @@ def test_grader_revision_names_this_issue() -> None:
     as any change to ``grade_correctness`` OR to the ``answer_markers`` ground
     truth it grades clause (a) against. athenaeum#1843 changed how clause (a)
     matches; athenaeum#1935 changed WHAT it matches, by adding marker
-    alternatives to eight probes. Either way two report tables over the same
+    alternatives to eight probes; athenaeum#2918 strips markdown emphasis in
+    the matcher and repairs four markers that named a fact the question did
+    not ask for. Either way two report tables over the same
     stored rows -- one graded before, one after -- must be distinguishable
     from their headers alone, and ``corpus_digest`` cannot carry that for a
     ``probes.yaml``-only change because it digests pages only."""
-    assert GRADER_REVISION == "athenaeum#1935"
+    assert GRADER_REVISION == "athenaeum#2918"
 
 
 def _synthetic_marker_probe(marker: str) -> tuple[Probe, Corpus]:
@@ -2781,6 +2786,31 @@ def _synthetic_marker_record(answer: str) -> RolloutRecord:
     )
 
 
+def test_marker_match_ignores_markdown_emphasis_athenaeum_2918() -> None:
+    """Emphasis delimiters around (or inside) the planted phrase do not break
+    the match (athenaeum#2918: "since **March 2019**" vs the marker "since
+    March 2019"), on either side; snake_case underscores survive; and the
+    matcher still refuses a paraphrase."""
+    probe, corpus = _synthetic_marker_probe("held since March 2019")
+    for answer in (
+        "A role she has held since **March 2019**.",
+        "A role *held since March 2019*.",
+        "A role __held since__ March 2019.",
+        "a role _held since March 2019_",
+        "A **role** held since March 2019.",
+    ):
+        assert grade_correctness(_synthetic_marker_record(answer), probe, corpus) is True, answer
+    # Counter-examples: emphasis stripping is not paraphrase tolerance.
+    for answer in (
+        "A role she has held from **March 2019** onward.",
+        "A role held since **March 2018**.",
+    ):
+        assert grade_correctness(_synthetic_marker_record(answer), probe, corpus) is False, answer
+    # An underscore inside an identifier is content, not emphasis.
+    assert _normalize_marker_for_match("use snake_case_name **now**") == "use snake_case_name now"
+    assert _normalize_marker_for_match("*a*  b") == "a b"
+
+
 def test_marker_acceptance_pins_todays_grader_revision_athenaeum_1932() -> None:
     """Pins today's ``grade_correctness`` marker-matching behaviour (issue
     athenaeum#1932 acceptance criterion): a repair to ``answer_markers`` or a
@@ -2815,3 +2845,61 @@ def test_marker_acceptance_pins_todays_grader_revision_athenaeum_1932() -> None:
         "The vendor stopped shipping security\npatches, per the decision record."
     )
     assert grade_correctness(record, probe, corpus) is True
+
+
+# ---------------------------------------------------------------------------
+# Oracle positive-control gate on the decision block (athenaeum#2918)
+# ---------------------------------------------------------------------------
+
+
+def _oracle_row(probe_id: str, *, correct: bool) -> RolloutRow:
+    """An ORACLE row for *probe_id* whose answer carries the probe's planted
+    marker (``correct=True``) or only an unrelated sentence."""
+    probe = _probe(probe_id)
+    marker = probe.answer_markers[0][1]
+    answer = f"The answer is {marker}." if correct else "I looked at the page and have no view."
+    return _row(
+        _record(arm=Arm.ORACLE, probe_id=probe_id, probe_class=probe.probe_class, answer=answer)
+    )
+
+
+def test_decision_block_is_void_when_an_enrolled_class_fails_the_oracle_control() -> None:
+    """A single_hop oracle cell that misses its marker voids the block: the
+    heading says so and no condition, cutoff or verdict table is printed."""
+    report = build_report([_oracle_row("pto_allowance", correct=False)])
+    shortfalls = oracle_control_shortfalls(report)
+    assert [(sf.probe_class, sf.corpus_scale, sf.rate) for sf in shortfalls] == [
+        ("single_hop", CORPUS_SCALE, 0.0)
+    ]
+    block = "\n".join(render_decision_block(report))
+    assert "VOID: oracle control failed" in block
+    assert f"| {CORPUS_SCALE} | single_hop | 0.000 |" in block
+    for unreadable in ("**Cutoff scale:**", "Three conditions", "| condition 1 |", "all pass"):
+        assert unreadable not in block
+    # ...and the full report carries the same void block, at the top.
+    text = render_report(report)
+    assert text.index("VOID: oracle control failed") < text.index("## Arms in this report")
+
+
+def test_decision_block_is_readable_when_the_oracle_control_passes() -> None:
+    """Positive control for the test above: the same probe answered correctly
+    leaves the block readable, so the void above is about the control and not
+    about the fixture."""
+    report = build_report([_oracle_row("pto_allowance", correct=True)])
+    assert oracle_control_shortfalls(report) == ()
+    block = "\n".join(render_decision_block(report))
+    assert "VOID" not in block
+    assert "Three conditions" in block
+
+
+def test_oracle_control_ignores_report_only_classes_and_other_arms() -> None:
+    """A report-only class (unprompted_push) below the floor at oracle does
+    not void the block, and neither does a wrong answer from a non-oracle arm."""
+    report_only = build_report([_oracle_row("relay_sync_fix", correct=False)])
+    assert oracle_control_shortfalls(report_only) == ()
+    probe = _probe("pto_allowance")
+    pull_miss = _row(
+        _record(arm=Arm.PULL, probe_id=probe.id, probe_class=probe.probe_class, answer="no idea")
+    )
+    assert oracle_control_shortfalls(build_report([pull_miss])) == ()
+    assert ORACLE_CONTROL_FLOOR == 1.0

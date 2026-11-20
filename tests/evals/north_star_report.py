@@ -646,7 +646,7 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
 #: marker repair moves the same stored rows' verdicts with NO other header
 #: field moving. That is precisely the indistinguishability this stamp exists
 #: to prevent.
-GRADER_REVISION = "athenaeum#1935"
+GRADER_REVISION = "athenaeum#2918"
 
 
 def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
@@ -3124,6 +3124,57 @@ def _torn_phrase(torn: int) -> str:
     return f"{torn} torn row" if torn == 1 else f"{torn} torn rows"
 
 
+#: The oracle positive control's floor (issue athenaeum#2918, design doc
+#: ``native-memory-baseline.md`` §5): ``oracle`` hands the model the
+#: ground-truth pages verbatim, so it must score "at or near 1.0" on every
+#: condition-2-enrolled class. Read STRICTLY -- every enrolled class at every
+#: scale reads 1.000 -- the form the 2026-09-18 report applied; a class below
+#: it means the grading contract is not satisfiable by a correct answer on
+#: that class, so no verdict row computed from the same grader is readable.
+ORACLE_CONTROL_FLOOR = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class OracleControlShortfall:
+    """One enrolled (probe_class, corpus_scale) whose oracle correctness is
+    below :data:`ORACLE_CONTROL_FLOOR` (issue athenaeum#2918)."""
+
+    probe_class: str
+    corpus_scale: str
+    rate: float
+
+
+def oracle_control_shortfalls(
+    report: NorthStarReport,
+    *,
+    report_only_classes: frozenset[str] | None = None,
+) -> tuple[OracleControlShortfall, ...]:
+    """Every enrolled (class, scale) group whose ``oracle`` correctness is
+    below :data:`ORACLE_CONTROL_FLOOR`, sorted by (scale, class).
+
+    "Enrolled" is the complement of the ``report_only`` classes
+    (:func:`_report_only_probe_classes`, derived from the real corpus unless
+    *report_only_classes* is given), i.e. the classes design doc §7 reads.
+    A group with no gradable oracle row (``correctness_rate is None``) is not
+    a shortfall -- there is nothing to read -- and a report with no oracle
+    rows at all returns ``()``: this gate judges the control a run carried,
+    it does not demand one.
+    """
+    if report_only_classes is None:
+        report_only_classes = _report_only_probe_classes(
+            {stat.corpus_scale for stat in report.stats}
+        )
+    shortfalls = [
+        OracleControlShortfall(stat.probe_class, stat.corpus_scale, stat.correctness_rate)
+        for stat in report.stats
+        if stat.arm == Arm.ORACLE.value
+        and stat.probe_class not in report_only_classes
+        and stat.correctness_rate is not None
+        and stat.correctness_rate < ORACLE_CONTROL_FLOOR
+    ]
+    return tuple(sorted(shortfalls, key=lambda sf: (sf.corpus_scale, sf.probe_class)))
+
+
 def render_decision_block(
     report: NorthStarReport,
     verdicts: Sequence[ScaleVerdict] | None = None,
@@ -3149,6 +3200,35 @@ def render_decision_block(
 
     lines: list[str] = []
     lines.extend(_partial_banner_lines(report))
+    shortfalls = oracle_control_shortfalls(report)
+    if shortfalls:
+        # Issue athenaeum#2918: the positive control failed, so NO verdict
+        # row of this report may be read. Say so in the block itself and
+        # print no conditions, cutoff or verdict table -- a void result must
+        # not be one scroll away from a readable-looking go/no-go.
+        lines.append("## Decision (design doc §7, athenaeum#1734) -- VOID: oracle control failed")
+        lines.append("")
+        lines.append(
+            "> **VOID.** The `oracle` positive control (ground-truth pages handed to the model "
+            f"verbatim) scored below {ORACLE_CONTROL_FLOOR:.3f} on {len(shortfalls)} enrolled "
+            "class/scale group(s). The grading contract is then not satisfiable by a correct "
+            "answer (design doc §5), so **no condition, cutoff scale or verdict of this report "
+            "is to be read** -- they are not printed. The per-dimension tables below are "
+            "evidence only."
+        )
+        lines.append("")
+        lines.append(
+            f"**Verdict arm:** `{resolved_verdict_arm}` -- configuration only, not evaluated."
+        )
+        lines.append("")
+        lines.append("| scale | probe class | oracle correctness |")
+        lines.append("| --- | --- | --- |")
+        for shortfall in shortfalls:
+            lines.append(
+                f"| {shortfall.corpus_scale} | {shortfall.probe_class} | {shortfall.rate:.3f} |"
+            )
+        lines.append("")
+        return lines
     lines.append("## Decision (design doc §7, athenaeum#1734)")
     lines.append("")
     lines.append(
