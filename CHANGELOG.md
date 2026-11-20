@@ -25,6 +25,17 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- The per-turn push writes one skip row with reason `declared` when the
+  caller turns it off with `AUTO_RECALL=false`, so a declared-off turn is
+  counted as skipped rather than read as a turn the hook never saw. The row
+  holds only the reason, session id and timestamp. `athenaeum push-metrics
+  baseline` reports skipped turns (`skipped_turns`, `skipped_by_reason`,
+  `skip_only_sessions`) separately from pushes, and a session whose only rows
+  are skips gets the reference reason `push-skipped` instead of
+  `no-push-records` (athenaeum#2976).
+
 ## [0.27.6] - 2026-11-20
 
 **Summary.** 0.27.6 is a PATCH release on 0.27.2 (0.27.3 to 0.27.5 were

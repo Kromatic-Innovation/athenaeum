@@ -210,6 +210,13 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
             excluded_sessions_str = (
                 ",".join(baseline.excluded_sessions) if baseline.excluded_sessions else "none"
             )
+            skipped_str = (
+                " ("
+                + ", ".join(f"{k}={v}" for k, v in sorted(baseline.skipped_by_reason.items()))
+                + ")"
+                if baseline.skipped_by_reason
+                else ""
+            )
             snapshot_line = (
                 "dry run: no snapshot written (pass without --dry-run to write)"
                 if dry_run
@@ -224,6 +231,8 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
                 f"excluded_sessions: {excluded_sessions_str}\n"
                 f"excluded_push_records: {baseline.excluded_push_record_count}\n"
                 f"excluded_reference_records: {baseline.excluded_reference_record_count}\n"
+                f"skipped_turns: {baseline.skipped_turn_count}{skipped_str}\n"
+                f"skip_only_sessions: {baseline.skip_only_session_count}\n"
                 f"athenaeum_version: {baseline.athenaeum_version}\n"
                 f"git_sha: {baseline.git_sha}\n"
                 f"{snapshot_line}"
