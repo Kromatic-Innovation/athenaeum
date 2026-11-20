@@ -28,6 +28,19 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Added
 
 - Accept a raised page, asking every time (`athenaeum.raise_acceptance`, athenaeum#2939, slice S7a of the federation raise and retract design): the rule checks run before anyone is asked and a message that fails is recorded in the acceptance ledger with its reason code and raised as a decision (a duplicate is only recorded); a raise that passes becomes a `raise` decision in the target store's queue showing the payload, where the person may accept it or adjust its `type` and `tags` to something the store's `intake` rules accept. Accepting creates the copy at the uid derived from the target `store_id` and `raise_id` with the body unchanged, a `raised_from` block and an `Athenaeum-Raise: <raise_id> seq=<n> accept` commit line, and never overwrites a page already at that uid (the raise is held and a decision is raised). The compiling member's own relevance policy is never applied. `store_decisions` gains `resolve_decision` and an optional `detail` on a filed decision.
+- Integrate mode for a store's pages (`athenaeum.sync_integrate`). A store whose
+  `_store/access.yaml` declares `sync.mode: integrate` is synced by snapshot,
+  fetch, one two-parent merge commit (never a rebase), compile and a push that,
+  when rejected, integrates and pushes again up to three times before reporting
+  `push: failed, reason: contended`. Pages merge by unit, a contested unit keeps
+  the remote value, and every `_store/` file or unregistered path changed on both
+  sides keeps the remote version. A merged page that has no `uid`, `type` or
+  `name`, carries a conflict marker, or links from a shared surface to a private
+  one is held. The merge commit records `Athenaeum-Sync: 1` and one
+  `Athenaeum-Page:` line per page changed on both sides, with blob ids only. A
+  store with no declaration stays fast-forward; `sync_mode: fast_forward` under
+  `storage.adapters.<name>` narrows an install, and a local `integrate` on a store
+  that does not declare it is ignored and reported (athenaeum#2935).
 - A two-clone sync test harness (`tests/fixtures/two_clone_harness.py`): one bare
   remote and two installs, each with its own clone and configuration, that
   diverge and drive fetch, merge commit and push through the store seam over the
