@@ -1600,6 +1600,81 @@ def push_branch(repo: Path, branch: str, remote: str = "origin") -> PushResult:
     return PushResult(False, PushFailureReason.OTHER, detail)
 
 
+# -- Sync orchestration helpers (athenaeum#2935, design note §4) -----------
+#
+# Small read helpers and the fast-forward the integrate sequence needs, so the
+# orchestrator in ``sync_integrate`` never shells out to git itself.
+
+
+def current_branch(repo: Path) -> str | None:
+    """The checked-out branch name of *repo*, or ``None`` (detached HEAD / no repo)."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """Whether commit *ancestor* is *descendant* or reachable from it."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=str(repo),
+        capture_output=True,
+    )
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
+
+
+def fast_forward_branch(repo: Path, branch: str, rev: str) -> None:
+    """Move *branch* forward to *rev*, a descendant of its tip (design note §4.1 step 2).
+
+    Never rewrites history: refuses (``CalledProcessError``) if *rev* does not
+    descend from the branch tip, or would overwrite an uncommitted change.
+    """
+    tip = _git_out(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    old = tip.decode().strip()
+    if not is_ancestor(repo, old, rev):
+        raise subprocess.CalledProcessError(1, ["fast-forward", branch, rev])
+    _move_branch(repo, branch, old, rev)
+
+
+def blob_id_at_revision(repo: Path, rev: str, path: str) -> str | None:
+    """The git blob id of *path* at *rev*, or ``None`` when absent there."""
+    entry = _git_out(repo, "ls-tree", "-z", rev, "--", path)
+    if not entry:
+        return None
+    meta = entry.split(b"\t", 1)[0].split()
+    if len(meta) != 3 or meta[1] != b"blob":
+        return None
+    return meta[2].decode()
+
+
+def blob_id_of(repo: Path, data: bytes) -> str:
+    """The blob id git would give *data*; nothing is written to the object database."""
+    return subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        input=data,
+    ).stdout.decode().strip()
+
+
+def list_files_at_revision(repo: Path, rev: str, prefix: str = "") -> list[str]:
+    """Sorted blob paths at *rev* under *prefix* (the whole tree when empty)."""
+    args = ["ls-tree", "-r", "-z", "--name-only", rev]
+    if prefix:
+        args += ["--", prefix.rstrip("/") + "/"]
+    raw = _git_out(repo, *args)
+    return sorted(p.decode() for p in raw.split(b"\0") if p)
+
+
 class FilesystemStore:
     """``Store`` over :mod:`athenaeum.atomic_io` + :mod:`pathlib` (issue athenaeum#976).
 
