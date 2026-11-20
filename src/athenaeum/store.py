@@ -1723,6 +1723,44 @@ def blob_id_at_revision(repo: Path, rev: str, path: str) -> str | None:
     return meta[2].decode()
 
 
+def read_blob(repo: Path, blob: str) -> bytes | None:
+    """The bytes of the git blob *blob*, or ``None`` when *repo* has no such blob.
+
+    Reads the object database only (athenaeum#2940: the last accepted version of
+    a raised copy is read back by the blob id the acceptance ledger holds).
+    *blob* must be a full 40- or 64-hex object id; anything else is ``None``.
+    """
+    if len(blob) not in (40, 64) or any(c not in "0123456789abcdef" for c in blob):
+        return None
+    result = subprocess.run(
+        ["git", "cat-file", "blob", blob], cwd=str(repo), capture_output=True
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def write_blob(repo: Path, data: bytes, pin_ref: str | None = None) -> str:
+    """Write *data* into *repo*'s object database as a blob and return its id.
+
+    With *pin_ref* (a ref name under ``refs/``) the blob is also referenced from
+    that ref, so ``git gc`` never prunes a version that no commit holds
+    (athenaeum#2940: the raiser's payload as last accepted, when the committed
+    copy is a merge of it with the target's own edits). Raises
+    ``subprocess.CalledProcessError`` when git refuses.
+    """
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        input=data,
+    ).stdout.decode().strip()
+    if pin_ref is not None:
+        subprocess.run(
+            ["git", "update-ref", pin_ref, blob], cwd=str(repo), check=True, capture_output=True
+        )
+    return blob
+
+
 def blob_id_of(repo: Path, data: bytes) -> str:
     """The blob id git would give *data*; nothing is written to the object database."""
     return subprocess.run(
