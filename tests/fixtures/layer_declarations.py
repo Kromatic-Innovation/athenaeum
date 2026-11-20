@@ -113,6 +113,7 @@ MODULE_LAYER: dict[str, int] = {
     "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
     "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
     "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
+    "raise_ledger": 3,  # issue athenaeum#3001: the raiser's raise ledger
     "raise_acceptance_ledger": 3,  # issue athenaeum#2938: raise acceptance ledger
     "raise_acceptance": 3,  # issue athenaeum#2939: accept a raised page, asking every time
     "raise_supersede": 3,  # issue athenaeum#2940: apply a supersede to a raised copy

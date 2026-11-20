@@ -1046,6 +1046,23 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="raise-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "raise_ledger.py RAISE_LEDGER_FILENAME '_raise_ledger.jsonl' (issue "
+            "athenaeum#3001; docs/design/federation-raise-retract.md §4.3, §7.1, "
+            "slice S4) — the raiser's record of each raise, keyed by raise_id and "
+            "seq: ids and a payload hash, no page text. Durable and not "
+            "reconstructible (the mapping from a raise_id to its source page "
+            "exists nowhere else), the install's own state in the cache dir, "
+            "outside the wiki and raw roots so it is never a page of any store "
+            "and never enters the recall index. A record file merged by record, "
+            "never as text; keeping it on a bench is a later slice (S14)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="store-review-state",
         persistence_class="operational",
         operational_scope="store-durable",
