@@ -285,6 +285,37 @@ def test_ac3_a_later_supersede_merges_against_the_latest_accepted_version(env: E
     assert "1 December" in body and "First, ours." in body
 
 
+def test_ac3_a_merged_copy_is_not_the_next_ancestor_so_edits_are_not_reverted(env: Env) -> None:
+    """The ancestor is what the raiser last sent, not the merge of it with local edits."""
+    env.edit(lambda m, b: ({**m, "related": ["kept"]}, b.replace("First.", "First, ours.")))
+    assert env.supersede(body=NEW_BODY).status == rs.APPLIED  # merged
+    third = NEW_BODY.replace("15 December", "1 December")
+    assert env.supersede(seq=3, mid=2, body=third).status == rs.APPLIED
+    meta, body = env.copy()
+    assert "First, ours." in body and "1 December" in body
+    assert meta["related"] == ["kept"]
+
+
+def test_ac3_an_untouched_replace_does_not_make_target_keys_the_ancestor(env: Env) -> None:
+    env.edit(lambda m, b: ({**m, "related": ["kept"]}, b))  # not projected: still untouched
+    assert env.supersede(body=NEW_BODY).status == rs.APPLIED  # replaced
+    env.edit(lambda m, b: (m, b.replace("First.", "First, ours.")))
+    out = env.supersede(seq=3, mid=2, body=NEW_BODY.replace("15 December", "1 December"))
+    assert out.status == rs.APPLIED, (out.reason, out.decision and out.decision["detail"]["units"])
+    meta, body = env.copy()
+    assert meta["related"] == ["kept"] and "First, ours." in body and "1 December" in body
+
+
+def test_ac3_the_accepted_payload_survives_gc(env: Env) -> None:
+    env.edit(lambda m, b: (m, b.replace("First.", "Ours.")))
+    assert env.supersede(body=NEW_BODY).status == rs.APPLIED
+    row = disposition_of(env.cache, _mid(1))
+    assert row is not None and row.blob_id is not None
+    subprocess.run(["git", "-C", str(env.root), "gc", "-q", "--prune=now"], check=True)
+    data = read_blob(env.root, row.blob_id)
+    assert data is not None and b"15 December" in data and b"Ours." not in data
+
+
 def test_ac3_contested_unit_holds_the_page_and_raises_a_decision(env: Env) -> None:
     env.edit(lambda m, b: (m, b.replace("31 December", "30 November")))
     published = env.copy_path().read_text(encoding="utf-8")

@@ -27,7 +27,12 @@ compile role does with it:
 6. **Edited**: a three-way page merge (:func:`athenaeum.page_merge.merge_page`)
    with the last accepted version as ancestor, read through the store seam by the
    blob id of the latest accepted ledger row, the copy as it stands as the local
-   side and the new payload as the remote side. ``raised_from`` is not merged: it
+   side and the new payload as the remote side. The accepted version a row names
+   is the **payload as the raiser sent it**, filed as a fresh copy would be (not
+   the copy as merged with the target's edits, which as the next ancestor would
+   revert those edits); a version no commit holds is written as a blob and
+   pinned under :data:`ANCESTOR_REF_PREFIX` so ``git gc`` keeps it. ``raised_from``
+   is not merged: it
    is the target's own bookkeeping and is rewritten afterwards. A merge that
    leaves any contested or held unit writes nothing (the published version stays)
    and raises a decision; otherwise the merged page is committed.
@@ -106,7 +111,7 @@ from athenaeum.raise_messages import (
 )
 from athenaeum.raise_projection import PROJECTED_KEYS, derived_uid, payload_hash
 from athenaeum.raise_provenance import RaisedFrom, RaisedFromError, parse_raised_from
-from athenaeum.store import blob_id, commit_paths, read_blob
+from athenaeum.store import commit_paths, read_blob, write_blob
 from athenaeum.store_access import StoreDeclaration, load_store_declaration
 from athenaeum.store_decisions import file_decision
 from athenaeum.store_intake import intake_accepts
@@ -125,6 +130,9 @@ APPLIED = "applied"
 IGNORED = "ignored"
 #: Nothing was recorded: the message waits for the raise it depends on.
 WAITING = "waiting"
+
+#: Refs that keep each accepted payload blob reachable, ``<prefix>/<raise_id>/<message_id>``.
+ANCESTOR_REF_PREFIX = "refs/athenaeum/raise-accepted"
 
 #: The retract reason a rejected successor turns the message into (§7.4).
 RETRACT_REASON = "superseded_at_source"
@@ -478,11 +486,24 @@ def apply_supersede(
         )
 
     new_hash = payload_hash(_payload_text(page, msg.body))
+    new_block = _raised_from_after(copy, msg.seq, new_hash)
+    # The new payload as a fresh copy of it would be filed. It is the remote side of
+    # a merge and, whichever way the copy is updated, the version the ledger records
+    # as accepted: the NEXT merge's ancestor is what the raiser last sent, never the
+    # copy as merged with the target's own edits (that would revert them).
+    remote_meta: dict[str, Any] = {"uid": copy.meta.get("uid", uid)}
+    for key in PROJECTED_KEYS:
+        if key in page:
+            remote_meta[key] = page[key]
+    if "sources" in copy.meta:
+        remote_meta["sources"] = copy.meta["sources"]
+    remote = render_frontmatter(remote_meta) + msg.body
+    ancestor_text = _with_raised_from(remote, new_block)
     untouched = payload_hash(copy.text) == copy.block.content_hash
 
     if untouched:
         meta = {k: v for k, v in copy.meta.items() if k not in PROJECTED_KEYS}
-        meta["raised_from"] = _raised_from_after(copy, msg.seq, new_hash)
+        meta["raised_from"] = new_block
         for key in PROJECTED_KEYS:
             if key in page:
                 meta[key] = page[key]
@@ -490,6 +511,7 @@ def apply_supersede(
         return _finish(
             copy, new_text, msg, uid, target_store_id=target_store_id,
             target_root=Path(target_root), cache_dir=cache_dir, location=location, now=now,
+            accepted_text=ancestor_text,
         )
 
     # Edited in the target: a three-way merge, ancestor read by blob id.
@@ -501,13 +523,6 @@ def apply_supersede(
             "The last accepted version of this copy cannot be read back, so the edited "
             "copy cannot be merged with the new version. The copy stays as it is.",
         )
-    remote_meta: dict[str, Any] = {"uid": copy.meta.get("uid", uid)}
-    for key in PROJECTED_KEYS:
-        if key in page:
-            remote_meta[key] = page[key]
-    if "sources" in copy.meta:
-        remote_meta["sources"] = copy.meta["sources"]
-    remote = render_frontmatter(remote_meta) + msg.body
     page_type = page.get("type")
     spec = (specs or {}).get(page_type) if isinstance(page_type, str) else None
     result = merge_page(
@@ -525,10 +540,11 @@ def apply_supersede(
             "a person decides.",
             units,
         )
-    new_text = _with_raised_from(result.text, _raised_from_after(copy, msg.seq, new_hash))
+    new_text = _with_raised_from(result.text, new_block)
     return _finish(
         copy, new_text, msg, uid, target_store_id=target_store_id,
         target_root=Path(target_root), cache_dir=cache_dir, location=location, now=now,
+        accepted_text=ancestor_text,
     )
 
 
@@ -550,14 +566,30 @@ def _finish(
     cache_dir: Path,
     location: str,
     now: datetime | None,
+    accepted_text: str | None = None,
+    accepted_blob: str | None = None,
 ) -> Outcome:
+    """Write the copy, commit it and record the supersede ``accepted``.
+
+    The ledger names the **accepted version** by blob id: *accepted_text* written
+    (and pinned, so no ``gc`` prunes it) as a blob, or *accepted_blob* when the
+    payload did not change (the successor form).
+    """
+    assert msg.raise_id is not None
+    if accepted_text is not None:
+        accepted_blob = write_blob(
+            Path(target_root),
+            accepted_text.encode("utf-8"),
+            f"{ANCESTOR_REF_PREFIX}/{msg.raise_id}/{msg.message_id}",
+        )
+    assert accepted_blob is not None
     commit = _write_and_commit(
         Path(target_root), copy, new_text, msg, uid, "Apply a supersede to a raised copy"
     )
     row = _record(
         cache_dir, msg, target_store_id, location,
         disposition=DISPOSITION_ACCEPTED, payload_hash=msg.content_hash,
-        blob_id=blob_id(copy.path), now=now,
+        blob_id=accepted_blob, now=now,
     )
     return Outcome(APPLIED, None, None, row, uid, commit)
 
@@ -624,7 +656,9 @@ def _apply_successor(
     meta["superseded_by"] = slug
     meta["raised_from"] = _raised_from_after(copy, msg.seq, None)
     new_text = render_frontmatter(_ordered(meta, copy.meta)) + copy.body
+    latest = max(_accepted_rows(cache_dir, msg.raise_id or ""), key=lambda r: (r.seq, r.ts))
     return _finish(
         copy, new_text, msg, uid, target_store_id=target_store_id,
         target_root=Path(target_root), cache_dir=cache_dir, location=location, now=now,
+        accepted_blob=latest.blob_id,
     )
