@@ -29,24 +29,21 @@ dependencies = [
     # We cap each at an explicit upper bound (next-major boundary or wider)
     # so a surprise release can't silently break a released athenaeum
     # wheel — bumps are explicit PRs.
-    # Floor 0.39.0: first stable release shipping client.messages.batches
-    # (the Batch API surface batch-mode depends on, athenaeum#236).
-    # requirements-ci.txt pins anthropic 0.120.2, but the SDK has since
-    # shipped 1.x and 2.x, and the unlocked `clean-venv` CI job installs
-    # whatever resolves under this bound. The ceiling therefore stays at the
-    # next major boundary (`<3.0`): a tighter `<1` would exclude releases
-    # that job already exercises and break callers on a current SDK
-    # (athenaeum#2686). Record the lock's tested version here so a run that
-    # resolves a newer release is visible against this baseline.
-    # Tested versions: the lock's 0.120.2 (every locked CI job) and whatever
-    # is newest at run time (the unlocked `clean-venv` job). Nothing between
-    # 0.39.0 and 0.120.2 is exercised. The wider range is kept on purpose:
-    # 0.39.0 is the oldest release carrying the `messages.batches` surface
-    # athenaeum calls, and raising the floor to 0.120.2 would exclude callers
-    # on older SDKs without CI evidence that they are broken. Treat versions
-    # below 0.120.2 as best effort (see "Supported dependency ranges" in
-    # docs/guides/install.md).
-    "anthropic>=0.39.0,<3.0",
+    # Floor 0.50.0: the oldest release CI exercises (the `floors` job in
+    # ci.yml installs exactly this version and runs the SDK- and
+    # MCP-touching tests). 0.39.0 (the first release with
+    # client.messages.batches, athenaeum#236) through 0.49.0 are NOT
+    # supported: they lack `anthropic._exceptions.OverloadedError`, which the
+    # retry layer imports to classify transient API errors (the import is
+    # guarded, so on those releases overload errors would silently not be
+    # retried), and before 0.50.0 the SDK client has no `_sleep_for_retry`,
+    # which the test suite stubs. The lock pins 0.120.2 (every locked CI
+    # job); the unlocked `clean-venv` job installs whatever is newest. The
+    # ceiling stays at the next major boundary (`<3.0`): a tighter `<1` would
+    # exclude releases that job already exercises (athenaeum#2686). Versions
+    # between 0.50.0 and 0.120.2 are best effort (see "Supported dependency
+    # ranges" in docs/guides/install.md).
+    "anthropic>=0.50.0,<3.0",
     "pydantic>=2.0,<3.0",
 ]
 
@@ -62,20 +59,14 @@ mcp = [
     # surface does not exist on `mcp` 1.x, so a resolver that picked fastmcp
     # 3.x -- which declares `mcp<2.0` -- would break the bridge in the other
     # direction. `<3.0` matches what fastmcp-slim 4.x itself declares.
-    # The `fastmcp` FLOOR is 3.4.3: the first release whose
-    # `FastMCP.run_http_async` accepts `host_origin_protection`, which
-    # `athenaeum serve --transport http` passes (athenaeum#2605). Verified by
-    # downloading the wheels from PyPI and reading
-    # `fastmcp/server/mixins/transport.py` in each: `fastmcp-slim` 3.4.2 and
-    # earlier (and every `fastmcp` 2.x and 3.0 - 3.2 wheel, which ship the
-    # server in-package) have no `host_origin_protection`; `fastmcp-slim`
-    # 3.4.3 has it in the `run_http_async` signature, and `fastmcp` 3.4.3
-    # pins `fastmcp-slim==3.4.3`. Earlier floors (2.11.1, from athenaeum#2382)
-    # admitted releases on which unauthenticated HTTP serving refuses to start.
-    # Note the 3.x line declares `mcp<2.0`, which conflicts with the
-    # `mcp>=2.0` pin below, so a resolver lands on fastmcp 4.x in practice;
-    # `requirements-ci.txt` pins 4.0.11.
-    "fastmcp>=3.4.3,<5.0",
+    # The `fastmcp` FLOOR is 4.0.0, the oldest release CI exercises (the
+    # `floors` job in ci.yml). It is NOT 3.4.3 even though 3.4.3 is the first
+    # release whose `FastMCP.run_http_async` accepts `host_origin_protection`
+    # (athenaeum#2605): `fastmcp-slim` 3.4.3 declares `mcp<2.0`, which no
+    # resolver can satisfy together with the `mcp>=2.0` pin below, so 3.4.3
+    # could not be installed alongside this package's `mcp` requirement.
+    # 4.0.0 (declares `mcp>=2.0`) is the oldest release that can be. `requirements-ci.txt` pins 4.1.2.
+    "fastmcp>=4.0.0,<5.0",
     "mcp>=2.0,<3.0",
     # athenaeum#1954: cli_tool_bridge.py validates `tools/call` arguments
     # against the served input schema itself -- `mcp` 2.x dropped the pre-2.0
@@ -158,8 +149,8 @@ dev = [
     "ruff==0.17.3",
     # athenaeum#1954: kept identical to the `mcp` extra above -- see that
     # block for why `mcp` stays declared, why its bound is a 2.0 floor, and
-    # why fastmcp's floor is 3.4.3.
-    "fastmcp>=3.4.3,<5.0",
+    # why fastmcp's floor is 4.0.0.
+    "fastmcp>=4.0.0,<5.0",
     "mcp>=2.0,<3.0",
     # athenaeum#2384: both already ride in as fastmcp dependencies, and both
     # are TEST-only -- `src/` imports neither. Declared because
