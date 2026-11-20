@@ -347,7 +347,9 @@ def _build(data: dict[Any, Any], problems: list[Problem]) -> StoreDeclaration | 
     version = data.get("version")
     if "version" not in data:
         problems.append(Problem("version", "is required"))
-    elif isinstance(version, bool) or version not in SUPPORTED_VERSIONS:
+    elif type(version) is not int or version not in SUPPORTED_VERSIONS:
+        # ``type(...) is int``: a bool or a float such as ``1.0`` compares equal
+        # to a supported int but is not one.
         problems.append(
             Problem(
                 "version",
