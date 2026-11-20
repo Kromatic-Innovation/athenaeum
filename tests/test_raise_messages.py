@@ -250,3 +250,32 @@ def test_attest_carries_no_raise_id() -> None:
     assert "raise_id" not in rec
     rec["raise_id"] = mint_raise_id()
     assert isinstance(rm.parse_message(rec), Fallthrough)
+
+
+# -- review follow-ups: inputs that must fall through, never raise ------------
+
+
+@pytest.mark.parametrize("bad", [["withdrawn"], {"code": "withdrawn"}])
+def test_retract_with_unhashable_reason_falls_through(bad: object) -> None:
+    rec = _rec(_base("retract", seq=2, reason="withdrawn"))
+    rec["reason"] = bad
+    assert isinstance(rm.parse_message(rec), Fallthrough)
+
+
+def test_supersede_with_non_int_seq_falls_through() -> None:
+    rec = _rec(_base("supersede", seq=2, successor=mint_raise_id()))
+    rec["seq"] = "2"
+    assert isinstance(rm.parse_message(rec), Fallthrough)
+
+
+def test_deeply_nested_record_falls_through_without_recursion_error() -> None:
+    rec = _rec(_base("raise", content_hash=HASH, page=dict(PAGE), body="Text."))
+    nested: dict[str, object] = {}
+    cur = nested
+    for _ in range(5000):
+        nxt: dict[str, object] = {}
+        cur["x"] = nxt
+        cur = nxt
+    cur["uid"] = "u"
+    rec["page"] = nested
+    assert isinstance(rm.parse_message(rec), Fallthrough)

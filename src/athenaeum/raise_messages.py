@@ -171,18 +171,17 @@ def _str_list(v: object) -> bool:
 
 
 def _find_source_naming_key(obj: object) -> str | None:
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in SOURCE_NAMING_KEYS:
-                return str(k)
-            hit = _find_source_naming_key(v)
-            if hit is not None:
-                return hit
-    elif isinstance(obj, list):
-        for v in obj:
-            hit = _find_source_naming_key(v)
-            if hit is not None:
-                return hit
+    # Iterative, so a deeply nested record cannot raise RecursionError.
+    stack: list[object] = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k in SOURCE_NAMING_KEYS:
+                    return str(k)
+                stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
     return None
 
 
@@ -276,7 +275,9 @@ def _check_record(rec: dict[str, Any]) -> str | None:
         return "fact is not a type and tags mapping"
     if kind in (KIND_RAISE, KIND_PROPOSE_FACT) and rec["seq"] != 1:
         return f"{kind} must carry seq 1"
-    if kind == KIND_RETRACT and rec["reason"] not in RETRACT_REASONS:
+    if kind == KIND_RETRACT and (
+        not isinstance(rec["reason"], str) or rec["reason"] not in RETRACT_REASONS
+    ):
         return "retract reason is not one of the fixed reason codes"
     if kind == KIND_SUPERSEDE:
         if rec["seq"] < 2:
@@ -318,7 +319,12 @@ def parse_message(record: object) -> RaiseMessage | Fallthrough:
     """Validate one decoded record (not the envelope) as a message."""
     if not isinstance(record, dict):
         return Fallthrough("record is not a JSON object")
-    reason = _check_record(record)
+    try:
+        reason = _check_record(record)
+    except (TypeError, ValueError, RecursionError):
+        # Belt and braces: a value of an unexpected type must fall through,
+        # never raise (athenaeum#2937).
+        return Fallthrough("record has a value of the wrong type")
     if reason is not None:
         return Fallthrough(reason)
     return _to_message(record)
