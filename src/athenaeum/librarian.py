@@ -197,6 +197,7 @@ from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
     run_intake_audit,
 )
+from athenaeum.intake_destination import destination_for_entity
 from athenaeum.logconf import run_id_var
 from athenaeum.merge import (
     RunDeadlineExceeded,
@@ -306,7 +307,6 @@ from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.storage import (
     ReadOnlySurfaceError,
     open_store,
-    page_write_root_for_class,
     refuse_read_only_write,
     require_writable_path,
     resolve_indexed_surfaces,
@@ -2760,7 +2760,11 @@ def _apply_tier3_results(
     _create_roots: list[Path | None] = []
     for _e in new_entities:
         try:
-            _create_roots.append(page_write_root_for_class(_e.type, _page_config, wiki_root.parent))
+            _create_roots.append(
+                destination_for_entity(
+                    _e.type, _page_config, wiki_root.parent, tags=tuple(_e.tags)
+                ).root
+            )
         except ReadOnlySurfaceError as _exc:
             _retain_raw_on_read_only(result, _exc)
             _create_roots.append(None)
@@ -8687,6 +8691,34 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
         )
 
 
+def _run_store_intake_phase(ctx: RunContext) -> None:
+    """A store's raw intake on this install (intake routing S15, athenaeum#2625 §8.1).
+
+    Hands each file under ``raw/_stores/<store_id>/`` to the per-store dispatcher
+    (:func:`athenaeum.store_intake_dispatch.dispatch_store_intake`). Deterministic,
+    LLM-free, and never fatal: discovery for classify skips that tree, so this is
+    the only reader. A dry run reads and writes nothing.
+    """
+    if ctx.dry_run:
+        return
+    from athenaeum.store_intake_dispatch import dispatch_store_intake
+
+    try:
+        report = dispatch_store_intake(
+            ctx.knowledge_root, ctx.config, cache_dir=_resolve_cache_dir(None)
+        )
+    except Exception as exc:  # noqa: BLE001 - a store's intake never stops the run
+        log.warning("store intake phase failed (%s)", type(exc).__name__)
+        return
+    if report.files_read:
+        log.info(
+            "store intake: %d file(s) read, %d handled, %d misaddressed, %d nonconforming, "
+            "%d deferred",
+            report.files_read, report.handled, report.misaddressed, report.nonconforming,
+            report.deferred,
+        )
+
+
 def _run_correction_phase(ctx: RunContext) -> None:
     """Field-correction fast path (issue athenaeum#797, `docs/design/field-corrections.md`).
 
@@ -12971,6 +13003,10 @@ def run(
     # before the entity tier phase) per docs/design/field-corrections.md §10.1 so an
     # entity-phase overrun never starves this cheap path.
     _run_correction_phase(ctx)
+
+    # Phase: a store's raw intake on this install (athenaeum#3000) -- deterministic,
+    # LLM-free; the discovery that feeds classify skips raw/_stores/.
+    _run_store_intake_phase(ctx)
 
     # Phase: OS signal handling is installed/removed INSIDE the entity-tier
     # phase below (`_run_entity_tier_phase`), not as its own standalone
