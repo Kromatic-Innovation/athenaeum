@@ -252,6 +252,36 @@ def test_ac1_a_target_with_no_git_is_read_as_it_stands(tmp_path: Path) -> None:
     assert [f.check for f in result.findings] == [CHECK_HELD_ELSEWHERE]
 
 
+def test_ac1_a_copy_left_by_a_crashed_acceptance_is_checked_whole(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submitted = env.submit(body=HELD)
+    assert submitted.decision is not None
+    real = ra.record_acceptance
+
+    def crash(*a: Any, **k: Any) -> None:
+        raise RuntimeError("crashed after the commit, before the ledger row")
+
+    monkeypatch.setattr(ra, "record_acceptance", crash)
+    with pytest.raises(RuntimeError):
+        env.accept(submitted.decision["id"])
+    monkeypatch.setattr(ra, "record_acceptance", real)
+    # Something else commits before the acceptance is retried.
+    (env.root / "jordan.md").write_text(_page("person-jordan-reyes", "Jordan Reyes", body="x\n"))
+    env.commit_all("unrelated")
+    out = env.accept(submitted.decision["id"])
+    assert out.status == ra.ACCEPTED and out.commit is None  # nothing new written
+    assert out.filing is not None and out.filing.copy == rfc.COPY_CREATED
+    assert [f.check for f in out.filing.findings] == [CHECK_HELD_ELSEWHERE]
+
+
+def test_ac1_a_copy_the_commit_does_not_hold_is_read_as_it_stands(env: Env) -> None:
+    copy = env.root / f"{UID}-mara-ellison.md"
+    copy.write_text(_page(UID, "Mara Ellison", body=HELD))  # never committed
+    result = rfc.run_filing_checks(env.root, copy, env.head(), created=True)
+    assert [f.check for f in result.findings] == [CHECK_HELD_ELSEWHERE]
+
+
 # -- AC1: after a copy is replaced, the checks run on what changed --------------
 
 

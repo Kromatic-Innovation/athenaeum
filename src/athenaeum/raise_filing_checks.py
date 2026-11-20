@@ -16,8 +16,9 @@ naming the copy for each failure.
 * **Never a hold.** Nothing here edits, holds or reverts the copy. It stays as
   published until the item is settled; the fix is an ordinary follow-up commit.
   :func:`run_after_publish` never raises: a crash is recorded on the result.
-* **What is checked.** A created copy is checked whole. A replaced copy is checked
-  on the units whose value differs from the copy before the replacement
+* **What is checked.** A created copy is checked whole, including one an earlier
+  acceptance created before it crashed. A replaced copy is checked on the units
+  whose value differs from the copy before the replacement
   (:func:`athenaeum.page_merge.page_units` names the units), so a finding already
   settled on an unchanged unit is not opened again.
 * **Through the store seam.** The copy and the other pages are read at the commit
@@ -141,9 +142,14 @@ def _before(root: Path, commit: str | None, path: str) -> str | None:
 
 
 def run_filing_checks(
-    target_root: Path, copy_path: Path, commit: str | None
+    target_root: Path, copy_path: Path, commit: str | None, *, created: bool = False
 ) -> RaiseFilingResult:
     """Run the filing checks on the copy at *copy_path*, as *commit* published it.
+
+    *created* says the copy was created (by an acceptance), so it is checked whole
+    whatever commit is named; otherwise the version before is the copy at the
+    parent of *commit*. A copy that *commit* does not hold (written, never
+    committed) is read, with the other pages, as the files stand.
 
     Read-only. Raises on an unreadable store; :func:`run_after_publish` turns that
     into a crashed result.
@@ -152,7 +158,10 @@ def run_filing_checks(
     rel = Path(copy_path).resolve().relative_to(root.resolve()).as_posix()
     pages = _Pages(root, commit)
     after = pages.read(rel)
-    before = _before(root, commit, rel)
+    if after is None and commit is not None:
+        commit, pages = None, _Pages(root, None)
+        after = pages.read(rel)
+    before = None if created else _before(root, commit, rel)
     result = RaiseFilingResult(copy=COPY_CREATED if before is None else COPY_REPLACED)
     if after is None:
         return result
@@ -180,6 +189,7 @@ def run_after_publish(
     copy_path: Path,
     commit: str | None,
     raise_id: str,
+    created: bool = False,
     mounts: Mapping[str, Path] | None = None,
     asserter: Mapping[str, object] | None = None,
 ) -> RaiseFilingResult:
@@ -190,7 +200,7 @@ def run_after_publish(
     and returned as ``crashed``; the copy and its acceptance stand.
     """
     try:
-        result = run_filing_checks(target_root, copy_path, commit)
+        result = run_filing_checks(target_root, copy_path, commit, created=created)
         if result.findings:
             file_findings(
                 knowledge_root,

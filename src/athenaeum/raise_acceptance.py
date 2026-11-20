@@ -646,6 +646,7 @@ def accept_raise(
         copy_path=path,
         commit=commit or repo_head(Path(target_root)),
         raise_id=msg.raise_id,
+        created=True,  # also after a crash: the copy found at the uid is this raise's
         mounts=mounts,
         asserter=asserter,
     )
