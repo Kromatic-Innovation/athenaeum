@@ -148,6 +148,7 @@ MODULE_LAYER: dict[str, int] = {
     "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
     "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
     "sync_integrate": 4,  # athenaeum#2935: integrate mode; imports record_merge (L4)
+    "sync_lease": 4,  # athenaeum#2997: per-repository sync lease in the git dir (L4)
     "sync_machine_local": 4,  # athenaeum#2994: tracked machine-local file check (L4)
     "sync_filing_checks": 4,  # athenaeum#2928: filing checks after a push (L4)
     "record_merge": 4,  # athenaeum#2929: sibling of pending_merges (L4), whose parser it calls

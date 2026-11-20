@@ -1821,6 +1821,14 @@ def blob_id_of(repo: Path, data: bytes) -> str:
     ).stdout.decode().strip()
 
 
+def git_dir(repo: Path) -> Path:
+    """The absolute git directory of *repo* (a linked worktree's own one included).
+
+    Read-only. Raises ``subprocess.CalledProcessError`` outside a git repository.
+    """
+    return Path(_git_out(repo, "rev-parse", "--absolute-git-dir").decode().strip())
+
+
 def list_tracked_files(repo: Path) -> list[str]:
     """Sorted paths git tracks in *repo* right now (its index), relative to the root.
 
