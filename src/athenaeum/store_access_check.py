@@ -49,10 +49,14 @@ __all__ = ["LocationRow", "StoreRow", "AccessReport", "check_access"]
 
 NOT_OBSERVED = "not yet observed"
 
-#: A push or fetch failure that reads as the host refusing this install.
+#: A push failure that reads as the host refusing this install: clear permission
+#: evidence only. Transport failures ("Could not read from remote repository",
+#: "Permission denied (publickey)" with no host verdict, DNS, timeouts) and bare
+#: numbers do not match; those are reported but not flagged as a difference.
 _REFUSED_RE = re.compile(
-    r"permission denied|denied to|access denied|not allowed|unauthori[sz]ed|forbidden|"
-    r"403|401|authentication failed|protected branch|could not read from remote",
+    r"remote: permission denied|permission to \S+ denied|access denied|forbidden|"
+    r"returned error: 40[13]\b|http(?:/\d(?:\.\d)?)? 40[13]\b|"
+    r"authentication failed|protected branch hook declined|protected branch",
     re.IGNORECASE,
 )
 

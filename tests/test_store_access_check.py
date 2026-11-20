@@ -269,3 +269,36 @@ def test_bench_evidence_matches_by_remote_url(tmp_path, capsys) -> None:
     _, report = _run(kr, capsys)
     (loc,) = [x for x in _store(report)["locations"] if x["role"] == "bench"]
     assert (loc["fetch"], loc["push"]) == ("ok", "not yet observed")
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "ssh: Could not resolve hostname git.example.net\n"
+        "fatal: Could not read from remote repository.",
+        "fatal: Could not read from remote repository.\n"
+        "Please make sure you have the correct access rights",
+        "ssh: connect to host git.example.net port 22: Connection timed out",
+        "Writing objects: 100% (403/403), 401 bytes | 401.00 KiB/s, done.",
+    ],
+)
+def test_transport_failure_is_not_a_refusal(tmp_path, capsys, detail) -> None:
+    kr = _mount(tmp_path, SOLE_WRITER)
+    evidence.record_push(tmp_path / "pages", "origin", False, detail)
+    code, report = _run(kr, capsys)
+    assert code == 0 and _store(report)["differences"] == []
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "remote: Permission to acme/pages.git denied to someone.",
+        "fatal: unable to access 'https://x/': The requested URL returned error: 403",
+        "! [remote rejected] main -> main (protected branch hook declined)",
+    ],
+)
+def test_clear_refusal_is_a_difference(tmp_path, capsys, detail) -> None:
+    kr = _mount(tmp_path, SOLE_WRITER)
+    evidence.record_push(tmp_path / "pages", "origin", False, detail)
+    code, report = _run(kr, capsys)
+    assert code == 2 and any("refused" in d for d in _store(report)["differences"])
