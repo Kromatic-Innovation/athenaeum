@@ -36,8 +36,14 @@ Before the merge commit is written (section 4.3), every page changed on both
 sides is checked: frontmatter parses with ``uid``, ``type`` and ``name``, no
 conflict marker, and no link from a more widely shared surface to a more
 private one. A page that fails is held and keeps the remote version. One uid on
-two of the pages either side changed blocks the whole integrate (nothing is
-merged or pushed); re-minting is a later slice.
+two of the pages either side changed is handled by section 7.4
+(athenaeum#2996): added on both sides with the same ``type`` and normalised ``name``
+it is one page merged against an empty ancestor; with a different ``type`` or ``name``
+it is a collision and the local, unpublished page is re-minted (new 16-hex uid from
+:func:`athenaeum.models.generate_uid`, file renamed, references made in the same
+unpublished commits rewritten) and recorded as ``Athenaeum-Uid-Reminted``. Any other
+shape (the uid is already in the common ancestor, or more than two pages carry it)
+still blocks the integrate and nothing is merged or pushed.
 
 The merge commit message carries ``Athenaeum-Sync: 1`` and one
 ``Athenaeum-Page:`` line per page changed on both sides, with git blob ids and
@@ -69,7 +75,7 @@ from athenaeum.config import (
     resolve_push_remote,
     resolve_structured_upsert,
 )
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import generate_uid, parse_frontmatter
 from athenaeum.page_merge import merge_page
 from athenaeum.record_merge import KIND_PENDING_MERGES, merge_derived, merge_records
 from athenaeum.storage import available_adapters, open_store, surface_visibility
@@ -298,6 +304,8 @@ class IntegrateResult:
     #: The remote tip this integrate fetched (``None`` when the fetch failed): the
     #: remote's value before a push that follows (athenaeum#2928).
     remote_tip: str | None = None
+    #: ``(old uid, new uid)`` of each local page re-minted by this integrate (§7.4).
+    reminted: tuple[tuple[str, str], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -317,6 +325,8 @@ class PushOutcome:
     #: known; the filing checks after a push read them (athenaeum#2928).
     remote_before: str | None = None
     pushed: str | None = None
+    #: Local pages re-minted by the integrates this push needed (athenaeum#2996).
+    reminted: int = 0
 
 
 @dataclass(frozen=True)
@@ -442,26 +452,38 @@ def _push_loop(
 ) -> PushOutcome:
     attempts = 0
     detail = ""
+    reminted = 0
     while attempts < max(1, cfg.max_attempts):
         attempts += 1
         result: PushResult = push_branch(repo, branch, cfg.remote)
         if result.ok:
-            return PushOutcome(True, attempts, remote_before=remote_before, pushed=repo_head(repo))
+            return PushOutcome(
+                True,
+                attempts,
+                remote_before=remote_before,
+                pushed=repo_head(repo),
+                reminted=reminted,
+            )
         detail = result.detail
         if result.reason is not PushFailureReason.REJECTED_REMOTE_MOVED:
-            return PushOutcome(False, attempts, "other", detail)
+            return PushOutcome(False, attempts, "other", detail, reminted=reminted)
         if attempts >= max(1, cfg.max_attempts):
             break
         cfg.sleep(cfg.rng.uniform(*cfg.wait_range))
         try:
             commit_repo(repo, "athenaeum sync: snapshot before integrate")
         except subprocess.CalledProcessError:
-            return PushOutcome(False, attempts, REASON_INTEGRATE_BLOCKED, BLOCK_DIRTY)
+            return PushOutcome(
+                False, attempts, REASON_INTEGRATE_BLOCKED, BLOCK_DIRTY, reminted=reminted
+            )
         merged = integrate_remote(repo, branch, cfg)
         if not merged.ok:
-            return PushOutcome(False, attempts, REASON_INTEGRATE_BLOCKED, merged.reason)
+            return PushOutcome(
+                False, attempts, REASON_INTEGRATE_BLOCKED, merged.reason, reminted=reminted
+            )
         remote_before = merged.remote_tip
-    return PushOutcome(False, attempts, REASON_CONTENDED, detail)
+        reminted += len(merged.reminted)
+    return PushOutcome(False, attempts, REASON_CONTENDED, detail, reminted=reminted)
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +637,22 @@ def _merge(
             final[path] = theirs
             held.append(_held_item(HELD_UNREGISTERED, ("no-rule-for-path",), blobs))
 
+    reminted = _resolve_uid_collisions(
+        repo,
+        (ancestor, local, tip),
+        (local_changed, remote_changed),
+        specs,
+        roots,
+        final,
+        held,
+        page_lines,
+        both_pages,
+    )
+
     _validate(repo, local, tip, final, both_pages, held, page_lines, roots, cfg.config)
 
-    # One uid on two pages that either side changed blocks the integrate (section 7.4
-    # re-minting is a later slice).
+    # One uid still on two pages either side changed (§7.4 could not settle it: the uid
+    # is in the common ancestor, or more than two pages carry it) blocks the integrate.
     seen: dict[str, str] = {}
     for path in sorted(final):
         kind, _ = _classify(path, roots)
@@ -634,7 +668,7 @@ def _merge(
     changes = {
         p: data for p, data in final.items() if data != read_file_at_revision(repo, local, p)
     }
-    message = _message(tip, page_lines, held)
+    message = _message(tip, page_lines, held, reminted)
     try:
         commit = write_merge_commit(repo, branch, tip, changes, message)
     except WorkingTreeNotCleanError:
@@ -643,7 +677,13 @@ def _merge(
         log.warning("athenaeum sync: merge commit failed in %s: %s", repo, exc)
         return IntegrateResult("failed", reason="merge-commit-failed")
     uids = tuple(uid for uid, _ in page_lines)
-    return IntegrateResult("merged", commit=commit, held=tuple(held), pages_changed_both=uids)
+    return IntegrateResult(
+        "merged",
+        commit=commit,
+        held=tuple(held),
+        pages_changed_both=uids,
+        reminted=tuple(reminted),
+    )
 
 
 def _merge_one_page(
@@ -778,7 +818,12 @@ def _file_held_pages(
     ]
 
 
-def _message(tip: str, page_lines: list[tuple[str, str]], held: list[HeldItem]) -> str:
+def _message(
+    tip: str,
+    page_lines: list[tuple[str, str]],
+    held: list[HeldItem],
+    reminted: list[tuple[str, str]] | None = None,
+) -> str:
     lines = [f"athenaeum sync: integrate {tip[:12]}", "", "Athenaeum-Sync: 1"]
     lines += [f"Athenaeum-Page: {uid} {rest}" for uid, rest in page_lines]
     lines += [
@@ -787,7 +832,176 @@ def _message(tip: str, page_lines: list[tuple[str, str]], held: list[HeldItem]) 
         for h in held
         if not h.uid
     ]
+    lines += [f"Athenaeum-Uid-Reminted: {old} {new}" for old, new in reminted or ()]
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Section 7.4: when two installs minted the same uid (athenaeum#2996)
+# ---------------------------------------------------------------------------
+
+
+def _normalised_name(meta: Mapping[str, Any]) -> str:
+    return " ".join(str(meta.get("name") or "").casefold().split())
+
+
+def _identity(text: str | None) -> tuple[str, str]:
+    """``(type, normalised name)`` of a page text: what §7.4 compares."""
+    meta, _ = parse_frontmatter(text) if text else ({}, "")
+    meta = meta if isinstance(meta, dict) else {}
+    return str(meta.get("type") or "").strip(), _normalised_name(meta)
+
+
+def _uid_in_ancestor(repo: Path, ancestor: str, roots: tuple[PageRoot, ...], uid: str) -> bool:
+    for root in roots:
+        for path in list_files_at_revision(repo, ancestor, root.rel):
+            if _classify(path, roots)[0] != "page":
+                continue
+            if _uid_of(_text(read_file_at_revision(repo, ancestor, path))[0]) == uid:
+                return True
+    return False
+
+
+def _token(old: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(old)}(?![A-Za-z0-9_-])")
+
+
+def _rewrite(text: str, pairs: list[tuple[str, str]], keep: set[str]) -> str:
+    """Replace each old token with its new one, on every line not in *keep*."""
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\r\n") not in keep:
+            for old, new in pairs:
+                line = _token(old).sub(new, line)
+        out.append(line)
+    return "".join(out)
+
+
+def _remint(
+    repo: Path,
+    revs: tuple[str, str, str],
+    local_changed: set[str],
+    old: str,
+    path: str,
+    new: str,
+    roots: tuple[PageRoot, ...],
+    final: dict[str, bytes | None],
+    both_pages: dict[str, tuple[str, bytes | None, str | None, str | None]],
+) -> None:
+    """Give the local page at *path* the uid *new*, rename it, rewrite local references."""
+    ancestor, _local, tip = revs
+    pure = PurePosixPath(path)
+    renamed = path
+    pairs = [(old, new)]
+    if pure.stem == old or pure.stem.startswith(old + "-"):
+        new_stem = new + pure.stem[len(old) :]
+        renamed = str(pure.with_name(new_stem + pure.suffix))
+        pairs.insert(0, (pure.stem, new_stem))
+    data = final[path]
+    assert data is not None
+    final[path] = None
+    final[renamed] = _rewrite(data.decode("utf-8"), pairs, set()).encode("utf-8")
+    # References made in the same unpublished local commits: lines of a locally changed
+    # page that neither the common ancestor nor the remote has. A line already published
+    # (in the ancestor or on the remote) is never rewritten. A pending-merges record can
+    # name a page by its ``<uid>-<slug>.md`` file, so records are rewritten like pages.
+    for other in sorted(local_changed - {path}):
+        current = final.get(other)
+        if current is None or _classify(other, roots)[0] not in ("page", "record"):
+            continue
+        text, ok = _text(current)
+        if text is None or not ok:
+            continue
+        published: set[str] = set()
+        for rev in (ancestor, tip):
+            theirs, _ok = _text(read_file_at_revision(repo, rev, other))
+            published.update((theirs or "").splitlines())
+        rewritten = _rewrite(text, pairs, published)
+        if rewritten != text:
+            final[other] = rewritten.encode("utf-8")
+            if other in both_pages:
+                uid, _data, mine_t, theirs_t = both_pages[other]
+                both_pages[other] = (uid, final[other], mine_t, theirs_t)
+
+
+def _resolve_uid_collisions(
+    repo: Path,
+    revs: tuple[str, str, str],
+    changed: tuple[set[str], set[str]],
+    specs: Mapping[str, StructuredUpsertSpec],
+    roots: tuple[PageRoot, ...],
+    final: dict[str, bytes | None],
+    held: list[HeldItem],
+    page_lines: list[tuple[str, str]],
+    both_pages: dict[str, tuple[str, bytes | None, str | None, str | None]],
+) -> list[tuple[str, str]]:
+    """Settle each uid that two pages of the merged tree carry (design note §7.4).
+
+    Reads each page's uid from the merged tree through the seam; no index. A uid added
+    on both sides (one new local page, one new remote page, neither in the common
+    ancestor) is, with the same ``type`` and normalised ``name``, one page merged
+    against an empty ancestor; otherwise the local page is re-minted. Anything else is
+    left in place and blocks the integrate. Returns ``(old, new)`` for each re-mint.
+    """
+    ancestor, local, tip = revs
+    local_changed, remote_changed = changed
+    by_uid: dict[str, list[str]] = {}
+    for path in sorted(final):
+        text, _ok = _text(final[path])
+        if text is None or _classify(path, roots)[0] != "page":
+            continue
+        uid = _uid_of(text)
+        if uid:
+            by_uid.setdefault(uid, []).append(path)
+    used = set(by_uid)
+    reminted: list[tuple[str, str]] = []
+    for uid, paths in by_uid.items():
+        if len(paths) != 2:
+            continue
+        added = [read_file_at_revision(repo, ancestor, p) is None for p in paths]
+        local_new = [
+            p for p, new in zip(paths, added) if new and p in local_changed - remote_changed
+        ]
+        remote_new = [
+            p for p, new in zip(paths, added) if new and p in remote_changed - local_changed
+        ]
+        if len(local_new) != 1 or len(remote_new) != 1:
+            continue
+        if _uid_in_ancestor(repo, ancestor, roots, uid):
+            continue
+        mine_path, theirs_path = local_new[0], remote_new[0]
+        mine_t, _ = _text(read_file_at_revision(repo, local, mine_path))
+        theirs_t, _ = _text(read_file_at_revision(repo, tip, theirs_path))
+        if _identity(mine_t) == _identity(theirs_t):
+            blobs = {
+                "base": _NONE_BLOB,
+                "local": blob_id_at_revision(repo, local, mine_path) or _NONE_BLOB,
+                "remote": blob_id_at_revision(repo, tip, theirs_path) or _NONE_BLOB,
+            }
+            _merge_one_page(
+                theirs_path,
+                None,
+                mine_t,
+                theirs_t,
+                True,
+                read_file_at_revision(repo, tip, theirs_path),
+                specs,
+                blobs,
+                repo,
+                final,
+                held,
+                page_lines,
+                both_pages,
+            )
+            final[mine_path] = None
+            continue
+        new = generate_uid()
+        while new in used:
+            new = generate_uid()
+        used.add(new)
+        _remint(repo, revs, local_changed, uid, mine_path, new, roots, final, both_pages)
+        reminted.append((uid, new))
+    return reminted
 
 
 # ---------------------------------------------------------------------------

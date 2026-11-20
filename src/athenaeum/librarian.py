@@ -769,6 +769,9 @@ class SurfaceSyncState:
         ]
         if unmounted:
             fields["unmounted"] = ",".join(unmounted)
+        reminted = sum(int(r["reason"]) for r in self.results if r["op"] == "uid-reminted")
+        if reminted:
+            fields["uid_reminted"] = reminted
         fields["reason"] = (
             "failed" if any(r["outcome"] == "failed" for r in self.results) else "completed"
         )
@@ -1003,6 +1006,11 @@ def _report_sync(
 ) -> None:
     for step in report.steps:
         surface_sync.record((plan.label,), step.step, step.outcome, step.reason)
+    # Local pages re-minted because two installs minted one uid (athenaeum#2996).
+    reminted = len(report.integrate.reminted) if report.integrate else 0
+    reminted += report.push.reminted if report.push else 0
+    if reminted:
+        surface_sync.record((plan.label,), "uid-reminted", "ok", str(reminted))
 
 
 def _integrate_before_compile(
