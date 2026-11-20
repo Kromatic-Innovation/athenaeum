@@ -165,9 +165,21 @@ _INTERROGATIVE_DENYLIST: tuple[str, ...] = ("what", "who", "why did", "do we kno
 _MARKER_WHITESPACE_RE = re.compile(r"\s+")
 
 
+#: Markdown emphasis delimiters, for :func:`_normalize_marker_for_match`
+#: (issue athenaeum#2918): any run of ``*``, and any run of ``_`` that sits at
+#: a word boundary (so ``snake_case`` identifiers keep their underscores).
+_MARKER_EMPHASIS_RE = re.compile(r"\*+|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])")
+
+
 def _normalize_marker_for_match(text: str) -> str:
-    """Lowercase *text* and collapse every run of whitespace to one space
-    (issue athenaeum#1843).
+    """Strip markdown emphasis, lowercase *text*, and collapse every run of
+    whitespace to one space (issue athenaeum#1843, athenaeum#2918).
+
+    Emphasis (``**bold**``, ``*italic*``, ``__bold__``, ``_italic_``) is
+    removed because a model answers in markdown: "since **March 2019**" is
+    the planted phrase "since March 2019" with its delimiters wrapped
+    around it, not a different phrase (athenaeum#2918, ``mira_castellane_role``).
+    This is delimiter removal only -- NOT paraphrase tolerance.
 
     DELIBERATELY SEPARATE from
     :func:`tests.evals.north_star_report._normalize_for_match`, which stays
@@ -180,7 +192,7 @@ def _normalize_marker_for_match(text: str) -> str:
     ``marker_miss_with_delivery``, and :func:`validate_core`'s plantability
     check.
 
-    Whitespace and nothing else. No stemming, no punctuation stripping, no
+    Whitespace and emphasis delimiters, nothing else. No stemming, no punctuation stripping, no
     fuzzy match (issue athenaeum#1843 "Out of scope") -- the one real
     mismatch it exists to fix is a marker phrase that spans a line wrap in
     the page body it is planted in (``decision-retire-anchorline``'s
@@ -188,7 +200,7 @@ def _normalize_marker_for_match(text: str) -> str:
     differently in its own answer. Both sides of every comparison must be
     passed through it, never just one.
     """
-    return _MARKER_WHITESPACE_RE.sub(" ", text.lower()).strip()
+    return _MARKER_WHITESPACE_RE.sub(" ", _MARKER_EMPHASIS_RE.sub("", text).lower()).strip()
 
 
 def _marker_alternatives(value: object) -> tuple[str, ...]:

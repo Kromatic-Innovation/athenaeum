@@ -136,6 +136,17 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   supplies the patterns and the engine supplies the skip
   (athenaeum#2914).
 
+- North-star grid: the oracle positive control now gates the report. When any
+  condition-2-enrolled class scores below 1.000 at oracle, the decision block
+  prints as void (no conditions, cutoff scale or verdict table), the marker
+  matcher strips markdown emphasis (`**bold**`, `_italic_`) before matching
+  (paraphrase is still not accepted), and four probe markers that named a fact
+  the question did not ask for are repaired. `grader_revision` moves to
+  `athenaeum#2918`; `corpus_digest` does not (pages are untouched). The 30
+  failing oracle cells of run 44438673846 are classified and re-graded offline
+  in `docs/measurements/north-star-oracle-control-regrade-2026-11-19.md`
+  (athenaeum#2918).
+
 ### Fixed
 
 - `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
