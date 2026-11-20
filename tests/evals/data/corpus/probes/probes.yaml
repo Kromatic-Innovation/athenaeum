@@ -91,7 +91,13 @@
   must_not_rank: [budget-threshold-current]
   distractor_terms: ["discretionary spend", "500 GBP", "direct conversation"]
   answer_tokens: ["Voltmere"]
-  answer_markers: {person-amir-osei: "from a written note by itself"}
+  answer_markers:
+    # Two ALTERNATIVES (issue athenaeum#3029, operator ruling of 2026-11-20 on
+    # athenaeum#2805, as amended there). The first is the marker authored
+    # under athenaeum#1831; the second is a plainer clause of the same fact
+    # (the page says the approver wants the requester to explain the request
+    # in person), and the query never uses those words.
+    person-amir-osei: ["from a written note by itself", "requester explain"]
   note: >-
     The threshold and the finance partner's name (athenaeum#1768) live on the
     policy page; only his own page says he refuses to act on a written note

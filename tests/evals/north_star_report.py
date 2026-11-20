@@ -646,7 +646,7 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
 #: marker repair moves the same stored rows' verdicts with NO other header
 #: field moving. That is precisely the indistinguishability this stamp exists
 #: to prevent.
-GRADER_REVISION = "athenaeum#2918"
+GRADER_REVISION = "athenaeum#3029"
 
 
 def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
@@ -3164,15 +3164,109 @@ def oracle_control_shortfalls(
         report_only_classes = _report_only_probe_classes(
             {stat.corpus_scale for stat in report.stats}
         )
+    stats = report.stats
+    if report.oracle_exclusions:
+        # Issue athenaeum#3029: the control is read with the excluded pairs
+        # removed from every arm, so the floor is judged on what remains.
+        stats = tuple(
+            compute_group_stats(drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions))
+        )
     shortfalls = [
         OracleControlShortfall(stat.probe_class, stat.corpus_scale, stat.correctness_rate)
-        for stat in report.stats
+        for stat in stats
         if stat.arm == Arm.ORACLE.value
         and stat.probe_class not in report_only_classes
         and stat.correctness_rate is not None
         and stat.correctness_rate < ORACLE_CONTROL_FLOOR
     ]
     return tuple(sorted(shortfalls, key=lambda sf: (sf.corpus_scale, sf.probe_class)))
+
+
+#: At most this many probes may be excluded by the oracle tolerance in one
+#: enrolled (probe_class, corpus_scale) group (issue athenaeum#3029, operator
+#: ruling of 2026-11-20 on athenaeum#2805). A second failing probe in the same
+#: group voids it, as before.
+ORACLE_TOLERANCE_CAP = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class OracleExclusion:
+    """One (probe, scale) pair excluded from every arm by the oracle
+    tolerance (issue athenaeum#3029)."""
+
+    probe_id: str
+    probe_class: str
+    corpus_scale: str
+
+
+def compute_oracle_exclusions(
+    rows: Sequence[RolloutRow],
+    *,
+    report_only_classes: frozenset[str] | None = None,
+) -> tuple[OracleExclusion, ...]:
+    """The (probe, scale) pairs the oracle tolerance excludes (issue
+    athenaeum#3029, operator ruling of 2026-11-20 on athenaeum#2805).
+
+    Trigger: an enrolled ``oracle`` row grades wrong while its answer-bearing
+    pages were delivered (:func:`marker_miss_with_delivery` is ``True``).
+    Cap: at most :data:`ORACLE_TOLERANCE_CAP` such probe per enrolled
+    (class, scale) group. A group with more failing probes, or with any
+    failing oracle row that is NOT a marker miss with delivery, yields no
+    exclusion at all and stays below the floor, so it still voids.
+    """
+    if report_only_classes is None:
+        report_only_classes = _report_only_probe_classes({row.record.corpus_scale for row in rows})
+    failing: dict[tuple[str, str], dict[str, bool]] = {}
+    for row in rows:
+        record = row.record
+        if record.arm is not Arm.ORACLE or record.probe_class in report_only_classes:
+            continue
+        probe = _probe_for_row(row)
+        corpus = _corpus_for_scale(record.corpus_scale)
+        if grade_correctness(record, probe, corpus) is not False:
+            continue
+        delivered_miss = marker_miss_with_delivery(record, probe, corpus) is True
+        group = failing.setdefault((record.probe_class, record.corpus_scale), {})
+        group[record.probe_id] = group.get(record.probe_id, True) and delivered_miss
+    exclusions = [
+        OracleExclusion(probe_id, probe_class, corpus_scale)
+        for (probe_class, corpus_scale), probes in failing.items()
+        if len(probes) <= ORACLE_TOLERANCE_CAP and all(probes.values())
+        for probe_id in probes
+    ]
+    return tuple(sorted(exclusions, key=lambda ex: (ex.corpus_scale, ex.probe_class, ex.probe_id)))
+
+
+def drop_oracle_exclusions(
+    rows: Sequence[RolloutRow], exclusions: Sequence[OracleExclusion]
+) -> list[RolloutRow]:
+    """*rows* minus every row of an excluded (probe, scale) pair, on EVERY
+    arm, native arms included (issue athenaeum#3029)."""
+    excluded = {(ex.probe_id, ex.corpus_scale) for ex in exclusions}
+    return [
+        row for row in rows if (row.record.probe_id, row.record.corpus_scale) not in excluded
+    ]
+
+
+def _oracle_exclusion_lines(report: NorthStarReport) -> list[str]:
+    """The "Excluded by the oracle tolerance" table (issue athenaeum#3029);
+    empty when nothing was excluded."""
+    if not report.oracle_exclusions:
+        return []
+    lines = [
+        "**Excluded by the oracle tolerance** (athenaeum#3029): an enrolled `oracle` cell "
+        "graded wrong although its answer-bearing pages were delivered. Each pair below is "
+        f"removed from every arm, native arms included, for conditions 1, 2 and 3 (cap "
+        f"{ORACLE_TOLERANCE_CAP} probe per enrolled class and scale; a miss without delivery "
+        "still voids).",
+        "",
+        "| scale | probe class | probe |",
+        "| --- | --- | --- |",
+    ]
+    for ex in report.oracle_exclusions:
+        lines.append(f"| {ex.corpus_scale} | {ex.probe_class} | {ex.probe_id} |")
+    lines.append("")
+    return lines
 
 
 def render_decision_block(
@@ -3193,8 +3287,12 @@ def render_decision_block(
     if verdicts is None:
         # Issue athenaeum#1819: graded_rows excludes harness-failed cells
         # (never graded as an ordinary miss).
+        # Issue athenaeum#3029: pairs excluded by the oracle tolerance leave
+        # every arm, so conditions 1, 2 and 3 never read them.
         verdicts = compute_verdicts(
-            report.graded_rows, verdict_arm=resolved_verdict_arm, write_costs=report.write_costs
+            drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions),
+            verdict_arm=resolved_verdict_arm,
+            write_costs=report.write_costs,
         )
     cutoff = compute_cutoff_scale(verdicts)
 
@@ -3228,9 +3326,11 @@ def render_decision_block(
                 f"| {shortfall.corpus_scale} | {shortfall.probe_class} | {shortfall.rate:.3f} |"
             )
         lines.append("")
+        lines.extend(_oracle_exclusion_lines(report))
         return lines
     lines.append("## Decision (design doc §7, athenaeum#1734)")
     lines.append("")
+    lines.extend(_oracle_exclusion_lines(report))
     lines.append(
         f"**Verdict arm:** `{resolved_verdict_arm}` (ruling R1) -- the shipped configuration "
         "is the ONE Athenaeum arm every condition below reads. Other Athenaeum arms still "
@@ -3506,6 +3606,11 @@ class NorthStarReport:
     # rather than silently pooled (the same reason _pooled_floor_value
     # refuses a mixed-floor store).
     model: str = "unstamped"
+    # issue athenaeum#3029: (probe, scale) pairs the oracle tolerance removes
+    # from every arm for conditions 1-3; computed by build_report from the
+    # stored oracle rows. Empty for a report whose oracle control needed no
+    # tolerance. Appended last, per the convention above.
+    oracle_exclusions: tuple[OracleExclusion, ...] = ()
 
 
 def _pooled_model(rows: Sequence[RolloutRow]) -> str:
@@ -3689,6 +3794,7 @@ def build_report(
         phase2_partial=frozenset(phase2_partial),
         preflight_summary=preflight_summary,
         turn_cap_counts=_turn_cap_counts(rows),
+        oracle_exclusions=compute_oracle_exclusions(graded_rows),
     )
 
 
