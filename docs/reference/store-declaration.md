@@ -64,7 +64,9 @@ reviews: []
 
 ### Principals
 
-A principal block is `{iss, sub}`, both non-empty strings. Two blocks name the
+A principal block is `{iss, sub}`, both non-empty strings, with an optional `type`
+(`person`, `software_agent` or `organization`) that `athenaeum store access check`
+reads and that grants nothing. Two blocks name the
 same principal when they have the same identity key (the same rule the rest of
 athenaeum uses for an asserter), whatever order their keys are written in.
 

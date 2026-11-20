@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- `athenaeum store access check`: a read-only command that compares each mounted declared store's rights with the local `read_only` setting and with this install's recorded last fetch and last real push per location (no push is made; a never-pushed install reports `push: not yet observed`), and refuses a declaration that breaks the one-writer rule, holds answer without compile on a store with no bench, or has a software-only librarian with no person holding answer. Exits 2 on any difference or refusal; `--json` gives the same report. The last fetch and push outcomes are kept in a small machine-local file in the cache dir. A principal block may now carry an optional `type` (athenaeum#2991)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
