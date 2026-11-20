@@ -18,6 +18,11 @@ share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
 [support policy](docs/guides/install.md#support-policy).
 
+The bundled `promptwitness` package is experimental: it is not part of the
+athenaeum public API, is not covered by semver, and is subject to change
+without notice. From the release after 0.27.2 on, changes to it get their own
+`promptwitness` line in the release section, separate from `athenaeum` entries.
+
 ## [Unreleased]
 
 ### Added
@@ -41,6 +46,27 @@ ship without a deprecation period. See the
   differently. `_store/` files are registered as `config` artifacts, and a
   `_`-prefixed directory of any surface is no longer yielded as a page by
   `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+- `athenaeum.page_merge.merge_page(base, local, remote, spec)` is a pure
+  three-way merge of one page by unit (frontmatter key, H2 section, lines in
+  a section) using the multi-writer sync design's rule table. It returns the
+  merged text, the contested units, the held units with a reason code, and the
+  rule that settled each unit. `access` and `audience` are never merged: a
+  difference in either is held, and contested or held units carry the remote
+  value so the result always parses. It does no file access, runs no git
+  command and calls no model, and nothing calls it yet. The section and list
+  helpers it shares with the structured upsert moved to `athenaeum.page_text`
+  (athenaeum#2773).
+- The relevance policy table gains an optional `Store` column and a `route`
+  verdict. A `route` row names a `store_id` or `personal`; `RelevancePolicy.match_route`
+  answers the destination question, and `match` / `resolve` still consider only
+  `always` and `never` rows, so `never` beats `route` and capture is unchanged.
+  The hash, read-back, `relevance_policy` tool and `set_capture_rule` (new
+  `store` argument) carry the store. Nothing acts on a `route` row yet
+  (athenaeum#2625).
+- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
+  fact (capture, store, type, reason code), now called by the three capture gates in both
+  pipeline transports. Only its capture answer is used and it is the one the gates computed
+  before, so no install captures, drops or places anything differently (athenaeum#2625).
 
 ### Changed
 
@@ -116,9 +142,9 @@ Behaviour changes an existing install will notice:
 Experimental surface (not in `athenaeum.__all__`; flags, keys, formats and
 import paths may change in any minor release without a deprecation cycle): the
 decision digest (`athenaeum decisions digest`, the `queue_digest` MCP tool),
-decision push (`notify.yaml`), the `apply` option on decision answers, the
+decision push (`notify.yaml`) (athenaeum#2489), the `apply` option on decision answers, the
 `owner.bridge_memory_types` key, the `witness_paste` receipt field, the new
-`athenaeum.type_guidance` module, and everything 0.26.0 listed as experimental.
+`athenaeum.type_guidance` module (athenaeum#2731), and everything 0.26.0 listed as experimental.
 
 **Upgrading from 0.26.0**
 

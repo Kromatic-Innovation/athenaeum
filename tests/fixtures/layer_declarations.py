@@ -132,6 +132,8 @@ MODULE_LAYER: dict[str, int] = {
     "owner_memory_bridge": 3,  # issue athenaeum#2690
     "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
+    "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
+    "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
     "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)
@@ -169,6 +171,7 @@ MODULE_LAYER: dict[str, int] = {
     # (L4) and _cmd_drops.py (L5), both strictly above.
     "drops": 3,
     "relevance_policy": 2,  # issue athenaeum#2643
+    "intake_decision": 2,  # issue athenaeum#2797: pure decide(); a leaf
     "erasure": 3,
     "fingerprint": 3,
     "inference_blocks": 3,
