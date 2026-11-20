@@ -226,3 +226,27 @@ def test_ordinary_extra_root_is_still_accepted(kb: Kb) -> None:
     (kb.raw / "auto-memory").mkdir(parents=True)
     got = resolve_indexed_surfaces(kb.kr, {"recall": {"extra_intake_roots": ["raw/auto-memory"]}})
     assert [s.prefix for s in got] == ["auto-memory"]
+
+
+# Seer review on PR athenaeum#3026: a failed filing must not become a silent duplicate
+
+
+def test_failed_decision_filing_is_retried_not_dropped_as_duplicate(kb: Kb) -> None:
+    # A stranger's message fails a rule check, so submit_raise records a held row
+    # and then tries to file a held decision. Filing is refused (no compile).
+    stranger = {"iss": "https://x.example", "sub": "9"}
+    kb.drop(TARGET, "a.jsonl", kb.batch(kb.env.msg(proposer=stranger)))
+    good_asserter = kb.config["owner"]
+    kb.config["owner"] = {"asserter": {"iss": "https://x.example", "sub": "nobody"}}
+    first = kb.run()
+    assert first.handled == 0 and first.deferred == 1
+    assert load_queue(kb.kr, TARGET) == []
+    # compile is restored: the retry must reach a decision, not read as a duplicate
+    kb.config["owner"] = good_asserter
+    second = kb.run()
+    assert second.handled == 1
+    queue = load_queue(kb.kr, TARGET)
+    assert len(queue) == 1 and queue[0]["kind"] == "raise_held"
+    assert queue[0]["detail"]["message_id"] == MID
+    kb.run()
+    assert len(load_queue(kb.kr, TARGET)) == 1

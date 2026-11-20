@@ -51,7 +51,8 @@ from typing import Any
 
 from athenaeum.config import resolve_owner_asserter, resolve_raw_file_max_bytes
 from athenaeum.intake import discover_store_raw_dirs
-from athenaeum.raise_acceptance import submit_raise
+from athenaeum.raise_acceptance import DECISION_KIND_HELD, submit_raise
+from athenaeum.raise_acceptance_ledger import DISPOSITION_HELD, disposition_of
 from athenaeum.raise_messages import (
     KIND_RAISE,
     Fallthrough,
@@ -59,7 +60,12 @@ from athenaeum.raise_messages import (
     parse_batch,
 )
 from athenaeum.store import append_line_durable
-from athenaeum.store_decisions import StoreDecisionRefused, file_decision, resolve_mounts
+from athenaeum.store_decisions import (
+    StoreDecisionRefused,
+    file_decision,
+    load_queue,
+    resolve_mounts,
+)
 
 __all__ = [
     "DECISION_KIND_NONCONFORMING",
@@ -163,7 +169,50 @@ def _handle_raise(ctx: MessageContext, msg: RaiseMessage, record: dict[str, Any]
         mounts=dict(ctx.mounts),
         asserter=ctx.asserter,
     )
+    if outcome.status == "duplicate":
+        _refile_if_unfiled(ctx, msg)
     return HandlerResult(detail=f"{outcome.status}:{outcome.reason or ''}")
+
+
+def _decision_names(rec: dict[str, Any], message_id: str) -> bool:
+    detail = rec.get("detail")
+    if not isinstance(detail, dict):
+        return False
+    inner = detail.get("message")
+    return detail.get("message_id") == message_id or (
+        isinstance(inner, dict) and inner.get("message_id") == message_id
+    )
+
+
+def _refile_if_unfiled(ctx: MessageContext, msg: RaiseMessage) -> None:
+    """Never let a re-delivery hide a message that has no decision.
+
+    ``submit_raise`` writes a ``held`` acceptance row and then files the decision;
+    when filing fails (for example this install does not hold compile) the row
+    stays, and the next delivery reads as a ``duplicate`` that files nothing. A
+    message still ``held`` with no decision naming it is filed here (Seer review
+    on PR athenaeum#3026). A failure here raises, so the message stays deferred.
+    """
+    row = disposition_of(ctx.cache_dir, msg.message_id)
+    if row is None or row.disposition != DISPOSITION_HELD:
+        return
+    queue = load_queue(ctx.knowledge_root, ctx.store_id)
+    if any(_decision_names(r, msg.message_id) for r in queue):
+        return
+    file_decision(
+        ctx.knowledge_root,
+        store_id=ctx.store_id,
+        question="A raised message could not be applied by rule (reason: not_filed).",
+        kind=DECISION_KIND_HELD,
+        mounts=dict(ctx.mounts),
+        asserter=ctx.asserter,
+        detail={
+            "reason": row.reason or "not_filed",
+            "raise_id": msg.raise_id,
+            "message_id": msg.message_id,
+            "seq": msg.seq,
+        },
+    )
 
 
 DEFAULT_REGISTRY.register(KIND_RAISE, _handle_raise)
