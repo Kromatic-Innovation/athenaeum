@@ -27,6 +27,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- A two-clone sync test harness (`tests/fixtures/two_clone_harness.py`): one bare
+  remote and two installs, each with its own clone and configuration, that
+  diverge and drive fetch, merge commit and push through the store seam over the
+  local file transport, with no network and no model call (athenaeum#2932).
 - `athenaeum.store` gains the write side of the multi-writer sync seam:
   `write_merge_commit` builds the merged tree and a two-parent merge commit first
   and moves the local branch last (all or nothing), and `push_branch` pushes
