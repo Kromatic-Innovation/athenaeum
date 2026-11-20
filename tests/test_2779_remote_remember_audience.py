@@ -142,6 +142,88 @@ class TestCallerCannotWidenTheStamp:
         assert _only_meta(corpus, "remote-session")["audience"] == ["ops"]
 
 
+class TestReplacedFrontmatterIsSignalled:
+    """The reply and the log say when the server replaced the caller's frontmatter."""
+
+    def _save(self, corpus: Path, frontmatter: str, audience: set[str] | None = None) -> str:
+        server = _http(corpus, audience or {"ops"})
+        return _tool(server, "remember")(
+            content=f"---\n{frontmatter}\n---\nThe {NEEDLE} is quarterly.\n"
+        )
+
+    def test_a_replaced_audience_is_named_in_the_reply_and_the_log(
+        self, corpus: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO", logger="athenaeum.mcp_server"):
+            reply = self._save(corpus, "audience: [finance, ops]")
+        first, _, rest = reply.partition("\n")
+        assert first.startswith("Saved to raw/remote-session/")
+        assert "Note: The note's own `audience:` was replaced by the server's" in rest
+        assert any(
+            r.levelname == "INFO" and "`audience:` was replaced" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_a_dropped_access_open_is_named_in_the_reply_and_the_log(
+        self, corpus: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO", logger="athenaeum.mcp_server"):
+            reply = self._save(corpus, "access: open")
+        assert "`access: open` was dropped" in reply
+        assert any("`access: open` was dropped" in r.getMessage() for r in caplog.records)
+
+    def test_a_grant_dropped_from_a_restricted_note_is_named(self, corpus: Path) -> None:
+        reply = self._save(corpus, "access: personal\naudience: [finance]")
+        assert "`audience:` was dropped" in reply
+        assert "owner-only" in reply
+
+    def test_an_unchanged_note_gets_a_bare_reply(
+        self, corpus: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Counter-examples: no frontmatter, or an audience equal to the pin, changes nothing."""
+        with caplog.at_level("INFO", logger="athenaeum.mcp_server"):
+            plain = _remember(_http(corpus, {"ops"}))
+            same = self._save(corpus, "audience: [ops]")
+        for reply in (plain, same):
+            assert reply.startswith("Saved to ")
+            assert "\n" not in reply
+        assert not [r for r in caplog.records if "was replaced" in r.getMessage()]
+
+    def test_owner_pin_signals_nothing(self, corpus: Path) -> None:
+        server = _http(corpus, None)
+        reply = _tool(server, "remember")(
+            content=f"---\naudience: [finance]\n---\nThe {NEEDLE} is quarterly.\n"
+        )
+        assert "\n" not in reply
+
+
+class TestNotesSavedBeforeTheStampAreResaved:
+    """A note saved before the stamp existed is withheld; re-saving it is the fix.
+
+    No command retags an existing raw note, so the supported step is to save the
+    note again through the remote ``remember``. An owner-pinned save stamps
+    nothing, which is exactly the shape a pre-stamp remote save has on disk.
+    """
+
+    def test_the_untagged_note_is_withheld_then_the_resave_is_recallable(
+        self, corpus: Path
+    ) -> None:
+        _remember(_http(corpus, None))  # untagged, like a save from before the stamp
+        (old,) = (corpus / "raw" / "remote-session").glob("*.md")
+        old_text = old.read_text(encoding="utf-8")
+        assert "audience" not in parse_frontmatter(old_text)[0]
+
+        server = _http(corpus, {"ops"})
+        assert BODY in _recall(_http(corpus, None))  # positive control: the owner sees it
+        assert BODY not in _recall(server)  # withheld from the restricted audience
+
+        assert _remember(server).startswith("Saved to")
+        assert BODY in _recall(server)  # the re-save is recallable
+        (new,) = (p for p in old.parent.glob("*.md") if p != old)
+        assert parse_frontmatter(new.read_text(encoding="utf-8"))[0]["audience"] == ["ops"]
+        assert old.read_text(encoding="utf-8") == old_text  # raw notes are write-once
+
+
 class TestRestrictiveAccessIsNotWidened:
     """A restrictive ``access:`` is owner-only; the stamp must not open it to a role."""
 
