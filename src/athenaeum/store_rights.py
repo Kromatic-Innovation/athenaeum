@@ -20,7 +20,11 @@ validate resolves the same way.
 **Never on the recall path.** Resolution runs when a librarian run starts
 (:func:`record_run_start_rights`, called from ``librarian.run``) and, later, when
 ``athenaeum store access check`` runs (access S5 adds that caller). The run-start
-call only logs the result; nothing acts on it, so no install behaves differently.
+call logs the result and holds it in a process-wide table, which the write guard
+(access S3, :func:`declared_surface_rights`) consults: an owner who does not hold
+compile on a declared store is refused on that store's pages. A write path that
+starts without a run (a one-shot CLI command) resolves a surface the first time
+it is asked to write there and holds the answer the same way; reads never ask.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ __all__ = [
     "resolve_rights",
     "resolve_surface_rights",
     "record_run_start_rights",
+    "declared_surface_rights",
+    "reset_run_rights",
 ]
 
 log = logging.getLogger(__name__)
@@ -53,6 +59,22 @@ log = logging.getLogger(__name__)
 READER_ONLY: frozenset[str] = frozenset({"read"})
 
 _STATIC = "static"
+
+#: Rights held for the process, keyed by (resolved surface root, identity key).
+#: Filled at run start and, for a write path with no run, on first write.
+_RUN_RIGHTS: dict[tuple[Path, tuple[str, ...] | None], frozenset[str] | None] = {}
+
+
+def _cache_key(
+    root: Path, asserter: Mapping[str, object] | None
+) -> tuple[Path, tuple[str, ...] | None]:
+    ident = asserter_identity_key(dict(asserter) if asserter else None)
+    return (Path(root).resolve(), tuple(ident) if ident else None)
+
+
+def reset_run_rights() -> None:
+    """Forget every held resolution (a new run, or a test)."""
+    _RUN_RIGHTS.clear()
 
 
 class DirectoryAdapter(Protocol):
@@ -138,25 +160,51 @@ def resolve_surface_rights(
     return resolve_rights(declaration, asserter, adapters)
 
 
+def declared_surface_rights(
+    surface_root: Path,
+    asserter: Mapping[str, object] | None,
+) -> frozenset[str] | None:
+    """The rights held for *surface_root* this run: resolved once, then reused.
+
+    ``None`` when the surface has no declaration. Fails closed: a resolution that
+    raises is held as :data:`READER_ONLY`, so the write guard refuses and a bad
+    declaration never widens anything.
+    """
+    key = _cache_key(surface_root, asserter)
+    if key not in _RUN_RIGHTS:
+        try:
+            _RUN_RIGHTS[key] = resolve_surface_rights(surface_root, asserter)
+        except Exception as exc:  # noqa: BLE001 - fail closed, report why
+            log.warning(
+                "store rights: %s: resolution failed (%s)", surface_root, type(exc).__name__
+            )
+            _RUN_RIGHTS[key] = READER_ONLY
+    return _RUN_RIGHTS[key]
+
+
 def record_run_start_rights(
     surface_roots: Iterable[Path],
     asserter: Mapping[str, object] | None,
 ) -> dict[str, frozenset[str] | None]:
-    """Resolve and log the owner's rights on each surface; act on nothing.
+    """Resolve, log and hold the owner's rights on each surface.
+
+    Replaces anything held from an earlier run, so a changed declaration takes
+    effect at the next run; the write guard reads what this holds.
 
     One INFO line per surface (``store rights: <surface>: read,compile`` or
     ``no declaration``). Any failure is logged and swallowed: a broken
-    declaration must not stop or change a run. Returns the result for callers
-    that want to hold it in memory.
+    declaration must not stop a run (the guard holds it as reader only). Returns
+    the result for callers that want it in memory.
     """
     out: dict[str, frozenset[str] | None] = {}
     seen: set[Path] = set()
+    reset_run_rights()
     for root in surface_roots:
         if root in seen:
             continue
         seen.add(root)
         try:
-            rights = resolve_surface_rights(root, asserter)
+            rights = declared_surface_rights(root, asserter)
         except Exception as exc:  # noqa: BLE001 - never let this stop a run
             log.warning("store rights: %s: resolution failed (%s)", root, type(exc).__name__)
             continue

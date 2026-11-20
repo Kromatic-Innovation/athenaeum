@@ -12810,15 +12810,25 @@ def run(
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
-    # Issue athenaeum#2933: resolve the owner's declared store rights at run start
-    # and LOG them. Nothing acts on the result (access S3/S4 will); any failure
-    # is swallowed so a broken declaration cannot stop or change a run.
+    # Issue athenaeum#2933 / athenaeum#2988: resolve the owner's declared store
+    # rights once, at run start, for every configured surface. They are logged
+    # and held for the write guard (access S3); any failure is swallowed so a
+    # broken declaration cannot stop a run (the guard holds it as reader only).
     try:
         from athenaeum.config import resolve_owner_asserter
+        from athenaeum.storage import available_adapters
         from athenaeum.store_rights import record_run_start_rights
 
         record_run_start_rights(
-            (wiki_root, knowledge_root), resolve_owner_asserter(ctx.config)
+            (
+                wiki_root,
+                knowledge_root,
+                *(
+                    a.resolve_root(knowledge_root)
+                    for a in available_adapters(ctx.config).values()
+                ),
+            ),
+            resolve_owner_asserter(ctx.config),
         )
     except Exception:
         log.warning("store rights: run-start resolution failed", exc_info=True)

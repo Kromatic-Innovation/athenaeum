@@ -71,6 +71,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
+    resolve_owner_asserter,
     resolve_storage_adapters,
     resolve_storage_mapping,
 )
@@ -526,6 +527,11 @@ def page_write_root_for_class(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
             "declared read_only; compile never writes a page there"
         )
+    declared = declared_compile_refusal(adapter.name, config, knowledge_root)
+    if declared:
+        raise ReadOnlySurfaceError(
+            f"entity class {entity_class!r} maps to surface {adapter.name!r}, but {declared}"
+        )
     if not adapter.corpus_policy.embedded:
         raise SurfaceNotIndexedError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -612,6 +618,7 @@ def open_store(
         roots,
         non_purgeable_surfaces=non_purgeable,
         read_only_surfaces=read_only,
+        write_gate=lambda surface: declared_compile_refusal(surface, config, knowledge_root),
     )
 
 
@@ -631,6 +638,54 @@ def read_only_surface_roots(
         for name, adapter in available_adapters(config).items()
         if adapter.read_only
     }
+
+
+def declared_compile_refusal(
+    surface: str, config: dict[str, Any] | None, knowledge_root: Path
+) -> str | None:
+    """Why the surface named *surface* refuses a write for lack of declared compile.
+
+    The declaration layer of the write guard (design note §9, access S3): a
+    surface whose ``_store/access.yaml`` does not grant the owner compile is
+    refused, whatever its adapter's ``read_only`` says. It can only narrow:
+    ``None`` (no refusal) when the surface has no declaration, or the rights held
+    include compile. A declaration that is invalid, or a directory that cannot
+    answer, holds the owner as a reader only, so it refuses. Rights come from the
+    run-start table (:func:`athenaeum.store_rights.declared_surface_rights`); this
+    is called only on a write, never on the recall path.
+    """
+    from athenaeum.store_rights import declared_surface_rights
+
+    if config is None:
+        config = load_config(knowledge_root)
+    adapter = available_adapters(config).get(surface)
+    if adapter is None:
+        return None
+    root = adapter.resolve_root(knowledge_root)
+    rights = declared_surface_rights(root, resolve_owner_asserter(config))
+    if rights is None or "compile" in rights:
+        return None
+    held = ",".join(sorted(rights)) or "none"
+    return (
+        "its store declaration does not grant this install compile "
+        f"(rights held: {held}); a page there is never written from here"
+    )
+
+
+def declared_compile_refusal_of(
+    path: Path, config: dict[str, Any] | None, knowledge_root: Path
+) -> tuple[str, str] | None:
+    """``(surface, reason)`` when *path* lies on a surface the declaration refuses."""
+    if config is None:
+        config = load_config(knowledge_root)
+    resolved = Path(path).resolve()
+    for name, adapter in available_adapters(config).items():
+        root = adapter.resolve_root(knowledge_root).resolve()
+        if resolved == root or root in resolved.parents:
+            reason = declared_compile_refusal(name, config, knowledge_root)
+            if reason:
+                return name, reason
+    return None
 
 
 def read_only_surface_of(
@@ -674,6 +729,11 @@ def require_writable_path(
         raise ReadOnlySurfaceError(
             f"{op} refused on {path}: it lives on surface {surface!r}, declared "
             "read_only (a shared mount this install never writes)"
+        )
+    refused = declared_compile_refusal_of(path, config, knowledge_root)
+    if refused is not None:
+        raise ReadOnlySurfaceError(
+            f"{op} refused on {path}: it lives on surface {refused[0]!r}, and {refused[1]}"
         )
 
 
