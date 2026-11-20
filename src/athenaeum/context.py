@@ -75,8 +75,9 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -316,6 +317,19 @@ class Candidate:
     #: is an input to the rendered bullet, not a new published candidate
     #: attribute, and the envelope schema is versioned separately.
     parent_name: str = ""
+    #: Issue athenaeum#2978: the score the push-path relevance floor judges
+    #: this candidate by, and the backend whose floor and direction apply
+    #: (:func:`athenaeum.search.meets_relevance_floor`). For a vector
+    #: candidate this is its cosine DISTANCE (lower is better), kept here
+    #: because :attr:`relevance` stays ``None`` for vector. For an FTS5
+    #: candidate it is the BM25 rank. A vector-leg hit that was answered by
+    #: the FTS5 fallback (chromadb not installed) carries an FTS5 rank, so it
+    #: is judged as ``"fts5"``. Both are deliberately absent from
+    #: :meth:`to_dict`, for the same reason ``page_type`` is: the envelope
+    #: schema is versioned, and a distance is a different scale from the BM25
+    #: ``relevance`` it would sit beside.
+    floor_score: float | None = None
+    floor_backend: str = ""
 
     @property
     def bullet(self) -> str:
@@ -460,6 +474,8 @@ def _query_fts5(
                 relevance=float(rank) if rank is not None else None,
                 audience=audience or "",
                 page_type=page_type or "",
+                floor_score=float(rank) if rank is not None else None,
+                floor_backend="fts5",
             )
         )
     return out
@@ -493,6 +509,11 @@ def _query_vector(
         return []
     if not hits:
         return []
+    # Issue athenaeum#2978: `VectorBackend.query` answers from the FTS5 index
+    # when chromadb cannot be imported, so these scores are BM25 ranks, not
+    # distances, and the floor must judge them as FTS5. A real vector query
+    # has imported chromadb by now; the fallback's import failed.
+    floor_backend = "vector" if "chromadb" in sys.modules else "fts5"
     out: list[Candidate] = []
     filenames = [h[0] for h in hits if h[0]]
     meta: dict[str, tuple[str, str, str]] = {}
@@ -514,7 +535,7 @@ def _query_vector(
         except sqlite3.OperationalError as exc:
             log.warning("vector-hit metadata lookup failed, degrading to name-only: %s", exc)
             meta = {}
-    for filename, name, _score in hits:
+    for filename, name, distance in hits:
         audience, description, page_type = meta.get(filename, ("", "", ""))
         out.append(
             Candidate(
@@ -531,9 +552,47 @@ def _query_vector(
                 relevance=None,
                 audience=audience,
                 page_type=page_type,
+                # Issue athenaeum#2978: kept internally (never in the
+                # envelope) so the push-path floor can judge this candidate.
+                floor_score=_as_score(distance),
+                floor_backend=floor_backend,
             )
         )
     return out
+
+
+def _as_score(raw: object) -> float | None:
+    """A numeric score as ``float``, anything else as ``None``."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def _apply_relevance_floor(
+    candidates: list[Candidate], floors: Mapping[str, float | None]
+) -> list[Candidate]:
+    """Drop candidates whose score fails their own backend's floor (issue
+    athenaeum#2978). Never re-orders, never scores, and never tallies a
+    dropped candidate into the overflow breadcrumb: a page below the floor
+    is not a relevant result, so it must not be advertised as one withheld.
+
+    Each candidate is judged by :func:`athenaeum.search.meets_relevance_floor`
+    against ``floors[c.floor_backend]``, using :attr:`Candidate.floor_score`,
+    in that backend's direction. A backend with no floor (``None`` or
+    absent) keeps every candidate, and so does a candidate with no score to
+    compare: the floor removes candidates shown to be below it, never ones
+    it cannot judge.
+    """
+    from athenaeum.search import meets_relevance_floor
+
+    kept: list[Candidate] = []
+    for c in candidates:
+        backend = c.floor_backend or c.backend
+        floor = floors.get(backend)
+        score = c.floor_score
+        if floor is None or score is None or meets_relevance_floor(backend, score, floor):
+            kept.append(c)
+    return kept
 
 
 def _dedupe(candidates: list[Candidate]) -> list[Candidate]:
@@ -788,6 +847,7 @@ def build_context(
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
     trace: dict[str, Any] | None = None,
+    relevance_floor: Mapping[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -823,6 +883,14 @@ def build_context(
     ``trace`` (issue athenaeum#2916): an optional out-parameter. When given
     it is filled with ``terms`` and ``extractor`` for the caller to record;
     it keeps the pinned envelope schema untouched. Absent, nothing changes.
+
+    ``relevance_floor`` (issue athenaeum#2978): an optional per-backend floor,
+    ``{"fts5": ..., "vector": ...}``, applied by :func:`_apply_relevance_floor`
+    to each leg before the merge, and so before the cap. ``None`` (the default, and what every
+    caller except the per-turn push passes) skips the step entirely, so the
+    envelope is exactly what it was before this parameter existed. Only
+    :func:`build_context_for_turn` resolves and passes one; the static-refresh
+    adapter and other direct callers never do.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -920,6 +988,15 @@ def build_context(
     # invariant; see module docstring) — the athenaeum#1905 widening below
     # changes neither: it fetches FURTHER down the same relevance order and
     # throws the extra rows away after counting them.
+    # Issue athenaeum#2978: the push-path relevance floor removes candidates
+    # BEFORE the cap, so a below-floor page neither takes a slot nor counts
+    # into the withheld tally below. Each leg is floored before the merge, so
+    # a page found by both legs is kept when either leg's hit clears its own
+    # backend's floor. Skipped outright when no floor is set.
+    if relevance_floor is not None:
+        fts_candidates = _apply_relevance_floor(fts_candidates, relevance_floor)
+        vector_candidates = _apply_relevance_floor(vector_candidates, relevance_floor)
+
     merged = _dedupe([*fts_candidates, *vector_candidates])
 
     # Issue athenaeum#2538 (AC8): resolve parent names BEFORE the cap/budget
@@ -1265,6 +1342,31 @@ def _append_seen(path: Path, filenames: list[str]) -> None:
         pass  # best-effort — a dedup-bookkeeping failure must never break the push
 
 
+#: The candidate backends ``build_context`` can return, each with its own
+#: push-path floor (issue athenaeum#2978).
+_FLOOR_BACKENDS = ("fts5", "vector")
+
+
+def _resolve_push_relevance_floor(
+    config: dict[str, Any] | None,
+) -> dict[str, float | None] | None:
+    """Resolve the push-path floor for each candidate backend via
+    :func:`athenaeum.config.resolve_recall_relevance_floor` with
+    ``unprompted=True`` (issue athenaeum#2978). Returns ``None`` when no
+    backend has a floor, so the caller passes nothing and the push is
+    unchanged.
+    """
+    from athenaeum.config import resolve_recall_relevance_floor
+
+    floors = {
+        backend: resolve_recall_relevance_floor(config, backend, unprompted=True)
+        for backend in _FLOOR_BACKENDS
+    }
+    if all(v is None for v in floors.values()):
+        return None
+    return floors
+
+
 def build_context_for_turn(
     prompt: str,
     session_id: str,
@@ -1319,6 +1421,12 @@ def build_context_for_turn(
     (``skip_reason="harness_injected"``) is written to the push ledger. A
     submission mixing injected and user text is queried on the user text
     only. ``()`` (the default) leaves behavior unchanged.
+
+    Push-path relevance floor (issue athenaeum#2978): the floor resolved by
+    ``resolve_recall_relevance_floor(config, backend, unprompted=True)`` for
+    each candidate backend is passed to :func:`build_context`, which drops
+    candidates that fail it before the count cap. Unset (the default), no
+    floor is passed and the envelope is unchanged.
     """
     if injected_patterns:
         user_text, matched = split_injected_text(prompt, injected_patterns)
@@ -1345,6 +1453,12 @@ def build_context_for_turn(
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)
 
+    # Issue athenaeum#2978: the push path's own relevance floor, resolved per
+    # candidate backend (FTS5 and vector each in their own units and
+    # direction). `None` everywhere -- the shipped default -- passes no floor
+    # at all, so `build_context` runs exactly as before.
+    relevance_floor = _resolve_push_relevance_floor(config)
+
     trace: dict[str, Any] = {}
     envelope = build_context(
         prompt,
@@ -1359,6 +1473,7 @@ def build_context_for_turn(
         config=config,
         wiki_root=wiki_root,
         trace=trace,
+        relevance_floor=relevance_floor,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 
