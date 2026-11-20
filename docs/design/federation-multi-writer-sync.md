@@ -319,7 +319,7 @@ artifact registry already declares (`src/athenaeum/store.py:PERSISTENCE_CLASSES`
 | **Decision queue files** (the pending questions and merges lists and their archives) | Not expected in a shared pages repository. They are merged on the bench (§8.2). They are merged here only in the one case athenaeum#2623 §4 allows the bench to live in the pages repository: every reader is in the compile role. |
 | **Regenerated file** (`derived`), and `wiki/_index.md` written by `librarian.py:rebuild_index` | Take either side, then regenerate. Never merged. |
 | **Configuration** (`config`), and **every file under `_store/`** | Never merged automatically. The remote version stays and a decision is raised for a person. |
-| **Machine-local file** (`operational`, machine-local) | Must not be tracked in a multi-writer repository. A slice adds the check (§14, S6b). |
+| **Machine-local file** (`operational`, machine-local) | Must not be tracked in a multi-writer repository. `sync_machine_local.find_tracked_machine_local` lists the tracked ones before an integrate and `athenaeum machine-local-check` reports them read-only (S6b). |
 | **Any path the registry does not name**, changed on both sides | Held by default: the remote version stays and a decision is raised. A new kind of file is never merged by a rule nobody wrote for it. |
 
 The files athenaeum#2623 adds under `_store/` (the declaration and the review

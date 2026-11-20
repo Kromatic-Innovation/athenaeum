@@ -121,8 +121,8 @@ def test_directory_that_cannot_answer_resolves_to_read_only(tmp_path: Path) -> N
             "version": 1,
             "store_id": STORE_ID,
             "directory": "corp-ldap",
-            "groups": {"staff": {"members": [ME]}},
-            "roles": {"editor": {"rights": ["read", "compile"], "members": [{"group": "staff"}]}},
+            "groups": {"staff": [ME]},
+            "roles": {"editor": {"rights": ["read", "compile"], "members": ["group:staff"]}},
         }
     )
     kr, config = _kb(tmp_path, decl)

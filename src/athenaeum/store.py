@@ -696,6 +696,11 @@ class ArtifactDeclaration:
     #: constant exists) plus the design note table/paragraph this row
     #: transcribes.
     source_ref: str
+    #: Base names the artifact is stored under, where it is one file with a fixed
+    #: name. Empty when the artifact is a directory, a pattern or an operator-chosen
+    #: name. Read by the S6b check that a machine-local file is not tracked
+    #: (athenaeum#2994).
+    file_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.persistence_class not in PERSISTENCE_CLASSES:
@@ -1041,6 +1046,21 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="store-review-state",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="knowledge root",
+        source_ref=(
+            "store_reviews.py:REVIEW_STATE_DIRNAME '_store_reviews/<store_id>.jsonl' "
+            "(issue athenaeum#2992; docs/design/federation-store-access.md §8, slice "
+            "S10) — one run record per completed cross-store review: review name, "
+            "source store id, time, the source revision reviewed (the cursor) and "
+            "integer counts. No source text. Durable and not reconstructible, the "
+            "install's own state outside every store's wiki and raw roots; keeping "
+            "it on a bench is a later slice (S8)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="drop-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
@@ -1123,6 +1143,7 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         location="cache dir",
         source_ref="zero_yield.py:57 STATE_NAME 'zero_yield_state.json' (design note "
         "§5.2 table row 9)",
+        file_names=("zero_yield_state.json",),
     ),
     ArtifactDeclaration(
         name="killswitch-state",
@@ -1130,6 +1151,19 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         operational_scope="machine-local",
         location="cache dir",
         source_ref="killswitch.py:100 state_path() 'disabled' (design note §5.2 table row 9)",
+        file_names=("disabled",),
+    ),
+    ArtifactDeclaration(
+        name="store-access-evidence",
+        persistence_class="operational",
+        operational_scope="machine-local",
+        location="cache dir",
+        source_ref=(
+            "store_access_evidence.py STATE_NAME 'store_access_evidence.json' "
+            "(access S5, athenaeum#2991: this machine's last fetch and push outcome "
+            "per location; describes this machine's access to a host, so it is "
+            "machine-local)"
+        ),
     ),
     # -- config (design note §5.2 R3 box) --------------------------------
     ArtifactDeclaration(
@@ -1352,11 +1386,15 @@ def commit_repo(repo: Path, label: str) -> str | None:
     return _commit_all(repo, label)
 
 
-def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
+def commit_paths(
+    root: Path, paths: Sequence[Path], message: str, *, allow_empty: bool = False
+) -> str | None:
     """Commit exactly *paths* (and nothing else that is staged or modified) in
     the git repository containing *root*; return the new HEAD SHA.
 
     ``None`` when *root* is not inside a git repository (nothing is committed).
+    With *allow_empty* a commit is written even when *paths* are unchanged (a
+    decision answered "keep what is published" still leaves a record).
     Raises ``subprocess.CalledProcessError`` when git refuses.
     """
     top = subprocess.run(
@@ -1371,7 +1409,10 @@ def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
     subprocess.run(["git", "-C", repo, "add", "--", *rels], check=True, capture_output=True)
     try:
         subprocess.run(
-            ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
+            [
+                "git", "-C", repo, "commit", "-m", message, "--only",
+                *(["--allow-empty"] if allow_empty else []), "--", *rels,
+            ],
             check=True,
             capture_output=True,
         )
@@ -1430,6 +1471,14 @@ def restore_repo(repo: Path, sha: str) -> None:
 def _git_out(repo: Path, *args: str) -> bytes:
     """Run ``git *args`` in *repo*; return stdout bytes. Raises ``CalledProcessError``."""
     return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True).stdout
+
+
+def remote_url(repo: Path, remote: str = "origin") -> str | None:
+    """The URL of *remote* in *repo*, or ``None`` when it is not set (read-only)."""
+    try:
+        return _git_out(repo, "remote", "get-url", remote).decode().strip() or None
+    except (subprocess.CalledProcessError, OSError):
+        return None
 
 
 def fetch_remote_branch(repo: Path, branch: str, remote: str = "origin") -> str:
@@ -1770,6 +1819,26 @@ def blob_id_of(repo: Path, data: bytes) -> str:
         capture_output=True,
         input=data,
     ).stdout.decode().strip()
+
+
+def git_dir(repo: Path) -> Path:
+    """The absolute git directory of *repo* (a linked worktree's own one included).
+
+    Read-only. Raises ``subprocess.CalledProcessError`` outside a git repository.
+    """
+    return Path(_git_out(repo, "rev-parse", "--absolute-git-dir").decode().strip())
+
+
+def list_tracked_files(repo: Path) -> list[str]:
+    """Sorted paths git tracks in *repo* right now (its index), relative to the root.
+
+    Read-only. A path that is only untracked or ignored in the working tree is not
+    listed. Raises ``subprocess.CalledProcessError`` outside a git repository.
+    """
+    raw = _git_out(repo, "ls-files", "-z")
+    # ``replace``: a filename that is not UTF-8 must not abort a sync; the caller
+    # matches on ASCII base names and prints the path.
+    return sorted(p.decode(errors="replace") for p in raw.split(b"\0") if p)
 
 
 def list_files_at_revision(repo: Path, rev: str, prefix: str = "") -> list[str]:

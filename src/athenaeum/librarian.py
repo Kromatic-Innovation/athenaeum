@@ -92,7 +92,15 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, pii_attribution, push_state, spend, sync_integrate, zero_yield
+from athenaeum import (
+    batch_state,
+    pii_attribution,
+    push_state,
+    spend,
+    sync_integrate,
+    sync_lease,
+    zero_yield,
+)
 from athenaeum import drops as drops_mod
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
@@ -305,6 +313,7 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -761,6 +770,16 @@ class SurfaceSyncState:
         ]
         if why:
             fields["failed_why"] = ",".join(why)
+        unmounted = [
+            f"{r['surface']}={r['reason']}"
+            for r in self.results
+            if r["op"] == "mount" and r["outcome"] == "skipped" and r.get("reason")
+        ]
+        if unmounted:
+            fields["unmounted"] = ",".join(unmounted)
+        reminted = sum(int(r["reason"]) for r in self.results if r["op"] == "uid-reminted")
+        if reminted:
+            fields["uid_reminted"] = reminted
         fields["reason"] = (
             "failed" if any(r["outcome"] == "failed" for r in self.results) else "completed"
         )
@@ -879,7 +898,19 @@ def _maybe_pull_before_run(
         surface_sync.record(surfaces, "pull", "ok" if ok else "failed")
 
 
-def _maybe_push_after_run(
+def _maybe_push_after_run(*args: Any, **kwargs: Any) -> None:
+    """:func:`_push_after_run`, then drop any repository lease this run still holds.
+
+    The sync lease (athenaeum#2997) spans the compile, and a run that does not push
+    never reaches ``push_after_compile``, which would have dropped it.
+    """
+    try:
+        _push_after_run(*args, **kwargs)
+    finally:
+        sync_lease.release_all_leases()
+
+
+def _push_after_run(
     knowledge_root: Path,
     *,
     config: dict | None,
@@ -995,6 +1026,11 @@ def _report_sync(
 ) -> None:
     for step in report.steps:
         surface_sync.record((plan.label,), step.step, step.outcome, step.reason)
+    # Local pages re-minted because two installs minted one uid (athenaeum#2996).
+    reminted = len(report.integrate.reminted) if report.integrate else 0
+    reminted += report.push.reminted if report.push else 0
+    if reminted:
+        surface_sync.record((plan.label,), "uid-reminted", "ok", str(reminted))
 
 
 def _integrate_before_compile(
@@ -1028,9 +1064,49 @@ def _integrate_before_compile(
         if plan.branch is None:
             surface_sync.record((plan.label,), "integrate", "skipped", "detached-head")
             continue
-        report = sync_integrate.sync_before_compile(plan.repo, plan.branch, plan.settings)
+        report = sync_integrate.sync_before_compile(
+            plan.repo, plan.branch, _settings_with_held_filing(knowledge_root, config, plan)
+        )
         _report_sync(surface_sync, plan, report)
     return handled
+
+
+def _settings_with_held_filing(
+    knowledge_root: Path, config: dict | None, plan: "sync_integrate.RepoSyncPlan"
+) -> "sync_integrate.SyncSettings":
+    """The plan's settings with the held-page decision filer wired in (athenaeum#2995).
+
+    A repository whose store declares no ``store_id`` (or any failure reading it)
+    keeps the settings as planned: its held pages are still held and kept, only
+    no decision is filed.
+    """
+    try:
+        from dataclasses import replace
+
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_access import StoreDeclaration, load_store_declaration
+        from athenaeum.store_decisions import resolve_mounts
+
+        roots = plan.settings.page_roots
+        declaration = None
+        for root in roots:
+            declaration = load_store_declaration((plan.repo / root.rel).resolve())
+            if isinstance(declaration, StoreDeclaration):
+                break
+        if not isinstance(declaration, StoreDeclaration):
+            return plan.settings
+        filer = sync_integrate.make_held_filer(
+            plan.repo,
+            roots,
+            knowledge_root=knowledge_root,
+            store_id=declaration.store_id,
+            mounts=resolve_mounts(knowledge_root, config),
+            asserter=resolve_owner_asserter(config),
+        )
+        return replace(plan.settings, file_held=filer)
+    except Exception as exc:  # noqa: BLE001 - never fail the sync for a decision
+        log.warning("held-page decisions unavailable: %s", type(exc).__name__)
+        return plan.settings
 
 
 def _filing_checks_after_push(
@@ -1092,7 +1168,9 @@ def _integrate_push(
             surface_sync.record((plan.label,), "push", "skipped", "detached-head")
             continue
         report = sync_integrate.SyncReport()
-        outcome = sync_integrate.push_after_compile(plan.repo, plan.branch, plan.settings, report)
+        outcome = sync_integrate.push_after_compile(
+            plan.repo, plan.branch, _settings_with_held_filing(knowledge_root, config, plan), report
+        )
         _filing_checks_after_push(knowledge_root, config, plan, outcome, report)
         _report_sync(surface_sync, plan, report)
         if outcome.ok:
@@ -1231,6 +1309,9 @@ def git_push(
         text=True,
     )
     _push_cache_dir = _resolve_cache_dir(None)
+    record_push(
+        knowledge_root, remote, result.returncode == 0, result.stderr or result.stdout or ""
+    )
     if result.returncode != 0:
         reason = (
             result.stderr or result.stdout or ""
@@ -1294,6 +1375,7 @@ def git_pull(
         capture_output=True,
         text=True,
     )
+    record_fetch(knowledge_root, remote, result.returncode == 0)
     if result.returncode != 0:
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which
@@ -12816,7 +12898,7 @@ def run(
     # broken declaration cannot stop a run (the guard holds it as reader only).
     try:
         from athenaeum.config import resolve_owner_asserter
-        from athenaeum.storage import available_adapters
+        from athenaeum.storage import available_adapters, gathered_surface_mounts
         from athenaeum.store_rights import record_run_start_rights
 
         record_run_start_rights(
@@ -12830,6 +12912,16 @@ def run(
             ),
             resolve_owner_asserter(ctx.config),
         )
+        # Issue athenaeum#2989 (access S4): a declared store this install cannot
+        # read is not mounted. Report it per store in the run summary and the log.
+        from athenaeum.store_rights import run_start_mounts
+
+        for _name, _state in run_start_mounts(
+            gathered_surface_mounts(knowledge_root, ctx.config),
+            resolve_owner_asserter(ctx.config),
+        ).items():
+            if _state.refusal:
+                ctx.surface_sync.record((_name,), "mount", "skipped", _state.refusal)
     except Exception:
         log.warning("store rights: run-start resolution failed", exc_info=True)
 
