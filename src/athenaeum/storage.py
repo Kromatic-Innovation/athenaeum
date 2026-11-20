@@ -574,8 +574,14 @@ def page_write_root_for_store(
     declared-refusal, not-indexed). A store this install does not hold raises
     :class:`StorageConfigError`. Intake routing S3a (athenaeum#2999).
     """
+    adapters = available_adapters(config)
+    if "personal" in adapters:
+        raise StorageConfigError(
+            "storage.adapters.personal collides with the reserved store word "
+            "'personal' (the default wiki surface) -- pick a different adapter name"
+        )
     name = DEFAULT_ADAPTER_NAME if store == "personal" else store
-    adapter = available_adapters(config).get(name)
+    adapter = adapters.get(name)
     if adapter is None:
         raise StorageConfigError(
             f"intake decision names store {store!r}, which this install does not hold"

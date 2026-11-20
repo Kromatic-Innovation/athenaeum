@@ -200,3 +200,26 @@ class TestBothTransports:
                "mapping": {"concept": "notes"}}}
         assert destination_for_entity("concept", cfg, batch_root).root == batch_root / "notes"
 
+
+
+class TestReservedPersonalWord:
+    """Seer review on PR athenaeum#3023: an adapter named ``personal`` must not alias the wiki."""
+
+    def test_adapter_named_personal_is_refused_loudly(self, tmp_path: Path) -> None:
+        cfg = {
+            "storage": {
+                "adapters": {
+                    "personal": {
+                        "backing_store": "markdown",
+                        "surface_root": "personal",
+                        "read_only": True,
+                        "corpus_policy": {"embedded": True},
+                    }
+                },
+                "mapping": {"concept": "personal"},
+            }
+        }
+        with pytest.raises(StorageConfigError, match="reserved"):
+            destination_for_entity("concept", cfg, tmp_path)
+        with pytest.raises(StorageConfigError, match="reserved"):
+            destination_for_entity("concept", cfg, tmp_path, _decision("personal"))

@@ -94,6 +94,11 @@ def decide_destination(
     Raises :class:`StorageConfigError` when the mapping names an unknown
     adapter, exactly as the type-derived route did.
     """
+    if "personal" in available_adapters(config):
+        raise StorageConfigError(
+            "storage.adapters.personal collides with the reserved store word "
+            "'personal' (the default wiki surface) -- pick a different adapter name"
+        )
     mapping: Mapping[str, str] = {}
     if entity_type:
         mapping = {entity_type: _store_word(resolve_adapter_for_class(entity_type, config).name)}
