@@ -147,6 +147,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   failing oracle cells of run 44438673846 are classified and re-graded offline
   in `docs/measurements/north-star-oracle-control-regrade-2026-11-19.md`
   (athenaeum#2918).
+- The README Quick start now opens with a three-command block (install, `athenaeum --version`, `athenaeum test-mcp`) and says it needs no API key; the nightly-cost and `page_recompile` prose moved from the README to a new guide, `docs/guides/nightly-cost.md`, linked from the README and `docs/index.md` (athenaeum#2923).
 
 ### Fixed
 
