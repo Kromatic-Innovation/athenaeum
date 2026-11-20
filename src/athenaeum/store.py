@@ -108,10 +108,12 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import tempfile
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -1221,6 +1223,19 @@ class StoreCapabilities:
     bulk_read: bool
     cheap_local_scan: bool
     local_path_for: Callable[[StoreKey], Path] | None = None
+    # Multi-writer sync (athenaeum#2931, design note federation-multi-writer-sync
+    # §3.3): the store is versioned by git AND has a remote, so several installs
+    # may each write it and be integrated by a merge commit. ``has_remote`` is
+    # the fact the invariant needs; it is declared alongside, never inferred.
+    has_remote: bool = False
+    multi_writer: bool = False
+
+    def __post_init__(self) -> None:
+        if self.multi_writer and not (self.versioned and self.has_remote):
+            raise ValueError(
+                "multi_writer requires a store that is versioned by git and has a remote "
+                f"(versioned={self.versioned}, has_remote={self.has_remote})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1434,6 +1449,157 @@ def remote_history_rewritten(repo: Path, last_seen: str | None, fetched_tip: str
     )
 
 
+# -- Sync write side (athenaeum#2931, design note federation-multi-writer-sync §4.1/§4.2) --
+#
+# The merge commit and the push. Nothing here rewrites a commit that exists: the
+# merge commit is a new object whose parents are the two tips, the branch only ever
+# moves forward onto it, and a push names its refspec without the forcing prefix.
+
+
+class WorkingTreeNotCleanError(RuntimeError):
+    """Raised when a merge is asked of a checked-out branch with uncommitted changes."""
+
+
+class PushFailureReason(str, Enum):
+    """Why a push failed (design note §4.2): distinguishable, never merged into one."""
+
+    REJECTED_REMOTE_MOVED = "rejected_remote_moved"  # remote branch moved: integrate, retry
+    OTHER = "other"  # no network, no permission, unknown remote, a remote-side hook...
+
+
+@dataclass(frozen=True)
+class PushResult:
+    """Outcome of :func:`push_branch`. ``reason`` is ``None`` exactly when ``ok``."""
+
+    ok: bool
+    reason: PushFailureReason | None = None
+    detail: str = ""
+
+
+def _git_env_c() -> dict[str, str]:
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    return env
+
+
+def build_merged_tree(repo: Path, base_rev: str, changes: Mapping[str, bytes | None]) -> str:
+    """Write a tree object: *base_rev*'s tree with *changes* applied; return its SHA.
+
+    *changes* maps a repository path to its merged bytes, or to ``None`` to delete
+    it. Built in a throwaway index, so the repository's index, working tree and
+    branches are not touched; the only effect is new objects in the object database.
+    """
+    with tempfile.TemporaryDirectory(prefix="athenaeum-merge-index-") as tmp:
+        env = _git_env_c()
+        env["GIT_INDEX_FILE"] = str(Path(tmp) / "index")
+
+        def run(*args: str, stdin: bytes | None = None) -> bytes:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(repo),
+                check=True,
+                capture_output=True,
+                input=stdin,
+                env=env,
+            ).stdout
+
+        run("read-tree", base_rev)
+        for path, data in sorted(changes.items()):
+            if data is None:
+                run("update-index", "--force-remove", "--", path)
+                continue
+            existing = run("ls-files", "-s", "--", path).split()
+            mode = existing[0].decode() if existing else "100644"
+            blob = run("hash-object", "-w", "--stdin", stdin=data).decode().strip()
+            run("update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}")
+        return run("write-tree").decode().strip()
+
+
+def commit_merge(repo: Path, tree: str, local_rev: str, remote_rev: str, message: str) -> str:
+    """Create (do not attach to any branch) a merge commit of *tree* with two parents.
+
+    Parents are, in order, *local_rev* and *remote_rev*. Returns the commit SHA.
+    """
+    out = _git_out(
+        repo, "commit-tree", tree, "-p", local_rev, "-p", remote_rev, "-m", message
+    )
+    return out.decode().strip()
+
+
+def _move_branch(repo: Path, branch: str, old: str, new: str) -> None:
+    """Move *branch* from *old* to *new*, a descendant of *old*. The last step of a merge."""
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=str(repo), capture_output=True, text=True
+    )
+    if head.returncode == 0 and head.stdout.strip() == f"refs/heads/{branch}":
+        # Checked out: advance branch, index and working tree together. A
+        # fast-forward cannot leave a conflict marker, and git refuses it rather
+        # than overwrite a local change.
+        _git_out(repo, "merge", "--ff-only", "--quiet", new)
+    else:
+        _git_out(repo, "update-ref", f"refs/heads/{branch}", new, old)
+
+
+def write_merge_commit(
+    repo: Path,
+    branch: str,
+    remote_rev: str,
+    changes: Mapping[str, bytes | None],
+    message: str,
+) -> str:
+    """Integrate *remote_rev* into local *branch* as one two-parent merge commit.
+
+    *changes* is the merged tree expressed against the branch's current tree: the
+    path -> merged bytes (``None`` deletes) for every path whose merged content
+    differs from the local one. All-or-nothing (design note §4.1): the tree and the
+    commit are built first; the branch is moved to the commit last. A failure
+    anywhere before that leaves the branch, index and working tree exactly as they
+    were. Returns the new commit SHA.
+
+    Raises :class:`WorkingTreeNotCleanError` if *branch* is checked out with
+    uncommitted changes (snapshot them as a local commit first, design note §4
+    step 2), and ``subprocess.CalledProcessError`` on any git failure.
+    """
+    local_rev = _git_out(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    local = local_rev.decode().strip()
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=str(repo), capture_output=True, text=True
+    )
+    if head.stdout.strip() == f"refs/heads/{branch}" and not repo_is_clean(repo):
+        raise WorkingTreeNotCleanError(
+            f"refusing to merge into checked-out branch {branch!r}: uncommitted changes"
+        )
+    tree = build_merged_tree(repo, local, changes)
+    commit = commit_merge(repo, tree, local, remote_rev, message)
+    _move_branch(repo, branch, local, commit)
+    return commit
+
+
+def push_branch(repo: Path, branch: str, remote: str = "origin") -> PushResult:
+    """Push *branch* to *remote* without force and report why it failed (design note §4.2).
+
+    ``REJECTED_REMOTE_MOVED`` means the remote branch has commits this one lacks
+    (fetch, integrate, push again); ``OTHER`` is anything else (no network, no
+    permission, unknown remote). The refspec is a plain ``branch:branch``, so the
+    remote can only be fast-forwarded.
+    """
+    result = subprocess.run(
+        ["git", "push", "--porcelain", remote, f"refs/heads/{branch}:refs/heads/{branch}"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env=_git_env_c(),
+    )
+    if result.returncode == 0:
+        return PushResult(ok=True)
+    detail = (result.stderr.strip() or result.stdout.strip())[:2000]
+    for line in result.stdout.splitlines():
+        if line.startswith("!") and "[rejected]" in line:
+            if "(fetch first)" in line or "(non-fast-forward)" in line:
+                return PushResult(False, PushFailureReason.REJECTED_REMOTE_MOVED, detail)
+    return PushResult(False, PushFailureReason.OTHER, detail)
+
+
 class FilesystemStore:
     """``Store`` over :mod:`athenaeum.atomic_io` + :mod:`pathlib` (issue athenaeum#976).
 
@@ -1495,6 +1661,8 @@ class FilesystemStore:
         # Surfaces whose adapter declares ``read_only: true`` (athenaeum#2621):
         # every mutating method refuses a key on one of these.
         self._read_only = frozenset(read_only_surfaces)
+        _versioned = (self._knowledge_root / ".git").exists()
+        _has_remote = _versioned and _repo_has_remote(self._knowledge_root)
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
@@ -1504,7 +1672,9 @@ class FilesystemStore:
             # refusal the old ad-hoc ``(knowledge_root / ".git").exists()``
             # check gave — just expressed as a capability instead of a
             # duplicated filesystem probe.
-            versioned=(self._knowledge_root / ".git").exists(),
+            versioned=_versioned,
+            has_remote=_has_remote,
+            multi_writer=_versioned and _has_remote,
             purgeable=True,
             compare_and_swap=True,
             leases=True,  # S4 (athenaeum#979): FileLease over flock, see .lease()

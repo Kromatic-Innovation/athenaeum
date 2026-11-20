@@ -27,6 +27,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.store` gains the write side of the multi-writer sync seam:
+  `write_merge_commit` builds the merged tree and a two-parent merge commit first
+  and moves the local branch last (all or nothing), and `push_branch` pushes
+  without force and reports a rejection because the remote moved apart from any
+  other failure. `StoreCapabilities` gains `multi_writer`, which only a store
+  versioned by git with a remote can declare. Nothing rebases or rewrites a
+  commit (athenaeum#2931).
 - `athenaeum.record_merge.merge_records(kind, local, remote)` is a pure merge of
   a record file changed on both sides: records are read through the file's own
   parser (for the pending merges list, `parse_pending_merges_text`), keyed by
