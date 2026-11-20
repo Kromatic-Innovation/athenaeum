@@ -1483,6 +1483,16 @@ def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
     return sorted(p.decode() for p in raw.split(b"\0") if p)
 
 
+def merge_commits_between(repo: Path, rev_a: str, rev_b: str) -> list[str]:
+    """The merge commits (two or more parents) reachable from *rev_b* and not from *rev_a*.
+
+    Read-only; an empty list when the range holds none. Raises
+    ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    raw = _git_out(repo, "rev-list", "--merges", f"{rev_a}..{rev_b}")
+    return [line for line in raw.decode().split("\n") if line.strip()]
+
+
 def remote_history_rewritten(repo: Path, last_seen: str | None, fetched_tip: str) -> bool:
     """Whether the fetched remote tip no longer contains the commit last seen there.
 

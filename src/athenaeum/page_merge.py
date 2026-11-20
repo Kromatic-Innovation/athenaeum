@@ -373,6 +373,31 @@ class _Unit:
     text: str
 
 
+def page_units(text: str | None) -> dict[str, str]:
+    """The units of one page as ``{unit name: value}``, with the names :func:`merge_page` uses.
+
+    ``fm:<key>`` is the JSON form of a frontmatter value, ``preamble`` the text
+    before the first H2 and ``section:<title>`` one H2 section (its heading line
+    and body). A page that is absent has no units; one whose frontmatter does not
+    parse has the whole text as its body. Pure: the same units :func:`merge_page`
+    merges, named for a caller that wants to say which unit a change touched
+    (athenaeum#2928).
+    """
+    if text is None:
+        return {}
+    meta, body = parse_frontmatter(text)
+    out: dict[str, str] = {}
+    if isinstance(meta, dict):
+        for name, value in meta.items():
+            out[f"fm:{name}"] = json.dumps(value, sort_keys=True, default=str)
+    preamble, sections = _units(body)
+    if preamble.strip():
+        out["preamble"] = preamble
+    for key, unit in sections.items():
+        out[_unit_name(key)] = unit.heading + unit.text
+    return out
+
+
 def _norm_text(text: str) -> str:
     return text if not text or text.endswith("\n") else text + "\n"
 
