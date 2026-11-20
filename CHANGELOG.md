@@ -27,13 +27,48 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [0.28.0] - 2026-11-20
 
+**Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
+the per-turn push ways to stay quiet when it has nothing relevant to add. It
+also adds the experimental foundations for sharing a store between several
+installs. It is a MINOR release because it adds features (0.27.3 to 0.27.8
+were never published). `athenaeum.__all__` is unchanged, but **the declared
+dependency floors rise**, which can break an install pinned below them:
+`anthropic>=0.50.0` (was `>=0.39.0`) and `fastmcp>=4.0.0` (was `>=3.4.3`).
+
+For most users:
+
+- A fresh `athenaeum init` now passes `athenaeum doctor`. Setup that is not
+  finished yet reports `WARN` with the command that finishes it, instead of
+  `FAIL`, and `athenaeum init` works under a global git commit hook.
+- The per-turn push no longer fires on text the harness injected into the
+  prompt. A scheduled or scripted run can switch it off for one process with
+  `AUTO_RECALL=false`, which is recorded as a skip. An optional relevance floor
+  for pushed pages is available and is off by default.
+- The `remember` tool says so when it drops or replaces something the caller
+  supplied.
+
+Experimental and not called by a single-store install: the new
+`athenaeum.store_*`, `athenaeum.sync_*`, `athenaeum.raise_*`,
+`athenaeum.page_merge`, `athenaeum.record_merge` and
+`athenaeum.intake_decision` modules are the groundwork for federated stores:
+a store declaration, per-store decision queues, a multi-writer sync seam and
+raising pages between stores. They may change without notice. See
+`docs/guides/stability.md` for which surfaces count as stable.
+
+**Upgrading from 0.27.2**
+
+1. If you pin `anthropic` below 0.50.0 or `fastmcp` below 4.0.0, raise those
+   pins first. The installer will refuse the older versions.
+2. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`.
+
 ### Changed
 
+- The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
 - A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
 - The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
 - The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
-- The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
 - `athenaeum doctor` now reports the first-run setup checks (`mcp`, `hooks`,
   `key_mode`, `search_index`) as `WARN` with "setup pending" and the command
   that finishes setup, instead of `FAIL`, so a fresh `athenaeum init` exits
