@@ -1386,11 +1386,15 @@ def commit_repo(repo: Path, label: str) -> str | None:
     return _commit_all(repo, label)
 
 
-def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
+def commit_paths(
+    root: Path, paths: Sequence[Path], message: str, *, allow_empty: bool = False
+) -> str | None:
     """Commit exactly *paths* (and nothing else that is staged or modified) in
     the git repository containing *root*; return the new HEAD SHA.
 
     ``None`` when *root* is not inside a git repository (nothing is committed).
+    With *allow_empty* a commit is written even when *paths* are unchanged (a
+    decision answered "keep what is published" still leaves a record).
     Raises ``subprocess.CalledProcessError`` when git refuses.
     """
     top = subprocess.run(
@@ -1405,7 +1409,10 @@ def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
     subprocess.run(["git", "-C", repo, "add", "--", *rels], check=True, capture_output=True)
     try:
         subprocess.run(
-            ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
+            [
+                "git", "-C", repo, "commit", "-m", message, "--only",
+                *(["--allow-empty"] if allow_empty else []), "--", *rels,
+            ],
             check=True,
             capture_output=True,
         )

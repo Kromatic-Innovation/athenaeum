@@ -25,9 +25,12 @@ merges list by :func:`athenaeum.record_merge.merge_records`, a regenerated file
 by taking the remote side (the compile regenerates it), and **everything else
 keeps the remote version and is reported held** -- every file under ``_store/``
 and any path nothing has a rule for. A contested page unit also keeps the
-remote value (``merge_page`` does that). Nothing here calls a model, and
-nothing here raises a decision: the held list is returned and written into the
-merge commit (section 6.3) for the held-page decision of a later slice.
+remote value (``merge_page`` does that). Nothing here calls a model. The held
+list is returned and written into the merge commit (section 6.3), and each held
+*page* is filed as a ``held-page`` decision in the owning store's queue
+(athenaeum#2995, :func:`make_held_filer`) before that commit is written, so its
+``Athenaeum-Page`` line can carry the decision id. A person's answer is applied
+as an ordinary new commit by :func:`answer_held_decision`.
 
 Before the merge commit is written (section 4.3), every page changed on both
 sides is checked: frontmatter parses with ``uid``, ``type`` and ``name``, no
@@ -43,7 +46,8 @@ reason codes only. No page text and no path is written into it.
 Layering: L4. Imports the store seam (:mod:`athenaeum.store`), the pure merges
 (:mod:`athenaeum.page_merge`, :mod:`athenaeum.record_merge`), the declaration
 (:mod:`athenaeum.store_access`) and the link rule
-(:mod:`athenaeum.store_boundary`, :mod:`athenaeum.store_links`). It runs no git
+(:mod:`athenaeum.store_boundary`, :mod:`athenaeum.store_links`) and the per-store
+decision queue (:mod:`athenaeum.store_decisions`, L2). It runs no git
 command itself and imports nothing from :mod:`athenaeum.librarian`.
 """
 
@@ -51,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -72,9 +77,11 @@ from athenaeum.store import (
     PushFailureReason,
     PushResult,
     WorkingTreeNotCleanError,
+    blob_id,
     blob_id_at_revision,
     blob_id_of,
     changed_paths,
+    commit_paths,
     commit_repo,
     common_ancestor,
     current_branch,
@@ -83,6 +90,7 @@ from athenaeum.store import (
     is_ancestor,
     list_files_at_revision,
     push_branch,
+    read_blob,
     read_file_at_revision,
     repo_head,
     write_merge_commit,
@@ -94,13 +102,23 @@ from athenaeum.store_access import (
 )
 from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_boundary import link_forbidden
+from athenaeum.store_decisions import (
+    PageQuote,
+    StoreDecisionRefused,
+    _rights,
+    file_decision,
+    load_queue,
+    resolve_decision,
+)
 from athenaeum.store_links import extract_link_refs
 from athenaeum.sync_machine_local import check_repo as _check_machine_local
 
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "DECISION_KIND_HELD_PAGE",
     "MAX_PUSH_ATTEMPTS",
+    "HeldDecisionRefused",
     "HeldItem",
     "IntegrateResult",
     "PageRoot",
@@ -110,7 +128,9 @@ __all__ = [
     "SyncSettings",
     "SyncStep",
     "SyncReport",
+    "answer_held_decision",
     "integrate_remote",
+    "make_held_filer",
     "plan_repo_syncs",
     "push_after_compile",
     "resolve_sync_mode",
@@ -140,6 +160,17 @@ BLOCK_FETCH = "fetch-failed"
 BLOCK_DIRTY = "uncommitted-changes"
 
 _NONE_BLOB = "none"
+
+#: ``kind`` of the decision a held page opens in the store's decision queue.
+DECISION_KIND_HELD_PAGE = "held-page"
+#: A held page with this reason is not filed: the next run tries it again (§6.4).
+REASON_DEFERRED = "deferred"
+
+#: The answers a held-page decision takes, in the order they are offered.
+ANSWER_KEEP_REMOTE = "keep-remote"
+ANSWER_TAKE_LOCAL = "take-local"
+ANSWER_MERGED = "merged"
+HELD_ANSWERS = (ANSWER_KEEP_REMOTE, ANSWER_TAKE_LOCAL, ANSWER_MERGED)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +241,10 @@ class PageRoot:
     surface: str = "wiki"
 
 
+#: ``(held page, its title, its gist) -> decision id``; see :func:`make_held_filer`.
+HeldFiler = Callable[["HeldItem", str, str], str | None]
+
+
 @dataclass(frozen=True)
 class SyncSettings:
     """What the sync needs to know about one repository; every field has a default."""
@@ -221,6 +256,9 @@ class SyncSettings:
     wait_range: tuple[float, float] = RETRY_WAIT_RANGE
     sleep: Callable[[float], None] = time.sleep
     rng: random.Random = field(default_factory=random.Random)
+    #: Files one held page as a decision and returns its id (``None`` when it could
+    #: not be). ``None`` here means no decision is filed (athenaeum#2995).
+    file_held: HeldFiler | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +266,9 @@ class HeldItem:
     """One file, page or page unit that waits for a person; the remote version stays.
 
     ``uid`` is empty for a file that is not a page. Blob ids only, never text.
+    ``path`` and ``units`` (the contested or held unit names) are set for a page;
+    ``decision`` is the id of the decision filed for it (athenaeum#2995), empty
+    when none was.
     """
 
     kind: str
@@ -236,6 +277,9 @@ class HeldItem:
     base: str = _NONE_BLOB
     local: str = _NONE_BLOB
     remote: str = _NONE_BLOB
+    path: str = ""
+    units: tuple[str, ...] = ()
+    decision: str = ""
 
 
 @dataclass(frozen=True)
@@ -540,7 +584,7 @@ def _merge(
         readable = base_ok and mine_ok and theirs_ok
         if kind == "store":
             final[path] = theirs
-            held.append(HeldItem(HELD_STORE_FILE, ("config-never-merged",), **blobs))
+            held.append(_held_item(HELD_STORE_FILE, ("config-never-merged",), blobs))
         elif kind == "page" and root is not None:
             _merge_one_page(
                 path,
@@ -562,14 +606,14 @@ def _merge(
             final[path] = rec.text.encode("utf-8")
             if rec.held:
                 reasons = tuple(sorted({h.reason for h in rec.held}))
-                held.append(HeldItem(HELD_RECORD, reasons, **blobs))
+                held.append(_held_item(HELD_RECORD, reasons, blobs))
         elif kind == "derived" and readable:
             der = merge_derived(mine_t, theirs_t, take="remote")
             final[path] = der.text.encode("utf-8") if der.text is not None else None
         else:
             # A record or regenerated file missing on one side, or any path no rule names.
             final[path] = theirs
-            held.append(HeldItem(HELD_UNREGISTERED, ("no-rule-for-path",), **blobs))
+            held.append(_held_item(HELD_UNREGISTERED, ("no-rule-for-path",), blobs))
 
     _validate(repo, local, tip, final, both_pages, held, page_lines, roots, cfg.config)
 
@@ -584,6 +628,8 @@ def _merge(
         uid = _uid_of(text)
         if uid and seen.setdefault(uid, path) != path:
             return IntegrateResult("blocked", reason=BLOCK_UID_COLLISION)
+
+    held = _file_held_pages(repo, tip, held, page_lines, cfg.file_held)
 
     changes = {
         p: data for p, data in final.items() if data != read_file_at_revision(repo, local, p)
@@ -618,7 +664,7 @@ def _merge_one_page(
     uid = _uid_of(theirs_t, mine_t, base_t)
     if not readable:
         final[path] = theirs
-        held.append(HeldItem("page", ("unreadable",), uid, **blobs))
+        held.append(_held_page(("unreadable",), uid, blobs, path))
         page_lines.append((uid or "unknown", _held_line(blobs, ("unreadable",), blobs["remote"])))
         return
     ptype = ""
@@ -636,7 +682,8 @@ def _merge_one_page(
     )
     both_pages[path] = (uid, data, mine_t, theirs_t)
     if reasons:
-        held.append(HeldItem("page", reasons, uid, **blobs))
+        units = tuple(dict.fromkeys([*merged.contested, *(h.unit for h in merged.held)]))
+        held.append(_held_page(reasons, uid, blobs, path, units))
         page_lines.append((uid or "unknown", _held_line(blobs, reasons, result_blob)))
     else:
         page_lines.append(
@@ -648,11 +695,87 @@ def _merge_one_page(
         )
 
 
+def _held_item(
+    kind: str,
+    reasons: tuple[str, ...],
+    blobs: Mapping[str, str],
+    uid: str = "",
+    path: str = "",
+    units: tuple[str, ...] = (),
+) -> HeldItem:
+    return HeldItem(kind, reasons, uid, blobs["base"], blobs["local"], blobs["remote"], path, units)
+
+
+def _held_page(
+    reasons: tuple[str, ...],
+    uid: str,
+    blobs: Mapping[str, str],
+    path: str,
+    units: tuple[str, ...] = (),
+) -> HeldItem:
+    return _held_item("page", reasons, blobs, uid, path, units)
+
+
 def _held_line(blobs: Mapping[str, str], reasons: tuple[str, ...], result: str) -> str:
     return (
         f"resolver=held reason={','.join(reasons)} base={blobs['base']} "
         f"local={blobs['local']} remote={blobs['remote']} result={result}"
     )
+
+
+def _file_held_pages(
+    repo: Path,
+    tip: str,
+    held: list[HeldItem],
+    page_lines: list[tuple[str, str]],
+    file_held: HeldFiler | None,
+) -> list[HeldItem]:
+    """File one decision per held page and put its id on the page's line (§6.3, §6.4).
+
+    One decision per page: a page held for two reasons (a contested unit and a failed
+    check) is one item. A page with no uid cannot be named in a decision, and a
+    ``deferred`` page is tried again on the next run; neither is filed. A filer that
+    cannot file (returns ``None``) leaves the line as it was: the page is still held
+    and the push still goes ahead. Returns *held* with ``decision`` set where filed.
+    """
+    if file_held is None:
+        return held
+    by_path: dict[str, HeldItem] = {}
+    for item in held:
+        if item.kind != "page" or not item.path or not item.uid:
+            continue
+        prior = by_path.get(item.path)
+        if prior is None:
+            by_path[item.path] = item
+        else:
+            by_path[item.path] = replace(
+                prior,
+                reasons=tuple(dict.fromkeys([*prior.reasons, *item.reasons])),
+                units=tuple(dict.fromkeys([*prior.units, *item.units])),
+            )
+    ids: dict[str, str] = {}
+    for path, item in by_path.items():
+        if REASON_DEFERRED in item.reasons:
+            continue
+        text, _ok = _text(read_file_at_revision(repo, tip, path))
+        meta, body = parse_frontmatter(text) if text else ({}, "")
+        meta = meta if isinstance(meta, dict) else {}
+        title = str(meta.get("name") or "")
+        gist = str(meta.get("description") or "") or next(
+            (ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith("#")), ""
+        )
+        decision = file_held(item, title, gist)
+        if decision:
+            ids[path] = decision
+    if not ids:
+        return held
+    by_uid = {by_path[p].uid: d for p, d in ids.items()}
+    for i, (uid, rest) in enumerate(page_lines):
+        if uid in by_uid and rest.startswith("resolver=held"):
+            page_lines[i] = (uid, f"{rest} decision={by_uid[uid]}")
+    return [
+        replace(h, decision=ids[h.path]) if h.kind == "page" and h.path in ids else h for h in held
+    ]
 
 
 def _message(tip: str, page_lines: list[tuple[str, str]], held: list[HeldItem]) -> str:
@@ -665,6 +788,205 @@ def _message(tip: str, page_lines: list[tuple[str, str]], held: list[HeldItem]) 
         if not h.uid
     ]
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Sections 6.3 and 6.4: the held-page decision (athenaeum#2995)
+# ---------------------------------------------------------------------------
+
+
+class HeldDecisionRefused(ValueError):
+    """A held-page decision could not be answered; nothing was written.
+
+    ``code`` is one of ``no_decision``, ``not_pending``, ``not_allowed``,
+    ``bad_answer``, ``stale``, ``unavailable`` or ``invalid_text``.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_BLOB_RE = re.compile(r"^[0-9a-f]{40,64}$")
+
+
+def make_held_filer(
+    repo: Path,
+    roots: tuple[PageRoot, ...],
+    *,
+    knowledge_root: Path,
+    store_id: str,
+    mounts: Mapping[str, Path] | None = None,
+    asserter: Mapping[str, object] | None = None,
+) -> HeldFiler:
+    """The filer that opens a ``held-page`` decision in *store_id*'s own queue.
+
+    The decision names the uid, the contested units, the reason codes and the base,
+    local and remote blob ids; it quotes only this store's page (title and gist of
+    the version that stays published). Filing is idempotent: a pending decision for
+    the same uid and the same local and remote blobs is returned, not duplicated.
+    A refusal or a write error is logged and returns ``None``; it never stops a sync.
+    """
+    page_roots = {r.rel.strip("/") for r in roots}
+
+    def relative_to_root(path: str) -> str:
+        parent = _page_dir(path)
+        if parent in page_roots and parent:
+            return PurePosixPath(path).relative_to(parent).as_posix()
+        return path
+
+    def file(item: HeldItem, title: str, gist: str) -> str | None:
+        try:
+            for rec in load_queue(knowledge_root, store_id):
+                d = rec.get("detail") or {}
+                if (
+                    rec.get("kind") == DECISION_KIND_HELD_PAGE
+                    and rec.get("disposition") == "pending"
+                    and d.get("uid") == item.uid
+                    and d.get("local") == item.local
+                    and d.get("remote") == item.remote
+                ):
+                    return str(rec["id"])
+            stale = [
+                str(rec["id"])
+                for rec in load_queue(knowledge_root, store_id)
+                if rec.get("kind") == DECISION_KIND_HELD_PAGE
+                and rec.get("disposition") == "pending"
+                and (rec.get("detail") or {}).get("uid") == item.uid
+            ]
+            record = file_decision(
+                knowledge_root,
+                store_id=store_id,
+                question=(
+                    f"Two installs changed the page {item.uid} and the librarian could not "
+                    "settle it. The version already published stays on the page until you "
+                    "answer. Keep the published version, take this install's version, or "
+                    "supply a merged text."
+                ),
+                pages=[PageQuote(store_id, item.uid, title, gist, relative_to_root(item.path))],
+                kind=DECISION_KIND_HELD_PAGE,
+                mounts=mounts,
+                asserter=asserter,
+                detail={
+                    "uid": item.uid,
+                    "path": item.path,
+                    "units": list(item.units),
+                    "reasons": list(item.reasons),
+                    "base": item.base,
+                    "local": item.local,
+                    "remote": item.remote,
+                    "answers": list(HELD_ANSWERS),
+                },
+            )
+            # The page was held again on a newer remote or local version: the earlier
+            # pending decision for it can no longer be answered (it would be stale), so
+            # the new one replaces it.
+            for old in stale:
+                resolve_decision(
+                    knowledge_root, store_id=store_id, decision_id=old, disposition="superseded"
+                )
+            return str(record["id"])
+        except (StoreDecisionRefused, OSError, KeyError) as exc:
+            log.warning(
+                "athenaeum sync: held page %s not filed as a decision: %s",
+                item.uid,
+                type(exc).__name__,
+            )
+            return None
+
+    return file
+
+
+def answer_held_decision(
+    repo: Path,
+    knowledge_root: Path,
+    *,
+    store_id: str,
+    decision_id: str,
+    answer: str,
+    text: str | None = None,
+    mounts: Mapping[str, Path] | None = None,
+    asserter: Mapping[str, object] | None = None,
+) -> str:
+    """Apply a person's answer to a held page as one ordinary new commit; return its SHA.
+
+    *answer* is ``keep-remote`` (the published version, as it already stands),
+    ``take-local`` (this install's version, read from history by its blob id) or
+    ``merged`` (the *text* supplied). The page must still be at the published
+    version it was held at; otherwise the decision is ``stale`` and nothing is
+    written. The commit carries the decision id and blob ids only, and the decision
+    is closed after it. Raises :class:`HeldDecisionRefused` with nothing written.
+    """
+    rec = next(
+        (r for r in load_queue(knowledge_root, store_id) if r.get("id") == decision_id), None
+    )
+    if rec is None:
+        raise HeldDecisionRefused("no_decision", f"no decision {decision_id} in {store_id}'s queue")
+    if rec.get("kind") != DECISION_KIND_HELD_PAGE or rec.get("disposition") != "pending":
+        raise HeldDecisionRefused(
+            "not_pending", f"{decision_id} is not a pending held-page decision"
+        )
+    if mounts is not None and "answer" not in _rights(store_id, mounts, asserter):
+        raise HeldDecisionRefused("not_allowed", f"this install may not answer for {store_id}")
+    if answer not in HELD_ANSWERS:
+        raise HeldDecisionRefused("bad_answer", f"answer must be one of {', '.join(HELD_ANSWERS)}")
+    detail = rec.get("detail") or {}
+    rel = str(detail.get("path") or "")
+    pure = PurePosixPath(rel)
+    if not rel or pure.is_absolute() or ".." in pure.parts:
+        raise HeldDecisionRefused("unavailable", "the decision names no usable page path")
+    remote, local = str(detail.get("remote", "")), str(detail.get("local", ""))
+    page = Path(repo) / rel
+    if answer == ANSWER_MERGED:
+        if text is None:
+            raise HeldDecisionRefused("invalid_text", "the merged answer needs a text")
+        why = validate_page_text(text)
+        if why is not None or _uid_of(text) != detail.get("uid"):
+            raise HeldDecisionRefused(
+                "invalid_text", f"the merged text is not usable: {why or 'uid'}"
+            )
+        data = text.encode("utf-8")
+    else:
+        wanted = remote if answer == ANSWER_KEEP_REMOTE else local
+        found = read_blob(repo, wanted) if _BLOB_RE.match(wanted) else None
+        if found is None:
+            raise HeldDecisionRefused("unavailable", f"the {answer} version is not in history")
+        data = found
+    current = blob_id(page) if page.is_file() else _NONE_BLOB
+    if current != remote:
+        if current == blob_id_of(repo, data):
+            # A retry after the commit landed but closing the decision failed: the page
+            # already holds the answered text, so only the closing is left.
+            resolve_decision(
+                knowledge_root,
+                store_id=store_id,
+                decision_id=decision_id,
+                disposition=f"answered-{answer}",
+            )
+            return repo_head(repo) or ""
+        raise HeldDecisionRefused(
+            "stale", f"{rel} is no longer at the published version this decision was filed against"
+        )
+    before = page.read_bytes()
+    page.write_bytes(data)
+    message = (
+        f"athenaeum sync: settle held page {detail.get('uid')} ({answer})\n\n"
+        f"Athenaeum-Decision: {decision_id} answer={answer} "
+        f"base={detail.get('base', _NONE_BLOB)} local={local} remote={remote} "
+        f"result={blob_id_of(repo, data)}\n"
+    )
+    try:
+        commit = commit_paths(Path(repo), [Path(rel)], message, allow_empty=True)
+    except subprocess.CalledProcessError:
+        page.write_bytes(before)
+        raise
+    if commit is None:
+        page.write_bytes(before)
+        raise HeldDecisionRefused("unavailable", "the pages are not in a git repository")
+    resolve_decision(
+        knowledge_root, store_id=store_id, decision_id=decision_id, disposition=f"answered-{answer}"
+    )
+    return commit
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +1044,7 @@ def _validate(
             "local": blob_id_at_revision(repo, local, path) or _NONE_BLOB,
             "remote": blob_id_at_revision(repo, tip, path) or _NONE_BLOB,
         }
-        held.append(HeldItem("page", reasons, uid, **blobs))
+        held.append(_held_page(reasons, uid, blobs, path))
         for i, (line_uid, _rest) in enumerate(page_lines):
             if line_uid == (uid or "unknown"):
                 page_lines[i] = (line_uid, _held_line(blobs, reasons, blobs["remote"]))
