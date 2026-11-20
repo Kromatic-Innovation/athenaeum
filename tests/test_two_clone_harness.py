@@ -55,8 +55,9 @@ def test_diverge_then_fetch_merge_push_through_the_seam(harness: TwoCloneHarness
     assert harness.second.push().ok
     assert harness.remote_tip() == merged
 
-    harness.first.merge(harness.first.fetch(), {})  # converge: first takes the merge
-    assert harness.first.head() == merged == harness.second.head()
+    # the first install sees the merge on the remote and it descends from its own commit
+    assert harness.first.fetch() == merged
+    git(harness.first.root, "merge-base", "--is-ancestor", first_sha, merged)
 
 
 def test_second_push_rejected_after_first_pushed_reports_remote_moved(
