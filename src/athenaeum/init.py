@@ -31,6 +31,7 @@ created, never pre-existing content — a first-run UX concern.
 from __future__ import annotations
 
 import importlib.resources
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -222,7 +223,17 @@ def _scaffold(path: Path, created: list[Path]) -> None:
         created.append(git_dir)
         _git(["git", "init"], path)
         _git(["git", "add", "."], path)
-        commit = ["git", "commit", "-m", "Initialize knowledge directory"]
+        # Hooks are disabled for this one commit (athenaeum#2901): a global
+        # ``core.hooksPath`` commit hook (e.g. a protected-branch guard) would
+        # otherwise abort the seed commit of a repo the user has just created.
+        commit = [
+            "git",
+            "-c",
+            f"core.hooksPath={os.devnull}",
+            "commit",
+            "-m",
+            "Initialize knowledge directory",
+        ]
         try:
             subprocess.run(commit, cwd=path, check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:

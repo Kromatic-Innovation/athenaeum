@@ -113,6 +113,23 @@ At discovery time, a file that fits none of the recognized shapes is never silen
 `intake_audit.py`'s unclaimed-file sweep flags it (grouped by reason and sibling directory)
 into the pending-decision queue rather than leaving it invisible on disk.
 
+## The intake decision
+
+`athenaeum.intake_decision.decide` is one pure function that gives the decision for a single
+fact: capture or not (`keep`, `drop`, or `unsure` for a `never` rule the classifier is not
+confident about, which the caller escalates and then asks again), which store, which type, and a
+reason code. It reads the parsed relevance policy and does no file access, clock or model call.
+
+The three capture gates call it, in both pipeline transports:
+
+- before any tier, on declared metadata (`gate_raw_content`, which auto-memory also reaches);
+- after Tier 2 classify, on the classified type, tags and category (`gate_classified_entities`);
+- before Tier 3, on the declared facts of the page an update would land on (`gate_update_actions`).
+
+Today only the capture answer is used, and it is the answer the gates always computed. The store
+and type answers are computed and discarded: with no store known to this install the store is
+always `personal`, and a `route` row in the policy changes nothing about what is captured.
+
 ## See also
 
 - Guides — [Claude Code integration](../guides/claude-code.md)
