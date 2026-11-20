@@ -27,6 +27,35 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.record_merge.merge_records(kind, local, remote)` is a pure merge of
+  a record file changed on both sides: records are read through the file's own
+  parser (for the pending merges list, `parse_pending_merges_text`), keyed by
+  id, unioned in a stable order and written back through its renderer. A record
+  resolved on one side and open on the other takes the resolved state; one
+  resolved differently on the two sides is returned as held for a person.
+  `merge_derived` takes one side of a regenerated file and says to regenerate
+  it. No file access, git call or model call, and nothing calls it yet
+  (athenaeum#2929).
+
+- `athenaeum.store` gains the read side of the multi-writer sync seam: fetch a
+  remote branch, find the common ancestor of two revisions, read a file at a
+  revision, list paths changed between two revisions, and detect rewritten
+  remote history. Read-only; pull and push are unchanged (athenaeum#2930).
+- The `intake` block of `_store/access.yaml` (declaration `version: 2`): a
+  `default` of `accept` or `refuse` and ordered `type`/`tag` rules, last match
+  wins, a tag covering its `/` children as the relevance policy matches them.
+  A `subject` key, a `route` or `always` verdict, or the block in a version-1
+  file is refused. `athenaeum.store_intake.intake_accepts` is the pure accept
+  check; nothing applies it yet (athenaeum#2936).
+- `athenaeum.store_rights`: the `DirectoryAdapter` protocol, the built-in `static`
+  adapter (reads the declaration's `groups:` block) and `resolve_rights`, which
+  returns the subset of read, propose, compile and answer an owner holds on a
+  store, keyed by `asserter_identity_key` and never a role name. A directory that
+  cannot answer resolves as a reader only. A librarian run resolves the owner's
+  rights on its surfaces at start and logs one INFO line each; nothing acts on
+  the result and a failure is swallowed, so no run behaves differently
+  (athenaeum#2933).
+
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is
   refused), pins `raise:<raise_id>` as a typed source, and backs a new
@@ -73,10 +102,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   fact (capture, store, type, reason code), now called by the three capture gates in both
   pipeline transports. Only its capture answer is used and it is the one the gates computed
   before, so no install captures, drops or places anything differently (athenaeum#2625).
+- New guide `docs/guides/stability.md` says which surfaces count as stable beyond `athenaeum.__all__` (CLI, config keys, MCP tools, file formats), which are experimental and which are internal; the README links it beside the support policy (athenaeum#2908).
 
 ### Changed
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
+- The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
+- The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
+- The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
 
 ### Fixed
 
@@ -107,9 +140,13 @@ declares are unchanged. `athenaeum.__all__` is unchanged.
 
 - A remote `remember` (`--transport http`) under a restricted `--audience` now stamps the saved note with the server's pinned audience (`audience: [<roles>]`), so the caller that wrote it, and anyone else holding that role, can recall it. Before, the note was untagged and every restricted audience withheld it, including the writer's own. The stamp comes only from the server-side pin: it replaces any `audience:` in the note's own frontmatter, drops a note-written `access: open`, and no `remember` argument changes it. A note whose `access:` is `internal`, `confidential` or `personal` (set by intake screening or by the note) is not stamped and stays owner-only. A different restricted audience still cannot recall the note, `--audience owner` and stdio stamp nothing, and `docs/guides/remote.md` now says remote saves are visible to the caller's whole audience without review (athenaeum#2779).
 
+### Added
+
+- Three measurement reports under `docs/measurements/`, linked from `docs/index.md`: why pushed pages are irrelevant, the 2026-11-19 native-memory baseline re-run, and the rendered north-star grid report for that run. Documentation only; no code changes (athenaeum#2921).
+
 ### Security
 
-- The CI constraints file `requirements-ci.txt` takes a grouped update of 13 pins that clears open security advisories, among them several against `aiohttp`, plus the transitive pins those updates require. Only CI and installs run with `-c requirements-ci.txt` see the change; the package's declared dependency ranges are unchanged (athenaeum#2812).
+- The CI constraints file `requirements-ci.txt` takes the grouped update of 13 Dependabot bumps that clears open security advisories, among them several against `aiohttp`, plus the transitive pins those updates drag along: counting those, 20 existing pins change and one new pin (`opentelemetry-exporter-otlp-common` 0.66b2) is added. Two of the moves cross a major version, `oauthlib` 3.3.1 to 4.0.1 and `filelock` 3.32.2 to 4.2.1; `fastmcp` and `fastmcp-slim` move from 4.0.11 to 4.1.2, and `aiohttp` from 3.14.3 to 3.14.4. Only CI and installs run with `-c requirements-ci.txt` see the change; the package's declared dependency ranges are unchanged (athenaeum#2812).
 
 ## [0.27.0] - 2026-11-19
 
@@ -10944,6 +10981,7 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
+<!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
 [Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0

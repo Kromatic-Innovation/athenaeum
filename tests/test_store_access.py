@@ -227,9 +227,11 @@ def _role(rights: Any, members: Any = None) -> dict[str, Any]:
 COUNTER_EXAMPLES: list[tuple[str, str, str]] = [
     ("malformed-yaml", "version: 1\nstore_id: [unclosed", "_store/access.yaml"),
     ("not-a-mapping", "- a\n- b\n", "_store/access.yaml"),
-    ("version-2", _bad(version=2), "version"),
+    ("version-3", _bad(version=3), "version"),
     ("version-string", _bad(version="1"), "version"),
     ("version-bool", _bad(version=True), "version"),
+    ("version-float", _bad(version=1.0), "version"),
+    ("version-float-two", _bad(version=2.0), "version"),
     ("version-missing", _bad(version=_DROP), "version"),
     ("store-id-missing", _bad(store_id=_DROP), "store_id"),
     ("store-id-no-prefix", _bad(store_id="q7m2xk4vwz5d"), "store_id"),
@@ -362,7 +364,7 @@ class TestCounterExamples:
         assert isinstance(load_store_declaration(tmp_path), StoreDeclarationInvalid)
 
     def test_all_problems_are_reported_together(self) -> None:
-        result = _invalid(_doc(version=2, store_id="nope", grants={}))
+        result = _invalid(_doc(version=3, store_id="nope", grants={}))
         assert {"version", "store_id", "grants"} <= set(result.keys)
 
     def test_invalid_is_a_distinct_type_exposing_no_rights(self) -> None:
