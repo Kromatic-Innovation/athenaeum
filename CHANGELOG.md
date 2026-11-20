@@ -104,9 +104,13 @@ declares are unchanged. `athenaeum.__all__` is unchanged.
 
 - A remote `remember` (`--transport http`) under a restricted `--audience` now stamps the saved note with the server's pinned audience (`audience: [<roles>]`), so the caller that wrote it, and anyone else holding that role, can recall it. Before, the note was untagged and every restricted audience withheld it, including the writer's own. The stamp comes only from the server-side pin: it replaces any `audience:` in the note's own frontmatter, drops a note-written `access: open`, and no `remember` argument changes it. A note whose `access:` is `internal`, `confidential` or `personal` (set by intake screening or by the note) is not stamped and stays owner-only. A different restricted audience still cannot recall the note, `--audience owner` and stdio stamp nothing, and `docs/guides/remote.md` now says remote saves are visible to the caller's whole audience without review (athenaeum#2779).
 
+### Added
+
+- Three measurement reports under `docs/measurements/`, linked from `docs/index.md`: why pushed pages are irrelevant, the 2026-11-19 native-memory baseline re-run, and the rendered north-star grid report for that run. Documentation only; no code changes (athenaeum#2921).
+
 ### Security
 
-- The CI constraints file `requirements-ci.txt` takes a grouped update of 13 pins that clears open security advisories, among them several against `aiohttp`, plus the transitive pins those updates require. Only CI and installs run with `-c requirements-ci.txt` see the change; the package's declared dependency ranges are unchanged (athenaeum#2812).
+- The CI constraints file `requirements-ci.txt` takes the grouped update of 13 Dependabot bumps that clears open security advisories, among them several against `aiohttp`, plus the transitive pins those updates drag along: counting those, 20 existing pins change and one new pin (`opentelemetry-exporter-otlp-common` 0.66b2) is added. Two of the moves cross a major version, `oauthlib` 3.3.1 to 4.0.1 and `filelock` 3.32.2 to 4.2.1; `fastmcp` and `fastmcp-slim` move from 4.0.11 to 4.1.2, and `aiohttp` from 3.14.3 to 3.14.4. Only CI and installs run with `-c requirements-ci.txt` see the change; the package's declared dependency ranges are unchanged (athenaeum#2812).
 
 ## [0.27.0] - 2026-11-19
 
@@ -10941,6 +10945,7 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
+<!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
 [Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
