@@ -111,6 +111,10 @@ REASON_CODES = frozenset(
         "copy_removed",
         "raise_unknown",
         "superseded_at_source",
+        # Applying a ``retract`` to a copy (athenaeum#3003, slice S11): a waiting
+        # raise withdrawn, and an edited copy the compile role chose to keep.
+        "withdrawn",
+        "copy_kept",
     }
 )
 

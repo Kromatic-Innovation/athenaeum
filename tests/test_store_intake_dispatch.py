@@ -152,7 +152,8 @@ def test_registry_dispatches_by_kind_and_unregistered_kind_is_deferred(kb: Kb) -
         "sent_at": "2026-11-18T09:30:00Z", "reason": "withdrawn",
     }
     kb.drop(TARGET, "r.jsonl", kb.batch(retract))
-    first = kb.run()
+    # an empty registry: the default one gains a retract handler once the intake run loads it
+    first = kb.run(registry=sid.HandlerRegistry())
     assert first.unhandled == 1 and first.handled == 0
 
     seen: list[tuple[str, str]] = []
