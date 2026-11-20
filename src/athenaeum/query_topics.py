@@ -84,6 +84,31 @@ def _get_topic_model(config: dict[str, object] | None = None) -> str:
     return resolve_model("topic", "ATHENAEUM_TOPIC_MODEL", DEFAULT_TOPIC_MODEL, config)
 
 
+#: Process-lifetime latch for :func:`_warn_regex_fallback_once` (issue
+#: athenaeum#2906).
+_regex_fallback_warned = False
+
+
+def _warn_regex_fallback_once() -> None:
+    """Log, once per process, that topic extraction is on the regex fallback.
+
+    ``build_llm_client`` returns ``None`` (no key, no usable login) without
+    raising, so this path was silent. Names the fallback and how to enable LLM
+    extraction. A latch rather than per-call logging: the recall hook fires on
+    every prompt.
+    """
+    global _regex_fallback_warned
+    if _regex_fallback_warned:
+        return
+    _regex_fallback_warned = True
+    log.warning(
+        "query_topics: no LLM credential available; topic extraction is using "
+        "the regex fallback (proper-noun topics are lost). To enable LLM "
+        "extraction set ANTHROPIC_API_KEY, or log in with `claude` and set "
+        "llm.provider: claude-cli; run `athenaeum doctor` to check."
+    )
+
+
 def extract_topics(
     prompt: str,
     timeout: float = 3.0,
@@ -149,6 +174,7 @@ def extract_topics(
         )
         return []
     if client is None:
+        _warn_regex_fallback_once()
         return []
 
     try:
