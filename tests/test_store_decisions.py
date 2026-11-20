@@ -232,3 +232,18 @@ def test_listing_is_unchanged_when_no_store_is_declared(tmp_path: Path) -> None:
     root = tmp_path / "k"
     (root / "wiki").mkdir(parents=True)
     assert list_pending_decisions(root / "wiki") == []
+
+
+def test_filing_appends_and_never_rewrites_earlier_lines(kr: Path) -> None:
+    # Review on PR athenaeum#2980: filing is one O_APPEND write, so a record a
+    # concurrent filer wrote in between is kept, and a torn trailing line is
+    # skipped rather than lost-and-rewritten.
+    first = file_decision(kr, store_id=ALPHA, question="one")
+    path = sd.queue_path(kr, ALPHA)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"torn": \n')
+    second = file_decision(kr, store_id=ALPHA, question="two")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0])["id"] == first["id"]
+    assert lines[1] == '{"torn": '
+    assert [r["id"] for r in sd.load_queue(kr, ALPHA)] == [first["id"], second["id"]]

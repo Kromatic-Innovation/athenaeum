@@ -2,7 +2,7 @@
 """A decision queue per store, and the join that lists them (athenaeum#2934).
 
 Layering: L2 (imports :mod:`athenaeum.store_access`, :mod:`athenaeum.store_rights`,
-L2, and :mod:`athenaeum.storage`, :mod:`athenaeum.models`, :mod:`athenaeum.atomic_io`,
+L2, and :mod:`athenaeum.storage`, :mod:`athenaeum.models`, :mod:`athenaeum.store`,
 L1 and below).
 
 Design: ``docs/design/federation-store-access.md`` §7 (the compile role and the
@@ -47,9 +47,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter
 from athenaeum.storage import available_adapters
+from athenaeum.store import append_line_durable
 from athenaeum.store_access import StoreDeclaration, is_store_id, load_store_declaration
 from athenaeum.store_rights import resolve_rights
 
@@ -268,10 +268,10 @@ def file_decision(
         "pages": quoted,
         "other_pages": others,
     }
-    existing = load_queue(knowledge_root, store_id)
-    existing.append(record)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, "".join(json.dumps(r, sort_keys=True) + "\n" for r in existing))
+    # One O_APPEND write per record (review on PR athenaeum#2980): concurrent
+    # filers never overwrite each other, and a torn trailing line is skipped by
+    # :func:`load_queue`.
+    append_line_durable(path, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
     return record
 
 
