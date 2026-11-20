@@ -39,6 +39,16 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   differently. `_store/` files are registered as `config` artifacts, and a
   `_`-prefixed directory of any surface is no longer yielded as a page by
   `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+- `athenaeum.page_merge.merge_page(base, local, remote, spec)` is a pure
+  three-way merge of one page by unit (frontmatter key, H2 section, lines in
+  a section) using the multi-writer sync design's rule table. It returns the
+  merged text, the contested units, the held units with a reason code, and the
+  rule that settled each unit. `access` and `audience` are never merged: a
+  difference in either is held, and contested or held units carry the remote
+  value so the result always parses. It does no file access, runs no git
+  command and calls no model, and nothing calls it yet. The section and list
+  helpers it shares with the structured upsert moved to `athenaeum.page_text`
+  (athenaeum#2773).
 
 ### Changed
 
