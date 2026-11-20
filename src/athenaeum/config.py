@@ -6636,6 +6636,8 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
               surface_root: ~/shared-recipes   # the clone
               read_only: true                  # pulled and indexed, never written
               visibility: 1
+              # sync_mode: fast_forward        # optional: never merge, even if the
+              #                                # store declares sync.mode: integrate
               corpus_policy: {embedded: true, recallable: true}
           mapping:
             recipe: shared-recipes

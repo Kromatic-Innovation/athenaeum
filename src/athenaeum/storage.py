@@ -160,6 +160,12 @@ class StorageAdapter:
     #: page on a LOWER-ranked (more private) surface; an unranked deployment
     #: has every surface at 0, so nothing is refused.
     visibility: int = 0
+    #: ``sync_mode: fast_forward`` in config narrows a store that declares
+    #: ``integrate`` so this install never merges (athenaeum#2935, design note
+    #: §3.3). ``integrate`` here can never widen: a store that does not declare
+    #: it ignores the local value and reports that. ``None`` (default) = follow
+    #: the store's declaration.
+    sync_mode: str | None = None
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -301,9 +307,16 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
             f"storage.adapters.{name}.read_only must be a boolean (true/false), "
             f"got {read_only!r}"
         )
+    sync_mode = raw.get("sync_mode")
+    if sync_mode is not None and sync_mode not in ("fast_forward", "integrate"):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.sync_mode must be 'fast_forward' or 'integrate', "
+            f"got {sync_mode!r}"
+        )
     return StorageAdapter(
         name=name,
         read_only=read_only,
+        sync_mode=sync_mode,
         backing_store=backing_store.strip(),
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
