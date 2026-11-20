@@ -71,6 +71,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
+    resolve_owner_asserter,
     resolve_storage_adapters,
     resolve_storage_mapping,
 )
@@ -166,6 +167,10 @@ class StorageAdapter:
     #: it ignores the local value and reports that. ``None`` (default) = follow
     #: the store's declaration.
     sync_mode: str | None = None
+    #: ``store_id`` in config names the store this entry mounts (access S4,
+    #: design note §5). When set, a fetched declaration carrying a different id
+    #: refuses the mount. ``None`` (default) = no id pinned, nothing compared.
+    store_id: str | None = None
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -313,10 +318,16 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
             f"storage.adapters.{name}.sync_mode must be 'fast_forward' or 'integrate', "
             f"got {sync_mode!r}"
         )
+    store_id = raw.get("store_id")
+    if store_id is not None and (not isinstance(store_id, str) or not store_id.strip()):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.store_id must be a non-empty string, got {store_id!r}"
+        )
     return StorageAdapter(
         name=name,
         read_only=read_only,
         sync_mode=sync_mode,
+        store_id=store_id.strip() if store_id else None,
         backing_store=backing_store.strip(),
         surface_root=surface_root.strip(),
         corpus_policy=_policy_from_mapping(raw.get("corpus_policy")),
@@ -526,6 +537,11 @@ def page_write_root_for_class(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
             "declared read_only; compile never writes a page there"
         )
+    declared = declared_compile_refusal(adapter.name, config, knowledge_root)
+    if declared:
+        raise ReadOnlySurfaceError(
+            f"entity class {entity_class!r} maps to surface {adapter.name!r}, but {declared}"
+        )
     if not adapter.corpus_policy.embedded:
         raise SurfaceNotIndexedError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -612,6 +628,7 @@ def open_store(
         roots,
         non_purgeable_surfaces=non_purgeable,
         read_only_surfaces=read_only,
+        write_gate=lambda surface: declared_compile_refusal(surface, config, knowledge_root),
     )
 
 
@@ -631,6 +648,54 @@ def read_only_surface_roots(
         for name, adapter in available_adapters(config).items()
         if adapter.read_only
     }
+
+
+def declared_compile_refusal(
+    surface: str, config: dict[str, Any] | None, knowledge_root: Path
+) -> str | None:
+    """Why the surface named *surface* refuses a write for lack of declared compile.
+
+    The declaration layer of the write guard (design note §9, access S3): a
+    surface whose ``_store/access.yaml`` does not grant the owner compile is
+    refused, whatever its adapter's ``read_only`` says. It can only narrow:
+    ``None`` (no refusal) when the surface has no declaration, or the rights held
+    include compile. A declaration that is invalid, or a directory that cannot
+    answer, holds the owner as a reader only, so it refuses. Rights come from the
+    run-start table (:func:`athenaeum.store_rights.declared_surface_rights`); this
+    is called only on a write, never on the recall path.
+    """
+    from athenaeum.store_rights import declared_surface_rights
+
+    if config is None:
+        config = load_config(knowledge_root)
+    adapter = available_adapters(config).get(surface)
+    if adapter is None:
+        return None
+    root = adapter.resolve_root(knowledge_root)
+    rights = declared_surface_rights(root, resolve_owner_asserter(config))
+    if rights is None or "compile" in rights:
+        return None
+    held = ",".join(sorted(rights)) or "none"
+    return (
+        "its store declaration does not grant this install compile "
+        f"(rights held: {held}); a page there is never written from here"
+    )
+
+
+def declared_compile_refusal_of(
+    path: Path, config: dict[str, Any] | None, knowledge_root: Path
+) -> tuple[str, str] | None:
+    """``(surface, reason)`` when *path* lies on a surface the declaration refuses."""
+    if config is None:
+        config = load_config(knowledge_root)
+    resolved = Path(path).resolve()
+    for name, adapter in available_adapters(config).items():
+        root = adapter.resolve_root(knowledge_root).resolve()
+        if resolved == root or root in resolved.parents:
+            reason = declared_compile_refusal(name, config, knowledge_root)
+            if reason:
+                return name, reason
+    return None
 
 
 def read_only_surface_of(
@@ -674,6 +739,11 @@ def require_writable_path(
         raise ReadOnlySurfaceError(
             f"{op} refused on {path}: it lives on surface {surface!r}, declared "
             "read_only (a shared mount this install never writes)"
+        )
+    refused = declared_compile_refusal_of(path, config, knowledge_root)
+    if refused is not None:
+        raise ReadOnlySurfaceError(
+            f"{op} refused on {path}: it lives on surface {refused[0]!r}, and {refused[1]}"
         )
 
 
@@ -830,6 +900,38 @@ def validate_indexed_surfaces(
                 )
 
 
+def gathered_surface_mounts(
+    knowledge_root: Path, config: dict[str, Any] | None
+) -> dict[str, tuple[Path, str | None]]:
+    """``{name: (root, store_id)}`` of the surfaces the index gather mount-checks.
+
+    Exactly the surfaces :func:`resolve_indexed_surfaces` tests for a mount
+    refusal: ``embedded: true``, outside ``wiki/``, present on disk. Run-start
+    reporting uses this so it never reports a surface the gather does not refuse.
+    """
+    wiki_resolved = (knowledge_root / "wiki").resolve()
+    out: dict[str, tuple[Path, str | None]] = {}
+    for name, adapter in available_adapters(config).items():
+        root = adapter.resolve_root(knowledge_root)
+        resolved = root.resolve()
+        if not adapter.corpus_policy.embedded:
+            continue
+        if resolved == wiki_resolved or wiki_resolved in resolved.parents:
+            continue
+        if root.is_dir():
+            out[name] = (root, adapter.store_id)
+    return out
+
+
+def _declared_unmounted(
+    name: str, root: Path, asserter: Mapping[str, Any] | None, store_id: str | None
+) -> bool:
+    """Whether the surface *name* is a declared store this install refuses to mount."""
+    from athenaeum.store_rights import declared_mount_state
+
+    return declared_mount_state(name, root, asserter, store_id).refusal is not None
+
+
 def resolve_indexed_surfaces(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -852,6 +954,12 @@ def resolve_indexed_surfaces(
     ALSO listed as an extra intake root), or two indexed roots share a prefix.
     The scan-time ``pii:`` flag filter stays as the second layer.
 
+    A surface that is a declared store on which this install does not hold read
+    (or whose adapter ``store_id`` differs from the declaration's) is left out
+    (access S4, athenaeum#2989), so it is neither indexed nor recalled; nothing
+    on disk is deleted. This is the one gather point for both the index build
+    and recall, so the two cannot disagree.
+
     *extra_roots* overrides the config's extra intake roots (callers that have
     already resolved them).
     """
@@ -861,6 +969,8 @@ def resolve_indexed_surfaces(
     wiki_resolved = wiki_root.resolve()
     indexed: list[IndexedSurface] = []
     non_indexed: dict[str, Path] = {}
+    unmounted: set[Path] = set()
+    asserter = resolve_owner_asserter(config)
     for name, adapter in available_adapters(config).items():
         root = adapter.resolve_root(knowledge_root)
         if adapter.corpus_policy.embedded:
@@ -870,6 +980,11 @@ def resolve_indexed_surfaces(
                 # listing them again would index them twice.
                 continue
             if root.is_dir():
+                # Access S4: a declared store this install cannot read is not
+                # mounted -- not indexed, so not recalled. Nothing is deleted.
+                if _declared_unmounted(name, root, asserter, adapter.store_id):
+                    unmounted.add(root.resolve())
+                    continue
                 indexed.append(IndexedSurface(prefix=name, root=root.resolve()))
         else:
             non_indexed[name] = root
@@ -880,6 +995,7 @@ def resolve_indexed_surfaces(
         IndexedSurface(prefix=r.name, root=r, intake=True)
         for r in extra_roots
         if r.resolve() not in already  # a surface also listed as an extra root
+        and r.resolve() not in unmounted  # ... or one this install does not mount
     )
     validate_indexed_surfaces(indexed, non_indexed, wiki_root=wiki_root)
     return indexed
