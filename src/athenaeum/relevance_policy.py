@@ -18,12 +18,17 @@ Rules are one markdown table, read top to bottom::
     | never   |      | personal | |
     | always  |      | personal/travel | |
 
-* ``Verdict`` — ``always`` or ``never``.
+* ``Verdict`` — ``always`` or ``never`` (capture), or ``route`` (destination).
 * ``Type`` / ``Tag`` — a value from the ``types.md`` / ``tags.md`` vocabulary
   (same fallbacks the librarian uses when those files are absent). Blank or
   ``-`` means "not constrained".
 * ``Subject`` — an optional entity uid the rule is scoped to. Blank or ``-``
   means any subject.
+
+* ``Store`` — an OPTIONAL fifth column (athenaeum#2796). Required on a
+  ``route`` row, blank on ``always`` / ``never``: the ``store_id`` the matching
+  facts should go to, or the reserved word ``personal``. Never an adapter
+  name. A table without the column is valid and has no routes.
 
 A rule needs at least one of Type / Tag / Subject. When a rule names several
 keys it matches only when ALL of them match. A rule's Tag also matches the
@@ -35,6 +40,13 @@ first and its exceptions after it, so the example above resolves a
 ``never``. A fact no rule matches resolves to ``None`` (no policy; default
 behaviour). When a fact carries several tags, each rule is tested against all
 of them, so file order — not tag order — decides.
+
+Two questions, one table (athenaeum#2796). Capture — :meth:`RelevancePolicy.match`
+and :meth:`~RelevancePolicy.resolve` — is the last matching ``always`` /
+``never`` row and ignores ``route`` rows. Destination —
+:meth:`RelevancePolicy.match_route` — is the last matching ``route`` row and
+ignores the others. Neither kind of row affects the other's answer, so
+``never`` beats ``route``. Nothing acts on a ``route`` row yet.
 
 Validation failures (unknown verdict, unknown type or tag, empty rule) raise
 :class:`RelevancePolicyError` naming each offending rule by its number and
@@ -79,19 +91,31 @@ import yaml
 
 from athenaeum.models import load_schema_list, parse_frontmatter
 from athenaeum.schemas import KNOWN_TYPES
+from athenaeum.store_access import is_store_id
 
 #: Filename under ``wiki/_schema/``.
 POLICY_FILENAME = "relevance-policy.md"
 
 #: The verdicts this slice accepts. ``restrict`` (per-audience) is deferred to
-#: the store access model (athenaeum#2623).
-VERDICTS: frozenset[str] = frozenset({"always", "never"})
+#: the store access model (athenaeum#2623). ``route`` (athenaeum#2796) names a
+#: destination and takes no part in the capture question.
+VERDICTS: frozenset[str] = frozenset({"always", "never", "route"})
+
+#: The verdicts that answer the capture question.
+CAPTURE_VERDICTS: frozenset[str] = frozenset({"always", "never"})
+
+#: The verdict that answers the destination question.
+ROUTE_VERDICT = "route"
+
+#: Reserved ``Store`` value: the install owner's own store.
+PERSONAL_STORE = "personal"
 
 # Mirrors ``librarian.FALLBACK_TAGS`` (kept local: this module is below the
 # librarian in the layering and must not import it).
 _FALLBACK_TAGS = ("active", "archived", "blocked")
 
 _HEADER = ("verdict", "type", "tag", "subject")
+_HEADER_WITH_STORE = (*_HEADER, "store")
 
 
 class RelevancePolicyError(ValueError):
@@ -108,6 +132,9 @@ class RelevanceRule:
     type: str | None = None
     tag: str | None = None
     subject: str | None = None
+    #: Destination of a ``route`` row (a ``store_id`` or ``personal``); ``None``
+    #: on every other row. A result, never a match key.
+    store: str | None = None
 
     def matches(
         self, type_: str | None, tags: "list[str] | tuple[str, ...]", subject: str | None
@@ -131,6 +158,7 @@ class RelevanceRule:
             "type": self.type,
             "tag": self.tag,
             "subject": self.subject,
+            "store": self.store,
         }
 
     def describe(self) -> str:
@@ -139,6 +167,8 @@ class RelevanceRule:
             for k, v in (("type", self.type), ("tag", self.tag), ("subject", self.subject))
             if v is not None
         ]
+        if self.store is not None:
+            keys.append(f"store={self.store}")
         return f"{self.verdict} {' '.join(keys)}"
 
 
@@ -165,16 +195,39 @@ class RelevancePolicy:
         tags: "list[str] | tuple[str, ...]" = (),
         subject: str | None = None,
     ) -> RelevanceRule | None:
-        """The LAST matching rule itself (what decided the verdict), or ``None``."""
+        """The LAST matching ``always`` / ``never`` rule itself, or ``None``.
+
+        The capture question: ``route`` rows are skipped, so a ``route`` row
+        after a ``never`` row cannot shadow it (athenaeum#2796).
+        """
         for rule in reversed(self.rules):
-            if rule.matches(type_, tags, subject):
+            if rule.verdict in CAPTURE_VERDICTS and rule.matches(type_, tags, subject):
+                return rule
+        return None
+
+    def match_route(
+        self,
+        type_: str | None = None,
+        tags: "list[str] | tuple[str, ...]" = (),
+        subject: str | None = None,
+    ) -> RelevanceRule | None:
+        """The LAST matching ``route`` rule, or ``None``.
+
+        The destination question; ``always`` / ``never`` rows are skipped.
+        """
+        for rule in reversed(self.rules):
+            if rule.verdict == ROUTE_VERDICT and rule.matches(type_, tags, subject):
                 return rule
         return None
 
     def canonical_hash(self) -> str:
         """sha256 of the effective rules (file order), blind to comments/whitespace."""
         payload = json.dumps(
-            [[r.verdict, r.type, r.tag, r.subject] for r in self.rules],
+            [
+                [r.verdict, r.type, r.tag, r.subject]
+                + ([r.store] if r.verdict == ROUTE_VERDICT else [])
+                for r in self.rules
+            ],
             separators=(",", ":"),
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -193,15 +246,39 @@ def _cell(raw: str) -> str | None:
     return None if value in ("", "-") else value
 
 
+def _store_problem(
+    store: str, valid_stores: "set[str] | frozenset[str] | None"
+) -> str | None:
+    """Why a ``Store`` value is unusable, or ``None`` when it is fine."""
+    if store == PERSONAL_STORE:
+        return None
+    if not is_store_id(store):
+        return (
+            f"Store {store!r} is neither 'personal' nor shaped like a store_id "
+            "('st_' plus 12 lowercase base32 characters); an adapter name is not a Store"
+        )
+    if valid_stores is not None and store not in valid_stores:
+        return f"Store {store!r} is not a store this install maps"
+    return None
+
+
 def parse_relevance_policy(
     text: str,
     valid_types: "set[str] | frozenset[str]",
     valid_tags: "set[str] | frozenset[str]",
+    valid_stores: "set[str] | frozenset[str] | None" = None,
 ) -> RelevancePolicy:
-    """Parse and validate policy text. Raises :class:`RelevancePolicyError`."""
+    """Parse and validate policy text. Raises :class:`RelevancePolicyError`.
+
+    *valid_stores* is the set of ``store_id``s this install maps to a store,
+    resolved by the caller (this module stays below the storage layer). A
+    ``Store`` value is ``personal`` or a member of it. ``None`` (the caller has
+    no set) checks the ``store_id`` shape only.
+    """
     rules: list[RelevanceRule] = []
     errors: list[str] = []
     seen_header = False
+    has_store = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
         if not stripped.startswith("|"):
@@ -210,19 +287,25 @@ def parse_relevance_policy(
         if all(c and set(c) <= set("-: ") for c in cells):
             continue  # separator row
         if not seen_header:
-            if tuple(c.lower() for c in cells[: len(_HEADER)]) != _HEADER:
+            lowered = tuple(c.lower() for c in cells)
+            if lowered[: len(_HEADER)] != _HEADER or (
+                len(lowered) > len(_HEADER) and lowered != _HEADER_WITH_STORE
+            ):
                 errors.append(
                     f"line {lineno}: expected header row "
-                    f"'| Verdict | Type | Tag | Subject |', got {stripped!r}"
+                    f"'| Verdict | Type | Tag | Subject |' (optionally followed by "
+                    f"'| Store |'), got {stripped!r}"
                 )
                 break
+            has_store = len(lowered) == len(_HEADER_WITH_STORE)
             seen_header = True
             continue
-        cells += [""] * (len(_HEADER) - len(cells))
+        cells += [""] * (len(_HEADER_WITH_STORE) - len(cells))
         number = len(rules) + 1
         name = f"rule {number} (line {lineno})"
         verdict = (_cell(cells[0]) or "").lower()
         type_, tag, subject = _cell(cells[1]), _cell(cells[2]), _cell(cells[3])
+        store = _cell(cells[4]) if has_store else None
         if verdict not in VERDICTS:
             errors.append(
                 f"{name}: unknown verdict {verdict!r}; expected one of {sorted(VERDICTS)}"
@@ -233,7 +316,16 @@ def parse_relevance_policy(
             errors.append(f"{name}: unknown tag {tag!r} (not in tags.md vocabulary)")
         if type_ is None and tag is None and subject is None:
             errors.append(f"{name}: names no type, tag or subject")
-        rules.append(RelevanceRule(number, lineno, verdict, type_, tag, subject))
+        if verdict == ROUTE_VERDICT:
+            if store is None:
+                errors.append(f"{name}: a route rule needs a Store (a store_id or 'personal')")
+            else:
+                problem = _store_problem(store, valid_stores)
+                if problem:
+                    errors.append(f"{name}: {problem}")
+        elif store is not None and verdict in CAPTURE_VERDICTS:
+            errors.append(f"{name}: a {verdict} rule must leave Store blank, got {store!r}")
+        rules.append(RelevanceRule(number, lineno, verdict, type_, tag, subject, store))
     if errors:
         raise RelevancePolicyError(
             f"invalid {POLICY_FILENAME}: " + "; ".join(errors)
@@ -255,8 +347,12 @@ def policy_vocabulary(wiki_root: Path) -> tuple[set[str], set[str]]:
     return valid_types, valid_tags
 
 
-def load_relevance_policy(wiki_root: Path) -> RelevancePolicy:
+def load_relevance_policy(
+    wiki_root: Path, valid_stores: "set[str] | frozenset[str] | None" = None
+) -> RelevancePolicy:
     """Load ``<wiki_root>/_schema/relevance-policy.md``.
+
+    *valid_stores* is passed through to :func:`parse_relevance_policy`.
 
     A missing file returns the empty policy (``present=False``) — a complete
     no-op. A present-but-invalid file raises :class:`RelevancePolicyError`.
@@ -267,7 +363,7 @@ def load_relevance_policy(wiki_root: Path) -> RelevancePolicy:
         return RelevancePolicy()
     text = path.read_text(encoding="utf-8")
     valid_types, valid_tags = policy_vocabulary(wiki_root)
-    return parse_relevance_policy(text, valid_types, valid_tags)
+    return parse_relevance_policy(text, valid_types, valid_tags, valid_stores)
 
 
 def policy_hash_token(wiki_root: Path) -> str | None:
@@ -483,6 +579,8 @@ def policy_categories(policy: RelevancePolicy | None) -> list[str]:
     """
     seen: list[str] = []
     for rule in policy.rules if policy is not None else ():
+        if rule.verdict == ROUTE_VERDICT:
+            continue  # athenaeum#2796: route tags join the category list in a later slice
         if rule.tag is not None and rule.tag not in seen:
             seen.append(rule.tag)
     return seen

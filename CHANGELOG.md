@@ -49,6 +49,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   command and calls no model, and nothing calls it yet. The section and list
   helpers it shares with the structured upsert moved to `athenaeum.page_text`
   (athenaeum#2773).
+- The relevance policy table gains an optional `Store` column and a `route`
+  verdict. A `route` row names a `store_id` or `personal`; `RelevancePolicy.match_route`
+  answers the destination question, and `match` / `resolve` still consider only
+  `always` and `never` rows, so `never` beats `route` and capture is unchanged.
+  The hash, read-back, `relevance_policy` tool and `set_capture_rule` (new
+  `store` argument) carry the store. Nothing acts on a `route` row yet
+  (athenaeum#2625).
 
 ### Changed
 
