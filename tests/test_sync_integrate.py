@@ -504,3 +504,28 @@ def test_a_contended_push_is_reported_and_fires_the_push_failed_warning(
     fields = state.as_profile_fields()
     assert fields["reason"] == "failed" and "pages:push=contended" in str(fields["failed_why"])
     assert "athenaeum-push-failed" in caplog.text
+
+
+def test_integrate_uses_the_configured_push_remote(tmp_path: Path) -> None:
+    # Review on PR athenaeum#2983: integrate mode honours ``librarian.push_remote``
+    # exactly as the fast-forward sync does, instead of assuming ``origin``.
+    h, kr, cfg = _wired(tmp_path, declaration_text(), None)
+    git(h.second.root, "remote", "rename", "origin", "upstream")
+    cfg["librarian"] = {"push_remote": "upstream"}
+    plans = [p for p in sync_integrate.plan_repo_syncs(kr, cfg) if p.decision.integrate]
+    assert [p.settings.remote for p in plans] == ["upstream"]
+    mine = _diverge(h)
+    state = _run_second(kr, cfg)
+    assert len(parents(h.second)) == 2 and parents(h.second)[0] == mine
+    assert h.remote_tip() == h.second.head()
+    rows = {(r["surface"], r["op"]): r["outcome"] for r in state.results}
+    assert rows[("pages", "push")] == "ok"
+
+
+def test_a_surface_repository_keeps_its_own_branch_not_librarian_push_branch(
+    tmp_path: Path,
+) -> None:
+    h, kr, cfg = _wired(tmp_path, declaration_text(), None)
+    cfg["librarian"] = {"push_branch": "elsewhere"}
+    plans = [p for p in sync_integrate.plan_repo_syncs(kr, cfg) if p.decision.integrate]
+    assert [p.branch for p in plans] == [h.second.branch]

@@ -58,7 +58,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from athenaeum.config import StructuredUpsertSpec, resolve_structured_upsert
+from athenaeum.config import (
+    StructuredUpsertSpec,
+    resolve_push_branch,
+    resolve_push_remote,
+    resolve_structured_upsert,
+)
 from athenaeum.models import parse_frontmatter
 from athenaeum.page_merge import merge_page
 from athenaeum.record_merge import KIND_PENDING_MERGES, merge_derived, merge_records
@@ -751,6 +756,12 @@ def plan_repo_syncs(knowledge_root: Path, config: dict[str, Any] | None) -> list
     """
     store = open_store(config, knowledge_root)
     adapters = available_adapters(config)
+    # The same remote and branch the fast-forward sync uses (review on PR
+    # athenaeum#2983): ``librarian.push_remote`` for every repository, and
+    # ``librarian.push_branch`` for the knowledge repository only; a separate
+    # surface repository syncs its own checked-out branch.
+    remote = resolve_push_remote(config)
+    knowledge_branch = resolve_push_branch(config)
     read_only = store.read_only_surfaces()
     plans: list[RepoSyncPlan] = []
     for repo, surfaces in store.versioned_surface_repos().items():
@@ -782,9 +793,13 @@ def plan_repo_syncs(knowledge_root: Path, config: dict[str, Any] | None) -> list
             RepoSyncPlan(
                 repo=repo,
                 label=",".join(writable),
-                branch=current_branch(repo),
+                branch=(
+                    knowledge_branch
+                    if knowledge_branch and repo.resolve() == knowledge_root.resolve()
+                    else current_branch(repo)
+                ),
                 decision=decision,
-                settings=SyncSettings(page_roots=tuple(roots), config=config),
+                settings=SyncSettings(page_roots=tuple(roots), config=config, remote=remote),
             )
         )
     return plans
