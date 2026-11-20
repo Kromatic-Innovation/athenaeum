@@ -54,7 +54,7 @@ import random
 import subprocess
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -249,6 +249,9 @@ class IntegrateResult:
     held: tuple[HeldItem, ...] = ()
     pages_changed_both: tuple[str, ...] = ()
     reason: str = ""
+    #: The remote tip this integrate fetched (``None`` when the fetch failed): the
+    #: remote's value before a push that follows (athenaeum#2928).
+    remote_tip: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -263,6 +266,11 @@ class PushOutcome:
     attempts: int
     reason: str | None = None
     detail: str = ""
+    #: The remote tip as it stood just before the push that succeeded, and the commit
+    #: that push published. Both ``None`` unless the push succeeded and the tip was
+    #: known; the filing checks after a push read them (athenaeum#2928).
+    remote_before: str | None = None
+    pushed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,21 +350,35 @@ def push_after_compile(
     except subprocess.CalledProcessError:
         outcome = PushOutcome(False, 0, "other", "snapshot-failed")
     else:
-        outcome = _push_loop(repo, branch, cfg)
+        outcome = _push_loop(repo, branch, cfg, _remote_tip_or_none(repo, branch, cfg))
     if report is not None:
         report.push = outcome
         report.add("push", "ok" if outcome.ok else "failed", outcome.reason or "")
     return outcome
 
 
-def _push_loop(repo: Path, branch: str, cfg: SyncSettings) -> PushOutcome:
+def _remote_tip_or_none(repo: Path, branch: str, cfg: SyncSettings) -> str | None:
+    """The remote tip right now, for the filing checks; ``None`` on any failure.
+
+    The fetch adds objects only. A failure here never stops the push: without the
+    tip the checks after it simply do not run.
+    """
+    try:
+        return fetch_remote_branch(repo, branch, cfg.remote)
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _push_loop(
+    repo: Path, branch: str, cfg: SyncSettings, remote_before: str | None = None
+) -> PushOutcome:
     attempts = 0
     detail = ""
     while attempts < max(1, cfg.max_attempts):
         attempts += 1
         result: PushResult = push_branch(repo, branch, cfg.remote)
         if result.ok:
-            return PushOutcome(True, attempts)
+            return PushOutcome(True, attempts, remote_before=remote_before, pushed=repo_head(repo))
         detail = result.detail
         if result.reason is not PushFailureReason.REJECTED_REMOTE_MOVED:
             return PushOutcome(False, attempts, "other", detail)
@@ -370,6 +392,7 @@ def _push_loop(repo: Path, branch: str, cfg: SyncSettings) -> PushOutcome:
         merged = integrate_remote(repo, branch, cfg)
         if not merged.ok:
             return PushOutcome(False, attempts, REASON_INTEGRATE_BLOCKED, merged.reason)
+        remote_before = merged.remote_tip
     return PushOutcome(False, attempts, REASON_CONTENDED, detail)
 
 
@@ -388,6 +411,10 @@ def integrate_remote(
     except subprocess.CalledProcessError as exc:
         log.warning("athenaeum sync: fetch failed in %s: %s", repo, exc)
         return IntegrateResult("failed", reason=BLOCK_FETCH)
+    return replace(_integrate_at(repo, branch, tip, cfg), remote_tip=tip)
+
+
+def _integrate_at(repo: Path, branch: str, tip: str, cfg: SyncSettings) -> IntegrateResult:
     local = repo_head(repo)
     if local is None:
         return IntegrateResult("failed", reason="no-local-commit")
