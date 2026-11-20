@@ -1100,7 +1100,8 @@ def relevance_policy_edit_to_decision(rec: dict) -> dict:
 
     A ``type: "relevance-policy-edit"`` item: a remote (``--transport http``)
     client asked to add one ``always`` / ``never`` capture rule to the
-    relevance policy (:mod:`athenaeum.relevance_policy_edit`). Approving it
+    relevance policy (:mod:`athenaeum.relevance_policy_edit`; a ``route``
+    rule, athenaeum#2796, names a ``store``). Approving it
     appends the rule to ``wiki/_schema/relevance-policy.md`` with an audit
     record; rejecting it leaves the policy unchanged. ``confidence`` is
     ``None`` -- a client request, not a detector score.
@@ -1111,6 +1112,8 @@ def relevance_policy_edit_to_decision(rec: dict) -> dict:
     )
     verdict = rule.get("verdict", "")
     effect = "always capture" if verdict == "always" else "never capture"
+    if verdict == "route":
+        effect = f"route to store {rule.get('store')}"
     summary = (
         f"A remote client asks to set the capture policy to {verdict} "
         f"({effect} facts matching {scope or 'nothing'}) -- approve to add the "

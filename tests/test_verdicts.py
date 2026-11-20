@@ -106,6 +106,29 @@ class TestContentHash:
         )
         assert content_hash(before) == content_hash(after)
 
+    def test_content_hash_excludes_raised_from_block(self) -> None:
+        """athenaeum#2799: the raised_from block, and its seq/watch, are not content."""
+        block = (
+            "raised_from:\n  v: 1\n  raise_id: rs_k3v9t2hq8m4xw7pd5n6b\n"
+            "  seq: 1\n  watch: {watch}\n"
+        )
+        a = "---\nname: alpha\n---\nsome claim text\n"
+        b = "---\nname: alpha\n" + block.format(watch="active") + "---\nsome claim text\n"
+        c = "---\nname: alpha\n" + block.format(watch="lapsed") + "---\nsome claim text\n"
+        assert content_hash(a) == content_hash(b) == content_hash(c)
+
+    def test_content_hash_still_sees_content_under_raised_from(self) -> None:
+        block = "raised_from:\n  v: 1\n"
+        a = "---\nname: alpha\n" + block + "---\nbody one\n"
+        b = "---\nname: alpha\n" + block + "---\nbody two\n"
+        assert content_hash(a) != content_hash(b)
+
+    def test_content_hash_pinned_for_page_without_raised_from(self) -> None:
+        page = "---\nname: alpha\ntype: feedback\n---\nsome claim text\n"
+        assert content_hash(page) == (
+            "5a08ad7389f6519453d2e3a2b42179612ead8ab2667e0215a841b0b6a461d5c5"
+        )
+
     def test_content_hash_changes_on_body_change(self) -> None:
         a = "---\nname: alpha\n---\nbody one\n"
         b = "---\nname: alpha\n---\nbody two\n"

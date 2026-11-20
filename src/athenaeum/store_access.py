@@ -23,8 +23,9 @@ role name. The only rights surface is :func:`declared_rights`, which maps a
 principal's identity key to the union of the rights of every role that lists
 them directly.
 
-**Versioning.** Only ``version: 1`` is understood. A new top-level key arrives
-only with a higher version, so a version-1 file carrying an unknown key
+**Versioning.** Versions 1 and 2 are understood; version 2 introduces the
+``intake`` block (a version-1 file carrying one is invalid). A new top-level key
+arrives only with a higher version, so a file carrying an unknown key
 (``sync_mod``, the old ``grants``, a bare ``sync_mode``) is invalid, as is any
 other version. An install treats an invalid store as read-only.
 """
@@ -55,6 +56,8 @@ __all__ = [
     "RawLocation",
     "Locations",
     "Review",
+    "IntakeRule",
+    "IntakePolicy",
     "declared_rights",
     "is_store_id",
     "load_store_declaration",
@@ -66,6 +69,12 @@ __all__ = [
 DECLARATION_RELPATH = "_store/access.yaml"
 
 SUPPORTED_VERSION = 1
+#: The declaration version that introduces the ``intake`` block. A version-1
+#: file may not carry one; an install that reads only version 1 treats a
+#: version-2 store as read-only (design note federation-intake-routing §7).
+INTAKE_VERSION = 2
+SUPPORTED_VERSIONS = (SUPPORTED_VERSION, INTAKE_VERSION)
+INTAKE_VERDICTS = ("accept", "refuse")
 RIGHTS = ("read", "propose", "compile", "answer")
 SYNC_MODES = ("fast_forward", "integrate")
 DEFAULT_DIRECTORY = "static"
@@ -77,7 +86,10 @@ _STORE_ID_LEN = 12
 _STORE_ID_RE = re.compile(rf"^st_[{STORE_ID_ALPHABET}]{{{_STORE_ID_LEN}}}$")
 
 _TOP_KEYS = frozenset(
-    {"version", "store_id", "directory", "groups", "roles", "sync", "locations", "reviews"}
+    {
+        "version", "store_id", "directory", "groups", "roles", "sync", "locations",
+        "reviews", "intake",
+    }
 )
 _PRINCIPAL_KEYS = frozenset({"iss", "sub", "provider_ids"})
 _REVIEW_KEYS = ("name", "source", "every", "criteria")
@@ -198,6 +210,27 @@ class Review:
 
 
 @dataclass(frozen=True)
+class IntakeRule:
+    """One ``intake.rules`` entry: a verdict and a ``type``, a ``tag`` or both.
+
+    There is no ``subject``: a subject is a page uid, and a proposer may not be
+    able to read the store's pages.
+    """
+
+    verdict: str
+    type: str | None = None
+    tag: str | None = None
+
+
+@dataclass(frozen=True)
+class IntakePolicy:
+    """The ``intake`` block. ``rules`` are ordered; the last match wins."""
+
+    default: str
+    rules: tuple[IntakeRule, ...] = ()
+
+
+@dataclass(frozen=True)
 class StoreDeclaration:
     """A declaration that validated in full."""
 
@@ -209,6 +242,8 @@ class StoreDeclaration:
     sync: SyncDeclaration
     locations: Locations
     reviews: tuple[Review, ...]
+    #: ``None`` when the declaration has no ``intake`` block.
+    intake: IntakePolicy | None = None
 
 
 # -- public readers ---------------------------------------------------------
@@ -271,6 +306,16 @@ def parse_store_declaration(text: str) -> StoreDeclaration | StoreDeclarationInv
 # -- validation -------------------------------------------------------------
 
 
+def version_ok_for_intake(version: object) -> bool:
+    """True when *version* is a supported version that carries ``intake``."""
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version in SUPPORTED_VERSIONS
+        and version >= INTAKE_VERSION
+    )
+
+
 def _nonempty_str(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
@@ -279,6 +324,16 @@ def _build(data: dict[Any, Any], problems: list[Problem]) -> StoreDeclaration | 
     for key in data:
         if not isinstance(key, str):
             problems.append(Problem(str(key), "top-level keys must be strings"))
+        elif key == "intake" and version_ok_for_intake(data.get("version")):
+            continue
+        elif key == "intake":
+            problems.append(
+                Problem(
+                    "intake",
+                    "the intake block arrives only with a higher version "
+                    f"(declaration version {INTAKE_VERSION}); an earlier version may not carry it",
+                )
+            )
         elif key not in _TOP_KEYS:
             problems.append(
                 Problem(
@@ -292,12 +347,14 @@ def _build(data: dict[Any, Any], problems: list[Problem]) -> StoreDeclaration | 
     version = data.get("version")
     if "version" not in data:
         problems.append(Problem("version", "is required"))
-    elif isinstance(version, bool) or version != SUPPORTED_VERSION:
+    elif type(version) is not int or version not in SUPPORTED_VERSIONS:
+        # ``type(...) is int``: a bool or a float such as ``1.0`` compares equal
+        # to a supported int but is not one.
         problems.append(
             Problem(
                 "version",
-                f"{version!r} is not supported (this install reads version "
-                f"{SUPPORTED_VERSION}); the store is read-only here",
+                f"{version!r} is not supported (this install reads versions "
+                f"{', '.join(map(str, SUPPORTED_VERSIONS))}); the store is read-only here",
             )
         )
 
@@ -322,12 +379,14 @@ def _build(data: dict[Any, Any], problems: list[Problem]) -> StoreDeclaration | 
     sync = _sync(data.get("sync", {}), problems)
     locations = _locations(data.get("locations", {}), problems)
     reviews = _reviews(data.get("reviews", []), problems)
+    intake = _intake(data["intake"], problems) if "intake" in data else None
 
     if problems:
         return None
     assert isinstance(store_id, str) and isinstance(directory, str)
+    assert isinstance(version, int)
     return StoreDeclaration(
-        version=SUPPORTED_VERSION,
+        version=version,
         store_id=store_id,
         directory=directory,
         groups=groups,
@@ -335,6 +394,7 @@ def _build(data: dict[Any, Any], problems: list[Problem]) -> StoreDeclaration | 
         sync=sync,
         locations=locations,
         reviews=reviews,
+        intake=intake,
     )
 
 
@@ -582,3 +642,66 @@ def _reviews(value: object, problems: list[Problem]) -> tuple[Review, ...]:
         if not bad:
             out.append(Review(**{k: entry[k] for k in _REVIEW_KEYS}))
     return tuple(out)
+
+
+def _intake(value: object, problems: list[Problem]) -> IntakePolicy | None:
+    if not isinstance(value, dict):
+        problems.append(Problem("intake", "must be a mapping {default, rules}"))
+        return None
+    start = len(problems)
+    for k in value:
+        if k not in ("default", "rules"):
+            problems.append(Problem(f"intake.{k}", f"unknown intake key {k!r}"))
+    default = value.get("default")
+    if not isinstance(default, str) or default not in INTAKE_VERDICTS:
+        problems.append(
+            Problem("intake.default", f"must be one of {', '.join(INTAKE_VERDICTS)}")
+        )
+    raw_rules = value.get("rules", [])
+    rules: list[IntakeRule] = []
+    if not isinstance(raw_rules, list):
+        problems.append(Problem("intake.rules", "must be an ordered list of rules"))
+    else:
+        for i, entry in enumerate(raw_rules):
+            rule = _intake_rule(entry, f"intake.rules[{i}]", problems)
+            if rule is not None:
+                rules.append(rule)
+    if len(problems) > start or not isinstance(default, str):
+        return None
+    return IntakePolicy(default=default, rules=tuple(rules))
+
+
+def _intake_rule(entry: object, key: str, problems: list[Problem]) -> IntakeRule | None:
+    if not isinstance(entry, dict):
+        problems.append(Problem(key, "must be a mapping {verdict, type, tag}"))
+        return None
+    start = len(problems)
+    for k in entry:
+        if k == "subject":
+            problems.append(
+                Problem(f"{key}.subject", "is not allowed: a subject is a page uid and a "
+                        "proposer may not be able to read the store's pages")
+            )
+        elif k not in ("verdict", "type", "tag"):
+            problems.append(Problem(f"{key}.{k}", f"unknown rule key {k!r}"))
+    verdict = entry.get("verdict")
+    if not isinstance(verdict, str) or verdict not in INTAKE_VERDICTS:
+        problems.append(
+            Problem(
+                f"{key}.verdict",
+                f"{verdict!r} is not a verdict; a store's intake rules only "
+                f"{' or '.join(INTAKE_VERDICTS)}",
+            )
+        )
+    keys: dict[str, str] = {}
+    for name in ("type", "tag"):
+        if name in entry:
+            if _nonempty_str(entry[name]):
+                keys[name] = entry[name].strip()
+            else:
+                problems.append(Problem(f"{key}.{name}", "must be a non-empty string"))
+    if "type" not in keys and "tag" not in keys and len(problems) == start:
+        problems.append(Problem(key, "must name a type, a tag or both"))
+    if len(problems) > start:
+        return None
+    return IntakeRule(verdict=str(verdict), type=keys.get("type"), tag=keys.get("tag"))

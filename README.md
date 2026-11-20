@@ -6,6 +6,10 @@
 
 **Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
+**Before you install:** `git` must be installed, and for compiling you need either
+`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI. Python 3.13+ is required
+(`--python 3.13` below lets `uv` fetch it if needed).
+
 ```bash
 uv tool install --python 3.13 'athenaeum[mcp]'
 ```
@@ -14,25 +18,18 @@ Then run `athenaeum init` and follow the [Quick start](#quick-start) below.
 
 ## Quick start
 
-**Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
-`PATH` setup `uv tool install` needs, and the wrong-interpreter warning to
-check against if `athenaeum --version` ever looks stale. `git` must be
-installed; no git identity is needed (`init` sets a repo-local one if you have none).
-Supported Python versions: 3.13 and newer, matching `requires-python`. Only the
-current release is supported; see the [support policy](docs/guides/install.md#support-policy).
+See [Install](docs/guides/install.md) for the `PATH` setup `uv tool install`
+needs, and the wrong-interpreter warning to check against if `athenaeum --version`
+ever looks stale. No git identity is needed (`init` sets a repo-local one if you have none).
+Only the current release is supported; see the [support policy](docs/guides/install.md#support-policy) and
+[what counts as stable](docs/guides/stability.md).
 Upgrading an existing install? See [Upgrading](docs/guides/upgrading.md).
 
-**Before the first compile** (`athenaeum run`, below) you need either
-`ANTHROPIC_API_KEY` set or a logged-in `claude` CLI.
-
-The `[mcp]` extra in the install command is required by `athenaeum serve` and
+The `[mcp]` extra in the install command above is required by `athenaeum serve` and
 `athenaeum test-mcp`.
 
 ```bash
-# Install (Python 3.13+; the [mcp] extra is needed for `serve` and `test-mcp`)
-uv tool install --python 3.13 'athenaeum[mcp]'
-# ...or, into an activated Python 3.13+ environment:
-pip install 'athenaeum[mcp]'
+# (Install first, as shown at the top of this page.)
 
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
@@ -44,6 +41,10 @@ claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 > **Extras:** `[mcp]` is all a fresh install needs. `[vector]` adds semantic search;
 > without it search falls back to `fts5` with a one-time warning, never a failure.
 > See [Install](docs/guides/install.md) for both extras.
+
+> **Troubleshooting `init`:** `athenaeum init` makes its seed commit with git
+> hooks disabled, so a global `core.hooksPath` commit hook (for example a
+> protected-branch guard) does not block it.
 
 Want to confirm it works before wiring anything up or spending API budget?
 

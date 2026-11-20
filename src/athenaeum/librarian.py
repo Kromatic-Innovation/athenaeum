@@ -12625,6 +12625,19 @@ def run(
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
+    # Issue athenaeum#2933: resolve the owner's declared store rights at run start
+    # and LOG them. Nothing acts on the result (access S3/S4 will); any failure
+    # is swallowed so a broken declaration cannot stop or change a run.
+    try:
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_rights import record_run_start_rights
+
+        record_run_start_rights(
+            (wiki_root, knowledge_root), resolve_owner_asserter(ctx.config)
+        )
+    except Exception:
+        log.warning("store rights: run-start resolution failed", exc_info=True)
+
     # Phase: git precondition + config resolution (provider, budgets,
     # retire/push/pull opt-ins) — any failure here is a clean run failure.
     _rc = _run_preconditions(ctx)
