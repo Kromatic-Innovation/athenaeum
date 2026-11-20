@@ -11096,7 +11096,8 @@ knowledge librarian.
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
 <!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.6...HEAD
+[0.27.6]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...v0.27.6
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.25.0...v0.26.0
