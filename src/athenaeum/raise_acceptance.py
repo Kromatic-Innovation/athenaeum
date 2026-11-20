@@ -48,7 +48,8 @@ Layering: L3 (service). Imports :mod:`athenaeum.raise_acceptance_ledger` (L3),
 :mod:`athenaeum.store_decisions`, :mod:`athenaeum.store_intake`,
 :mod:`athenaeum.store_rights`, :mod:`athenaeum.store_access`,
 :mod:`athenaeum.raise_messages`, :mod:`athenaeum.raise_projection`,
-:mod:`athenaeum.raise_provenance` (L2) and :mod:`athenaeum.models` (L1).
+:mod:`athenaeum.raise_provenance` (L2), :mod:`athenaeum.models` and
+:mod:`athenaeum.store` (L1).
 """
 
 from __future__ import annotations
@@ -97,6 +98,7 @@ from athenaeum.raise_provenance import (
     parse_raised_from,
     raise_source_ref,
 )
+from athenaeum.store import blob_id, commit_paths
 from athenaeum.store_access import (
     StoreDeclaration,
     StoreDeclarationInvalid,
@@ -453,39 +455,11 @@ def _message_dict(msg: RaiseMessage) -> dict[str, Any]:
 # -- step 2: accept ----------------------------------------------------------
 
 
-def _git(root: Path, *args: str) -> str:
-    out = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    )
-    return out.stdout.strip()
-
-
-def _repo_of(root: Path) -> Path | None:
-    try:
-        return Path(_git(root, "rev-parse", "--show-toplevel"))
-    except (subprocess.CalledProcessError, OSError):
-        return None
-
-
-def _blob_id(path: Path) -> str:
-    return _git(path.parent, "hash-object", "--", str(path))
-
-
 def _create_exclusive(path: Path, text: str) -> None:
     """Create *path* and fail rather than replace an existing file."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
-
-
-def _commit_copy(root: Path, path: Path, message: str) -> str | None:
-    """Commit only *path*; ``None`` when the store is not in a git repository."""
-    repo = _repo_of(root)
-    if repo is None:
-        return None
-    _git(repo, "add", "--", str(path))
-    _git(repo, "commit", "-m", message, "--only", "--", str(path))
-    return _git(repo, "rev-parse", "HEAD")
 
 
 def _find_decision(knowledge_root: Path, store_id: str, decision_id: str) -> dict:
@@ -626,9 +600,9 @@ def accept_raise(
             )
             return Outcome(HELD, "uid_taken", held, row, uid)
         try:
-            commit = _commit_copy(
+            commit = commit_paths(
                 Path(target_root),
-                path,
+                [path],
                 f"Accept a raised page ({uid})\n\n{commit_line(msg.raise_id, msg.seq)}\n",
             )
         except (subprocess.CalledProcessError, OSError):
@@ -647,7 +621,7 @@ def accept_raise(
         location=location,
         payload_hash=msg.content_hash,
         adjustment=adjustment,
-        blob_id=_blob_id(path),
+        blob_id=blob_id(path),
         now=now,
     )
     resolve_decision(
