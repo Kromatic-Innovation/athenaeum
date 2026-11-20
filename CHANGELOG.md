@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- The raise acceptance ledger (athenaeum#2938, slice S5 of the federation raise and retract design): `athenaeum.raise_acceptance_ledger` defines the row shape and parser for one disposition per raise message (accepted, rejected with a fixed reason code, or held), carrying ids, the proposer's identity, the arrival location, the time, the payload hash, any type and tags adjustment, the accepted blob id and, for a fact, the page uids written. Lookups answer whether a `raise_id` is rejected and which adjustment applies to later payloads. It is registered in `ARTIFACT_REGISTRY` as `raise-acceptance-ledger`, kept in the install's cache dir, holds no page text or source page identifier, and never enters the recall index.
 - A decision queue per store (`athenaeum.store_decisions`): a decision is filed
   with the one store whose page it would change, in that store's own local queue
   file. It quotes only that store's pages and records any other store's page by
@@ -1552,7 +1553,6 @@ collected here so an upgrader does not have to read the whole span.
   before this issue, pinned by `tests/test_transcript_receipts.py`. See
   `docs/design/conflict-resolution.md`'s "Durable transcript receipts"
   section for the full decision table and known limits.
-
 
 - **`_pii-allowlist.yml` supports domain-level `pattern` entries (issue
   athenaeum#2007).** Alongside the existing exact-`value`/`reason` entry,
@@ -9358,7 +9358,6 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   truth-value) whenever embeddings were returned, which had effectively broken
   vector-backend clustering; fixed on the read path (athenaeum#370).
 
-
 ## [0.14.0] - 2026-07-11
 
 ### Changed — behavior
@@ -9431,7 +9430,6 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   test double now reports an immediately-completing batch at create time, so the
   poll loop's real 30s sleep is skipped under test (suite runs in seconds, not
   ~60s/test); production poll cadence unchanged.
-
 
 ## [0.13.13] - 2026-07-06
 
