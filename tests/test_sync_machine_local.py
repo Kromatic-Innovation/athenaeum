@@ -122,3 +122,21 @@ def test_cli_registered(repo: Path) -> None:
     assert parser is not None
     ns = parser.parse_args(["machine-local-check", "--repo", str(repo)])
     assert ns.func is cmd_machine_local_check
+
+
+def test_non_utf8_tracked_filename_does_not_abort_the_check(repo: Path) -> None:
+    bad = repo.joinpath(b"caf\xe9.txt".decode("utf-8", errors="surrogateescape"))
+    bad.write_text("x")
+    _git(repo, "add", "--", bad.name)
+    assert find_tracked_machine_local(repo) == ("cache/zero_yield_state.json",)
+    report = sync_before_compile(repo, "main", SyncSettings())
+    row = next(s for s in report.steps if s.step == "machine-local-files")
+    assert row.outcome == "failed" and row.reason == "tracked=1"
+
+
+def test_cli_json_ok_is_false_when_a_check_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cmd_machine_local_check(_args(tmp_path, True)) == 1  # not a git repository
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and payload["repos"][0]["error"]
