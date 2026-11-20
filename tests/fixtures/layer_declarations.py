@@ -136,6 +136,7 @@ MODULE_LAYER: dict[str, int] = {
     "page_description": 2,
     "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
     "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
+    "record_merge": 4,  # athenaeum#2929: sibling of pending_merges (L4), whose parser it calls
     "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)

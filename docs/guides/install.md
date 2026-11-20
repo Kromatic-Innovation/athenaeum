@@ -357,17 +357,28 @@ the only way to find out is to notice that recall feels stale, or to run
 | Component | Supported range |
 |-----------|-----------------|
 | Python | 3.13 and newer (`requires-python = ">=3.13"`) |
-| `fastmcp` (`[mcp]` extra) | `>=3.4.3,<5.0` -- 3.4.3 is the first release that accepts `host_origin_protection`, which `athenaeum serve --transport http` needs |
+| `fastmcp` (`[mcp]` extra) | `>=4.0.0,<5.0` -- 4.0.0 is the oldest release that installs alongside `mcp` 2.x (the 3.x releases declare `mcp<2.0`) |
 | `mcp` (`[mcp]` extra) | `>=2.0,<3.0` |
-| `anthropic` | `>=0.39.0,<3.0` |
+| `anthropic` | `>=0.50.0,<3.0` -- older releases lack the `OverloadedError` class the retry layer classifies |
 
-These are the ranges the package metadata accepts. The tested set is
-`requirements-ci.txt` in the repository: CI installs it, so the exact
-versions pinned there are what the test suite runs against. One CI job also
-installs the package with no lock at all, which exercises the newest releases
-the ranges allow. Versions inside a range but older than the lock are not
-exercised; treat them as best effort. `anthropic` in particular spans many
-majors, and only the locked release and the newest one are tested.
+These are the ranges the package metadata accepts. CI tests these versions:
+
+- **The locked set.** `requirements-ci.txt` in the repository pins every
+  dependency, and the main test jobs install it, so those exact versions are
+  what the full suite runs against.
+- **The newest releases.** One CI job installs the package with no lock at
+  all, which exercises the newest releases the ranges allow.
+- **The floors.** A separate `floors` CI job installs the oldest releases the
+  ranges admit (`anthropic` 0.50.0, `fastmcp` 4.0.0, `mcp` 2.0.0) with
+  everything else at the lock, and runs the tests that touch those packages.
+  That job is advisory: a red result there means a floor should be raised, so
+  it is not part of the required merge gate.
+
+`requirements-ci.txt` governs CI installs only (it is applied with `-c`); a plain `pip install athenaeum` or `uv tool install athenaeum` resolves from the ranges in the package metadata, and no lockfile (`uv.lock` is git-ignored) is committed or used by CI, so the two can resolve different patch versions.
+
+Versions inside a range but between the floor and the lock are not exercised;
+treat them as best effort. `anthropic` in particular spans many majors, and
+only the floor, the locked release and the newest one are tested.
 
 ## Support policy
 

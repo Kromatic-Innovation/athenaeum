@@ -80,7 +80,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -1105,12 +1105,41 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     )
 
 
+def parse_pending_merges_text(text: str) -> list[PendingMerge]:
+    """Parse the TEXT of a ``_pending_merges.md`` into :class:`PendingMerge` objects.
+
+    The file-free half of :func:`parse_pending_merges`, for callers that already
+    hold the text (athenaeum#2929: the record merge reads two versions of the
+    file from a store and has no path to hand).
+    """
+    return [pm for b in _split_blocks(text) if (pm := _parse_block(b)) is not None]
+
+
+def unparsed_pending_merge_block_count(text: str) -> int:
+    """How many blocks in *text* :func:`parse_pending_merges_text` would skip.
+
+    A skipped block (malformed header, no checkbox) is silently absent from the
+    parsed list, so a caller that rewrites the file from the parsed list would
+    delete it. The record merge uses this count to refuse that.
+    """
+    return sum(1 for b in _split_blocks(text) if _parse_block(b) is None)
+
+
+def render_pending_merges(merges: Sequence[PendingMerge]) -> str:
+    """Render *merges* as the text of a ``_pending_merges.md``.
+
+    Each block is its parsed ``raw_block`` verbatim, under the ``# Pending
+    Merges`` header and joined with the ``---`` separator every writer in this
+    module uses, so a parse then render round-trips a block byte for byte.
+    """
+    return "\n\n---\n\n".join(["# Pending Merges", *(m.raw_block for m in merges)]) + "\n"
+
+
 def parse_pending_merges(merges_path: Path) -> list[PendingMerge]:
     """Parse ``_pending_merges.md`` into :class:`PendingMerge` objects."""
     if not merges_path.exists():
         return []
-    text = merges_path.read_text(encoding="utf-8")
-    return [pm for b in _split_blocks(text) if (pm := _parse_block(b)) is not None]
+    return parse_pending_merges_text(merges_path.read_text(encoding="utf-8"))
 
 
 def write_pending_merge(
