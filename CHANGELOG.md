@@ -27,6 +27,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.store` gains the read side of the multi-writer sync seam: fetch a
+  remote branch, find the common ancestor of two revisions, read a file at a
+  revision, list paths changed between two revisions, and detect rewritten
+  remote history. Read-only; pull and push are unchanged (athenaeum#2930).
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is
   refused), pins `raise:<raise_id>` as a typed source, and backs a new
