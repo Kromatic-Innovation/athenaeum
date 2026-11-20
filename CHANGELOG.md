@@ -25,6 +25,8 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-20
+
 ### Changed
 
 - A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
@@ -11089,7 +11091,8 @@ knowledge librarian.
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
 <!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...v0.28.0
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.25.0...v0.26.0
