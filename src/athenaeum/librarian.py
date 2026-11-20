@@ -305,6 +305,7 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -761,6 +762,13 @@ class SurfaceSyncState:
         ]
         if why:
             fields["failed_why"] = ",".join(why)
+        unmounted = [
+            f"{r['surface']}={r['reason']}"
+            for r in self.results
+            if r["op"] == "mount" and r["outcome"] == "skipped" and r.get("reason")
+        ]
+        if unmounted:
+            fields["unmounted"] = ",".join(unmounted)
         reminted = sum(int(r["reason"]) for r in self.results if r["op"] == "uid-reminted")
         if reminted:
             fields["uid_reminted"] = reminted
@@ -1281,6 +1289,9 @@ def git_push(
         text=True,
     )
     _push_cache_dir = _resolve_cache_dir(None)
+    record_push(
+        knowledge_root, remote, result.returncode == 0, result.stderr or result.stdout or ""
+    )
     if result.returncode != 0:
         reason = (
             result.stderr or result.stdout or ""
@@ -1344,6 +1355,7 @@ def git_pull(
         capture_output=True,
         text=True,
     )
+    record_fetch(knowledge_root, remote, result.returncode == 0)
     if result.returncode != 0:
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which
@@ -12860,16 +12872,36 @@ def run(
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
-    # Issue athenaeum#2933: resolve the owner's declared store rights at run start
-    # and LOG them. Nothing acts on the result (access S3/S4 will); any failure
-    # is swallowed so a broken declaration cannot stop or change a run.
+    # Issue athenaeum#2933 / athenaeum#2988: resolve the owner's declared store
+    # rights once, at run start, for every configured surface. They are logged
+    # and held for the write guard (access S3); any failure is swallowed so a
+    # broken declaration cannot stop a run (the guard holds it as reader only).
     try:
         from athenaeum.config import resolve_owner_asserter
+        from athenaeum.storage import available_adapters, gathered_surface_mounts
         from athenaeum.store_rights import record_run_start_rights
 
         record_run_start_rights(
-            (wiki_root, knowledge_root), resolve_owner_asserter(ctx.config)
+            (
+                wiki_root,
+                knowledge_root,
+                *(
+                    a.resolve_root(knowledge_root)
+                    for a in available_adapters(ctx.config).values()
+                ),
+            ),
+            resolve_owner_asserter(ctx.config),
         )
+        # Issue athenaeum#2989 (access S4): a declared store this install cannot
+        # read is not mounted. Report it per store in the run summary and the log.
+        from athenaeum.store_rights import run_start_mounts
+
+        for _name, _state in run_start_mounts(
+            gathered_surface_mounts(knowledge_root, ctx.config),
+            resolve_owner_asserter(ctx.config),
+        ).items():
+            if _state.refusal:
+                ctx.surface_sync.record((_name,), "mount", "skipped", _state.refusal)
     except Exception:
         log.warning("store rights: run-start resolution failed", exc_info=True)
 

@@ -532,3 +532,26 @@ def test_a_surface_repository_keeps_its_own_branch_not_librarian_push_branch(
     cfg["librarian"] = {"push_branch": "elsewhere"}
     plans = [p for p in sync_integrate.plan_repo_syncs(kr, cfg) if p.decision.integrate]
     assert [p.branch for p in plans] == [h.second.branch]
+
+
+def test_sync_records_fetch_and_push_evidence(tmp_path: Path) -> None:
+    """athenaeum#2991: the fetch and push outcome land in the machine-local evidence file."""
+    import subprocess
+
+    from athenaeum import store_access_evidence as evidence
+
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "a.md").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+    nope = str(tmp_path / "nope.git")
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", nope], check=True)
+    from athenaeum.sync_integrate import push_after_compile, sync_before_compile
+
+    sync_before_compile(repo, "main")
+    push_after_compile(repo, "main")
+    entry = evidence.load_evidence()[evidence.location_key(repo)]
+    assert entry["fetch"]["ok"] is False and entry["push"]["ok"] is False
+    assert entry["remote"] == "origin"
