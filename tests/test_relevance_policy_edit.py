@@ -29,7 +29,10 @@ from athenaeum.relevance_policy_edit import (
     read_audit,
 )
 
-TAGS = "| Tag | U |\n|---|---|\n| active | x |\n| personal | x |\n| personal/travel | x |\n"
+TAGS = (
+    "| Tag | U |\n|---|---|\n| active | x |\n| personal | x |\n"
+    "| personal/travel | x |\n| hr | x |\n"
+)
 TYPES = "| Type | D |\n|---|---|\n| person | x |\n| preference | x |\n"
 EXISTING = (
     "# Relevance policy\n\nOperator note kept verbatim.\n\n"
@@ -145,12 +148,13 @@ class TestAudit:
             "type": None,
             "tag": "personal/travel",
             "subject": None,
+            "store": None,
         }
-        assert rec["before"]["rules"] == [["never", None, "personal", None]]
+        assert rec["before"]["rules"] == [["never", None, "personal", None, None]]
         assert rec["before"]["hash"] == before
         assert rec["after"]["rules"] == [
-            ["never", None, "personal", None],
-            ["always", None, "personal/travel", None],
+            ["never", None, "personal", None, None],
+            ["always", None, "personal/travel", None, None],
         ]
         assert rec["after"]["hash"] == load_relevance_policy(kb / "wiki").canonical_hash()[:8]
         assert rec["proposal_id"] is None
@@ -267,3 +271,123 @@ class TestRemoteProposal:
         assert [o.applied for o in report.outcomes] == [False]
         assert report.outcomes[0].error_code == "invalid_rule"
         assert not _policy_file(kb).exists()
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2796: ``route`` rules carry a store
+# ---------------------------------------------------------------------------
+
+STORE = "st_h4r5n2kd6wq3"
+
+
+class TestRouteRule:
+    def test_stdio_appends_widens_header_and_audits_the_store(self, kb: Path) -> None:
+        _policy_file(kb).write_text(EXISTING)
+        before_lines = _policy_file(kb).read_text().splitlines()
+        server = _server(kb)
+        args = {"verdict": "route", "tag": "hr", "store": STORE}
+        out = _call(server, "set_capture_rule", **args)
+        assert out["ok"] and out["mode"] == "applied" and out["changed"] is True
+        assert out["rule"]["store"] == STORE
+        lines = _policy_file(kb).read_text().splitlines()
+        header = next(i for i, ln in enumerate(lines) if ln.startswith("| Verdict"))
+        assert lines[header] == "| Verdict | Type | Tag | Subject | Store |"
+        assert lines[header + 1].endswith("-------|")
+        # Every existing rule row and the operator's prose keep their bytes.
+        rule_row = "| never | | personal | |"
+        assert rule_row in lines
+        assert [ln for ln in lines if ln not in (lines[header], lines[header + 1])][:-1] == [
+            ln for ln in before_lines if not ln.startswith(("| Verdict", "|---"))
+        ]
+        assert lines[-1] == f"| route |  | hr |  | {STORE} |"
+        policy = load_relevance_policy(kb / "wiki")
+        assert policy.match_route(tags=["hr"]).store == STORE
+        assert policy.resolve(tags=["personal"]) == "never"
+        (rec,) = read_audit(kb / "wiki")
+        assert rec["rule"]["store"] == STORE
+        assert rec["after"]["rules"][-1] == ["route", None, "hr", None, STORE]
+        again = _call(server, "set_capture_rule", **args)
+        assert again["ok"] and again["changed"] is False
+        assert len(read_audit(kb / "wiki")) == 1
+
+    def test_stdio_creates_a_five_column_table_when_there_is_no_file(self, kb: Path) -> None:
+        _call(_server(kb), "set_capture_rule", verdict="route", tag="hr", store="personal")
+        first = _policy_file(kb).read_text().splitlines()[0]
+        assert first == "| Verdict | Type | Tag | Subject | Store |"
+
+    def test_http_files_a_proposal_with_the_store_and_approval_applies_it(
+        self, kb: Path
+    ) -> None:
+        _policy_file(kb).write_text(EXISTING)
+        original = _policy_file(kb).read_text()
+        out = _call(
+            _server(kb, transport="http"),
+            "set_capture_rule",
+            verdict="route",
+            tag="hr",
+            store=STORE,
+        )
+        assert out["ok"] and out["mode"] == "proposed" and out["rule"]["store"] == STORE
+        assert _policy_file(kb).read_text() == original
+        (pending,) = list_pending_proposals(kb / "wiki")
+        assert pending["rule"]["store"] == STORE
+        assert pending["rule_key"] == ["route", None, "hr", None, STORE]
+        (item,) = [
+            d for d in list_pending_decisions(kb / "wiki") if d["type"] == "relevance-policy-edit"
+        ]
+        assert f"route to store {STORE}" in item["summary"]
+        write_decision_answer(
+            kb / "raw",
+            decision_id=out["proposal_id"],
+            decision_type="relevance-policy-edit",
+            verdict="approve",
+            wiki_root=kb / "wiki",
+        )
+        report = apply_decision_answers(kb / "wiki", kb / "raw")
+        assert [o.applied for o in report.outcomes] == [True], report.outcomes
+        assert load_relevance_policy(kb / "wiki").match_route(tags=["hr"]).store == STORE
+        (rec,) = read_audit(kb / "wiki")
+        assert rec["rule"]["store"] == STORE and rec["proposal_id"] == out["proposal_id"]
+
+    def test_bad_input_is_rejected_without_writing(self, kb: Path) -> None:
+        _policy_file(kb).write_text(EXISTING)
+        server = _server(kb)
+        for kwargs in (
+            {"verdict": "route", "tag": "hr"},
+            {"verdict": "never", "tag": "personal", "store": STORE},
+            {"verdict": "route", "tag": "hr", "store": "hr"},  # an adapter name
+        ):
+            out = _call(server, "set_capture_rule", **kwargs)
+            assert out["ok"] is False and out["error_code"] == "invalid_rule", kwargs
+        assert _policy_file(kb).read_text() == EXISTING
+        assert read_audit(kb / "wiki") == []
+        http = _call(
+            _server(kb, transport="http"), "set_capture_rule", verdict="route", tag="hr"
+        )
+        assert http["error_code"] == "invalid_rule"
+        assert list_pending_proposals(kb / "wiki") == []
+
+
+class TestRouteRuleOverStrayCells:
+    """Seer review on athenaeum#2959: widening must not turn a stray cell into a Store."""
+
+    STRAY = (
+        "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n"
+        "| never | | personal | | old note |\n"
+    )
+
+    def test_widening_is_refused_clearly_and_nothing_is_written(self, kb: Path) -> None:
+        _policy_file(kb).write_text(self.STRAY)
+        assert load_relevance_policy(kb / "wiki").resolve(tags=["personal"]) == "never"
+        out = _call(_server(kb), "set_capture_rule", verdict="route", tag="hr", store=STORE)
+        assert out["ok"] is False and out["error_code"] == "invalid_rule"
+        assert "line 3" in out["message"] and "old note" in out["message"]
+        assert "must leave Store blank" not in out["message"]
+        assert _policy_file(kb).read_text() == self.STRAY
+        assert read_audit(kb / "wiki") == []
+
+    def test_a_non_route_edit_over_stray_cells_is_unaffected(self, kb: Path) -> None:
+        _policy_file(kb).write_text(self.STRAY)
+        out = _call(_server(kb), "set_capture_rule", verdict="always", tag="personal/travel")
+        assert out["ok"] is True
+        assert _policy_file(kb).read_text().startswith(self.STRAY)
