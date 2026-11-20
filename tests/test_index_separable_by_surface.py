@@ -296,3 +296,40 @@ def test_real_chromadb_build_list_remove(corpus: dict[str, Path]) -> None:
     # next incremental build restores the still-mounted surface
     backend.build_index(corpus["wiki"], cache, extra_roots=[corpus["notes"], corpus["shared"]])
     assert backend.list_surface(cache, "notes") == ["notes/alice.md", "notes/only-notes.md"]
+
+
+def test_fts5_remove_surface_on_unmigrated_v6_index(corpus: dict[str, Path]) -> None:
+    cache = corpus["cache"]
+    cache.mkdir(parents=True)
+    conn = sqlite3.connect(str(cache / _DB_NAME))
+    conn.execute(
+        "CREATE VIRTUAL TABLE wiki USING fts5(filename, name, tags, aliases, "
+        "description, body, audience UNINDEXED, type UNINDEXED, "
+        'tokenize="porter unicode61")'
+    )
+    conn.execute("PRAGMA user_version = 6")
+    for fn in ("alice.md", "notes/alice.md", "notes/b.md", "shared/alice.md"):
+        conn.execute(
+            "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)", (fn, "n", "", "", "", "b", "|", "")
+        )
+    conn.commit()
+    conn.close()
+    backend = FTS5Backend()
+    assert backend.remove_surface(cache, "notes") == 2
+    conn = sqlite3.connect(str(cache / _DB_NAME))
+    left = sorted(r[0] for r in conn.execute("SELECT filename FROM wiki"))
+    conn.close()
+    assert left == ["alice.md", "shared/alice.md"]
+
+
+def test_vector_remove_surface_raises_and_keeps_manifest_when_open_fails(
+    corpus: dict[str, Path], fake_chromadb: _FakeCollection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = corpus["cache"]
+    (cache / _VECTOR_DIR).mkdir(parents=True)
+    manifest = json.dumps({"version": 3, "hashes": {"notes/alice.md": "b"}})
+    (cache / _VECTOR_MANIFEST).write_text(manifest)
+    monkeypatch.setattr(VectorBackend, "_open_collection", lambda self, c: None)
+    with pytest.raises(RuntimeError, match="not removed"):
+        VectorBackend().remove_surface(cache, "notes")
+    assert (cache / _VECTOR_MANIFEST).read_text() == manifest
