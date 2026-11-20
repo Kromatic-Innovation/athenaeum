@@ -259,8 +259,8 @@ For each raise the raiser appends one row to its raise ledger:
 
 ```json
 {"v": 1, "raise_id": "rs_k3v9t2hq8m4xw7pd5n6b", "seq": 1,
- "origin": "st_f2n8rb5hjc3t", "source_uid": "5e1d09c3a7b24f86",
- "target": "st_q7m2xk4vwz9d", "route": "proposer",
+ "origin": "st_f2n6rb5hjc3t", "source_uid": "5e1d09c3a7b24f86",
+ "target": "st_q7m2xk4vwz5d", "route": "proposer",
  "content_hash": "sha256:…", "sent_at": "2026-11-18T09:30:00Z",
  "state": "sent"}
 ```
@@ -459,7 +459,7 @@ sources: ["raise:rs_k3v9t2hq8m4xw7pd5n6b"]
 raised_from:
   v: 1                          # the version of this block
   raise_id: rs_k3v9t2hq8m4xw7pd5n6b
-  origin: st_f2n8rb5hjc3t
+  origin: st_f2n6rb5hjc3t
   proposer: "group:department-heads"
   via: proposer                 # proposer | review:<name>
   content_hash: "sha256:…"
@@ -553,7 +553,7 @@ key or file-name rule of its own.
 
 ```jsonl
 {"record":"batch","schema_version":1,"submitter":"raise","batch_id":"20261118T093000Z-9f3ac1d2","created_at":"2026-11-18T09:30:00Z"}
-{"record":"raise","raise_id":"rs_k3v9t2hq8m4xw7pd5n6b","seq":1,"message_id":"rm_7d2c9w4kq8t3h6vx5pnb","origin":"st_f2n8rb5hjc3t","target":"st_q7m2xk4vwz9d","proposer":{"iss":"https://git.example.net","sub":"1203"},"via":"proposer","sent_at":"2026-11-18T09:30:00Z","content_hash":"sha256:…","page":{"type":"principle","name":"Year-end PTO usage report","description":"Every employee files a PTO usage report by 31 December.","aliases":[],"tags":["policy"],"access":"open"},"body":"Every employee files a PTO usage report by 31 December. …"}
+{"record":"raise","raise_id":"rs_k3v9t2hq8m4xw7pd5n6b","seq":1,"message_id":"rm_7d2c9w4kq8t3h6vx5pnb","origin":"st_f2n6rb5hjc3t","target":"st_q7m2xk4vwz5d","proposer":{"iss":"https://git.example.net","sub":"1203"},"via":"proposer","sent_at":"2026-11-18T09:30:00Z","content_hash":"sha256:…","page":{"type":"principle","name":"Year-end PTO usage report","description":"Every employee files a PTO usage report by 31 December.","aliases":[],"tags":["policy"],"access":"open"},"body":"Every employee files a PTO usage report by 31 December. …"}
 ```
 
 | `record` | Carries | Meaning |
@@ -675,7 +675,7 @@ personal facts. Raising that page would send all of them.
 
 ```jsonl
 {"record":"batch","schema_version":1,"submitter":"raise","batch_id":"20261118T100500Z-4b7e21c9","created_at":"2026-11-18T10:05:00Z"}
-{"record":"propose-fact","raise_id":"rs_p8d3m6wq2t9hx4vk7c5n","seq":1,"message_id":"rm_4h8t2k9wq6d3x7vp5cnb","origin":"st_b6t3kd9wq2mx","target":"st_q7m2xk4vwz9d","proposer":{"iss":"https://git.example.net","sub":"1318"},"via":"intake","sent_at":"2026-11-18T10:05:00Z","content_hash":"sha256:…","fact":{"type":"person","tags":["hr"]},"body":"Sam Ortega moves to the Leeds office on 1 December."}
+{"record":"propose-fact","raise_id":"rs_p8d3m6wq2t9hx4vk7c5n","seq":1,"message_id":"rm_4h8t2k9wq6d3x7vp5cnb","origin":"st_b6t3kd5wq2mx","target":"st_q7m2xk4vwz5d","proposer":{"iss":"https://git.example.net","sub":"1318"},"via":"intake","sent_at":"2026-11-18T10:05:00Z","content_hash":"sha256:…","fact":{"type":"person","tags":["hr"]},"body":"Sam Ortega moves to the Leeds office on 1 December."}
 ```
 
 The `fact.type` and `fact.tags` are a suggestion; the compile role fixes the

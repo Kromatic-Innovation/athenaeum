@@ -45,6 +45,21 @@ Athenaeum writes files to a user-controlled knowledge directory and makes authen
 
 The raw intake is intentionally append-only. Attacks that rely on overwriting trusted entities are out of scope unless they bypass the append-only invariant.
 
+## chromadb advisories
+
+Four advisories are open against the `chromadb` version Athenaeum pins (the optional `[vector]` extra), and no chromadb release fixes them yet:
+
+| Advisory | Severity | What it is |
+| --- | --- | --- |
+| GHSA-f4j7-r4q5-qw2c | critical | Code injection before authentication, through the collections endpoint |
+| GHSA-36p7-vc44-83pf | critical | Code injection by an authenticated caller, through the collection update endpoint |
+| GHSA-2wm9-hf6c-p5cr | high | Any authenticated user can read or change any tenant's collections |
+| GHSA-xph7-9rjv-w5fr | high | The simple role provider does not check which tenant a permission applies to |
+
+All four are flaws in chromadb's **HTTP server**. Athenaeum uses chromadb **embedded**, inside its own process (`chromadb.PersistentClient`), and does not start or connect to a chromadb server. `tests/test_chromadb_embedded_only.py` fails if anything under `src/athenaeum` uses `HttpClient`, `AsyncHttpClient`, `chromadb.server`, `chroma run` or `trust_remote_code`, so this statement stays true.
+
+The `chromadb` package also installs a `chroma` command that can start that server. **Do not run `chroma run` (or any chromadb server) over Athenaeum's vector index directory**; doing so exposes the index to these advisories.
+
 ## Out of scope
 
 - Issues in `[vector]` dependencies (report upstream to chromadb)

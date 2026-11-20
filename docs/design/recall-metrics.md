@@ -174,3 +174,87 @@ print(report.to_dict())                            # counts and rates only
 ```
 
 `rm.score(gold, observations)` takes prepared `TaskObservation` sets directly.
+
+## Measuring recall on a host with no per-turn hook
+
+Claude Code has a per-turn hook, so the metrics above see every push. ChatGPT,
+the Grok apps and Cursor do not: the model gets recall only by pulling (a
+`recall` or `read_entity` call it chooses to make, perhaps steered by an
+instruction), or from a session-start snapshot. Each host's design note
+([ChatGPT](host-chatgpt.md), [Grok](host-grok.md), [Cursor](host-cursor.md))
+says what to call the mechanism; this section says how to measure it, once, so
+the three results can be compared with each other and with Claude Code. It
+changes no code and runs no measurement.
+
+### Two words, defined once
+
+A host **works** when its probe passes: the host connects, and the tools it
+lists respond. A host is **supported** when its recall measurement, made by the
+method below, is published under `docs/measurements/`. A host can work without
+being supported. [`clients.md`](../guides/clients.md) uses the words this way.
+Neither word says anything about how good the result is.
+
+### Method
+
+- **Prompt set.** Use the gold-set format above. Tasks use invented subjects,
+  are fixed before the run, and are committed with the result so it can be
+  repeated. The committed example,
+  `tests/evals/data/recall_metrics/gold-set-example.yaml`, is the default set.
+  Add a short list of control prompts for which the corpus holds no relevant
+  page; they sit beside the gold set, not in it, because a gold task needs a
+  relevant page.
+- **Corpus.** A seeded throwaway corpus, never a live one. The example set's
+  corpus is `tests/evals/data/corpus/core`. Every gold task has its relevant
+  pages in it, and decoys stay unlabelled.
+- **Runs.** Each task starts in a fresh conversation on the host, with the
+  athenaeum connection and any standing instruction held the same across the
+  prompt set. When a host offers several configurations (for example no
+  instruction, a user instruction, a server instruction, a session-start
+  snapshot), each is its own arm over the same prompts, and arms are reported
+  side by side, never pooled. The Claude Code arm runs the same prompts and
+  corpus with the hook on, and is scored with the scorer above.
+- **Evidence.** The model's own `recall` and `read_entity` calls and their
+  results, and the conversation text. Where the host does not expose a
+  transcript, the operator copies the conversation out by hand. Where that is
+  not possible either, "used" is not measured for that host and the result says
+  so.
+- **How a pull is counted.** A pull is a delivery, not a push. A page returned
+  by the model's `recall` call, or opened by `read_entity`, is a *delivered*
+  and *engaged* item, which is how the definitions above already treat the
+  recalled set. A pull is never added to push coverage, and never counted as a
+  push, even when an instruction made the model do it.
+
+### Which metrics apply
+
+| Metric | On a host with no hook |
+| --- | --- |
+| Recall-through | Applies. The headline number: relevant pages the model recalled or opened / relevant pages. |
+| Use precision | Applies, with the same "used" definition and the same unvalidated-proxy caveat. |
+| Session use rate | Applies, with a pulled page as the delivered item. |
+| Push coverage | Cannot be measured: nothing is pushed. Reported as undefined, never 0. |
+| `recall_through_of_pushed` | Cannot be measured, for the same reason. |
+| `opened_without_push` | Not meaningful: every open is without a push. Not reported. |
+| Raw push-use and push volume | Cannot be measured. Not reported. |
+
+In place of the unmeasurable ones, report two rates from the same runs:
+
+- **Pull rate**: turns on which the model called `recall` / turns whose task
+  has a relevant page in the corpus.
+- **Needless pull rate**: turns on which the model called `recall` / control
+  turns.
+
+With a session-start snapshot arm, also report the added latency at session
+start, and whether each relevant page was already in the snapshot.
+
+Report sample sizes (tasks and turns), the same two intervals as above where
+they can be computed, the date, the host app or client version, and the model
+if the host shows it. Hosted models change without notice, so a result is a
+dated observation of that day's model and is not carried forward.
+
+### What this sets, and what it does not
+
+This section sets no pass bar and says nothing about what number is good
+enough. Where a threshold applies, it comes from the decision record
+(athenaeum#2312). A measurement note reports numbers and the arm they came
+from; the wording a client guide may use for the host follows from the
+published result and the host's design note.

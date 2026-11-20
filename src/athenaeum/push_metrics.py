@@ -732,6 +732,7 @@ class PushRecord:
     items: list[PushedItem] = field(default_factory=list)
     source: str = ""
     session_attribution: str = ""
+    skip_reason: str = ""
 
     @property
     def total_token_cost(self) -> int:
@@ -768,6 +769,8 @@ class PushRecord:
             d["source"] = self.source
         if self.session_attribution:
             d["session_attribution"] = self.session_attribution
+        if self.skip_reason:
+            d["skip_reason"] = self.skip_reason
         return d
 
 
@@ -871,7 +874,11 @@ def record_push(
 
         if not resolve_push_metrics_enabled(config):
             return False
-        if not record.session_id or not record.items:
+        if not record.session_id:
+            return False
+        # A skip row (``skip_reason`` set) carries no items by design: it
+        # records that a turn was deliberately NOT pushed.
+        if not record.items and not record.skip_reason:
             return False
         path = (
             durable_push_records_path(wiki_root, cache_dir=cache_dir)
@@ -992,9 +999,18 @@ def record_hook_push(
 
 
 def read_push_records(
-    cache_dir: Path | None = None, *, wiki_root: Path | None = None
+    cache_dir: Path | None = None,
+    *,
+    wiki_root: Path | None = None,
+    include_skips: bool = False,
 ) -> list[dict[str, Any]]:
     """Read every push record. Tolerates a torn trailing line; never raises.
+
+    Skip rows (a turn deliberately not pushed, ``skip_reason`` set; issue
+    athenaeum#2914) share the ledger file but are NOT pushes: they are
+    dropped here by default so every existing reader (coverage, baseline,
+    liveness, usage) keeps counting only real pushes. Pass
+    ``include_skips=True`` -- or use :func:`read_skip_records` -- to see them.
 
     *wiki_root*, when supplied, resolves via :func:`durable_push_records_path`
     — the SAME resolution :func:`record_push` uses, so a read against a given
@@ -1008,7 +1024,22 @@ def read_push_records(
         if wiki_root is not None
         else push_records_path(cache_dir)
     )
-    return _read_jsonl(path)
+    rows = _read_jsonl(path)
+    if include_skips:
+        return rows
+    return [r for r in rows if not r.get("skip_reason")]
+
+
+def read_skip_records(
+    cache_dir: Path | None = None, *, wiki_root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Only the skip rows (issue athenaeum#2914), so the skip rate is
+    ``len(skips) / (len(skips) + len(pushes))`` over a window."""
+    return [
+        r
+        for r in read_push_records(cache_dir, wiki_root=wiki_root, include_skips=True)
+        if r.get("skip_reason")
+    ]
 
 
 # ---------------------------------------------------------------------------

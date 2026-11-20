@@ -171,9 +171,13 @@ class TestArtifactRegistryClassMembership:
 
     def test_ac5_config_class_covers_exactly_the_named_four(self) -> None:
         """AC5: 'The config class covers rules/, templates/, the authority
-        manifest and athenaeum.yaml.'"""
+        manifest and athenaeum.yaml.' The two ``_store/`` entries (athenaeum#2772)
+        are the only additions; they are asserted separately below."""
         config_entries = {e.name: e for e in ARTIFACT_REGISTRY if e.persistence_class == "config"}
-        assert set(config_entries) == {
+        assert set(config_entries) - {
+            "store-access-declaration",
+            "store-review-criteria",
+        } == {
             "shape-rules",
             "entity-templates",
             "authority-manifest",
