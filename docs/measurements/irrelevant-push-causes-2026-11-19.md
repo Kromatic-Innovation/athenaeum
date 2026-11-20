@@ -250,8 +250,11 @@ It does not show that intake is healthy for relevant recall, which is a
 separate measurement.
 
 The follow-on issues the acceptance criteria call for (one per named cause,
-linked from athenaeum#2295 and athenaeum#2312) are **not filed yet**. They are
-pending the orchestrator.
+linked from athenaeum#2295 and athenaeum#2312) are athenaeum#2914 (harness-text
+triggers, d1), athenaeum#2915 (self-contained programmatic prompts, e) and
+athenaeum#2916 (record the extracted query terms). The retrieval case (a) is
+athenaeum#2952, blocked by athenaeum#2916 so that extraction misses can be told
+apart from ranking misses.
 
 ## Limits
 

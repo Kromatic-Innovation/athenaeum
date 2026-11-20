@@ -102,6 +102,12 @@ MODULE_LAYER: dict[str, int] = {
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,
     "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
+    "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
+    "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
+    "store_access": 2,  # issue athenaeum#2772: _store/access.yaml parser; imports models (L1)
+    "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
+    "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
+    "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
     "store_links": 2,  # issue athenaeum#2619: link guard + lint
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
@@ -129,6 +135,9 @@ MODULE_LAYER: dict[str, int] = {
     "owner_memory_bridge": 3,  # issue athenaeum#2690
     "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
+    "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
+    "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
+    "record_merge": 4,  # athenaeum#2929: sibling of pending_merges (L4), whose parser it calls
     "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)
@@ -166,6 +175,7 @@ MODULE_LAYER: dict[str, int] = {
     # (L4) and _cmd_drops.py (L5), both strictly above.
     "drops": 3,
     "relevance_policy": 2,  # issue athenaeum#2643
+    "intake_decision": 2,  # issue athenaeum#2797: pure decide(); a leaf
     "erasure": 3,
     "fingerprint": 3,
     "inference_blocks": 3,
@@ -424,6 +434,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_enumerate": 5,
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,
+    "_cmd_raised_from_lint": 5,  # issue athenaeum#2799
     "_cmd_store_link_lint": 5,  # issue athenaeum#2619
     "_cmd_import_memory": 5,  # issue athenaeum#2316
     "_cmd_index": 5,
