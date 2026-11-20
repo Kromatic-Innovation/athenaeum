@@ -27,6 +27,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- A decision queue per store (`athenaeum.store_decisions`): a decision is filed
+  with the one store whose page it would change, in that store's own local queue
+  file. It quotes only that store's pages and records any other store's page by
+  `store_id` and uid alone, filled in on display from the viewer's own mounts
+  (an unreadable page is shown only as unreadable). `list_pending_decisions`
+  stays one listing: every item names its `store_id` (`personal` for the existing
+  queues), and a store on which the owner does not hold answer contributes
+  nothing (athenaeum#2934).
 - `athenaeum.store` gains the write side of the multi-writer sync seam:
   `write_merge_commit` builds the merged tree and a two-parent merge commit first
   and moves the local branch last (all or nothing), and `push_branch` pushes
