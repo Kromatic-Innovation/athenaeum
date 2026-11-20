@@ -28,6 +28,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Added
 
 - A store's declared rights now narrow the write guard. When a surface carries `_store/access.yaml` and the owner's `owner.asserter` does not hold compile there (a reader, a proposer only, not listed, an invalid declaration, or a directory that cannot answer), every write to that surface's pages is refused with `ReadOnlySurfaceError`, whatever the adapter's `read_only` says. The declaration never widens local config, and a surface with no declaration behaves as before. Rights are resolved once at run start (or on the first write when no run started), never per write and never on the recall path (athenaeum#2988)
+- The search index is now separable by surface: every FTS5 row and vector embedding records the surface it came from, and `list_surface_derived_data` / `remove_surface_derived_data` list and remove one surface's derived data without reading or rewriting another's. An existing index is rebuilt automatically on the next run (FTS5 schema version 7, vector metadata schema version 4). (athenaeum#2990)
 
 ## [0.28.0] - 2026-11-20
 
