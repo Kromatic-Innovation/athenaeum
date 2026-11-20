@@ -20,7 +20,7 @@ store instead and says so in :attr:`Destination.fallback`. It never writes into
 a read-only surface.
 
 Layering: L3. Imports :mod:`athenaeum.storage` (L1) and
-:mod:`athenaeum.intake_decision` (L2).
+:mod:`athenaeum.intake_decision` (L2) and :mod:`athenaeum.relevance_policy` (L2).
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from athenaeum.intake_decision import (
     StoreInfo,
     decide,
 )
+from athenaeum.relevance_policy import RelevancePolicy
 from athenaeum.storage import (
     DEFAULT_ADAPTER_NAME,
     ReadOnlySurfaceError,
@@ -54,20 +55,10 @@ log = logging.getLogger(__name__)
 _WRITE = frozenset({"read", "compile"})
 
 
-class _MappingOnlyPolicy:
-    """A policy with no rules: S3a routes on ``storage.mapping`` alone.
-
-    ``route`` rows taking effect is slice S3b, so the write path decides with
-    no rules rather than the capture policy.
-    """
-
-    rules: tuple[()] = ()
-
-    def match(self, type_: Any = None, tags: Any = (), subject: Any = None) -> None:
-        return None
-
-    def match_route(self, type_: Any = None, tags: Any = (), subject: Any = None) -> None:
-        return None
+#: A policy with no rules: S3a routes on ``storage.mapping`` alone. ``route``
+#: rows taking effect is slice S3b, so the write path decides with the empty
+#: policy rather than the capture policy.
+_MAPPING_ONLY_POLICY = RelevancePolicy()
 
 
 @dataclass(frozen=True)
@@ -104,7 +95,7 @@ def decide_destination(
         mapping = {entity_type: _store_word(resolve_adapter_for_class(entity_type, config).name)}
     stores = {_store_word(n): StoreInfo(rights=_WRITE) for n in available_adapters(config)}
     return decide(
-        Description(type=entity_type or None, tags=tags), _MappingOnlyPolicy(), stores, mapping
+        Description(type=entity_type or None, tags=tags), _MAPPING_ONLY_POLICY, stores, mapping
     )
 
 
