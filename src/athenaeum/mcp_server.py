@@ -91,6 +91,7 @@ from athenaeum.footnote_markers import INLINE_MARKER_RE, resolve_markers
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
+    OWNER_ONLY_ACCESS_LEVELS,
     SOURCE_TYPES,
     AmbiguousPageUidError,
     PageLocator,
@@ -3246,13 +3247,6 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
-#: ``access:`` levels that are owner-only for a restricted caller unless an
-#: ``audience:`` grant opens them (``models.effective_audience``). A remote
-#: ``remember`` never stamps its pinned audience onto a note carrying one of
-#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
-_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
-
-
 def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
@@ -3315,7 +3309,9 @@ def _inject_provenance_frontmatter(
         if access_level == "open":
             del meta["access"]
             access_level = ""
-        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+        if access_level in OWNER_ONLY_ACCESS_LEVELS:
+            # Same set ``models.effective_audience`` treats as owner-only; a
+            # remote ``remember`` never widens it (athenaeum#2779, athenaeum#2924).
             # A restrictive `access:` (set by intake screening, or written in
             # the note itself) is owner-only, and an `audience:` grant is the
             # one thing that would open it to a role. Fail closed: stamp
