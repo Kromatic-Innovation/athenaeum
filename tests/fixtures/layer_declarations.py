@@ -103,6 +103,7 @@ MODULE_LAYER: dict[str, int] = {
     "storage": 1,
     "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
     "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
+    "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
     "store_access": 2,  # issue athenaeum#2772: _store/access.yaml parser; imports models (L1)
     "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
     "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
