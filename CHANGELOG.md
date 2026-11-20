@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- The `reviews` block of a store declaration now has meaning: `athenaeum.store_reviews` finds each review's source among the mounted stores, runs a review only when the source's own declaration grants the reviewing principal read, computes when it is due from `every` and the last run, and keeps the cursor and a run record (counts only, no source text) in the install's own state. No model is called and nothing is written to the source. (athenaeum#2992)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
