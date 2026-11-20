@@ -581,6 +581,16 @@ def _apply_cap(
     return candidates[:ceiling]
 
 
+#: Which extractor produced a push's query terms (issue athenaeum#2916).
+EXTRACTOR_MODEL = "model"
+EXTRACTOR_REGEX_FALLBACK = "regex_fallback"
+EXTRACTOR_REGEX_ONLY = "regex_only"
+
+#: Bounds on the terms recorded in a ledger row (issue athenaeum#2916).
+_RECORDED_TERMS_MAX = 12
+_RECORDED_TERM_CHARS = 64
+
+
 def _extract_terms(
     prompt: str,
     *,
@@ -588,11 +598,17 @@ def _extract_terms(
     stopwords: frozenset[str],
     config: dict[str, Any] | None,
     use_llm: bool,
+    trace: dict[str, Any] | None = None,
 ) -> list[str]:
     """Term extraction: LLM (via the already import-light
     :func:`athenaeum.query_topics.extract_topics`) with a regex+stopword
     fallback. The LLM path is reached lazily — nothing above this function
     call imports :mod:`athenaeum.query_topics` at module scope.
+
+    *trace*, when given, receives ``extractor`` (issue athenaeum#2916):
+    :data:`EXTRACTOR_MODEL` when the model's terms were used,
+    :data:`EXTRACTOR_REGEX_FALLBACK` when the model was tried and yielded
+    nothing, :data:`EXTRACTOR_REGEX_ONLY` when the model was not tried.
     """
     terms: list[str] = []
     if use_llm:
@@ -608,8 +624,12 @@ def _extract_terms(
         terms = _canonical_terms(raw_terms)
 
     if terms:
+        if trace is not None:
+            trace["extractor"] = EXTRACTOR_MODEL
         return terms
 
+    if trace is not None:
+        trace["extractor"] = EXTRACTOR_REGEX_FALLBACK if use_llm else EXTRACTOR_REGEX_ONLY
     return _canonical_terms([prompt], stopwords=stopwords)
 
 
@@ -767,6 +787,7 @@ def build_context(
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -798,6 +819,10 @@ def build_context(
     ``config=None`` as well, the answer is :data:`_DEFAULT_SEARCH_BACKEND`
     without importing the resolver at all — identical value, no import
     cost; see that constant's own comment.
+
+    ``trace`` (issue athenaeum#2916): an optional out-parameter. When given
+    it is filled with ``terms`` and ``extractor`` for the caller to record;
+    it keeps the pinned envelope schema untouched. Absent, nothing changes.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -843,8 +868,15 @@ def build_context(
     stopwords = stopwords if stopwords is not None else _resolve_stopwords(cache_dir)
 
     terms = _extract_terms(
-        prompt, timeout=llm_timeout, stopwords=stopwords, config=config, use_llm=use_llm
+        prompt,
+        timeout=llm_timeout,
+        stopwords=stopwords,
+        config=config,
+        use_llm=use_llm,
+        trace=trace,
     )
+    if trace is not None:
+        trace["terms"] = list(terms)
 
     # Issue athenaeum#1905: both legs fetch to the WINDOW, not to `n`. The
     # extra rows are never rendered — `_apply_cap` below cuts back to `n`
@@ -979,6 +1011,7 @@ def record_context_push(
     cache_dir: Path,
     wiki_root: Path | None = None,
     config: dict[str, Any] | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> bool:
     """Route one rendered envelope's push into the durable push-metrics
     ledger, tagged ``"source": "sidecar"`` (issue athenaeum#1362,
@@ -1009,6 +1042,12 @@ def record_context_push(
     local, never at this module's top level — this module's import-weight
     contract (see the module docstring) is paid by every ``build_context``
     caller on the hot path; this function is not on that path.
+
+    ``trace`` (issue athenaeum#2916): the dict :func:`build_context` filled.
+    When it carries terms and
+    :func:`athenaeum.config.resolve_push_record_query_terms` is on, the row
+    records the extracted terms and the extractor name; the prompt itself is
+    still never stored.
     """
     try:
         candidates = envelope.get("candidates") or []
@@ -1065,6 +1104,14 @@ def record_context_push(
             items=items,
             source="sidecar",
         )
+        if trace and "terms" in trace:
+            from athenaeum.config import resolve_push_record_query_terms
+
+            if resolve_push_record_query_terms(config):
+                record.query_terms = [
+                    str(t)[:_RECORDED_TERM_CHARS] for t in trace["terms"][:_RECORDED_TERMS_MAX]
+                ]
+                record.extractor = str(trace.get("extractor", ""))
         return push_metrics.record_push(
             record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
         )
@@ -1267,6 +1314,7 @@ def build_context_for_turn(
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)
 
+    trace: dict[str, Any] = {}
     envelope = build_context(
         prompt,
         session_id,
@@ -1279,6 +1327,7 @@ def build_context_for_turn(
         llm_timeout=llm_timeout,
         config=config,
         wiki_root=wiki_root,
+        trace=trace,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 
@@ -1286,6 +1335,6 @@ def build_context_for_turn(
     # ledger the MCP `recall` path writes, tagged `"source":"sidecar"`.
     # Best-effort — never raises, never affects the envelope this function
     # returns.
-    record_context_push(envelope, cache_dir=cache_dir)
+    record_context_push(envelope, cache_dir=cache_dir, config=config, trace=trace)
 
     return envelope

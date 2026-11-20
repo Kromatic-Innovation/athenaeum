@@ -4225,7 +4225,8 @@ exec "$REAL_AWK" "$@"
         """AC2 (hard gate): push records stay byte-identical in shape --
         pinned by an explicit key-set assertion, not a spot-check, so this
         cannot regress by a future edit adding `topics` (or anything else)
-        to the ledger row. athenaeum#711 stays intact: the ledger keeps a
+        to the ledger row. `query_terms` / `extractor` joined the pinned set
+        deliberately (athenaeum#2916). athenaeum#711 stays intact: the ledger keeps a
         query HASH only.
         """
         _require("bash")
@@ -4255,6 +4256,10 @@ exec "$REAL_AWK" "$@"
             "token_cost",
             "token_cost_estimated",
             "source",
+            # athenaeum#2916: the extracted terms and the extractor that
+            # produced them (on by default; a setting omits both).
+            "query_terms",
+            "extractor",
         }, f"push record shape changed: {sorted(rec)}"
         assert "topics" not in rec
 

@@ -135,6 +135,34 @@ liveness and usage reports count real pushes only), and
 `skips / (skips + pushes)` over a window. Ledgers written before this change
 have no `skip_reason` key and read as before.
 
+### Recording the extracted query terms
+
+The push ledger keeps a hash of the prompt, never the prompt. To tell "the
+extractor picked the wrong terms" apart from "ranking missed", each push row
+also records the terms the push searched on and which extractor produced them:
+
+- `query_terms`: the topic terms (at most 12, each cut to 64 characters).
+- `extractor`: `model` (the topic model's terms were used), `regex_fallback`
+  (the model was tried and gave nothing, so the regex and stopword extractor
+  ran) or `regex_only` (the model was not tried, e.g. `--no-llm`).
+
+**Default: on.** The terms are derived from the prompt, so they are the one
+free-text-derived field in a ledger that otherwise holds opaque page ids and
+counts. The default is on because a measurement field that is off records
+nothing until the data it would have held is already gone, and the exposure is
+bounded: topic words only, never the prompt, in the same local cache-dir ledger
+as the pushed-page ids, outside the wiki corpus. Turn it off if a topic word is
+sensitive in your deployment: `ATHENAEUM_PUSH_RECORD_QUERY_TERMS=0` or
+`push_metrics.record_query_terms: false`. New rows then carry neither key. The
+per-turn hook reads the environment variable (it does not load
+`athenaeum.yaml`), so set it there or in the cache dir's `config.env`.
+
+Both keys are optional on read: rows written earlier, or with the field off,
+read cleanly. `athenaeum push-metrics tail` projects them when present (the
+plain-text view prints a `terms=` line under the row), and `athenaeum demo`
+shows them under "last turn", falling back to the local topics trace for older
+rows.
+
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the

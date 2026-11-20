@@ -733,6 +733,8 @@ class PushRecord:
     source: str = ""
     session_attribution: str = ""
     skip_reason: str = ""
+    query_terms: list[str] | None = None
+    extractor: str = ""
 
     @property
     def total_token_cost(self) -> int:
@@ -771,6 +773,12 @@ class PushRecord:
             d["session_attribution"] = self.session_attribution
         if self.skip_reason:
             d["skip_reason"] = self.skip_reason
+        # Issue athenaeum#2916: optional on read -- rows written before it
+        # (and rows with the field switched off) carry neither key.
+        if self.query_terms is not None:
+            d["query_terms"] = list(self.query_terms)
+        if self.extractor:
+            d["extractor"] = self.extractor
         return d
 
 
@@ -1462,6 +1470,13 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
     attribution = raw.get("session_attribution")
     if attribution:
         shaped["session_attribution"] = attribution
+    # Issue athenaeum#2916: include-only-when-present, like ``source``.
+    terms = raw.get("query_terms")
+    if isinstance(terms, list):
+        shaped["query_terms"] = [str(t) for t in terms]
+    extractor = raw.get("extractor")
+    if extractor:
+        shaped["extractor"] = extractor
     return shaped
 
 

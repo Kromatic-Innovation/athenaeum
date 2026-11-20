@@ -103,6 +103,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   pipeline transports. Only its capture answer is used and it is the one the gates computed
   before, so no install captures, drops or places anything differently (athenaeum#2625).
 - New guide `docs/guides/stability.md` says which surfaces count as stable beyond `athenaeum.__all__` (CLI, config keys, MCP tools, file formats), which are experimental and which are internal; the README links it beside the support policy (athenaeum#2908).
+- A push ledger row now records the query terms it searched on and which
+  extractor produced them (`model`, `regex_fallback` or `regex_only`), so a push
+  that missed can be attributed to extraction or to ranking. On by default;
+  `push_metrics.record_query_terms: false` (or
+  `ATHENAEUM_PUSH_RECORD_QUERY_TERMS=0`) turns it off. Older ledgers read
+  unchanged, `push-metrics tail` projects the fields and `athenaeum demo` shows
+  them (athenaeum#2916).
 
 ### Changed
 
