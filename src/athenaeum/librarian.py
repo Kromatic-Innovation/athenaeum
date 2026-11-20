@@ -305,6 +305,7 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
     STATUS_APPLIED as STRUCTURED_UPSERT_APPLIED,
@@ -1238,6 +1239,9 @@ def git_push(
         text=True,
     )
     _push_cache_dir = _resolve_cache_dir(None)
+    record_push(
+        knowledge_root, remote, result.returncode == 0, result.stderr or result.stdout or ""
+    )
     if result.returncode != 0:
         reason = (
             result.stderr or result.stdout or ""
@@ -1301,6 +1305,7 @@ def git_pull(
         capture_output=True,
         text=True,
     )
+    record_fetch(knowledge_root, remote, result.returncode == 0)
     if result.returncode != 0:
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which

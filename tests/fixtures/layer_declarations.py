@@ -105,6 +105,8 @@ MODULE_LAYER: dict[str, int] = {
     "store_decisions": 2,  # issue athenaeum#2934: per-store decision queue; imports L1, L2
     "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
     "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
+    "store_access_evidence": 2,  # issue athenaeum#2991: last fetch/push outcome per location
+    "store_access_check": 3,  # issue athenaeum#2991: store access check; imports L1, L2
     "store_access": 2,  # issue athenaeum#2772: _store/access.yaml parser; imports models (L1)
     "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
     "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
@@ -443,6 +445,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_explain_routing": 5,
     "_cmd_fold_lint": 5,
     "_cmd_raised_from_lint": 5,  # issue athenaeum#2799
+    "_cmd_store": 5,  # issue athenaeum#2991
     "_cmd_store_link_lint": 5,  # issue athenaeum#2619
     "_cmd_import_memory": 5,  # issue athenaeum#2316
     "_cmd_index": 5,

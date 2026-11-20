@@ -1131,6 +1131,18 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         location="cache dir",
         source_ref="killswitch.py:100 state_path() 'disabled' (design note §5.2 table row 9)",
     ),
+    ArtifactDeclaration(
+        name="store-access-evidence",
+        persistence_class="operational",
+        operational_scope="machine-local",
+        location="cache dir",
+        source_ref=(
+            "store_access_evidence.py STATE_NAME 'store_access_evidence.json' "
+            "(access S5, athenaeum#2991: this machine's last fetch and push outcome "
+            "per location; describes this machine's access to a host, so it is "
+            "machine-local)"
+        ),
+    ),
     # -- config (design note §5.2 R3 box) --------------------------------
     ArtifactDeclaration(
         name="shape-rules",
@@ -1430,6 +1442,14 @@ def restore_repo(repo: Path, sha: str) -> None:
 def _git_out(repo: Path, *args: str) -> bytes:
     """Run ``git *args`` in *repo*; return stdout bytes. Raises ``CalledProcessError``."""
     return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True).stdout
+
+
+def remote_url(repo: Path, remote: str = "origin") -> str | None:
+    """The URL of *remote* in *repo*, or ``None`` when it is not set (read-only)."""
+    try:
+        return _git_out(repo, "remote", "get-url", remote).decode().strip() or None
+    except (subprocess.CalledProcessError, OSError):
+        return None
 
 
 def fetch_remote_branch(repo: Path, branch: str, remote: str = "origin") -> str:

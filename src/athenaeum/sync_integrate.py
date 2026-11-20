@@ -92,6 +92,7 @@ from athenaeum.store_access import (
     StoreDeclarationInvalid,
     load_store_declaration,
 )
+from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_boundary import link_forbidden
 from athenaeum.store_links import extract_link_refs
 
@@ -319,6 +320,7 @@ def sync_before_compile(
         return report
     report.add("snapshot", "ok" if sha else "skipped", "" if sha else "nothing-to-commit")
     result = integrate_remote(repo, branch, cfg)
+    record_fetch(repo, cfg.remote, not (result.status == "failed" and result.reason == BLOCK_FETCH))
     report.integrate = result
     if result.status == "failed" and result.reason == BLOCK_FETCH:
         report.add("fetch", "failed", result.reason)
@@ -351,6 +353,7 @@ def push_after_compile(
         outcome = PushOutcome(False, 0, "other", "snapshot-failed")
     else:
         outcome = _push_loop(repo, branch, cfg, _remote_tip_or_none(repo, branch, cfg))
+        record_push(repo, cfg.remote, outcome.ok, outcome.detail or outcome.reason or "")
     if report is not None:
         report.push = outcome
         report.add("push", "ok" if outcome.ok else "failed", outcome.reason or "")
