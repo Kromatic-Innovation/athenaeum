@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- A store's declared rights now narrow the write guard. When a surface carries `_store/access.yaml` and the owner's `owner.asserter` does not hold compile there (a reader, a proposer only, not listed, an invalid declaration, or a directory that cannot answer), every write to that surface's pages is refused with `ReadOnlySurfaceError`, whatever the adapter's `read_only` says. The declaration never widens local config, and a surface with no declaration behaves as before. Rights are resolved once at run start (or on the first write when no run started), never per write and never on the recall path (athenaeum#2988)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
