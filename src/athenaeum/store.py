@@ -1369,11 +1369,17 @@ def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
     repo = top.stdout.strip()
     rels = [str(p) for p in paths]
     subprocess.run(["git", "-C", repo, "add", "--", *rels], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        # Leave the index as it was (review on PR athenaeum#2984): a path this
+        # call staged must not ride along in a later whole-index commit.
+        subprocess.run(["git", "-C", repo, "reset", "-q", "--", *rels], capture_output=True)
+        raise
     return subprocess.run(
         ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()

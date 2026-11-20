@@ -603,3 +603,25 @@ def test_has_link() -> None:
 
     assert has_link("see [[page]]") and has_link("[x](a.md)")
     assert not has_link("plain text") and not has_link("[x](https://example.net)")
+
+
+def test_a_failed_commit_leaves_no_copy_and_nothing_staged(env: Env) -> None:
+    # Review on PR athenaeum#2984: when git refuses the commit, the copy is
+    # removed AND unstaged, so no later whole-index commit picks it up.
+    out = env.submit(env.msg())
+    hooks = env.root.parent / "refusing-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "-C", str(env.root), "config", "core.hooksPath", str(hooks)], check=True
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        env.accept(out.decision["id"])  # type: ignore[index]
+    assert not list(env.root.glob(f"{derived_uid(TARGET, RID)}*.md"))
+    staged = subprocess.run(
+        ["git", "-C", str(env.root), "diff", "--cached", "--name-only"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert staged == ""
