@@ -90,6 +90,7 @@ from athenaeum.compile_routing import (
 )
 from athenaeum.config import resolve_drop_log, resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
+from athenaeum.intake_destination import destination_for_entity
 from athenaeum.logconf import run_id_var
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
@@ -125,7 +126,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.storage import page_write_root_for_class, refuse_read_only_write
+from athenaeum.storage import refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
@@ -2630,7 +2631,9 @@ def process_batch_run(
             for _e in new_entities:
                 try:
                     _create_roots.append(
-                        page_write_root_for_class(_e.type, resolved_config, wiki_root.parent)
+                        destination_for_entity(
+                            _e.type, resolved_config, wiki_root.parent, tags=tuple(_e.tags)
+                        ).root
                     )
                 except ReadOnlySurfaceError as _exc:
                     log.warning("  Refused (read-only surface): %s", _exc)

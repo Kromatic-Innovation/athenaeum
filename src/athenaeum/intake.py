@@ -115,6 +115,8 @@ from athenaeum.session_recovery import (
     SessionRecoverer,
     written_at_from_frontmatter,
 )
+from athenaeum.storage import STORE_RAW_DIRNAME
+from athenaeum.store_access import is_store_id
 
 log = logging.getLogger(__name__)
 
@@ -1068,6 +1070,41 @@ def _discover_raw_files_in_dir(
     return files
 
 
+def store_raw_dir(raw_root: Path, store_id: str) -> Path:
+    """The raw intake directory of store *store_id*: ``raw/_stores/<store_id>/``.
+
+    Intake routing S15 (``docs/design/federation-intake-routing.md`` §8.1): the
+    place a single compiling install keeps what is addressed to a store it
+    compiles. Raises ``ValueError`` for a *store_id* that is not a valid one, so
+    a caller can never build a path out of an arbitrary name.
+    """
+    if not is_store_id(store_id):
+        raise ValueError(f"not a store id: {store_id!r}")
+    return raw_root / STORE_RAW_DIRNAME / store_id
+
+
+def discover_store_raw_dirs(raw_root: Path) -> tuple[dict[str, Path], list[str]]:
+    """``({store_id: directory}, [invalid directory names])`` under ``raw/_stores/``.
+
+    A directory whose name is not a valid ``store_id`` is reported (second
+    element) and never read; a stray file directly under ``_stores`` is ignored.
+    Sorted, so the answer does not depend on directory order.
+    """
+    stores: dict[str, Path] = {}
+    invalid: list[str] = []
+    base = raw_root / STORE_RAW_DIRNAME
+    if not base.is_dir():
+        return stores, invalid
+    for entry in sorted(base.iterdir()):
+        if not entry.is_dir():
+            continue
+        if is_store_id(entry.name):
+            stores[entry.name] = entry
+        else:
+            invalid.append(entry.name)
+    return stores, invalid
+
+
 def discover_raw_files(
     raw_root: Path, config: dict[str, Any] | None = None
 ) -> list[RawFile]:
@@ -1179,6 +1216,13 @@ def discover_raw_files(
         # questions on every subsequent run. Skip them at the source level,
         # before any tier classification can re-escalate them.
         if source == "answers":
+            continue
+        # Intake routing S15 (athenaeum#2625 §8.1): `raw/_stores/<store_id>/` is a
+        # store's raw intake on its single compiling install. It has its own
+        # deterministic per-store handler (`store_intake_dispatch`) and must
+        # never reach the capture gates, `decide` or the member's personal
+        # classify path -- skip it whole, like `answers`.
+        if source == STORE_RAW_DIRNAME:
             continue
         files.extend(
             _discover_raw_files_in_dir(
