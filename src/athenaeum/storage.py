@@ -531,7 +531,18 @@ def page_write_root_for_class(
     declared ``read_only`` (athenaeum#2621), and :class:`StorageConfigError`
     for an unknown adapter.
     """
-    adapter = resolve_adapter_for_class(entity_class, config)
+    return _write_root_for_adapter(
+        resolve_adapter_for_class(entity_class, config), entity_class, config, knowledge_root
+    )
+
+
+def _write_root_for_adapter(
+    adapter: StorageAdapter,
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """The write-guard checks shared by the type-derived and store-named routes."""
     if adapter.read_only:
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -548,6 +559,28 @@ def page_write_root_for_class(
             "not indexed (embedded: false); compile cannot write pages there"
         )
     return adapter.resolve_root(knowledge_root)
+
+
+def page_write_root_for_store(
+    store: str,
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """Directory a NEW page is written to for the store an intake decision named.
+
+    ``personal`` is the default wiki surface; any other word names a configured
+    adapter. Same guards as :func:`page_write_root_for_class` (read-only,
+    declared-refusal, not-indexed). A store this install does not hold raises
+    :class:`StorageConfigError`. Intake routing S3a (athenaeum#2999).
+    """
+    name = DEFAULT_ADAPTER_NAME if store == "personal" else store
+    adapter = available_adapters(config).get(name)
+    if adapter is None:
+        raise StorageConfigError(
+            f"intake decision names store {store!r}, which this install does not hold"
+        )
+    return _write_root_for_adapter(adapter, entity_class, config, knowledge_root)
 
 
 def resolve_store_for_class(
