@@ -25,42 +25,6 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
-### Added
-
-- The sidecar guide and the environment reference describe how a scheduled or
-  scripted run whose prompt carries all its input skips the per-turn push:
-  its launcher sets `AUTO_RECALL=false` for that run, the explicit `recall`
-  tool still works, and the launcher value beats the cached config
-  (athenaeum#2977).
-
-## [0.27.6] - 2026-11-20
-
-**Summary.** 0.27.6 is a PATCH release on 0.27.2 (0.27.3 to 0.27.5 were
-never published). It contains no breaking change and `athenaeum.__all__` is
-unchanged. For most users it changes four things:
-- A fresh `athenaeum init` now passes `athenaeum doctor`. Setup that has not
-  been finished yet reports `WARN` with the command that finishes it, instead
-  of `FAIL`.
-- `athenaeum init` works under a global git commit hook.
-- The per-turn push no longer fires on text the harness injected into the
-  prompt.
-- The `remember` tool says so when it drops or replaces something the caller
-  supplied.
-
-The declared dependency floors rise to versions CI actually tests:
-`anthropic>=0.50.0` and `fastmcp>=4.0.0`. Most of the new modules are the
-foundations of federated stores (a store declaration, per-store decision
-queues, the multi-writer sync seam, and raising pages between stores). They
-are experimental, and nothing in a single-store install calls them yet. See
-`docs/guides/stability.md` for which surfaces count as stable.
-
-**Upgrading from 0.27.2**
-
-1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
-   `athenaeum doctor`.
-2. If you pin `anthropic` below 0.50.0 or `fastmcp` below 4.0.0, raise those
-   pins first. The installer will refuse the older versions.
-
 ### Changed
 
 - A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
@@ -101,6 +65,11 @@ are experimental, and nothing in a single-store install calls them yet. See
 
 ### Added
 
+- The sidecar guide and the environment reference describe how a scheduled or
+  scripted run whose prompt carries all its input skips the per-turn push:
+  its launcher sets `AUTO_RECALL=false` for that run, the explicit `recall`
+  tool still works, and the launcher value beats the cached config
+  (athenaeum#2977).
 - Filing checks after a raise is accepted (`athenaeum.raise_filing_checks`, athenaeum#2927, slice S21 of the federation raise and retract design). Once `accept_raise` has created a raised copy, or `apply_supersede` has replaced one, the target store runs the same three filing checks as the sync (a contact value already on another page of the store, an address whose local part names a different person, a person-shaped address on an organisation's page) on the copy, reading the target's pages at the commit that published it, and opens a `filing-check` item in the target's decision queue naming the copy for each failure. A created copy is checked whole and a replaced one on the units that changed. The checks run only after the copy is committed and its acceptance recorded: they never reject, hold or ask about a raise, never edit the copy, and a crash in them leaves the acceptance standing. The result is the new `filing` field of the returned `Outcome`. The checks themselves move to `athenaeum.filing_checks`, shared with `athenaeum.sync_filing_checks`, whose behaviour is unchanged.
 - Apply a supersede in the target (`athenaeum.raise_supersede`, athenaeum#2940, slice S13 of the federation raise and retract design): `apply_supersede` finds the copy by its derived uid and decides whether it is untouched by projecting it as it stands and comparing that payload hash with `raised_from.content_hash`, never a hash of the whole page. An untouched copy is replaced by the new payload with the recorded `type` and `tags` adjustment applied again, and `content_hash` and `seq` are updated (commit line `Athenaeum-Raise: <raise_id> seq=<n> supersede`); an edited copy is merged three-way (`page_merge`) with the last accepted version, read by the blob id in the acceptance ledger, as the ancestor, and any contested unit holds the page, keeps the published version and raises a decision. A payload that changes `access` or `audience` is held for a person even when the copy is untouched, and a message with a `seq` no higher than the one applied is ignored. A successor-form supersede stamps `superseded_by` with the successor copy's name slug; when the successor's raise was rejected it is a retract with reason `superseded_at_source`, handed to a caller-supplied applier (raise S11 is not built yet) or held. The ancestor is the payload as the raiser last sent it, filed as a fresh copy would be and pinned under `refs/athenaeum/raise-accepted/` so `git gc` keeps it, so a merged copy never becomes the next ancestor and reverts the target's edits. `store` gains `read_blob` and `write_blob`, and the acceptance ledger gains the reason codes this slice records.
 - Accept a raised page, asking every time (`athenaeum.raise_acceptance`, athenaeum#2939, slice S7a of the federation raise and retract design): the rule checks run before anyone is asked and a message that fails is recorded in the acceptance ledger with its reason code and raised as a decision (a duplicate is only recorded); a raise that passes becomes a `raise` decision in the target store's queue showing the payload, where the person may accept it or adjust its `type` and `tags` to something the store's `intake` rules accept. Accepting creates the copy at the uid derived from the target `store_id` and `raise_id` with the body unchanged, a `raised_from` block and an `Athenaeum-Raise: <raise_id> seq=<n> accept` commit line, and never overwrites a page already at that uid (the raise is held and a decision is raised). The compiling member's own relevance policy is never applied. `store_decisions` gains `resolve_decision` and an optional `detail` on a filed decision.
@@ -11104,8 +11073,7 @@ knowledge librarian.
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
 <!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.6...HEAD
-[0.27.6]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...v0.27.6
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...HEAD
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.25.0...v0.26.0
