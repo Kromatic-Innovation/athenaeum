@@ -69,6 +69,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   payload hash over that projection, `raise_id` / `message_id` minting and
   validators, and the derived uid of a raised copy. Nothing calls it yet, so no
   install behaves differently (athenaeum#2626, athenaeum#2798).
+- `athenaeum.raise_messages`, a pure codec for the six raise protocol records
+  (`raise`, `propose-fact`, `supersede`, `retract`, `lapse`, `attest`) inside the
+  existing envelope-first JSONL batch, with the fixed retract reason codes and a
+  refusal of any field that names the source page. A file or record that does not
+  conform comes back as a fallthrough and never raises. Nothing calls it yet, so no
+  install behaves differently (athenaeum#2626, athenaeum#2937).
 - `athenaeum.store_access` parses and validates a store's declaration,
   `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
   naming each offending key, and nothing reads it yet so no install behaves
