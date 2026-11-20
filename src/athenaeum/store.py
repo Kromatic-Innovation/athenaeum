@@ -1532,6 +1532,22 @@ def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
     return sorted(p.decode() for p in raw.split(b"\0") if p)
 
 
+def deletion_commit_messages(repo: Path, rev_a: str, rev_b: str, path: str) -> list[str]:
+    """Full messages of the commits in ``rev_a..rev_b`` that delete *path*.
+
+    Read-only; the range is the history one side of a merge added since the
+    common ancestor. Merge commits are not counted (a merge carries no diff of
+    its own against its first parent). Renames are not followed: a path that
+    moved away reads as deleted, matching :func:`changed_paths`. Raises
+    ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    raw = _git_out(
+        repo, "log", "--no-renames", "--diff-filter=D", "--format=%B%x00",
+        f"{rev_a}..{rev_b}", "--", path,
+    )
+    return [m.strip("\n") for m in raw.decode("utf-8", "replace").split("\0") if m.strip()]
+
+
 def merge_commits_between(repo: Path, rev_a: str, rev_b: str) -> list[str]:
     """The merge commits (two or more parents) reachable from *rev_b* and not from *rev_a*.
 
