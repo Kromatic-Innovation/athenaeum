@@ -523,6 +523,6 @@ class TestMissingCredentialCounterExample:
         monkeypatch.setattr(provider_mod.os.path, "exists", lambda _b: False)
 
         result = check_key_mode(None, tmp_path / "cache")
-        assert result.status == "fail"
+        assert result.status == "warn"  # athenaeum#2906: first-run setup is pending, not broken
         assert "ANTHROPIC_API_KEY" in result.detail
         assert "supplying-an-api-key" in result.fix

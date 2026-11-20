@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -121,7 +122,7 @@ def healthy_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "wiki-index.db").write_text("fake-db", encoding="utf-8")
+    sqlite3.connect(cache_dir / "wiki-index.db").close()  # a real (empty) sqlite DB
 
     claude_dir = tmp_path / "claude-home"
     scripts_dir = tmp_path / "hooks" / "athenaeum"
@@ -217,12 +218,12 @@ def test_healthy_install_cli_exits_zero(healthy_install: dict, monkeypatch) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_not_registered_fails_and_names_fix(healthy_install: dict) -> None:
+def test_mcp_not_registered_is_pending_and_names_fix(healthy_install: dict) -> None:
     (healthy_install["claude_dir"] / ".claude.json").unlink()
     results = _run_healthy(healthy_install)
-    assert doctor.exit_code(results) == 1
+    assert doctor.exit_code(results) == 0
     mcp = next(r for r in results if r.name == "mcp")
-    assert mcp.status == "fail"
+    assert mcp.status == "warn"
     assert "claude mcp add" in mcp.fix
 
 
@@ -230,8 +231,8 @@ def test_mcp_entry_missing_from_existing_claude_json(healthy_install: dict) -> N
     _write_json(healthy_install["claude_dir"] / ".claude.json", {"mcpServers": {}})
     results = _run_healthy(healthy_install)
     mcp = next(r for r in results if r.name == "mcp")
-    assert mcp.status == "fail"
-    assert doctor.exit_code(results) == 1
+    assert mcp.status == "warn"
+    assert doctor.exit_code(results) == 0
 
 
 def test_claude_json_present_but_unparseable_fails_mcp(healthy_install: dict) -> None:
@@ -283,9 +284,9 @@ def test_neither_claude_json_location_still_fails_mcp(healthy_install: dict) -> 
     assert not (healthy_install["home_dir"] / ".claude.json").exists()
     results = _run_healthy(healthy_install)
     mcp = next(r for r in results if r.name == "mcp")
-    assert mcp.status == "fail"
+    assert mcp.status == "warn"
     assert "claude mcp add" in mcp.fix
-    assert doctor.exit_code(results) == 1
+    assert doctor.exit_code(results) == 0
 
 
 def test_claude_config_dir_location_still_wins_when_both_absent_of_home(
@@ -318,8 +319,8 @@ def test_malformed_hooks_block_shapes_are_tolerated(healthy_install: dict) -> No
     )
     results = _run_healthy(healthy_install)
     hooks = next(r for r in results if r.name == "hooks")
-    assert hooks.status == "fail"
-    assert doctor.exit_code(results) == 1
+    assert hooks.status == "warn"
+    assert doctor.exit_code(results) == 0
 
 
 def test_bare_command_hook_resolved_via_path(
@@ -354,12 +355,12 @@ def test_bare_command_hook_resolved_via_path(
     assert hooks.status == "ok"
 
 
-def test_no_hooks_registered_fails_and_names_fix(healthy_install: dict) -> None:
+def test_no_hooks_registered_is_pending_and_names_fix(healthy_install: dict) -> None:
     _write_json(healthy_install["claude_dir"] / "settings.json", {"hooks": {}})
     results = _run_healthy(healthy_install)
-    assert doctor.exit_code(results) == 1
+    assert doctor.exit_code(results) == 0
     hooks = next(r for r in results if r.name == "hooks")
-    assert hooks.status == "fail"
+    assert hooks.status == "warn"
     assert "sidecar.md" in hooks.fix
 
 
@@ -396,7 +397,7 @@ def test_settings_json_present_but_unparseable_fails_hooks(
     assert doctor.exit_code(results) == 1
 
 
-def test_no_api_key_fails_key_mode_and_names_fix(
+def test_no_api_key_is_pending_key_mode_and_names_fix(
     healthy_install: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _pin_llm_provider_env(monkeypatch)
@@ -405,9 +406,9 @@ def test_no_api_key_fails_key_mode_and_names_fix(
     # tests/test_2762_key_mode_login.py), so this is the plain missing-key case.
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
     results = _run_healthy(healthy_install)
-    assert doctor.exit_code(results) == 1
+    assert doctor.exit_code(results) == 0
     key_mode = next(r for r in results if r.name == "key_mode")
-    assert key_mode.status == "fail"
+    assert key_mode.status == "warn"
     assert "regex" in key_mode.detail
     assert "supplying-an-api-key" in key_mode.fix
 
@@ -428,7 +429,7 @@ def test_cached_config_env_key_satisfies_key_mode(
     assert key_mode.status == "ok"
 
 
-def test_claude_cli_provider_with_missing_binary_fails_key_mode(
+def test_claude_cli_provider_with_missing_binary_is_pending_key_mode(
     healthy_install: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
@@ -439,8 +440,8 @@ def test_claude_cli_provider_with_missing_binary_fails_key_mode(
     monkeypatch.delenv("ATHENAEUM_CLAUDE_CLI_BIN", raising=False)
     results = _run_healthy(healthy_install)
     key_mode = next(r for r in results if r.name == "key_mode")
-    assert key_mode.status == "fail"
-    assert doctor.exit_code(results) == 1
+    assert key_mode.status == "warn"
+    assert doctor.exit_code(results) == 0
 
 
 def test_invalid_llm_provider_fails_key_mode(
@@ -474,25 +475,26 @@ def test_claude_cli_provider_with_binary_present_ok(
     assert "claude_code_login" in key_mode.detail or "login" in key_mode.detail
 
 
-def test_missing_search_index_fails_and_names_fix(healthy_install: dict) -> None:
+def test_missing_search_index_is_pending_and_names_fix(healthy_install: dict) -> None:
     (healthy_install["cache_dir"] / "wiki-index.db").unlink()
     results = _run_healthy(healthy_install)
-    assert doctor.exit_code(results) == 1
+    assert doctor.exit_code(results) == 0
     index = next(r for r in results if r.name == "search_index")
-    assert index.status == "fail"
+    assert index.status == "warn"
     assert "reindex" in index.fix
 
 
-def test_vector_backend_missing_index_fails(
+def test_vector_backend_missing_index_is_pending(
     healthy_install: dict,
 ) -> None:
+    pytest.importorskip("chromadb")  # without it the vector backend falls back to fts5
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
         "search_backend: vector\n", encoding="utf-8"
     )
     results = _run_healthy(healthy_install)
     index = next(r for r in results if r.name == "search_index")
-    assert index.status == "fail"
-    assert doctor.exit_code(results) == 1
+    assert index.status == "warn"
+    assert doctor.exit_code(results) == 0
 
 
 def test_vector_backend_with_built_index_ok(healthy_install: dict) -> None:
@@ -754,7 +756,7 @@ def test_doctor_cli_makes_no_writes_on_broken_install(
     through the real CLI entry point — a failing check must still never
     write, only report."""
     monkeypatch.setattr(doctor, "_default_fetch", _fake_fetch_offline)
-    (healthy_install["claude_dir"] / ".claude.json").unlink()
+    (healthy_install["claude_dir"] / ".claude.json").write_text("{bad", encoding="utf-8")
     before_knowledge = _snapshot(healthy_install["knowledge_root"])
     before_cache = _snapshot(healthy_install["cache_dir"])
 
@@ -881,3 +883,54 @@ def test_no_removed_config_keys_is_ok(healthy_install: dict) -> None:
         r for r in _run_healthy(healthy_install) if r.name == "removed_config_keys"
     )
     assert row.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2906: a fresh install reports its four first-run checks as
+# "setup pending" (WARN, exit 0); present-but-broken state still FAILs.
+# ---------------------------------------------------------------------------
+
+_FIRST_RUN = ("mcp", "hooks", "key_mode", "search_index")
+
+
+def test_fresh_install_first_run_checks_are_pending_warn_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing set up at all: every first-run check is WARN carrying
+    "setup pending" and a fix, no check is FAIL, and the exit code is 0."""
+    _pin_llm_provider_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(doctor, "_claude_login_missing", lambda: False)
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / "athenaeum.yaml").write_text("search_backend: vector\n", encoding="utf-8")
+    # API provider + no key is the plain missing-key case.
+    monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "api")
+    results = doctor.run_checks(
+        knowledge,
+        cache_dir=tmp_path / "cache",
+        claude_config_dir=tmp_path / "claude",
+        home=tmp_path / "home",
+        fetch=_fake_fetch_offline,
+    )
+    by_name = {r.name: r for r in results}
+    for name in _FIRST_RUN:
+        assert by_name[name].status == "warn", by_name[name]
+        assert "setup pending" in by_name[name].detail
+        assert by_name[name].fix
+    assert not [r for r in results if r.status == "fail"]
+    assert doctor.exit_code(results) == 0
+    text = doctor.format_report(results)
+    assert "[WARN] mcp" in text
+    assert "with 4 warning(s)" in text
+
+
+def test_corrupt_fts5_index_still_fails_search_index(healthy_install: dict) -> None:
+    (healthy_install["cache_dir"] / "wiki-index.db").write_bytes(b"garbage" * 64)
+    results = _run_healthy(healthy_install)
+    index = next(r for r in results if r.name == "search_index")
+    assert index.status == "fail"
+    assert "unreadable" in index.detail
+    assert "reindex" in index.fix
+    assert doctor.exit_code(results) == 1

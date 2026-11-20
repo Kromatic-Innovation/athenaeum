@@ -132,6 +132,8 @@ does not answer.
   persisted one, and what stays true across mid-run page writes.
 - [Native-memory baseline](design/native-memory-baseline.md) — the comparison against the
   host agent's own memory that decides whether the project continues.
+- [Push behaviour for self-contained prompts](design/push-self-contained-prompts.md) — declared skip
+  for programmatic runs, then a measured relevance floor on the push path.
 - [Prompts](design/prompts.md)
 - [Sensitivity class vocabulary](design/sensitivity-class-vocabulary.md)
 - [Sensitivity value routing](design/sensitivity-value-routing.md)
@@ -246,6 +248,7 @@ Evidence, kept out of the reading path.
 - [Native-memory baseline — validating grid for the `follow_through` path-to-beat](measurements/native-memory-baseline-2026-09-19.md) — the reading taken after the four `follow_through` path-to-beat changes landed: no class regressed on the verdict arm, and §7 passes at `medium` for the first time.
 - [North-star grid — rendered report, run 35443944736](measurements/north-star-grid-2026-09-19-run-35443944736.md) — the full rendered report that reading was taken from, recorded in-tree because the Actions artifact expires.
 - [Native-memory baseline re-run, 2026-11-19: the oracle control failed](measurements/native-memory-baseline-2026-11-19.md) — the re-run for the kill criterion: the oracle positive control failed on `single_hop` and `redundancy`, so the decision rows are void; records provenance, derived spend, the failing cells, and that the corpus digests differ from 2026-09-19.
+- [North-star oracle control: the 30 failing cells, classified and re-graded offline, 2026-11-19](measurements/north-star-oracle-control-regrade-2026-11-19.md) — sorts the 30 failing oracle cells of the 2026-11-19 run into probe defect, matcher defect and model failure; matcher-only re-grade per class, repaired-marker view, and the 2026-09-19 oracle re-count.
 - [North-star grid — rendered report, run 44438673846](measurements/north-star-grid-2026-11-19-run-44438673846.md) — the full rendered report from that run, recorded in-tree because the Actions artifact expires; its decision block is void.
 - [Rollout eval layer — packaged adapter vs. the shell hook](measurements/rollout-eval-adapter-cutover-2026-09-26.md) — the score against the packaged `athenaeum-claude-hook` adapter, next to the last shell-hook run; `push_breadcrumb_pull` reads below the recorded floor.
 - [Rollout eval layer — packaged adapter re-measurement](measurements/rollout-eval-adapter-cutover-2026-09-29.md) — re-run against the packaged adapter after an overflow-notice fix; `push_breadcrumb_pull` recovers partway toward the shell-hook floor but does not reach it.

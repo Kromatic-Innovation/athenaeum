@@ -408,7 +408,9 @@
           "— push records keep only a query hash (athenaeum#711), never the " +
           "query text.";
       } else {
-        topics.textContent = "Topics: " + (turn.topics || []).join(", ");
+        topics.textContent =
+          "Topics: " + (turn.topics || []).join(", ") +
+          (turn.extractor ? " (extractor: " + turn.extractor + ")" : "");
       }
       meta.appendChild(topics);
 
