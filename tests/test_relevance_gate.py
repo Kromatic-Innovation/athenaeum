@@ -360,3 +360,27 @@ def test_collected_classify_handle_mixed_raw_never_reaches_write_tier(tmp_path, 
     assert all("SecretCoveredMarker" not in p for p in write_prompts)
     for page in (root / "wiki").glob("*.md"):
         assert "SecretCoveredMarker" not in page.read_text()
+
+
+ROUTE_POLICY = (
+    "| Verdict | Type | Tag | Subject | Store |\n|---|---|---|---|---|\n"
+    "| never | | personal | | |\n| route | | personal | | st_h4r5n2kd6wq3 |\n"
+)
+
+
+@pytest.mark.parametrize("batch", [False, True], ids=["sync", "batch"])
+def test_a_route_row_after_a_never_row_does_not_let_the_note_through(
+    tmp_path, monkeypatch, batch
+):
+    """athenaeum#2796: ``never`` beats ``route``; capture is unchanged."""
+    root = _seed(tmp_path, ROUTE_POLICY)
+    raw = root / "raw" / "sessions" / "20260101T120000Z-aabbccd0.md"
+    raw.write_text(PERSONAL)
+    rc, client = _run(root, monkeypatch, batch=batch)
+    assert rc == 0
+    assert not raw.exists()
+    assert _pages(root) == []
+    client.messages.create.assert_not_called()
+    rows = iter_drops(root / "cache")
+    assert len(rows) == 1
+    assert rows[0].reason.startswith("relevance-policy: never tag=personal")

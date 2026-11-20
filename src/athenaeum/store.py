@@ -1142,6 +1142,25 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         source_ref="config.py:185 'athenaeum.yaml' (design note §5.2 R3 box, issue "
         "athenaeum#980 AC5)",
     ),
+    # -- store declaration (issue athenaeum#2772) -------------------------
+    # Operator-authored and versioned with the pages, so a copy changed on both
+    # sides is held for a person and never merged by rule.
+    ArtifactDeclaration(
+        name="store-access-declaration",
+        persistence_class="config",
+        operational_scope=None,
+        location="surface root (_store/access.yaml)",
+        source_ref="store_access.py DECLARATION_RELPATH (design note "
+        "federation-store-access §5, issue athenaeum#2772)",
+    ),
+    ArtifactDeclaration(
+        name="store-review-criteria",
+        persistence_class="config",
+        operational_scope=None,
+        location="surface root (_store/reviews/<name>.md)",
+        source_ref="store_access.py (design note federation-store-access §8, "
+        "issue athenaeum#2772)",
+    ),
     # -- off-corpus purgeable surface (design note §8, issue athenaeum#984) --
     # AC4: the purgeable surface's derived/operational artifacts, declared
     # through this SAME R3 catalogue every other store artifact declares
@@ -1326,6 +1345,93 @@ def restore_repo(repo: Path, sha: str) -> None:
     """
     subprocess.run(["git", "reset", "--hard", sha], cwd=str(repo), check=True, capture_output=True)
     subprocess.run(["git", "clean", "-fd"], cwd=str(repo), check=True, capture_output=True)
+
+
+# -- Sync read side (athenaeum#2930, design note federation-multi-writer-sync §3.1) --
+#
+# Read-only git operations a multi-writer sync needs. None writes a commit, moves
+# a branch, or touches the working tree; ``fetch_remote_branch`` only adds objects
+# and remote-tracking refs. The seam holds no opinion about page content.
+
+
+def _git_out(repo: Path, *args: str) -> bytes:
+    """Run ``git *args`` in *repo*; return stdout bytes. Raises ``CalledProcessError``."""
+    return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True).stdout
+
+
+def fetch_remote_branch(repo: Path, branch: str, remote: str = "origin") -> str:
+    """Fetch *branch* from *remote* and return the fetched tip commit SHA.
+
+    The local branch and working tree are untouched. Raises
+    ``subprocess.CalledProcessError`` when the fetch fails (no network, unknown
+    remote or branch).
+    """
+    _git_out(repo, "fetch", "--quiet", remote, branch)
+    return _git_out(repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}").decode().strip()
+
+
+def common_ancestor(repo: Path, rev_a: str, rev_b: str) -> str | None:
+    """The best common ancestor commit of two revisions, or ``None`` for unrelated histories."""
+    result = subprocess.run(
+        ["git", "merge-base", rev_a, rev_b], cwd=str(repo), capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return result.stdout.strip() or None
+    if result.returncode == 1:
+        return None
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
+
+
+def read_file_at_revision(repo: Path, rev: str, path: str) -> bytes | None:
+    """The bytes of *path* as committed at *rev*, or ``None`` if the path is absent there.
+
+    Reads the object database only; the working tree and index are not touched.
+    Raises ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    _git_out(repo, "rev-parse", "--verify", f"{rev}^{{commit}}")
+    entry = _git_out(repo, "ls-tree", "-z", rev, "--", path)
+    if not entry:
+        return None
+    meta = entry.split(b"\t", 1)[0].split()
+    if len(meta) != 3 or meta[1] != b"blob":
+        return None
+    return _git_out(repo, "cat-file", "blob", meta[2].decode())
+
+
+def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
+    """Sorted paths that differ between two revisions (added, modified or deleted).
+
+    Renames are reported as a delete plus an add; pairing a page by uid is the
+    caller's business, not the seam's.
+    """
+    raw = _git_out(repo, "diff", "--name-only", "-z", "--no-renames", rev_a, rev_b)
+    return sorted(p.decode() for p in raw.split(b"\0") if p)
+
+
+def remote_history_rewritten(repo: Path, last_seen: str | None, fetched_tip: str) -> bool:
+    """Whether the fetched remote tip no longer contains the commit last seen there.
+
+    ``True`` when *last_seen* is not an ancestor of (or equal to) *fetched_tip*.
+    An ordinary fast-forward keeps *last_seen* in the history and is ``False``,
+    as is a first sync (``last_seen`` is ``None``). Where "last seen" is kept is
+    the caller's concern; this takes it as an argument and stores nothing.
+    """
+    if last_seen is None:
+        return False
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", last_seen, fetched_tip],
+        cwd=str(repo),
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
 
 
 class FilesystemStore:
