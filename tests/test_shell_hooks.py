@@ -4328,8 +4328,10 @@ exec "$REAL_AWK" "$@"
 
 
 class TestRetiredShellParityGaps:
-    """Three things the retired shell hook did that the packaged adapter does
-    NOT do yet (issue athenaeum#1363).
+    """Three things the retired shell hook did that the packaged adapter did
+    NOT do at the cutover (issue athenaeum#1363). Gap 2, the push-path
+    relevance floor, is closed by issue athenaeum#2978: its marker is gone
+    and its test now asserts the floor is honoured.
 
     Issue athenaeum#1361 cut the live ``UserPromptSubmit`` hook over from
     ``examples/claude-code/user-prompt-recall.sh`` to
@@ -4448,27 +4450,16 @@ class TestRetiredShellParityGaps:
         )
 
     def test_relevance_floor_is_enforced_on_the_mcp_path(self) -> None:
-        """Second control: the floor IS wired -- just not on this path. It is
-        called from :mod:`athenaeum.mcp_server` (the explicit ``recall``
-        tool) and nowhere in :mod:`athenaeum.context`, which is what the
-        sidecar runs.
+        """Second control: the floor is wired on both paths -- the explicit
+        ``recall`` tool (:mod:`athenaeum.mcp_server`) and, since issue
+        athenaeum#2978 closed gap 2, the per-turn push the sidecar runs
+        (:mod:`athenaeum.context`).
         """
         mcp = (Path(__file__).parent.parent / "src" / "athenaeum" / "mcp_server.py").read_text()
         ctx = (Path(__file__).parent.parent / "src" / "athenaeum" / "context.py").read_text()
         assert "meets_relevance_floor" in mcp
-        assert "meets_relevance_floor" not in ctx
+        assert "meets_relevance_floor" in ctx
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "athenaeum#1363 gap 2: athenaeum.context never calls "
-            "meets_relevance_floor, so recall.relevance_floor.{fts5,vector} "
-            "(and the ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5 env override) are "
-            "inert on the per-turn sidecar path. The retired shell hook "
-            "imported both resolvers and filtered its own rows with them. "
-            "Delete this marker when context.py enforces the floor."
-        ),
-    )
     def test_relevance_floor_is_honoured_on_the_sidecar_path(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -4480,10 +4471,11 @@ class TestRetiredShellParityGaps:
             self._run(hook_env, "tell me about customer development frameworks")
         ), "precondition: the probe query must push at least one bullet unfiltered"
 
-        # FTS5 `rank` is negative-is-better, so a floor of -1e9 admits
-        # everything and +1e9 admits nothing: the direction is
+        # FTS5 `rank` is negative-is-better and a hit clears the floor when
+        # `rank <= floor`, so a floor of +1e9 admits everything and -1e9
+        # admits nothing: the direction is
         # `athenaeum.search.meets_relevance_floor`'s, not this test's guess.
-        floored = dict(hook_env, ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5="1000000000")
+        floored = dict(hook_env, ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5="-1000000000")
         assert not self._bullets(
             self._run(floored, "tell me about customer development frameworks")
         ), "every hit is below an impossibly strict floor and must be dropped"
