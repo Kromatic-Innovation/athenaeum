@@ -27,6 +27,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- The `intake` block of `_store/access.yaml` (declaration `version: 2`): a
+  `default` of `accept` or `refuse` and ordered `type`/`tag` rules, last match
+  wins, a tag covering its `/` children as the relevance policy matches them.
+  A `subject` key, a `route` or `always` verdict, or the block in a version-1
+  file is refused. `athenaeum.store_intake.intake_accepts` is the pure accept
+  check; nothing applies it yet (athenaeum#2936).
 - `athenaeum.store_rights`: the `DirectoryAdapter` protocol, the built-in `static`
   adapter (reads the declaration's `groups:` block) and `resolve_rights`, which
   returns the subset of read, propose, compile and answer an owner holds on a
