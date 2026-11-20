@@ -233,6 +233,7 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
                 f"excluded_reference_records: {baseline.excluded_reference_record_count}\n"
                 f"skipped_turns: {baseline.skipped_turn_count}{skipped_str}\n"
                 f"skip_only_sessions: {baseline.skip_only_session_count}\n"
+                f"excluded_skipped_turns: {baseline.excluded_skip_record_count}\n"
                 f"athenaeum_version: {baseline.athenaeum_version}\n"
                 f"git_sha: {baseline.git_sha}\n"
                 f"{snapshot_line}"

@@ -142,6 +142,9 @@ unset or `true`.
 `athenaeum push-metrics baseline` reports skips as their own figure:
 `skipped_turns` (with a per-reason breakdown, `skipped_by_reason`) and
 `skip_only_sessions`, the sessions in the window whose only rows are skips.
+An `--exclude-session` drops that session's skips as well; they are counted in
+`excluded_skipped_turns`, and the session is listed in `excluded_sessions` even
+when it has no push rows.
 Neither is folded into `push_records` or `sessions`. Reference determination
 gives a skip-only session the reason `push-skipped` rather than
 `no-push-records`.

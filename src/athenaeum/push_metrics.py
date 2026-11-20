@@ -2247,7 +2247,10 @@ class BaselineWindow:
     ``skip_reason`` set) as their own figure. They are never folded into
     ``push_record_count`` or ``session_count``: a skipped turn is not a push,
     and a session whose only rows are skips is counted in
-    ``skip_only_session_count`` rather than vanishing as "no push".
+    ``skip_only_session_count`` rather than vanishing as "no push". An
+    excluded session's skips are dropped too, counted in
+    ``excluded_skip_record_count``, and the session is listed in
+    ``excluded_sessions`` even when it has no push rows.
     """
 
     start: str
@@ -2264,6 +2267,7 @@ class BaselineWindow:
     skipped_turn_count: int = 0
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
     skip_only_session_count: int = 0
+    excluded_skip_record_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2280,6 +2284,7 @@ class BaselineWindow:
             "skipped_turns": self.skipped_turn_count,
             "skipped_by_reason": dict(sorted(self.skipped_by_reason.items())),
             "skip_only_sessions": self.skip_only_session_count,
+            "excluded_skipped_turns": self.excluded_skip_record_count,
         }
 
 
@@ -2473,6 +2478,11 @@ def compute_baseline(
 
     excluded_pushes = [r for r in pushes_in if r.get("session_id") in exclude_set]
     excluded_refs = [r for r in refs_in if r.get("session_id") in exclude_set]
+    # Issue athenaeum#2976: skip rows are windowed and excluded the same way,
+    # so an excluded skip-only session is still reported as excluded.
+    skips_window = [r for r in skips if _in_window(r.get("ts"))]
+    excluded_skips = [r for r in skips_window if r.get("session_id") in exclude_set]
+    skips_in = [r for r in skips_window if r.get("session_id") not in exclude_set]
     if exclude_set:
         pushes_in = [r for r in pushes_in if r.get("session_id") not in exclude_set]
         refs_in = [r for r in refs_in if r.get("session_id") not in exclude_set]
@@ -2480,7 +2490,7 @@ def compute_baseline(
     found_excluded_sessions = sorted(
         {
             sid
-            for r in (excluded_pushes + excluded_refs)
+            for r in (excluded_pushes + excluded_refs + excluded_skips)
             if isinstance(sid := r.get("session_id"), str) and sid
         }
     )
@@ -2489,11 +2499,6 @@ def compute_baseline(
 
     # Issue athenaeum#2976: skip rows in the same window, under the same
     # session denylist, reported as their own figure.
-    skips_in = [
-        r
-        for r in skips
-        if _in_window(r.get("ts")) and r.get("session_id") not in exclude_set
-    ]
     skipped_by_reason: dict[str, int] = {}
     for r in skips_in:
         reason = str(r.get("skip_reason"))
@@ -2527,6 +2532,7 @@ def compute_baseline(
         skipped_turn_count=len(skips_in),
         skipped_by_reason=skipped_by_reason,
         skip_only_session_count=len(skip_only_sessions),
+        excluded_skip_record_count=len(excluded_skips),
     )
 
 

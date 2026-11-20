@@ -220,6 +220,12 @@ def test_baseline_exclude_session_drops_its_skips(cache: Path) -> None:
     baseline = push_metrics.compute_baseline(cache_dir=cache, exclude_sessions=["sess-skip-only"])
     assert baseline.skipped_turn_count == 0
     assert baseline.skip_only_session_count == 0
+    # The exclusion is still visible: the skip-only session is listed and
+    # its skip rows are counted as excluded.
+    assert baseline.excluded_sessions == ("sess-skip-only",)
+    assert baseline.excluded_skip_record_count == 1
+    assert baseline.excluded_push_record_count == 0
+    assert baseline.to_dict()["excluded_skipped_turns"] == 1
 
 
 def test_baseline_with_no_skips_reports_zero(cache: Path) -> None:
