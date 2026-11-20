@@ -47,6 +47,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
+- [What counts as stable](guides/stability.md) — which surfaces beyond `__all__` you can build on, which are experimental, which are internal.
 
 ## Modules
 
