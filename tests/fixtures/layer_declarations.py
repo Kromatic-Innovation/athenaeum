@@ -102,6 +102,7 @@ MODULE_LAYER: dict[str, int] = {
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,
     "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
+    "store_decisions": 2,  # issue athenaeum#2934: per-store decision queue; imports L1, L2
     "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
     "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
     "store_access": 2,  # issue athenaeum#2772: _store/access.yaml parser; imports models (L1)
