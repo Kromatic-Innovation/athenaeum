@@ -121,9 +121,23 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   because no LLM credential is available, naming how to enable LLM extraction
   (athenaeum#2906).
 
+- The per-turn push no longer fires on text the harness injected into the prompt
+  channel (background-task notices, messages from other agents, system
+  reminders). A wholly injected submission is skipped and recorded as one push
+  ledger row with `skip_reason: harness_injected`; a submission mixing injected
+  and user text is queried on the user text only. The Claude Code adapter
+  supplies the patterns and the engine supplies the skip
+  (athenaeum#2914).
+
 ### Fixed
 
 - `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
+
+- Six vector-backend tests (in `test_doctor.py`, `test_cli.py::TestWarnIfBackendCacheMissing` and `test_indexed_surfaces.py`) now skip instead of failing under a `[dev]`-only install without chromadb (athenaeum#2905).
+
+### Security
+
+- `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
 
 ## [0.27.2] - 2026-11-19
 

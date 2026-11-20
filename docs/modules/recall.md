@@ -105,6 +105,36 @@ prose sentences carrying no marker exceeds `librarian.unmarked_sentence_max_rati
 same posture as the oversized-page guardrail. Nothing is ever blocked,
 rewritten, or refused on this number.
 
+## Per-turn push: harness-injected text is not a prompt
+
+The per-turn push builds its query from what the prompt says, so it must only
+fire on text a person or a calling program wrote. A host harness can deliver its
+own text through the prompt channel (a background-task completion notice, a
+message from another agent, a system reminder); a query built from that text
+matches the notice, not the work.
+
+- **Pseudo-prompt** (the whole submission is injected text): no push is made,
+  nothing is added to the session's seen-list, and the push ledger gets one row
+  with an empty `items` list, `"pushed_count": 0` and a `skip_reason`
+  (`harness_injected`).
+- **Mixed submission** (injected text plus user text): the injected spans are
+  removed and the query is built from the user text only.
+- **Normal prompt**: unchanged.
+
+The engine owns the skip (`athenaeum.context.build_context_for_turn`'s
+`injected_patterns` argument); a host adapter supplies the patterns. The Claude
+Code adapter supplies patterns for `<task-notification>`, `<teammate-message>`
+and `<system-reminder>` spans. A span must have its closing tag to match, so a
+person typing a lone opening tag is never skipped. With no patterns (the
+default for any other caller) behaviour is as before.
+
+Skip rows live in the same ledger file but are not pushes:
+`push_metrics.read_push_records` omits them by default (so baseline, coverage,
+liveness and usage reports count real pushes only), and
+`push_metrics.read_skip_records` returns just the skips, so the skip rate is
+`skips / (skips + pushes)` over a window. Ledgers written before this change
+have no `skip_reason` key and read as before.
+
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the

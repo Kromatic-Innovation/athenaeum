@@ -76,6 +76,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1089,6 +1090,67 @@ def record_context_push(
 # of it. Moved here rather than duplicated.
 
 
+#: Skip reason recorded when a submission is wholly harness-injected text
+#: (issue athenaeum#2914).
+SKIP_REASON_HARNESS_INJECTED = "harness_injected"
+
+
+def split_injected_text(prompt: str, patterns: Sequence[str]) -> tuple[str, bool]:
+    """Remove harness-injected spans from *prompt*.
+
+    *patterns* are regular expressions supplied by the host adapter (the
+    engine knows no host's markup). Returns ``(user_text, matched)``:
+    ``user_text`` is the prompt with every matching span removed and
+    whitespace trimmed; ``matched`` says whether anything was removed. With
+    no patterns the prompt is returned unchanged. A malformed pattern is
+    ignored rather than raised, so a bad adapter pattern degrades to
+    "push as before".
+    """
+    user_text = prompt
+    for pattern in patterns:
+        try:
+            user_text = re.sub(pattern, " ", user_text, flags=re.DOTALL)
+        except re.error:
+            continue
+    matched = user_text != prompt
+    return (user_text.strip() if matched else prompt), matched
+
+
+def record_context_skip(
+    prompt: str,
+    session_id: str,
+    reason: str,
+    *,
+    cache_dir: Path,
+    wiki_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Write one skip row (no items, ``skip_reason`` set) to the push ledger.
+
+    Best-effort like :func:`record_context_push`: never raises.
+    """
+    try:
+        if not session_id:
+            return False
+        from athenaeum import push_metrics
+
+        record = push_metrics.PushRecord(
+            session_id=session_id,
+            ts=push_metrics.now_iso(),
+            query_hash=push_metrics._query_hash(prompt),
+            backend="",
+            items=[],
+            source="sidecar",
+            skip_reason=reason,
+        )
+        return push_metrics.record_push(
+            record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
+        )
+    except Exception:  # must never break the turn
+        log.debug("context: skip-row instrumentation failed", exc_info=True)
+        return False
+
+
 def _seen_file(cache_dir: Path, session_id: str) -> Path:
     """Session-dedup bookkeeping (issue athenaeum#1358 scope: "session dedup").
 
@@ -1137,6 +1199,7 @@ def build_context_for_turn(
     llm_timeout: float = 3.0,
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
+    injected_patterns: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1170,7 +1233,37 @@ def build_context_for_turn(
     ``wiki_root`` is forwarded as-is to :func:`build_context` (issue
     athenaeum#2538 AC8) — ``None`` by default, so a caller that does not
     pass it sees no behavior change at all.
+
+    ``injected_patterns`` (issue athenaeum#2914): regexes the host adapter
+    supplies for text its harness injects into the prompt channel. A
+    submission that is wholly such text (a *pseudo-prompt*) is not pushed:
+    an empty envelope is returned and one skip row
+    (``skip_reason="harness_injected"``) is written to the push ledger. A
+    submission mixing injected and user text is queried on the user text
+    only. ``()`` (the default) leaves behavior unchanged.
     """
+    if injected_patterns:
+        user_text, matched = split_injected_text(prompt, injected_patterns)
+        if matched:
+            if not user_text:
+                if not _recall_disabled(cache_dir):
+                    record_context_skip(
+                        prompt,
+                        session_id,
+                        SKIP_REASON_HARNESS_INJECTED,
+                        cache_dir=cache_dir,
+                        wiki_root=wiki_root,
+                        config=config,
+                    )
+                return _empty_envelope(
+                    prompt,
+                    session_id,
+                    budget if budget is not None else DEFAULT_BUDGET_TOKENS,
+                    search_backend or _DEFAULT_SEARCH_BACKEND,
+                    time.monotonic(),
+                )
+            prompt = user_text
+
     seen_path = _seen_file(cache_dir, session_id)
     exclude = _read_seen(seen_path)
 

@@ -260,6 +260,17 @@ from athenaeum.config import (
 #: athenaeum.yaml) but share the same default on purpose.
 _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT = 15
 
+# Issue athenaeum#2914: markup Claude Code injects into the prompt channel
+# (background-task completion notices, messages from other agents, system
+# reminders). This adapter supplies the patterns; the engine
+# (`athenaeum.context`) owns the skip. Each requires its closing tag, so a
+# stray literal opening tag in a person's own text is never swallowed.
+_INJECTED_TEXT_PATTERNS = (
+    r"<task-notification\b[^>]*>.*?</task-notification>",
+    r"<teammate-message\b[^>]*>.*?</teammate-message>",
+    r"<system-reminder\b[^>]*>.*?</system-reminder>",
+)
+
 
 #: Keys unique to Grok Build's camelCase hook payload (issue athenaeum#2371)
 #: -- Claude Code's genuine payload spells the same concepts
@@ -845,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 n=_resolve_recall_cap_ceiling(),
                 wiki_root=wiki_root,
+                injected_patterns=_INJECTED_TEXT_PATTERNS,
             )
             text = envelope["render"]["text"]
             preamble = envelope["render"]["preamble"]
