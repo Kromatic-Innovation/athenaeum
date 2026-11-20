@@ -18,20 +18,63 @@ share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
 [support policy](docs/guides/install.md#support-policy).
 
+The bundled `promptwitness` package is experimental: it is not part of the
+athenaeum public API, is not covered by semver, and is subject to change
+without notice. From the release after 0.27.2 on, changes to it get their own
+`promptwitness` line in the release section, separate from `athenaeum` entries.
+
 ## [Unreleased]
 
 ### Added
 
+- `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
+  raised copy, failing closed (any key outside the nine of the design note is
+  refused), pins `raise:<raise_id>` as a typed source, and backs a new
+  read-only command, `athenaeum raised-from-lint`, that reports a page whose
+  block is malformed. `raised_from` is now left out of `content_hash`. No page
+  is written or changed; the precedence rank of the `raise` source type stays
+  unset (athenaeum#2626, athenaeum#2799).
+- `athenaeum.raise_projection`, a pure module with no I/O: the raise
+  projection of a page (`type`, `name`, `description`, `aliases`, `tags`,
+  `access`, `audience` and the body with links reduced to their labels), the
+  payload hash over that projection, `raise_id` / `message_id` minting and
+  validators, and the derived uid of a raised copy. Nothing calls it yet, so no
+  install behaves differently (athenaeum#2626, athenaeum#2798).
 - `athenaeum.store_access` parses and validates a store's declaration,
   `_store/access.yaml`, failing closed: a present-but-invalid file yields a result
   naming each offending key, and nothing reads it yet so no install behaves
   differently. `_store/` files are registered as `config` artifacts, and a
   `_`-prefixed directory of any surface is no longer yielded as a page by
   `PageLocator.iter_surface_pages` or the index build (athenaeum#2772).
+- `athenaeum.page_merge.merge_page(base, local, remote, spec)` is a pure
+  three-way merge of one page by unit (frontmatter key, H2 section, lines in
+  a section) using the multi-writer sync design's rule table. It returns the
+  merged text, the contested units, the held units with a reason code, and the
+  rule that settled each unit. `access` and `audience` are never merged: a
+  difference in either is held, and contested or held units carry the remote
+  value so the result always parses. It does no file access, runs no git
+  command and calls no model, and nothing calls it yet. The section and list
+  helpers it shares with the structured upsert moved to `athenaeum.page_text`
+  (athenaeum#2773).
+- The relevance policy table gains an optional `Store` column and a `route`
+  verdict. A `route` row names a `store_id` or `personal`; `RelevancePolicy.match_route`
+  answers the destination question, and `match` / `resolve` still consider only
+  `always` and `never` rows, so `never` beats `route` and capture is unchanged.
+  The hash, read-back, `relevance_policy` tool and `set_capture_rule` (new
+  `store` argument) carry the store. Nothing acts on a `route` row yet
+  (athenaeum#2625).
+- `athenaeum.intake_decision.decide`, one pure function giving the intake decision for a
+  fact (capture, store, type, reason code), now called by the three capture gates in both
+  pipeline transports. Only its capture answer is used and it is the one the gates computed
+  before, so no install captures, drops or places anything differently (athenaeum#2625).
 
 ### Changed
 
 - The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
+
+### Fixed
+
+- `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
 
 ## [0.27.2] - 2026-11-19
 
@@ -74,8 +117,13 @@ decision-queue digest and an opt-in push notifier, and routes first-person
 auto-memory notes to the owner page. The documentation and packaging fixes
 asked for by the 0.25.0/0.26.0 release review are in: README quick start
 order, project status and release cadence, supported dependency ranges, and
-the remote-mode security notes. `athenaeum.__all__` is unchanged. There are no
-breaking changes to the public API; the behaviour changes are listed below.
+the remote-mode security notes. `athenaeum.__all__` is unchanged. One change is
+breaking and data-mutating for scripted callers: answering a decision
+(`athenaeum decisions answer` and the `resolve_question`, `resolve_merge` and
+`review_audit_item` MCP tools) now applies the answer at once by default, where
+it used to only record it (athenaeum#2531). Scripts that relied on the old
+record-only behaviour must pass `--apply deferred` (MCP: `apply="deferred"`);
+see upgrade step 3. The behaviour changes are listed below.
 
 Behaviour changes an existing install will notice:
 
@@ -98,9 +146,9 @@ Behaviour changes an existing install will notice:
 Experimental surface (not in `athenaeum.__all__`; flags, keys, formats and
 import paths may change in any minor release without a deprecation cycle): the
 decision digest (`athenaeum decisions digest`, the `queue_digest` MCP tool),
-decision push (`notify.yaml`), the `apply` option on decision answers, the
+decision push (`notify.yaml`) (athenaeum#2489), the `apply` option on decision answers, the
 `owner.bridge_memory_types` key, the `witness_paste` receipt field, the new
-`athenaeum.type_guidance` module, and everything 0.26.0 listed as experimental.
+`athenaeum.type_guidance` module (athenaeum#2731), and everything 0.26.0 listed as experimental.
 
 **Upgrading from 0.26.0**
 
@@ -109,9 +157,11 @@ decision push (`notify.yaml`), the `apply` option on decision answers, the
    `fastmcp` yourself, it must be 3.4.3 or later.
 2. If you install with `-c requirements-ci.lock`, switch to
    `-c requirements-ci.txt`.
-3. If you script decision answers and rely on them staying unapplied until the
-   next `ingest-answers` tick, add `--apply deferred` (MCP:
-   `apply="deferred"`).
+3. If you script `athenaeum decisions answer`, or call the `resolve_question`,
+   `resolve_merge` or `review_audit_item` MCP tools, and rely on answers staying
+   unapplied until the next `ingest-answers` tick, add `--apply deferred` (MCP:
+   `apply="deferred"`) to keep the previous record-only behaviour. Without it,
+   each answer mutates the knowledge base at once.
 4. If you have an owner configured and do not want auto-memory notes bridged to
    the owner page, set `owner.bridge_memory_types: []`.
 5. Optional: re-run `athenaeum registry` to build the

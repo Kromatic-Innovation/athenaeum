@@ -48,6 +48,14 @@ from typing import Any
 
 from athenaeum._retry import with_retry
 from athenaeum.config import DEFAULT_REASONING_T2_MODEL, resolve_model
+from athenaeum.intake_decision import (
+    CAPTURE_DROP,
+    CAPTURE_KEEP,
+    CAPTURE_UNSURE,
+    Description,
+    RuleLike,
+    decide,
+)
 from athenaeum.models import ClassifiedEntity, EntityAction, parse_frontmatter
 from athenaeum.prompt_safety import fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
@@ -56,7 +64,6 @@ from athenaeum.relevance_policy import (
     DROP_REASON_PREFIX,
     DROP_REASON_UNSURE,
     RelevancePolicy,
-    RelevanceRule,
     declared_facts,
     policy_categories,
     raw_is_explicit_remember,
@@ -107,60 +114,12 @@ class CategoryGateOutcome:
     overrides: int = 0
 
 
-def _label(rule: RelevanceRule) -> str:
+def _label(rule: RuleLike) -> str:
     return f"{rule.describe()} (rule {rule.number}, line {rule.line})"
 
 
 def _excerpt(name: str, text: str) -> str:
     return f"{name}: {text}".strip()[:_EXCERPT_CHARS]
-
-
-def _confident(confidence: str | None) -> bool:
-    return confidence == CONFIDENCE_HIGH
-
-
-def _reachable_never(
-    policy: RelevancePolicy, type_: str | None, tags: list[str], subject: str | None
-) -> RelevanceRule | None:
-    """The first ``never`` rule keyed on a tag that could still apply to this fact.
-
-    "Could apply" means every OTHER key the rule names (type, subject)
-    matches, so only the category is in doubt. ``None`` means no ``never`` rule
-    is in play and an unsure category cannot matter.
-    """
-    for rule in policy.rules:
-        if (
-            rule.verdict == "never"
-            and rule.tag is not None
-            and rule.matches(type_, tags + [rule.tag], subject)
-        ):
-            return rule
-    return None
-
-
-def _decide(
-    policy: RelevancePolicy,
-    type_: str | None,
-    tags: list[str],
-    subject: str | None,
-    category: str | None,
-    confidence: str | None,
-    *,
-    can_be_unsure: bool,
-) -> tuple[str, RelevanceRule | None]:
-    """``("keep" | "drop" | "escalate", rule)`` for one fact."""
-    base = policy.match(type_, tags, subject)
-    full = policy.match(type_, tags + [category], subject) if category else base
-    if full is not None and full.verdict == "never":
-        # A rule that decided without the category needs no confidence in it.
-        if base is not None and base.number == full.number:
-            return "drop", full
-        return ("drop", full) if _confident(confidence) else ("escalate", full)
-    if can_be_unsure and not _confident(confidence):
-        rule = _reachable_never(policy, type_, tags, subject)
-        if rule is not None:
-            return "escalate", rule
-    return "keep", None
 
 
 def build_escalation_request(
@@ -287,30 +246,34 @@ def gate_classified_entities(
         # A person-hint item (athenaeum#2654) carries category + confidence like
         # any other, so it can be unsure and escalate; its subject is the
         # hinted page's uid (the owner's uid for an owner fact).
-        verdict, rule = _decide(
+        decision = decide(
+            Description(
+                type=c.entity_type or None,
+                tags=tuple(c.tags),
+                subject=c.existing_uid,
+                category=c.category,
+                confidence=c.category_confidence,
+                explicit=explicit,
+                classified=True,
+            ),
             policy,
-            c.entity_type or None,
-            list(c.tags),
-            c.existing_uid,
-            c.category,
-            c.category_confidence,
-            can_be_unsure=True,
         )
-        if verdict == "keep" or rule is None:
-            out.kept.append(c)
-            continue
-        if explicit:
+        if decision.overridden is not None:
             log.info(
                 "relevance-explicit-override ref=%s name=%r rule=%s",
                 raw_ref,
                 c.name,
-                _label(rule),
+                _label(decision.overridden),
             )
             out.overrides += 1
             out.kept.append(c)
             continue
+        rule = decision.rule
+        if decision.capture == CAPTURE_KEEP or rule is None:
+            out.kept.append(c)
+            continue
         prefix = DROP_REASON_PREFIX
-        if verdict == "escalate":
+        if decision.capture == CAPTURE_UNSURE:
             out.escalated += 1
             category, sure = escalate_category(
                 c, categories, client=client, usage=usage, config=config, raw_ref=raw_ref
@@ -320,19 +283,21 @@ def gate_classified_entities(
                 prefix = DROP_REASON_UNSURE
             else:
                 resolved = replace(c, category=category, category_confidence=CONFIDENCE_HIGH)
-                verdict2, rule2 = _decide(
+                second = decide(
+                    Description(
+                        type=resolved.entity_type or None,
+                        tags=tuple(resolved.tags),
+                        subject=resolved.existing_uid,
+                        category=category,
+                        confidence=CONFIDENCE_HIGH,
+                        classified=True,
+                    ),
                     policy,
-                    resolved.entity_type or None,
-                    list(resolved.tags),
-                    resolved.existing_uid,
-                    category,
-                    CONFIDENCE_HIGH,
-                    can_be_unsure=False,
                 )
-                if verdict2 == "keep" or rule2 is None:
+                if second.capture != CAPTURE_DROP or second.rule is None:
                     out.kept.append(c)
                     continue
-                rule = rule2
+                rule = second.rule
         out.drops.append(
             CategoryDrop(
                 reason=f"{prefix}: {_label(rule)}",
@@ -367,24 +332,27 @@ def gate_update_actions(
     kept: list[EntityAction] = []
     drops: list[CategoryDrop] = []
     for action in actions:
-        rule = None
+        decision = None
         if action.kind == "update" and action.existing_uid:
             path = index.get_by_uid(action.existing_uid)
             if path is not None and path.exists():
                 meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
-                rule = policy.match(*declared_facts({**meta, "uid": action.existing_uid}))
-        if rule is None or rule.verdict != "never":
+                type_, tags, uid = declared_facts({**meta, "uid": action.existing_uid})
+                decision = decide(
+                    Description(type_, tuple(tags), uid, explicit=explicit), policy
+                )
+        if decision is None or decision.capture != CAPTURE_DROP:
+            if decision is not None and decision.overridden is not None:
+                log.info(
+                    "relevance-explicit-override ref=%s update=%s rule=%s",
+                    raw_ref,
+                    action.existing_uid,
+                    _label(decision.overridden),
+                )
             kept.append(action)
             continue
-        if explicit:
-            log.info(
-                "relevance-explicit-override ref=%s update=%s rule=%s",
-                raw_ref,
-                action.existing_uid,
-                _label(rule),
-            )
-            kept.append(action)
-            continue
+        rule = decision.rule
+        assert rule is not None
         drops.append(
             CategoryDrop(
                 reason=f"{DROP_REASON_PREFIX}: {_label(rule)}",

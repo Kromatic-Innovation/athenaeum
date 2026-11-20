@@ -4434,7 +4434,8 @@ def create_server(
 
         Issue athenaeum#2643: answers "what are you set to remember?" by
         listing the operator's relevance-policy rules (`always` / `never`,
-        keyed on type, tag and optional subject uid) in evaluation order.
+        keyed on type, tag and optional subject uid, plus `route` rules that
+        name a destination `store`) in evaluation order.
         Read-only: the policy lives in `wiki/_schema/relevance-policy.md` and
         is edited there or through `set_capture_rule`, never through this tool.
 
@@ -4447,7 +4448,8 @@ def create_server(
             is constrained), `hash` (8-hex digest of the effective rules, the
             same value the librarian run summary reports, or null),
             `semantics`, and `rules` — each with `rule`, `line`, `verdict`,
-            `type`, `tag` and `subject`. An invalid file returns `error`
+            `type`, `tag`, `subject` and `store` (null unless a `route` rule).
+            An invalid file returns `error`
             naming each bad rule instead.
         """
         from athenaeum.relevance_policy import (
@@ -4467,6 +4469,7 @@ def create_server(
         tag: str | None = None,
         subject_uid: str | None = None,
         rationale: str = "",
+        store: str | None = None,
     ) -> dict:
         """Record a standing capture rule as POLICY, not as a fact.
 
@@ -4481,12 +4484,18 @@ def create_server(
         rule. This tool does no language parsing. Give `verdict` plus at
         least one of `type`, `tag`, `subject_uid`:
 
-        - `verdict`: `always` (capture matching facts) or `never` (do not).
+        - `verdict`: `always` (capture matching facts) or `never` (do not), or
+          `route` (record where matching facts should go; see `store`).
         - `type`: an entity type from the deployment's type vocabulary.
         - `tag`: a tag from its tag vocabulary; a tag also covers its
           `/`-separated children (`personal` covers `personal/travel`).
         - `subject_uid`: the `uid` (frontmatter) of the entity the rule is
           scoped to.
+        - `store`: required for `route`, and refused for `always` / `never`:
+          the `store_id` of the destination store (`st_` plus 12 lowercase
+          base32 characters) or the reserved word `personal`. Never an
+          adapter name. A `route` rule only records where matching facts
+          should go; nothing acts on it yet, so capture is unchanged.
 
         A rule naming several keys matches only when all of them match. The
         new rule is added LAST and the last matching rule wins, so it
@@ -4500,12 +4509,13 @@ def create_server(
         decisions queue (`mode: "proposed"`) and nothing changes until then.
 
         Args:
-            verdict: `always` or `never`.
+            verdict: `always`, `never` or `route`.
             type: Optional entity type the rule matches.
             tag: Optional tag the rule matches.
             subject_uid: Optional entity uid the rule matches.
             rationale: Optional one-line reason, shown to the operator when
                 the rule is proposed.
+            store: Destination for a `route` rule (a `store_id` or `personal`).
 
         Returns:
             A dict with `ok`, `mode` (`applied` | `proposed`), `changed`
@@ -4530,7 +4540,9 @@ def create_server(
         is_http = transport == "http"
         try:
             if is_http:
-                if rule_edit_is_noop(wiki_root, verdict, type, tag, subject_uid):
+                if rule_edit_is_noop(
+                    wiki_root, verdict, type, tag, subject_uid, store
+                ):
                     # Nothing to approve: the policy already ends with this rule.
                     return {
                         "ok": True,
@@ -4541,7 +4553,13 @@ def create_server(
                         ),
                     }
                 record, created = file_rule_edit_proposal(
-                    wiki_root, verdict, type, tag, subject_uid, rationale=rationale.strip()
+                    wiki_root,
+                    verdict,
+                    type,
+                    tag,
+                    subject_uid,
+                    store,
+                    rationale=rationale.strip(),
                 )
                 return {
                     "ok": True,
@@ -4556,7 +4574,7 @@ def create_server(
                     ),
                 }
             result = apply_rule_edit(
-                wiki_root, verdict, type, tag, subject_uid, transport="stdio"
+                wiki_root, verdict, type, tag, subject_uid, store, transport="stdio"
             )
         except RelevancePolicyError as exc:
             return {"ok": False, "error_code": "invalid_rule", "message": str(exc)}

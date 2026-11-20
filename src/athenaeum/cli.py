@@ -133,6 +133,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_store_link_lint",
         "add_store_link_lint_subparser",
     ),
+    "raised-from-lint": (
+        "athenaeum._cmd_raised_from_lint",
+        "add_raised_from_lint_subparser",
+    ),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
         "add_recovery_yield_subparser",
@@ -223,6 +227,7 @@ _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
          "quarantine", "repair", "reconcile", "decompose-page", "recompile",
          "relate", "correct-notes", "fold-lint", "store-link-lint",
+         "raised-from-lint",
          "pii-restore", "quiesce", "drain", "storage", "schema", "registry",
          "memory-class", "description", "subject-population"),
     ),
@@ -354,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_quarantine import add_quarantine_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_quiesce import add_quiesce_subparser
+    from athenaeum._cmd_raised_from_lint import add_raised_from_lint_subparser
     from athenaeum._cmd_receipts import add_receipts_subparser
     from athenaeum._cmd_recompile import add_recompile_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
@@ -407,6 +413,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
     add_store_link_lint_subparser(subparsers)  # store-link-lint (athenaeum#2619)
+    add_raised_from_lint_subparser(subparsers)  # raised-from-lint (athenaeum#2799)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     # questions / merges removed in 0.24.0 (issue athenaeum#2457), as the
     # athenaeum#1992 deprecation announced: `decisions` carries every mode
