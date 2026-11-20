@@ -134,6 +134,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_store_link_lint_subparser",
     ),
     "store": ("athenaeum._cmd_store", "add_store_subparser"),
+    "machine-local-check": (
+        "athenaeum._cmd_machine_local_check",
+        "add_machine_local_check_subparser",
+    ),
     "raised-from-lint": (
         "athenaeum._cmd_raised_from_lint",
         "add_raised_from_lint_subparser",
@@ -232,7 +236,7 @@ _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
          "quarantine", "repair", "reconcile", "decompose-page", "recompile",
          "relate", "correct-notes", "fold-lint", "store-link-lint",
-         "raised-from-lint", "uid-collision-lint",
+         "raised-from-lint", "uid-collision-lint", "machine-local-check",
          "pii-restore", "quiesce", "drain", "storage", "schema", "registry",
          "memory-class", "description", "subject-population"),
     ),
@@ -353,6 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_import_memory import add_import_memory_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
+    from athenaeum._cmd_machine_local_check import add_machine_local_check_subparser
     from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
@@ -421,6 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
     add_store_link_lint_subparser(subparsers)  # store-link-lint (athenaeum#2619)
     add_store_subparser(subparsers)  # store access check (athenaeum#2991)
+    add_machine_local_check_subparser(subparsers)  # machine-local-check (athenaeum#2994)
     add_raised_from_lint_subparser(subparsers)  # raised-from-lint (athenaeum#2799)
     add_uid_collision_lint_subparser(subparsers)  # uid-collision-lint (athenaeum#2993)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)

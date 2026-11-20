@@ -95,6 +95,7 @@ from athenaeum.store_access import (
 from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_boundary import link_forbidden
 from athenaeum.store_links import extract_link_refs
+from athenaeum.sync_machine_local import check_repo as _check_machine_local
 
 log = logging.getLogger(__name__)
 
@@ -311,6 +312,7 @@ def sync_before_compile(
     """
     cfg = settings or SyncSettings()
     report = SyncReport()
+    _report_machine_local(repo, report)
     try:
         sha = commit_repo(repo, "athenaeum sync: snapshot before integrate")
     except subprocess.CalledProcessError as exc:
@@ -331,6 +333,25 @@ def sync_before_compile(
         "integrate", "ok" if result.ok else "failed", result.status if result.ok else result.reason
     )
     return report
+
+
+def _report_machine_local(repo: Path, report: SyncReport) -> None:
+    """Section 5, S6b: a tracked machine-local file is a ``machine-local-files`` row.
+
+    Read-only and run before the snapshot, so a file the snapshot is about to add
+    is not counted. It only reports; the sync goes on. Paths go to the log, the
+    summary row carries the count.
+    """
+    paths, error = _check_machine_local(repo)
+    if error:
+        report.add("machine-local-files", "skipped", error)
+    elif paths:
+        log.warning(
+            "athenaeum sync: machine-local file(s) tracked in %s: %s", repo, ", ".join(paths)
+        )
+        report.add("machine-local-files", "failed", f"tracked={len(paths)}")
+    else:
+        report.add("machine-local-files", "ok")
 
 
 def push_after_compile(
