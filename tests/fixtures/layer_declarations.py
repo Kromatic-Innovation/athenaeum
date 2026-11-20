@@ -103,6 +103,7 @@ MODULE_LAYER: dict[str, int] = {
     "storage": 1,
     "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
     "store_access": 2,  # issue athenaeum#2772: _store/access.yaml parser; imports models (L1)
+    "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
     "store_links": 2,  # issue athenaeum#2619: link guard + lint
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
@@ -130,6 +131,8 @@ MODULE_LAYER: dict[str, int] = {
     "owner_memory_bridge": 3,  # issue athenaeum#2690
     "owner_page": 3,  # issue athenaeum#2652
     "page_description": 2,
+    "page_text": 0,  # athenaeum#2773: stdlib-only section/list helpers
+    "page_merge": 2,  # athenaeum#2773: sibling of structured_upsert (L2)
     "person_hints": 3,  # issue athenaeum#2653
     "person_registry": 2,
     "structured_upsert": 2,  # structured_upsert.py: sibling of intake (L2); imports config (L2)

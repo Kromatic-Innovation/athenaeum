@@ -48,6 +48,8 @@ true.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tests.fixtures.layer_declarations import MODULE_LAYER, UNDECLARED
 from tests.test_import_graph_acyclic import SRC, build_import_graph
 
@@ -238,3 +240,53 @@ def test_declared_layers_are_sane() -> None:
             f"{module}: declared layer {layer!r} is out of the expected "
             "L0..L6 range"
         )
+
+
+# page_merge (athenaeum#2773) is a pure function: no git helper, store, provider
+# or file access. It may read the type spec (config), parse a page (models) and
+# use the shared section helpers (page_text).
+PAGE_MERGE_ALLOWED_ATHENAEUM = frozenset({"config", "models", "page_text"})
+PAGE_MERGE_FORBIDDEN_STDLIB = frozenset(
+    {"subprocess", "os", "pathlib", "shutil", "tempfile", "io", "socket", "urllib", "http"}
+)
+
+
+def _page_merge_import_violations(athenaeum: set[str], stdlib: set[str]) -> list[str]:
+    bad = [f"athenaeum.{m}" for m in sorted(athenaeum - PAGE_MERGE_ALLOWED_ATHENAEUM)]
+    bad += sorted(stdlib & PAGE_MERGE_FORBIDDEN_STDLIB)
+    return bad
+
+
+def _stdlib_top_level_imports(path: Path) -> set[str]:
+    import ast
+
+    out: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            out |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            out.add(node.module.split(".")[0])
+    return out
+
+
+def test_page_merge_imports_no_git_store_provider_or_file_module() -> None:
+    graph = build_import_graph()
+    athenaeum_imports = graph["page_merge"]
+    stdlib_imports = _stdlib_top_level_imports(SRC / "page_merge.py")
+    assert _page_merge_import_violations(athenaeum_imports, stdlib_imports) == [], (
+        f"page_merge imports {sorted(athenaeum_imports)} / {sorted(stdlib_imports)}; "
+        f"only {sorted(PAGE_MERGE_ALLOWED_ATHENAEUM)} may be imported and no file or process module"
+    )
+
+
+def test_page_merge_import_check_flags_a_git_store_or_file_import() -> None:
+    """Positive control: the check above fails on the imports it exists to stop."""
+    assert _page_merge_import_violations({"config", "store"}, set()) == ["athenaeum.store"]
+    assert _page_merge_import_violations({"provider"}, {"subprocess"}) == [
+        "athenaeum.provider",
+        "subprocess",
+    ]
+    assert _page_merge_import_violations({"atomic_io"}, {"pathlib"}) == [
+        "athenaeum.atomic_io",
+        "pathlib",
+    ]
