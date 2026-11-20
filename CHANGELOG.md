@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- The raise acceptance ledger (athenaeum#2938, slice S5 of the federation raise and retract design): `athenaeum.raise_acceptance_ledger` defines the row shape and parser for one disposition per raise message (accepted, rejected with a fixed reason code, or held), carrying ids, the proposer's identity, the arrival location, the time, the payload hash, any type and tags adjustment, the accepted blob id and, for a fact, the page uids written. Lookups answer whether a `raise_id` is rejected and which adjustment applies to later payloads. It is registered in `ARTIFACT_REGISTRY` as `raise-acceptance-ledger`, kept in the install's cache dir, holds no page text or source page identifier, and never enters the recall index.
 - `athenaeum.store` gains the write side of the multi-writer sync seam:
   `write_merge_commit` builds the merged tree and a two-parent merge commit first
   and moves the local branch last (all or nothing), and `push_branch` pushes
