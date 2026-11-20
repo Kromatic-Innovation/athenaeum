@@ -1023,6 +1023,24 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="raise-acceptance-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "raise_acceptance_ledger.py ACCEPTANCE_LEDGER_FILENAME "
+            "'_raise_acceptance.jsonl' (issue athenaeum#2938; "
+            "docs/design/federation-raise-retract.md §4.4, §6.2, slice S5) — one "
+            "disposition row per raise message (accepted, rejected with a reason "
+            "code, or held), ids and metadata only: no page text and no source "
+            "page identifier. Durable and not reconstructible, the install's own "
+            "state in the cache dir, outside the wiki and raw roots so it is "
+            "never a page and never enters the recall index. Same shape as "
+            "push-records-ledger and drop-ledger; keeping it on a bench is a "
+            "later slice (S14)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="drop-ledger",
         persistence_class="operational",
         operational_scope="store-durable",

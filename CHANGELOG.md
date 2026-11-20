@@ -44,6 +44,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   remote and two installs, each with its own clone and configuration, that
   diverge and drive fetch, merge commit and push through the store seam over the
   local file transport, with no network and no model call (athenaeum#2932).
+- A decision queue per store (`athenaeum.store_decisions`): a decision is filed
+  with the one store whose page it would change, in that store's own local queue
+  file. It quotes only that store's pages and records any other store's page by
+  `store_id` and uid alone, filled in on display from the viewer's own mounts
+  (an unreadable page is shown only as unreadable). `list_pending_decisions`
+  stays one listing: every item names its `store_id` (`personal` for the existing
+  queues), and a store on which the owner does not hold answer contributes
+  nothing (athenaeum#2934).
+- The raise acceptance ledger (athenaeum#2938, slice S5 of the federation raise and retract design): `athenaeum.raise_acceptance_ledger` defines the row shape and parser for one disposition per raise message (accepted, rejected with a fixed reason code, or held), carrying ids, the proposer's identity, the arrival location, the time, the payload hash, any type and tags adjustment, the accepted blob id and, for a fact, the page uids written. Lookups answer whether a `raise_id` is rejected and which adjustment applies to later payloads. It is registered in `ARTIFACT_REGISTRY` as `raise-acceptance-ledger`, kept in the install's cache dir, holds no page text or source page identifier, and never enters the recall index.
 - `athenaeum.store` gains the write side of the multi-writer sync seam:
   `write_merge_commit` builds the merged tree and a two-parent merge commit first
   and moves the local branch last (all or nothing), and `push_branch` pushes
