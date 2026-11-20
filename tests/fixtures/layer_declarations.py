@@ -115,6 +115,7 @@ MODULE_LAYER: dict[str, int] = {
     "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
     "raise_acceptance_ledger": 3,  # issue athenaeum#2938: raise acceptance ledger
     "raise_acceptance": 3,  # issue athenaeum#2939: accept a raised page, asking every time
+    "store_intake_dispatch": 3,  # issue athenaeum#3000: per-store raw intake dispatcher; imports L3
     "raise_supersede": 3,  # issue athenaeum#2940: apply a supersede to a raised copy
     "raise_filing_checks": 3,  # issue athenaeum#2927: filing checks after a raise is accepted
     "filing_checks": 3,  # issue athenaeum#2927: the filing checks shared with sync S17
