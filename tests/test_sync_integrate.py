@@ -349,12 +349,15 @@ def test_an_unregistered_path_changed_on_both_sides_keeps_the_remote_version(
     assert (h.second.root / "extras" / "notes.txt").read_text() == "from first\n"
 
 
-def test_one_uid_on_two_pages_blocks_the_integrate_and_nothing_is_pushed(
+def test_a_uid_already_in_the_ancestor_on_two_pages_still_blocks_and_nothing_is_pushed(
     harness: TwoCloneHarness,
 ) -> None:
     first, second = harness.first, harness.second
-    first.commit("wiki/priya.md", page("person-twin", "Priya Raman"))
-    second.commit("wiki/sam.md", page("person-twin", "Sam Ortiz"))
+    # The uid is in the common ancestor (one page); one install renames it while the other
+    # edits it, so two pages carry it. Section 7.4 cannot re-mint that: it stays blocked.
+    first.commit("wiki/jordan.md", BASE.replace("Acme Corp.", "Acme Corp, Lisbon."))
+    git(second.root, "mv", "wiki/jordan.md", "wiki/jordan-renamed.md")
+    git(second.root, "commit", "-q", "-m", "rename")
     assert push_after_compile(first.root, "main", SETTINGS).ok
     before = second.head()
     result = integrate_remote(second.root, "main", SETTINGS)
