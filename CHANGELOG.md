@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- The search index is now separable by surface: every FTS5 row and vector embedding records the surface it came from, and `list_surface_derived_data` / `remove_surface_derived_data` list and remove one surface's derived data without reading or rewriting another's. An existing index is rebuilt automatically on the next run (FTS5 schema version 7, vector metadata schema version 4). (athenaeum#2990)
+
 ## [0.28.0] - 2026-11-20
 
 **Summary.** 0.28.0 makes a fresh install pass its own health check, and gives
