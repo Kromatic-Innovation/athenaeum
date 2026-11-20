@@ -10,15 +10,19 @@ the release cadence and what "supported" means, see the
 
 ## The compatibility promise
 
-Only the names in `athenaeum.__all__` carry a compatibility promise. A
-breaking change to one of them is a deliberate, CHANGELOG-announced event.
+Two kinds of surface are stable:
 
-## Documented surfaces
+- the names in `athenaeum.__all__`, and
+- the documented surfaces in the table below.
 
-These surfaces are documented in the reference pages. They are the ones to
-build on, but they are not covered by the `__all__` promise: a release can change
-them, and the [CHANGELOG](../../CHANGELOG.md) is where the change is announced
-(under `### Removed` or `### Changed`). Read it before upgrading across a minor.
+"Stable" here means a change to one of them is a breaking change, and a
+breaking change is never made silently: it is announced in the
+[CHANGELOG](../../CHANGELOG.md) under `### Removed` or `### Changed`, with the
+upgrade steps for that release. It does not mean a deprecation period; a minor
+release (0.x) can still make the change. Read the CHANGELOG before upgrading
+across a minor.
+
+## Stable surfaces beyond `__all__`
 
 | Surface | Where it is documented | What to expect |
 |---|---|---|
@@ -31,7 +35,7 @@ them, and the [CHANGELOG](../../CHANGELOG.md) is where the change is announced
 ## Experimental surfaces
 
 These are marked experimental where they are documented. They sit outside the
-`__all__` promise and may change or be removed in any minor release without a
+promise above and may change or be removed in any minor release without a
 deprecation cycle.
 
 - Remote serving (`athenaeum serve --transport http`) and the `serve.auth.*`
