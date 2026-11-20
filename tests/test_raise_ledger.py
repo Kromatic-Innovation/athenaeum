@@ -174,6 +174,20 @@ class TestLedger:
         assert len(rows) == 1
         assert len(bad) == 3
 
+    def test_non_utf8_and_deeply_nested_lines_are_reported_not_raised(self, tmp_path: Path) -> None:
+        path = raise_ledger_path(tmp_path)
+        path.write_bytes(
+            json.dumps(_row()).encode()
+            + b"\n\xff\xfe not utf8\n"
+            + b"[" * 100000
+            + b"\n"
+            + json.dumps(_row(seq=2)).encode()
+            + b"\n"
+        )
+        rows, bad = read_raise_ledger(tmp_path)
+        assert [r.seq for r in rows] == [1, 2]
+        assert len(bad) == 2
+
     def test_counter_example_reverse_order_resolves_to_seq_2(self, tmp_path: Path) -> None:
         _write(
             raise_ledger_path(tmp_path),

@@ -208,18 +208,19 @@ def read_raise_ledger(cache_dir: Path) -> tuple[list[RaiseRow], list[str]]:
     A torn or malformed line is reported (returned as its text), never raised.
     """
     try:
-        text = raise_ledger_path(cache_dir).read_text(encoding="utf-8")
+        raw = raise_ledger_path(cache_dir).read_bytes()
     except OSError:
         return [], []
     rows: list[RaiseRow] = []
     malformed: list[str] = []
-    for line in text.splitlines():
-        line = line.strip()
+    for raw_line in raw.splitlines():
+        # Decode per line so one non-UTF-8 line cannot hide the rest.
+        line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
+            data = json.loads(raw_line.decode("utf-8"))
+        except (ValueError, RecursionError):  # bad JSON, bad UTF-8 or absurd nesting
             malformed.append(line)
             continue
         row = RaiseRow.from_dict(data)
