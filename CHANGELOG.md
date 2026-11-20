@@ -25,6 +25,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- The sidecar guide and the environment reference describe how a scheduled or
+  scripted run whose prompt carries all its input skips the per-turn push:
+  its launcher sets `AUTO_RECALL=false` for that run, the explicit `recall`
+  tool still works, and the launcher value beats the cached config
+  (athenaeum#2977).
+
 ## [0.27.6] - 2026-11-20
 
 **Summary.** 0.27.6 is a PATCH release on 0.27.2 (0.27.3 to 0.27.5 were
