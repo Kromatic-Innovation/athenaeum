@@ -69,7 +69,15 @@ Athenaeum is on PyPI; release quality matters in a way that internal-only
 repos don't impose. The README, install path, error UX, and public API
 are seen by strangers who have no internal context.
 
-Before any release tag (`vX.Y.Z`):
+**Which releases get Zenodotus.** A MINOR or MAJOR release (`0.x` → `0.x+1.0`,
+or a major bump) runs the Zenodotus gate below. A PATCH release does not: it
+needs only an accurate CHANGELOG section for that version, and the operator
+tags on that. A release is MINOR when its `[Unreleased]` block has an
+`### Added` heading, a `### Removed` heading or a `BREAKING` marker, meaning
+a significant consumer-visible addition or a removal; otherwise (only Changed,
+Fixed, Security or docs entries) it is a PATCH.
+
+Before any MINOR or MAJOR release tag (`vX.Y.0`):
 
 1. Confirm `develop` is at the intended release-candidate tip.
 2. Run the workspace `/zenodotus` skill against this repo:
@@ -89,13 +97,14 @@ Before any release tag (`vX.Y.Z`):
      fires automatically on the tag push.
    - **Conditional** / **Fail** → fix the must-fix items on `develop`,
      re-run `/zenodotus`, retry.
-5. Tagging stays human-triggered. Zenodotus does not run `git tag`.
+5. Tagging stays human-triggered for every release, PATCH included.
+   Zenodotus does not run `git tag`.
 
 The `.zenodotus/` directory is gitignored — verdict artifacts are local
 record, not durable repo state.
 
-Internal Quine review and CI remain in place; Zenodotus is **additive**, not
-a substitute. Internal reviewers cannot unsee design intent; Zenodotus
+Internal Quine review and CI remain in place for every release; Zenodotus is
+**additive** for MINOR and MAJOR releases, not a substitute. Internal reviewers cannot unsee design intent; Zenodotus
 reviewers cannot read it.
 
 ## Testing
