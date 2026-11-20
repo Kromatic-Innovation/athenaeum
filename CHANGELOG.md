@@ -25,6 +25,72 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+## [0.27.6] - 2026-11-20
+
+**Summary.** 0.27.6 is a PATCH release on 0.27.2 (0.27.3 to 0.27.5 were
+never published). It contains no breaking change and `athenaeum.__all__` is
+unchanged. For most users it changes four things:
+- A fresh `athenaeum init` now passes `athenaeum doctor`. Setup that has not
+  been finished yet reports `WARN` with the command that finishes it, instead
+  of `FAIL`.
+- `athenaeum init` works under a global git commit hook.
+- The per-turn push no longer fires on text the harness injected into the
+  prompt.
+- The `remember` tool says so when it drops or replaces something the caller
+  supplied.
+
+The declared dependency floors rise to versions CI actually tests:
+`anthropic>=0.50.0` and `fastmcp>=4.0.0`. Most of the new modules are the
+foundations of federated stores (a store declaration, per-store decision
+queues, the multi-writer sync seam, and raising pages between stores). They
+are experimental, and nothing in a single-store install calls them yet. See
+`docs/guides/stability.md` for which surfaces count as stable.
+
+**Upgrading from 0.27.2**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`.
+2. If you pin `anthropic` below 0.50.0 or `fastmcp` below 4.0.0, raise those
+   pins first. The installer will refuse the older versions.
+
+### Changed
+
+- A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
+- The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
+- The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
+- The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
+- The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
+- `athenaeum doctor` now reports the first-run setup checks (`mcp`, `hooks`,
+  `key_mode`, `search_index`) as `WARN` with "setup pending" and the command
+  that finishes setup, instead of `FAIL`, so a fresh `athenaeum init` exits
+  `0`. Present-but-broken state (unparseable `settings.json` or
+  `.claude.json`, a hook whose script is missing, an unreadable fts5 index, an
+  unrecognised `llm.provider`) is still `FAIL`. The README Quick start now runs
+  `doctor` after `test-mcp` with sample output. Topic extraction also logs a
+  one-time-per-process warning when it falls back to the regex extractor
+  because no LLM credential is available, naming how to enable LLM extraction
+  (athenaeum#2906).
+
+- The per-turn push no longer fires on text the harness injected into the prompt
+  channel (background-task notices, messages from other agents, system
+  reminders). A wholly injected submission is skipped and recorded as one push
+  ledger row with `skip_reason: harness_injected`; a submission mixing injected
+  and user text is queried on the user text only. The Claude Code adapter
+  supplies the patterns and the engine supplies the skip
+  (athenaeum#2914).
+
+- North-star grid: the oracle positive control now gates the report. When any
+  condition-2-enrolled class scores below 1.000 at oracle, the decision block
+  prints as void (no conditions, cutoff scale or verdict table), the marker
+  matcher strips markdown emphasis (`**bold**`, `_italic_`) before matching
+  (paraphrase is still not accepted), and four probe markers that named a fact
+  the question did not ask for are repaired. `grader_revision` moves to
+  `athenaeum#2918`; `corpus_digest` does not (pages are untouched). The 30
+  failing oracle cells of run 44438673846 are classified and re-graded offline
+  in `docs/measurements/north-star-oracle-control-regrade-2026-11-19.md`
+  (athenaeum#2918).
+- The README Quick start now opens with a three-command block (install, `athenaeum --version`, `athenaeum test-mcp`) and says it needs no API key; the nightly-cost and `page_recompile` prose moved from the README to a new guide, `docs/guides/nightly-cost.md`, linked from the README and `docs/index.md` (athenaeum#2923).
+
 ### Added
 
 - Filing checks after a raise is accepted (`athenaeum.raise_filing_checks`, athenaeum#2927, slice S21 of the federation raise and retract design). Once `accept_raise` has created a raised copy, or `apply_supersede` has replaced one, the target store runs the same three filing checks as the sync (a contact value already on another page of the store, an address whose local part names a different person, a person-shaped address on an organisation's page) on the copy, reading the target's pages at the commit that published it, and opens a `filing-check` item in the target's decision queue naming the copy for each failure. A created copy is checked whole and a replaced one on the units that changed. The checks run only after the copy is committed and its acceptance recorded: they never reject, hold or ask about a raise, never edit the copy, and a crash in them leaves the acceptance standing. The result is the new `filing` field of the returned `Outcome`. The checks themselves move to `athenaeum.filing_checks`, shared with `athenaeum.sync_filing_checks`, whose behaviour is unchanged.
@@ -147,62 +213,21 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `ATHENAEUM_PUSH_RECORD_QUERY_TERMS=0`) turns it off. Older ledgers read
   unchanged, `push-metrics tail` projects the fields and `athenaeum demo` shows
   them (athenaeum#2916).
-
-### Changed
-
-- A remote `remember` now says so when the server replaces or drops frontmatter the caller wrote: a note's own `audience:` that differs from the pinned audience, an `audience:` grant on a restricted note, or `access: open`. The reply gains a `Note:` line after `Saved to ...` and the server logs it at info level; before, the change was silent. `docs/guides/remote.md` also now states that notes saved before 0.27.2 stay untagged, that no command retags them, and that saving the note again through the remote `remember` is the one way to make it recallable by the restricted audience (athenaeum#2922).
-- The `remember` MCP tool now says so when it drops a caller-supplied `source`: the reply gains a second line (`Note: the supplied \`source\` was ignored; ...`) and the server logs a warning, where before the value was discarded with nothing at warning level. Omitting `source`, or naming the transport default itself, changes nothing (athenaeum#2900).
-- The README states the prerequisites (`git`, an API key or a logged-in `claude` CLI, Python 3.13+) before a single `uv tool install` line instead of repeating the install command and the Python requirement (athenaeum#2907).
-- The owner-only `access:` levels (`internal`, `confidential`, `personal`) are now defined once, in `athenaeum.models`, and the remote `remember` audience stamp reads that same set, so the two can no longer drift apart (athenaeum#2924).
-- The declared dependency floors are now ones CI actually tests: `anthropic` is `>=0.50.0` (was `>=0.39.0`; releases before 0.50.0 lack the `OverloadedError` class the retry layer classifies, so overload errors would not have been retried) and `fastmcp` is `>=4.0.0` (was `>=3.4.3`, which declares `mcp<2.0` and could not be installed alongside the required `mcp>=2.0`). A new advisory `floors` CI job installs those floors and runs the SDK- and MCP-touching tests; `docs/guides/install.md` lists which dependency versions CI tests (athenaeum#2909).
-- `athenaeum doctor` now reports the first-run setup checks (`mcp`, `hooks`,
-  `key_mode`, `search_index`) as `WARN` with "setup pending" and the command
-  that finishes setup, instead of `FAIL`, so a fresh `athenaeum init` exits
-  `0`. Present-but-broken state (unparseable `settings.json` or
-  `.claude.json`, a hook whose script is missing, an unreadable fts5 index, an
-  unrecognised `llm.provider`) is still `FAIL`. The README Quick start now runs
-  `doctor` after `test-mcp` with sample output. Topic extraction also logs a
-  one-time-per-process warning when it falls back to the regex extractor
-  because no LLM credential is available, naming how to enable LLM extraction
-  (athenaeum#2906).
-
-- The per-turn push no longer fires on text the harness injected into the prompt
-  channel (background-task notices, messages from other agents, system
-  reminders). A wholly injected submission is skipped and recorded as one push
-  ledger row with `skip_reason: harness_injected`; a submission mixing injected
-  and user text is queried on the user text only. The Claude Code adapter
-  supplies the patterns and the engine supplies the skip
-  (athenaeum#2914).
-
-- North-star grid: the oracle positive control now gates the report. When any
-  condition-2-enrolled class scores below 1.000 at oracle, the decision block
-  prints as void (no conditions, cutoff scale or verdict table), the marker
-  matcher strips markdown emphasis (`**bold**`, `_italic_`) before matching
-  (paraphrase is still not accepted), and four probe markers that named a fact
-  the question did not ask for are repaired. `grader_revision` moves to
-  `athenaeum#2918`; `corpus_digest` does not (pages are untouched). The 30
-  failing oracle cells of run 44438673846 are classified and re-graded offline
-  in `docs/measurements/north-star-oracle-control-regrade-2026-11-19.md`
-  (athenaeum#2918).
-- The README Quick start now opens with a three-command block (install, `athenaeum --version`, `athenaeum test-mcp`) and says it needs no API key; the nightly-cost and `page_recompile` prose moved from the README to a new guide, `docs/guides/nightly-cost.md`, linked from the README and `docs/index.md` (athenaeum#2923).
+- Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
 
 ### Fixed
 
 - `athenaeum init` makes its seed commit with git hooks disabled, so a global `core.hooksPath` commit hook (for example a protected-branch guard) no longer aborts it with `git commit` failing on a fresh install (athenaeum#2901).
 
 - Six vector-backend tests (in `test_doctor.py`, `test_cli.py::TestWarnIfBackendCacheMissing` and `test_indexed_surfaces.py`) now skip instead of failing under a `[dev]`-only install without chromadb (athenaeum#2905).
-
-### Security
-
-- `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
-- Design record for how the per-turn push should treat self-contained programmatic prompts: a caller-declared skip, then a measured relevance floor, with build slices (athenaeum#2915).
-
-### Fixed
-
 - `athenaeum.store_access` no longer raises on a `_store/access.yaml` whose YAML
   parses but fails to construct a value (an impossible date such as `2026-02-30`,
   a bad `!!int`, deep nesting): it returns the invalid result naming the parse
   failure. A `version` written as `1.0` is now invalid too (athenaeum#2772).
+
+### Security
+
+- `SECURITY.md` now states Athenaeum's exposure to the four open chromadb server advisories (it runs chromadb embedded and never starts a server) and warns against running `chroma run` over the vector index directory; a new test keeps `src/athenaeum` free of server-mode chromadb use (athenaeum#2913).
 
 ## [0.27.2] - 2026-11-19
 
