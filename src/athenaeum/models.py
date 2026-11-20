@@ -304,6 +304,18 @@ def parse_asserter(meta: dict[str, object] | None) -> dict[str, object]:
     return normalized
 
 
+def underscore_segment_excluded(parts: Iterable[str]) -> bool:
+    """True when any path segment in *parts* starts with ``_``.
+
+    The ONE segment rule behind the underscore-prefix convention: operational
+    subdirectories (``wiki/_quarantine/``, a surface's ``_store/``) are never
+    scanned as pages. ``athenaeum.search._wiki_relpath_excluded`` (the wiki
+    scan), :meth:`PageLocator.iter_surface_pages` and the index build's
+    surface walk all call it, so the rule has no second copy.
+    """
+    return any(part.startswith("_") for part in parts)
+
+
 def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]:
     """Derive the durable identity key from an ``asserter`` block.
 
@@ -1238,11 +1250,17 @@ _ACCESS_PUBLIC = "open"
 # the backends test the same marker instead of hardcoding a literal.
 AUDIENCE_PUBLIC_TOKEN = "__access_open__"
 
+# The ``access:`` levels that are owner-only: they contribute no audience role,
+# so a restricted caller is shut out unless an explicit ``audience:`` grant opens
+# the page (see :func:`effective_audience`). The single definition of the set;
+# ``mcp_server`` imports it rather than keeping its own copy (athenaeum#2924).
+OWNER_ONLY_ACCESS_LEVELS: frozenset[str] = frozenset({"internal", "confidential", "personal"})
+
 # Words that are access levels / the internal public sentinel, NOT audience
 # roles. Dropped from any ``audience:`` list so a mislabeled entry can never be
 # read as a role grant (and can never forge the public marker).
 _RESERVED_AUDIENCE_ROLES: frozenset[str] = frozenset(
-    {"open", "internal", "confidential", "personal", AUDIENCE_PUBLIC_TOKEN}
+    {_ACCESS_PUBLIC, AUDIENCE_PUBLIC_TOKEN} | OWNER_ONLY_ACCESS_LEVELS
 )
 
 
@@ -1320,9 +1338,10 @@ def effective_audience(meta: dict[str, object] | None) -> tuple[set[str], bool]:
 
     - ``is_public`` is True iff ``access: open`` (world-readable).
     - ``granted_roles`` is the set of explicit ``audience:`` role ids. The
-      coarse ``access:`` levels ``internal``/``confidential``/``personal``
-      contribute NO roles (owner-only) unless an explicit ``audience:`` grant
-      is present — the composition rule from the design.
+      coarse ``access:`` levels in :data:`OWNER_ONLY_ACCESS_LEVELS`
+      (``internal``/``confidential``/``personal``) contribute NO roles
+      (owner-only) unless an explicit ``audience:`` grant is present — the
+      composition rule from the design.
 
     A page with neither ``access: open`` nor an ``audience:`` grant has
     ``(set(), False)`` — audience-∅, withheld from every restricted caller.
@@ -3668,13 +3687,20 @@ class PageLocator:
         yield from self.iter_surface_pages()
 
     def iter_surface_pages(self) -> "Iterator[tuple[str, Path]]":
-        """Yield ``(key, path)`` for the pages on the extra surfaces only."""
+        """Yield ``(key, path)`` for the pages on the extra surfaces only.
+
+        A page under a ``_``-prefixed directory of a surface (such as
+        ``_store/``) is never yielded, the same segment rule the wiki scan
+        applies (:func:`underscore_segment_excluded`).
+        """
         for prefix, root in self.surfaces:
             if not root.is_dir():
                 continue
             for fpath in sorted(root.rglob("*.md")):
                 rel = fpath.relative_to(root)
                 if fpath.name.startswith("_") or any(p.startswith(".") for p in rel.parts):
+                    continue
+                if underscore_segment_excluded(rel.parent.parts):
                     continue
                 yield f"{prefix}/{rel.as_posix()}", fpath
 

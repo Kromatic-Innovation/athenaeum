@@ -47,6 +47,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
+- [What counts as stable](guides/stability.md) — which surfaces beyond `__all__` you can build on, which are experimental, which are internal.
 
 ## Modules
 
@@ -78,6 +79,7 @@ integrating anything.
 - [Environment variables](reference/environment.md) — the common knobs and the precedence chain.
 - [Data formats](reference/data-formats.md) — raw intake, wiki frontmatter, degraded-run artifacts.
 - [Exit codes](reference/exit-codes.md).
+- [Store declaration](reference/store-declaration.md) — the `_store/access.yaml` format: roles, rights, sync mode, locations.
 - [0.27.0 build notes](changelog/0.27.0-build-notes.md) — the per-merge entries behind the
   `[0.27.0]` changelog section.
 - [0.26.0 build notes](changelog/0.26.0-build-notes.md) — the per-merge entries behind the

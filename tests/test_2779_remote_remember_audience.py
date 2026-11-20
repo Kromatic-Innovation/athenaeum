@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import OWNER_ONLY_ACCESS_LEVELS, parse_frontmatter
 
 NEEDLE = "Zarquon calibration protocol"
 #: The note body, absent from a recall that echoes only the query.
@@ -71,6 +71,10 @@ def _only_meta(corpus: Path, subdir: str) -> dict:
 
 def _http(corpus: Path, audience: set[str] | None):
     return _server(corpus, transport="http", caller_audience=audience)
+
+
+def _recall_as(corpus: Path, audience: set[str] | None, query: str) -> str:
+    return _tool(_http(corpus, audience), "recall")(query=query, top_k=5)
 
 
 class TestRemoteRememberStamp:
@@ -236,12 +240,9 @@ class TestRestrictiveAccessIsNotWidened:
         meta = _only_meta(corpus, "remote-session")
         assert meta["access"] == "personal"
         assert "audience" not in meta
-        def recall_as(audience: set[str] | None) -> str:
-            return _tool(_http(corpus, audience), "recall")(query="metformin", top_k=5)
-
         # Positive control: the owner reads it, so the query does find the note.
-        assert "diagnosed" in recall_as(None)
-        assert "diagnosed" not in recall_as({"ops"})
+        assert "diagnosed" in _recall_as(corpus, None, "metformin")
+        assert "diagnosed" not in _recall_as(corpus, {"ops"}, "metformin")
 
     @pytest.mark.parametrize("level", ["internal", "confidential", "personal"])
     def test_a_note_written_restrictive_drops_its_own_grant(
@@ -275,3 +276,26 @@ class TestStdioUnchanged:
         (fb,) = (b / "s").glob("*.md")
         assert fa.read_text().split("---", 2)[2:] == fb.read_text().split("---", 2)[2:]
         assert "audience" not in fa.read_text()
+
+
+class TestOneOwnerOnlyDefinition:
+    """``mcp_server`` and ``models.effective_audience`` share one definition (athenaeum#2924)."""
+
+    def test_mcp_server_uses_the_models_definition(self) -> None:
+        pytest.importorskip("fastmcp")
+        from athenaeum import mcp_server, models
+
+        assert mcp_server.OWNER_ONLY_ACCESS_LEVELS is models.OWNER_ONLY_ACCESS_LEVELS
+        assert not hasattr(mcp_server, "_OWNER_ONLY_ACCESS_LEVELS")
+
+    @pytest.mark.parametrize("level", sorted(OWNER_ONLY_ACCESS_LEVELS))
+    def test_both_sites_treat_each_level_as_owner_only(self, level: str) -> None:
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import _inject_provenance_frontmatter
+        from athenaeum.models import effective_audience
+
+        assert effective_audience({"access": level}) == (set(), False)
+        out = _inject_provenance_frontmatter(
+            f"---\naccess: {level}\n---\nbody\n", None, None, pinned_audience={"ops"}
+        )
+        assert "audience" not in parse_frontmatter(out)[0]
