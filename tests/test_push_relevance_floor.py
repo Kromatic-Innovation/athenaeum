@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -189,11 +191,21 @@ def test_floor_never_reorders(cache: Path, monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------
 
 
-def _fake_vector(monkeypatch: pytest.MonkeyPatch, cache: Path, hits: list[tuple]) -> None:
+def _fake_vector(
+    monkeypatch: pytest.MonkeyPatch, cache: Path, hits: list[tuple], *, chromadb: bool = True
+) -> None:
+    """Stand in for the vector index. ``chromadb=True`` models a real vector
+    query (chromadb imported, scores are distances); ``False`` models
+    ``VectorBackend.query``'s FTS5 fallback (chromadb not importable, scores
+    are BM25 ranks)."""
     import athenaeum.search as search_mod
 
     (cache / "wiki-vectors").mkdir(exist_ok=True)
     monkeypatch.setattr(search_mod, "query_vector_index", lambda *_a, **_k: list(hits))
+    if chromadb:
+        monkeypatch.setitem(sys.modules, "chromadb", types.ModuleType("chromadb"))
+    else:
+        monkeypatch.delitem(sys.modules, "chromadb", raising=False)
 
 
 _VECTOR_HITS = [
@@ -241,6 +253,35 @@ def test_each_backend_uses_its_own_floor_and_direction(
     fts_only = {"recall": {"relevance_floor": {"push": {"fts5": ranks[0]}}}}
     env = _turn(cache, session="f", search_backend="vector", config=fts_only)
     assert _names(env) == ["aaaa1111-best.md"] + [fn for fn, _, _ in _VECTOR_HITS]
+
+
+def test_page_in_both_legs_is_kept_when_either_hit_clears_its_floor(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each leg is floored before the merge: the mid page fails the FTS5
+    floor but its vector hit clears the vector floor, so it is kept (in its
+    vector position). Judging it by the FTS5 hit alone would drop it."""
+    ranks = _ranks(cache)
+    _fake_vector(monkeypatch, cache, [("bbbb2222-mid.md", "Zebrafish Migration", 0.2)])
+    config = {"recall": {"relevance_floor": {"push": {"fts5": ranks[0], "vector": 0.5}}}}
+    env = _turn(cache, search_backend="vector", config=config)
+    assert _names(env) == ["aaaa1111-best.md", "bbbb2222-mid.md"]
+    assert env["candidates"][1]["backend"] == "vector"
+
+
+def test_fts5_fallback_hits_are_judged_by_the_fts5_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without chromadb, ``VectorBackend.query`` answers from FTS5, so its
+    scores are BM25 ranks (negative). Judged as distances they would clear
+    any vector floor; they must be judged as FTS5 instead."""
+    fallback_hits = [("ffff0001-a.md", "A", -9.0), ("ffff0002-b.md", "B", -1.0)]
+    _fake_vector(monkeypatch, tmp_path, fallback_hits, chromadb=False)
+    config = {"recall": {"relevance_floor": {"push": {"fts5": -5.0, "vector": 0.5}}}}
+    env = _turn(tmp_path, search_backend="vector", config=config)
+    assert _names(env) == ["ffff0001-a.md"]
+    # The envelope still labels them as the vector leg, exactly as before.
+    assert [c["backend"] for c in env["candidates"]] == ["vector"]
 
 
 def test_candidate_without_a_score_is_kept() -> None:

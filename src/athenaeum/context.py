@@ -75,6 +75,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -316,15 +317,19 @@ class Candidate:
     #: is an input to the rendered bullet, not a new published candidate
     #: attribute, and the envelope schema is versioned separately.
     parent_name: str = ""
-    #: Issue athenaeum#2978: a vector candidate's cosine DISTANCE, kept so the
-    #: push-path relevance floor can be applied to it (lower is better, the
-    #: direction :func:`athenaeum.search.meets_relevance_floor` uses for
-    #: ``"vector"``). ``None`` for an FTS5 candidate, whose score is
-    #: :attr:`relevance`. Deliberately absent from :meth:`to_dict`, for the
-    #: same reason ``page_type`` is: the envelope schema is versioned, and a
-    #: distance is a different scale from the BM25 ``relevance`` it would sit
-    #: beside.
-    distance: float | None = None
+    #: Issue athenaeum#2978: the score the push-path relevance floor judges
+    #: this candidate by, and the backend whose floor and direction apply
+    #: (:func:`athenaeum.search.meets_relevance_floor`). For a vector
+    #: candidate this is its cosine DISTANCE (lower is better), kept here
+    #: because :attr:`relevance` stays ``None`` for vector. For an FTS5
+    #: candidate it is the BM25 rank. A vector-leg hit that was answered by
+    #: the FTS5 fallback (chromadb not installed) carries an FTS5 rank, so it
+    #: is judged as ``"fts5"``. Both are deliberately absent from
+    #: :meth:`to_dict`, for the same reason ``page_type`` is: the envelope
+    #: schema is versioned, and a distance is a different scale from the BM25
+    #: ``relevance`` it would sit beside.
+    floor_score: float | None = None
+    floor_backend: str = ""
 
     @property
     def bullet(self) -> str:
@@ -469,6 +474,8 @@ def _query_fts5(
                 relevance=float(rank) if rank is not None else None,
                 audience=audience or "",
                 page_type=page_type or "",
+                floor_score=float(rank) if rank is not None else None,
+                floor_backend="fts5",
             )
         )
     return out
@@ -502,6 +509,11 @@ def _query_vector(
         return []
     if not hits:
         return []
+    # Issue athenaeum#2978: `VectorBackend.query` answers from the FTS5 index
+    # when chromadb cannot be imported, so these scores are BM25 ranks, not
+    # distances, and the floor must judge them as FTS5. A real vector query
+    # has imported chromadb by now; the fallback's import failed.
+    floor_backend = "vector" if "chromadb" in sys.modules else "fts5"
     out: list[Candidate] = []
     filenames = [h[0] for h in hits if h[0]]
     meta: dict[str, tuple[str, str, str]] = {}
@@ -542,7 +554,8 @@ def _query_vector(
                 page_type=page_type,
                 # Issue athenaeum#2978: kept internally (never in the
                 # envelope) so the push-path floor can judge this candidate.
-                distance=_as_score(distance),
+                floor_score=_as_score(distance),
+                floor_backend=floor_backend,
             )
         )
     return out
@@ -555,12 +568,6 @@ def _as_score(raw: object) -> float | None:
     return float(raw)
 
 
-def _candidate_score(c: Candidate) -> float | None:
-    """The score the relevance floor compares for *c*, in its backend's own
-    units: the BM25 ``rank`` for FTS5, the cosine distance for vector."""
-    return c.distance if c.backend == "vector" else c.relevance
-
-
 def _apply_relevance_floor(
     candidates: list[Candidate], floors: Mapping[str, float | None]
 ) -> list[Candidate]:
@@ -570,18 +577,20 @@ def _apply_relevance_floor(
     is not a relevant result, so it must not be advertised as one withheld.
 
     Each candidate is judged by :func:`athenaeum.search.meets_relevance_floor`
-    against ``floors[c.backend]`` in that backend's direction. A backend with
-    no floor (``None`` or absent) keeps every candidate, and so does a
-    candidate with no score to compare: the floor removes candidates shown
-    to be below it, never ones it cannot judge.
+    against ``floors[c.floor_backend]``, using :attr:`Candidate.floor_score`,
+    in that backend's direction. A backend with no floor (``None`` or
+    absent) keeps every candidate, and so does a candidate with no score to
+    compare: the floor removes candidates shown to be below it, never ones
+    it cannot judge.
     """
     from athenaeum.search import meets_relevance_floor
 
     kept: list[Candidate] = []
     for c in candidates:
-        floor = floors.get(c.backend)
-        score = _candidate_score(c)
-        if floor is None or score is None or meets_relevance_floor(c.backend, score, floor):
+        backend = c.floor_backend or c.backend
+        floor = floors.get(backend)
+        score = c.floor_score
+        if floor is None or score is None or meets_relevance_floor(backend, score, floor):
             kept.append(c)
     return kept
 
@@ -877,7 +886,7 @@ def build_context(
 
     ``relevance_floor`` (issue athenaeum#2978): an optional per-backend floor,
     ``{"fts5": ..., "vector": ...}``, applied by :func:`_apply_relevance_floor`
-    after the merge and before the cap. ``None`` (the default, and what every
+    to each leg before the merge, and so before the cap. ``None`` (the default, and what every
     caller except the per-turn push passes) skips the step entirely, so the
     envelope is exactly what it was before this parameter existed. Only
     :func:`build_context_for_turn` resolves and passes one; the static-refresh
@@ -979,13 +988,16 @@ def build_context(
     # invariant; see module docstring) — the athenaeum#1905 widening below
     # changes neither: it fetches FURTHER down the same relevance order and
     # throws the extra rows away after counting them.
-    merged = _dedupe([*fts_candidates, *vector_candidates])
-
     # Issue athenaeum#2978: the push-path relevance floor removes candidates
     # BEFORE the cap, so a below-floor page neither takes a slot nor counts
-    # into the withheld tally below. Skipped outright when no floor is set.
+    # into the withheld tally below. Each leg is floored before the merge, so
+    # a page found by both legs is kept when either leg's hit clears its own
+    # backend's floor. Skipped outright when no floor is set.
     if relevance_floor is not None:
-        merged = _apply_relevance_floor(merged, relevance_floor)
+        fts_candidates = _apply_relevance_floor(fts_candidates, relevance_floor)
+        vector_candidates = _apply_relevance_floor(vector_candidates, relevance_floor)
+
+    merged = _dedupe([*fts_candidates, *vector_candidates])
 
     # Issue athenaeum#2538 (AC8): resolve parent names BEFORE the cap/budget
     # below -- a no-op when `wiki_root` is unset (see that parameter's own

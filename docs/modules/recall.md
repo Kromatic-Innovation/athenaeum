@@ -176,6 +176,10 @@ default: with no floor set, the push is exactly what it was.
   candidate by its BM25 rank, a vector candidate by its cosine distance. Lower
   is better for both, and a candidate exactly at the floor is kept. The vector
   distance is used for this check only and does not appear in the envelope.
+  Each search leg is floored before the two are merged, so a page both legs
+  found is kept when either hit clears its own floor. When the vector leg
+  falls back to the FTS5 index (chromadb not installed), its hits are judged
+  by the FTS5 floor.
 - A dropped candidate does not take a slot, and it is not counted in the
   "N more matching results were withheld" line. A page below the floor is not
   a relevant result.
