@@ -258,3 +258,31 @@ def test_librarian_run_reports_and_leaves_the_store_untouched(
     assert "store 'recipes' not mounted: no-read-right" in caplog.text
     assert "unmounted=recipes=no-read-right" in caplog.text
     assert (kr / "recipes" / "loaf.md").read_bytes() == before
+
+
+def test_run_start_reports_only_surfaces_the_gather_checks(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A non-embedded surface with a no-read declaration is never gathered, so it
+    # is neither refused by the gather nor reported as unmounted at run start.
+    from athenaeum.storage import gathered_surface_mounts
+
+    kr, config = _kb(tmp_path, PROPOSER_ONLY)
+    config["storage"]["adapters"]["recipes"]["corpus_policy"] = {"embedded": False}
+    assert gathered_surface_mounts(kr, config) == {}
+    (kr / "raw").mkdir()
+    (kr / "athenaeum.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    for args in (
+        ("init", "-b", "develop"),
+        ("config", "user.email", "t@example.com"),
+        ("config", "user.name", "T"),
+        ("add", "-A"),
+        ("commit", "-m", "seed"),
+    ):
+        subprocess.run(["git", *args], cwd=kr, check=True, capture_output=True)
+    with caplog.at_level(logging.INFO):
+        librarian.run(
+            raw_root=kr / "raw", wiki_root=kr / "wiki", knowledge_root=kr, merge_only=True
+        )
+    assert "not mounted" not in caplog.text
+    assert "unmounted=" not in caplog.text

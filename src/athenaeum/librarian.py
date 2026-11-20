@@ -12823,7 +12823,7 @@ def run(
     # broken declaration cannot stop a run (the guard holds it as reader only).
     try:
         from athenaeum.config import resolve_owner_asserter
-        from athenaeum.storage import available_adapters
+        from athenaeum.storage import available_adapters, gathered_surface_mounts
         from athenaeum.store_rights import record_run_start_rights
 
         record_run_start_rights(
@@ -12842,10 +12842,7 @@ def run(
         from athenaeum.store_rights import run_start_mounts
 
         for _name, _state in run_start_mounts(
-            {
-                n: (ad.resolve_root(knowledge_root), ad.store_id)
-                for n, ad in available_adapters(ctx.config).items()
-            },
+            gathered_surface_mounts(knowledge_root, ctx.config),
             resolve_owner_asserter(ctx.config),
         ).items():
             if _state.refusal:

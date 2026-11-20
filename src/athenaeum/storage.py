@@ -900,6 +900,29 @@ def validate_indexed_surfaces(
                 )
 
 
+def gathered_surface_mounts(
+    knowledge_root: Path, config: dict[str, Any] | None
+) -> dict[str, tuple[Path, str | None]]:
+    """``{name: (root, store_id)}`` of the surfaces the index gather mount-checks.
+
+    Exactly the surfaces :func:`resolve_indexed_surfaces` tests for a mount
+    refusal: ``embedded: true``, outside ``wiki/``, present on disk. Run-start
+    reporting uses this so it never reports a surface the gather does not refuse.
+    """
+    wiki_resolved = (knowledge_root / "wiki").resolve()
+    out: dict[str, tuple[Path, str | None]] = {}
+    for name, adapter in available_adapters(config).items():
+        root = adapter.resolve_root(knowledge_root)
+        resolved = root.resolve()
+        if not adapter.corpus_policy.embedded:
+            continue
+        if resolved == wiki_resolved or wiki_resolved in resolved.parents:
+            continue
+        if root.is_dir():
+            out[name] = (root, adapter.store_id)
+    return out
+
+
 def _declared_unmounted(
     name: str, root: Path, asserter: Mapping[str, Any] | None, store_id: str | None
 ) -> bool:
