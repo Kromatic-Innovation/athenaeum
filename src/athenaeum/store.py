@@ -1352,6 +1352,46 @@ def commit_repo(repo: Path, label: str) -> str | None:
     return _commit_all(repo, label)
 
 
+def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
+    """Commit exactly *paths* (and nothing else that is staged or modified) in
+    the git repository containing *root*; return the new HEAD SHA.
+
+    ``None`` when *root* is not inside a git repository (nothing is committed).
+    Raises ``subprocess.CalledProcessError`` when git refuses.
+    """
+    top = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if top.returncode != 0 or not top.stdout.strip():
+        return None
+    repo = top.stdout.strip()
+    rels = [str(p) for p in paths]
+    subprocess.run(["git", "-C", repo, "add", "--", *rels], check=True, capture_output=True)
+    try:
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        # Leave the index as it was (review on PR athenaeum#2984): a path this
+        # call staged must not ride along in a later whole-index commit.
+        subprocess.run(["git", "-C", repo, "reset", "-q", "--", *rels], capture_output=True)
+        raise
+    return subprocess.run(
+        ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def blob_id(path: Path) -> str:
+    """The git object id *path*'s bytes have (``git hash-object``), committed or not."""
+    return subprocess.run(
+        ["git", "hash-object", "--", str(path)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
 def repo_head(repo: Path) -> str | None:
     """The HEAD commit SHA of the git repository at *repo*, or ``None`` (no repo / no commit)."""
     result = subprocess.run(
