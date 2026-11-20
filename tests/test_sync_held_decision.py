@@ -266,3 +266,64 @@ def test_a_librarian_run_files_the_decision(env: Env) -> None:
     (rec,) = env.queue()
     assert rec["kind"] == DECISION_KIND_HELD_PAGE and rec["detail"]["uid"] == UID
     assert _page_line(env).endswith(f" decision={rec['id']}")
+
+
+# -- review fixes -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("answer", ["take-local", "merged"])
+def test_a_retry_after_the_commit_landed_but_closing_failed_closes_without_a_second_commit(
+    env: Env, answer: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.contested()
+    integrate_remote(env.h.second.root, "main", env.settings())
+    (rec,) = env.queue()
+    text = GLOBEX.replace("works at Globex.", "works at Globex and Initech.")
+    kw: dict[str, Any] = {
+        "store_id": STORE,
+        "decision_id": rec["id"],
+        "answer": answer,
+        "text": text if answer == "merged" else None,
+    }
+    real = sync_integrate.resolve_decision
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sync_integrate, "resolve_decision", boom)
+    with pytest.raises(OSError):
+        answer_held_decision(env.h.second.root, env.kr, **kw)
+    monkeypatch.setattr(sync_integrate, "resolve_decision", real)
+    landed = env.h.second.head()
+    assert env.queue()[0]["disposition"] == "pending"
+    assert answer_held_decision(env.h.second.root, env.kr, **kw) == landed
+    assert env.h.second.head() == landed  # no second commit
+    assert env.queue()[0]["disposition"] == f"answered-{answer}"
+
+
+def test_a_decision_is_superseded_when_the_page_is_held_again_on_a_newer_version(
+    env: Env,
+) -> None:
+    env.contested()
+    first = integrate_remote(env.h.second.root, "main", env.settings())
+    old = first.held[0].decision
+    filer = env.settings().file_held
+    assert filer is not None
+    newer = HeldItem(
+        "page",
+        ("contested",),
+        UID,
+        first.held[0].base,
+        first.held[0].local,
+        "f" * 40,
+        path="wiki/jordan.md",
+    )
+    new = filer(newer, "Jordan Reyes", "")
+    assert new and new != old
+    states = {r["id"]: r["disposition"] for r in env.queue()}
+    assert states == {old: "superseded", new: "pending"}
+    with pytest.raises(HeldDecisionRefused) as gone:
+        answer_held_decision(
+            env.h.second.root, env.kr, store_id=STORE, decision_id=old, answer="keep-remote"
+        )
+    assert gone.value.code == "not_pending"
