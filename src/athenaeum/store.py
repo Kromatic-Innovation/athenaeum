@@ -1852,6 +1852,7 @@ class FilesystemStore:
         *,
         non_purgeable_surfaces: Collection[str] = (),
         read_only_surfaces: Collection[str] = (),
+        write_gate: Callable[[str], str | None] | None = None,
     ) -> None:
         self._knowledge_root = Path(knowledge_root)
         self._roots = dict(roots)
@@ -1862,6 +1863,10 @@ class FilesystemStore:
         # Surfaces whose adapter declares ``read_only: true`` (athenaeum#2621):
         # every mutating method refuses a key on one of these.
         self._read_only = frozenset(read_only_surfaces)
+        # Asked only when a mutating method runs (never on a read): returns a
+        # refusal reason for a surface whose store declaration does not grant
+        # this install compile (access S3, athenaeum#2988), else ``None``.
+        self._write_gate = write_gate
         _versioned = (self._knowledge_root / ".git").exists()
         _has_remote = _versioned and _repo_has_remote(self._knowledge_root)
         self.capabilities = StoreCapabilities(
@@ -1996,6 +2001,10 @@ class FilesystemStore:
                 f"{op} refused on surface {surface!r}: it is declared read_only "
                 "(a shared mount this install never writes)"
             )
+        if self._write_gate is not None:
+            reason = self._write_gate(surface)
+            if reason:
+                raise ReadOnlySurfaceError(f"{op} refused on surface {surface!r}: {reason}")
 
     def read_only_surfaces(self) -> frozenset[str]:
         """The surfaces this store refuses to write (athenaeum#2621)."""
