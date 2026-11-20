@@ -761,6 +761,13 @@ class SurfaceSyncState:
         ]
         if why:
             fields["failed_why"] = ",".join(why)
+        unmounted = [
+            f"{r['surface']}={r['reason']}"
+            for r in self.results
+            if r["op"] == "mount" and r["outcome"] == "skipped" and r.get("reason")
+        ]
+        if unmounted:
+            fields["unmounted"] = ",".join(unmounted)
         fields["reason"] = (
             "failed" if any(r["outcome"] == "failed" for r in self.results) else "completed"
         )
@@ -12816,7 +12823,7 @@ def run(
     # broken declaration cannot stop a run (the guard holds it as reader only).
     try:
         from athenaeum.config import resolve_owner_asserter
-        from athenaeum.storage import available_adapters
+        from athenaeum.storage import available_adapters, gathered_surface_mounts
         from athenaeum.store_rights import record_run_start_rights
 
         record_run_start_rights(
@@ -12830,6 +12837,16 @@ def run(
             ),
             resolve_owner_asserter(ctx.config),
         )
+        # Issue athenaeum#2989 (access S4): a declared store this install cannot
+        # read is not mounted. Report it per store in the run summary and the log.
+        from athenaeum.store_rights import run_start_mounts
+
+        for _name, _state in run_start_mounts(
+            gathered_surface_mounts(knowledge_root, ctx.config),
+            resolve_owner_asserter(ctx.config),
+        ).items():
+            if _state.refusal:
+                ctx.surface_sync.record((_name,), "mount", "skipped", _state.refusal)
     except Exception:
         log.warning("store rights: run-start resolution failed", exc_info=True)
 
