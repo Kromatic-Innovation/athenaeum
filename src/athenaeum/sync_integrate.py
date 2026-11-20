@@ -823,6 +823,13 @@ def make_held_filer(
                     and d.get("remote") == item.remote
                 ):
                     return str(rec["id"])
+            stale = [
+                str(rec["id"])
+                for rec in load_queue(knowledge_root, store_id)
+                if rec.get("kind") == DECISION_KIND_HELD_PAGE
+                and rec.get("disposition") == "pending"
+                and (rec.get("detail") or {}).get("uid") == item.uid
+            ]
             record = file_decision(
                 knowledge_root,
                 store_id=store_id,
@@ -847,6 +854,13 @@ def make_held_filer(
                     "answers": list(HELD_ANSWERS),
                 },
             )
+            # The page was held again on a newer remote or local version: the earlier
+            # pending decision for it can no longer be answered (it would be stale), so
+            # the new one replaces it.
+            for old in stale:
+                resolve_decision(
+                    knowledge_root, store_id=store_id, decision_id=old, disposition="superseded"
+                )
             return str(record["id"])
         except (StoreDecisionRefused, OSError, KeyError) as exc:
             log.warning(
@@ -899,11 +913,6 @@ def answer_held_decision(
         raise HeldDecisionRefused("unavailable", "the decision names no usable page path")
     remote, local = str(detail.get("remote", "")), str(detail.get("local", ""))
     page = Path(repo) / rel
-    current = blob_id(page) if page.is_file() else _NONE_BLOB
-    if current != remote:
-        raise HeldDecisionRefused(
-            "stale", f"{rel} is no longer at the published version this decision was filed against"
-        )
     if answer == ANSWER_MERGED:
         if text is None:
             raise HeldDecisionRefused("invalid_text", "the merged answer needs a text")
@@ -919,6 +928,21 @@ def answer_held_decision(
         if found is None:
             raise HeldDecisionRefused("unavailable", f"the {answer} version is not in history")
         data = found
+    current = blob_id(page) if page.is_file() else _NONE_BLOB
+    if current != remote:
+        if current == blob_id_of(repo, data):
+            # A retry after the commit landed but closing the decision failed: the page
+            # already holds the answered text, so only the closing is left.
+            resolve_decision(
+                knowledge_root,
+                store_id=store_id,
+                decision_id=decision_id,
+                disposition=f"answered-{answer}",
+            )
+            return repo_head(repo) or ""
+        raise HeldDecisionRefused(
+            "stale", f"{rel} is no longer at the published version this decision was filed against"
+        )
     before = page.read_bytes()
     page.write_bytes(data)
     message = (
