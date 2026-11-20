@@ -27,6 +27,16 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.record_merge.merge_records(kind, local, remote)` is a pure merge of
+  a record file changed on both sides: records are read through the file's own
+  parser (for the pending merges list, `parse_pending_merges_text`), keyed by
+  id, unioned in a stable order and written back through its renderer. A record
+  resolved on one side and open on the other takes the resolved state; one
+  resolved differently on the two sides is returned as held for a person.
+  `merge_derived` takes one side of a regenerated file and says to regenerate
+  it. No file access, git call or model call, and nothing calls it yet
+  (athenaeum#2929).
+
 - `athenaeum.raise_provenance` parses and validates the `raised_from` block of a
   raised copy, failing closed (any key outside the nine of the design note is
   refused), pins `raise:<raise_id>` as a typed source, and backs a new
