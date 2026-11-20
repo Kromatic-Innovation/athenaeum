@@ -27,6 +27,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- A two-clone sync test harness (`tests/fixtures/two_clone_harness.py`): one bare
+  remote and two installs, each with its own clone and configuration, that
+  diverge and drive fetch, merge commit and push through the store seam over the
+  local file transport, with no network and no model call (athenaeum#2932).
 - A decision queue per store (`athenaeum.store_decisions`): a decision is filed
   with the one store whose page it would change, in that store's own local queue
   file. It quotes only that store's pages and records any other store's page by
