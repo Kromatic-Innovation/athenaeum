@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Rights resolution at run start is logged and acted on by nothing (athenaeum#2933)."""
+"""Rights resolution at run start is logged, and held for the write guard (athenaeum#2933)."""
 
 from __future__ import annotations
 

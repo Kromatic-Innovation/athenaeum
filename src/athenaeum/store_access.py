@@ -40,7 +40,7 @@ from typing import Any
 
 import yaml
 
-from athenaeum.models import asserter_identity_key
+from athenaeum.models import ASSERTER_TYPES, asserter_identity_key
 
 __all__ = [
     "DECLARATION_RELPATH",
@@ -91,7 +91,7 @@ _TOP_KEYS = frozenset(
         "reviews", "intake",
     }
 )
-_PRINCIPAL_KEYS = frozenset({"iss", "sub", "provider_ids"})
+_PRINCIPAL_KEYS = frozenset({"iss", "sub", "provider_ids", "type"})
 _REVIEW_KEYS = ("name", "source", "every", "criteria")
 _PURPOSES = ("review",)
 _GROUP_PREFIX = "group:"
@@ -144,6 +144,10 @@ class Principal:
     sub: str
     key: tuple[str, ...]
     provider_ids: tuple[tuple[str, str], ...] = ()
+    #: The optional ``type`` of the principal block (``person``,
+    #: ``software_agent`` or ``organization``); ``None`` when not written. It
+    #: never enters ``key`` and grants nothing (athenaeum#2991).
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -428,13 +432,20 @@ def _principal(value: object, key: str, problems: list[Problem]) -> Principal | 
             problems.append(
                 Problem(f"{key}.provider_ids", "must map non-empty strings to non-empty strings")
             )
+    kind = value.get("type")
+    if kind is not None and kind not in ASSERTER_TYPES:
+        problems.append(
+            Problem(f"{key}.type", f"must be one of {', '.join(sorted(ASSERTER_TYPES))}")
+        )
     if len(problems) > start:
         return None
     identity = asserter_identity_key(dict(value))
     if not identity:  # pragma: no cover - iss and sub are non-empty strings here
         problems.append(Problem(key, "has no derivable identity key"))
         return None
-    return Principal(iss=value["iss"], sub=value["sub"], key=identity, provider_ids=pid_items)
+    return Principal(
+        iss=value["iss"], sub=value["sub"], key=identity, provider_ids=pid_items, kind=kind
+    )
 
 
 def _groups(value: object, problems: list[Problem]) -> tuple[Group, ...]:

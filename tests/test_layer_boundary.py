@@ -129,6 +129,10 @@ ALLOWED_UPWARD_EDGES: frozenset[tuple[str, str]] = frozenset(
         # adapters/mapping -- the module's own docstring calls this "the one
         # place in [storage.py] that reaches up".
         ("storage", "config"),
+        # storage.py (L1) -> store_rights.py (L2): a deferred, function-local import
+        # in the declaration layer of the write guard (access S3, athenaeum#2988).
+        # store_rights reaches storage only through its callers, so no cycle.
+        ("storage", "store_rights"),
         # verdicts.py (L2) imports off_corpus.py (L3): this is the
         # misconfigured-off_corpus fallback on the erasure-class verdict
         # routing path (issue athenaeum#984 finding A) -- a deferred,

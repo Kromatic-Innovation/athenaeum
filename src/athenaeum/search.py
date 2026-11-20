@@ -1174,6 +1174,44 @@ def _write_manifest(
     tmp.replace(path)
 
 
+#: Surface label of the flat wiki root (``wiki`` is a reserved index prefix, see
+#: :func:`athenaeum.storage.validate_indexed_surfaces`).
+WIKI_SURFACE = "wiki"
+
+
+def surface_of(indexed_name: str) -> str:
+    """The surface an indexed name belongs to (athenaeum#2990, design note §9).
+
+    The wiki root is flat, so a name with no ``/`` is on :data:`WIKI_SURFACE`;
+    every other surface's names are ``<prefix>/<relpath>`` and its prefix
+    (unique, ``/``-free, enforced at config time) is its surface label. Derived
+    rather than carried, so the scan's record shape is unchanged.
+    """
+    head, sep, _rest = indexed_name.partition("/")
+    return head if sep else WIKI_SURFACE
+
+
+def _prune_manifest_surface(manifest_path: Path, surface: str) -> None:
+    """Drop one surface's entries from a manifest sidecar, keeping the rest verbatim.
+
+    Without this, a removed surface that is still mounted would be skipped by
+    the next incremental build (hash unchanged -> not "added") and stay absent
+    from the index. Other surfaces' entries are copied, never recomputed.
+    """
+    manifest = _load_manifest(manifest_path)
+    if manifest is None:
+        return
+    for key in ("hashes", "stats"):
+        section = manifest.get(key)
+        if isinstance(section, dict):
+            manifest[key] = {
+                k: v for k, v in section.items() if surface_of(str(k)) != surface
+            }
+    tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+    tmp.write_text(json.dumps(manifest), encoding="utf-8")
+    tmp.replace(manifest_path)
+
+
 class FTS5Backend:
     """SQLite FTS5 full-text search with BM25 ranking and porter stemming."""
 
@@ -1206,7 +1244,10 @@ class FTS5Backend:
     # ``_FTS5_XFAIL``): the grep baseline reads the rendered body, FTS5's
     # index never did. Column-set change, so this needs the same bump every
     # prior shape change did.
-    _SCHEMA_VERSION = 6
+    #
+    # Version 7 (athenaeum#2990) adds the ``surface`` column so one surface's
+    # rows can be listed and removed without touching another's.
+    _SCHEMA_VERSION = 7
 
     #: Cap on how much of a page's body is indexed (characters), mirroring
     #: ``VectorBackend._DOC_LIMIT``'s precedent for bounding a per-page
@@ -1262,10 +1303,10 @@ class FTS5Backend:
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
         "(filename, name, tags, aliases, description, body, audience UNINDEXED, "
-        "type UNINDEXED, "
+        "type UNINDEXED, surface UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?,?)"
 
     def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
@@ -1332,7 +1373,7 @@ class FTS5Backend:
         meta: dict[str, Any],
         *,
         config: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
@@ -1375,7 +1416,51 @@ class FTS5Backend:
             body,
             audience,
             page_type,
+            surface_of(indexed_name),
         )
+
+    def list_surface(self, cache_dir: Path, surface: str) -> list[str]:
+        """Indexed names of every FTS5 row derived from *surface*, sorted.
+
+        athenaeum#2990. An absent/unreadable index lists nothing.
+        """
+        db_path = cache_dir / _DB_NAME
+        if not db_path.is_file():
+            return []
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute(
+                    "SELECT filename FROM wiki WHERE surface = ? ORDER BY filename",
+                    (surface,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        return [str(r[0]) for r in rows]
+
+    def remove_surface(self, cache_dir: Path, surface: str) -> int:
+        """Delete every FTS5 row derived from *surface*; return the count.
+
+        athenaeum#2990. One ``DELETE ... WHERE surface = ?``: other surfaces'
+        rows are neither re-read for content nor rewritten. The manifest
+        sidecar drops this surface's entries so a still-mounted surface is
+        re-indexed by the next build instead of being skipped as unchanged.
+        """
+        db_path = cache_dir / _DB_NAME
+        removed = 0
+        if db_path.is_file():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                removed = conn.execute(
+                    "DELETE FROM wiki WHERE surface = ?", (surface,)
+                ).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        _prune_manifest_surface(cache_dir / _FTS5_MANIFEST, surface)
+        return int(removed)
 
     def build_index(
         self,
@@ -2165,7 +2250,10 @@ class VectorBackend:
     # live HNSW segment ignores a later ``modify`` until reopened, so an
     # index created under the old default can only pick the new width up
     # through a full rebuild -- exactly what a version mismatch forces.
-    _METADATA_SCHEMA_VERSION = 3
+    #
+    # Version 4 (athenaeum#2990) adds the ``surface`` metadata key so one
+    # surface's embeddings can be listed and removed on their own.
+    _METADATA_SCHEMA_VERSION = 4
     # Issue athenaeum#2023: HNSW candidate-list width for every query
     # (chromadb's ``hnsw:search_ef``). chromadb's default (100) is an
     # APPROXIMATE search: measured on the 1000-page ``medium`` eval corpus
@@ -2410,6 +2498,8 @@ class VectorBackend:
                     # falls back), so a page found by one backend's filter is
                     # found by the other's too.
                     "type": resolve_page_type(meta),
+                    # athenaeum#2990: the surface this embedding came from.
+                    "surface": surface_of(indexed_name),
                 }
             )
         for i in range(0, len(ids), self._BATCH_SIZE):
@@ -2419,6 +2509,50 @@ class VectorBackend:
                 documents=documents[i:end],
                 metadatas=metadatas[i:end],
             )
+
+    def _open_collection(self, cache_dir: Path) -> Any | None:
+        """Open the existing collection, or ``None`` when there is none to open."""
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return None
+        chromadb = self._get_chromadb()
+        from chromadb.api.client import SharedSystemClient
+
+        with _VECTOR_CLIENT_LOCK:
+            SharedSystemClient.clear_system_cache()
+            try:
+                client = chromadb.PersistentClient(path=str(vector_dir))
+                return client.get_collection(
+                    _VECTOR_COLLECTION, embedding_function=self._embedding_function()
+                )
+            except Exception:  # noqa: BLE001 - no usable collection: nothing derived
+                return None
+
+    def list_surface(self, cache_dir: Path, surface: str) -> list[str]:
+        """Ids of every embedding derived from *surface*, sorted (athenaeum#2990)."""
+        collection = self._open_collection(cache_dir)
+        if collection is None:
+            return []
+        got = collection.get(where={"surface": surface}, include=[])
+        return sorted(str(i) for i in got["ids"])
+
+    def remove_surface(self, cache_dir: Path, surface: str) -> int:
+        """Delete every embedding derived from *surface*; return the count.
+
+        athenaeum#2990. A metadata-filtered delete: other surfaces' vectors
+        are untouched. The manifest drops this surface's entries (see
+        :meth:`FTS5Backend.remove_surface`).
+        """
+        removed = 0
+        collection = self._open_collection(cache_dir)
+        if collection is not None:
+            ids = collection.get(where={"surface": surface}, include=[])["ids"]
+            if ids:
+                collection.delete(ids=ids)
+            removed = len(ids)
+            _write_generation(cache_dir / _VECTOR_DIR)
+        _prune_manifest_surface(cache_dir / _VECTOR_MANIFEST, surface)
+        return removed
 
     def build_index(
         self,
@@ -3635,6 +3769,41 @@ def query_vector_index(
 ) -> list[tuple[str, str, float]]:
     """Query the chromadb vector index. Callable from shell hooks."""
     return get_backend("vector").query(query, Path(cache_dir), n=n, exclude=exclude)
+
+
+def list_surface_derived_data(cache_dir: str | Path, surface: str) -> dict[str, list[str]]:
+    """List the derived data held for one surface (athenaeum#2990, design note §9).
+
+    Returns ``{"fts5": [...], "vector": [...]}`` of indexed names. The vector
+    side is only opened when a vector index exists.
+    """
+    cache = Path(cache_dir)
+    return {
+        "fts5": FTS5Backend().list_surface(cache, surface),
+        "vector": (
+            VectorBackend().list_surface(cache, surface)
+            if (cache / _VECTOR_DIR).is_dir()
+            else []
+        ),
+    }
+
+
+def remove_surface_derived_data(cache_dir: str | Path, surface: str) -> dict[str, int]:
+    """Remove every search row and embedding derived from one surface.
+
+    athenaeum#2990. Never reads or rewrites another surface's rows. An install
+    whose vector index exists but whose chromadb is missing raises rather than
+    silently leaving the embeddings behind.
+    """
+    cache = Path(cache_dir)
+    return {
+        "fts5": FTS5Backend().remove_surface(cache, surface),
+        "vector": (
+            VectorBackend().remove_surface(cache, surface)
+            if (cache / _VECTOR_DIR).is_dir()
+            else 0
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
