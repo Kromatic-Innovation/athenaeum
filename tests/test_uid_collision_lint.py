@@ -12,7 +12,7 @@ import pytest
 
 from athenaeum._cmd_uid_collision_lint import EXIT_COLLISIONS_FOUND, cmd_uid_collision_lint
 from athenaeum.cli import main as cli_main
-from athenaeum.uid_collision_lint import scan_uid_collisions
+from athenaeum.uid_collision_lint import UnknownSurface, scan_uid_collisions
 
 SHORT = "aaaa1111"
 LONG = "0123456789abcdef"
@@ -145,3 +145,17 @@ def test_plain_output_marks_the_tombstone(kroot: Path, capsys: pytest.CaptureFix
 def test_clean_corpus_exits_zero_through_the_real_cli(kroot: Path) -> None:
     _page(kroot / "wiki" / f"{SHORT}-alice.md", SHORT, "Alice")
     assert cli_main(["uid-collision-lint", "--path", str(kroot)]) == 0
+
+
+def test_unknown_surface_is_refused_not_a_clean_scan(
+    kroot: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _page(kroot / "wiki" / f"{SHORT}-a.md", SHORT, "A")
+    _page(kroot / "wiki" / f"{SHORT}-b.md", SHORT, "B")
+    _page(kroot / "recipes" / f"{LONG}-x.md", LONG, "X")
+    with pytest.raises(UnknownSurface):
+        scan_uid_collisions(kroot, surface="recipez")
+    assert cmd_uid_collision_lint(_args(kroot, surface="recipez")) == 1
+    assert "recipez" in capsys.readouterr().err
+    assert cmd_uid_collision_lint(_args(kroot, surface="recipes")) == 0
+    assert cmd_uid_collision_lint(_args(kroot, surface="wiki")) == EXIT_COLLISIONS_FOUND

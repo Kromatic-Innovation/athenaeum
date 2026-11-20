@@ -4,7 +4,8 @@
 Thin CLI dispatcher over :mod:`athenaeum.uid_collision_lint`; read-only. Exit
 codes: ``0`` -- no collision; :data:`EXIT_COLLISIONS_FOUND` (2) -- at least one
 uid is carried by more than one page of a surface (same convention as
-``store-link-lint``). It rewrites nothing; a collision is for a person to decide.
+``store-link-lint``); ``1`` -- ``--surface`` names no known surface. It
+rewrites nothing; a collision is for a person to decide.
 """
 
 from __future__ import annotations
@@ -16,14 +17,19 @@ from pathlib import Path
 
 from athenaeum._cli_shared import _resolve_knowledge_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
-from athenaeum.uid_collision_lint import scan_uid_collisions
+from athenaeum.uid_collision_lint import UnknownSurface, scan_uid_collisions
 
 EXIT_COLLISIONS_FOUND = 2
+EXIT_BAD_SURFACE = 1
 
 
 def cmd_uid_collision_lint(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum uid-collision-lint``."""
-    report = scan_uid_collisions(_resolve_knowledge_root(args), surface=args.surface)
+    try:
+        report = scan_uid_collisions(_resolve_knowledge_root(args), surface=args.surface)
+    except UnknownSurface as exc:
+        print(f"uid-collision-lint: {exc}", file=sys.stderr)
+        return EXIT_BAD_SURFACE
     if args.json:
         payload = {
             "pages_scanned": report.pages_scanned,

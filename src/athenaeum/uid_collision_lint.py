@@ -35,11 +35,16 @@ from athenaeum.models import PageLocator, is_tombstone, parse_frontmatter
 from athenaeum.storage import resolve_locator_surfaces
 
 __all__ = [
+    "UnknownSurface",
     "CollidingPage",
     "UidCollision",
     "UidCollisionReport",
     "scan_uid_collisions",
 ]
+
+
+class UnknownSurface(ValueError):
+    """``surface`` names neither ``wiki`` nor a configured surface."""
 
 
 @dataclass(frozen=True)
@@ -86,13 +91,20 @@ def scan_uid_collisions(
     """Report every uid carried by more than one page, per surface (read-only).
 
     *surface* limits the scan to one surface name (``wiki`` or a configured
-    surface prefix); ``None`` scans each surface on its own.
+    surface prefix); ``None`` scans each surface on its own. Raises
+    :class:`UnknownSurface` for any other name, so a misspelling cannot pass
+    as a clean scan.
     """
     if config is None:
         config = load_config(knowledge_root)
     locator = PageLocator(
         knowledge_root / "wiki", resolve_locator_surfaces(knowledge_root, config)
     )
+    known = [PageLocator.WIKI_SURFACE, *(name for name, _root in locator.surfaces)]
+    if surface is not None and surface not in known:
+        raise UnknownSurface(
+            f"unknown surface {surface!r}; known surfaces: {', '.join(sorted(known))}"
+        )
     by_uid: dict[tuple[str, str], list[CollidingPage]] = defaultdict(list)
     scanned = 0
     for _key, path in locator.iter_pages():
