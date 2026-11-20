@@ -386,6 +386,64 @@ jobs:
             tests/test_clean_venv_ci_wiring.py \
             tests/test_public_api.py
 
+  # athenaeum#2909 - the OLDEST releases the declared ranges admit. Every other
+  # job here constrains to `requirements-ci.txt` (newest-at-lock) or resolves the
+  # newest release; nothing exercised the floors, so a floor could drift from
+  # what actually works. This job installs the exact floors of `anthropic`,
+  # `fastmcp` and `mcp` (everything else stays at the lock) and runs the tests
+  # that touch those SDKs. Deliberately NOT in `ci-required`'s `needs:`: it is a
+  # narrow, advisory signal on the floors, and a red here means "raise the
+  # floor", not "this change is broken". tests/test_floors_ci_wiring.py keeps
+  # the pins below equal to the floors in pyproject.toml.
+  floors:
+    name: Dependency floors (anthropic, fastmcp, mcp)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install at the declared floors
+        run: |
+          python -m pip install --upgrade pip
+          # The lock, minus the four packages whose floors are under test
+          # (`mcp-types` moves in lockstep with `mcp`).
+          grep -v -i -E '^(anthropic|fastmcp|fastmcp-slim|mcp|mcp-types)==' requirements-ci.txt > /tmp/floor-constraints.txt
+          printf '%s\n' 'anthropic==0.50.0' 'fastmcp==4.0.0' 'fastmcp-slim==4.0.0' 'mcp==2.0.0' 'mcp-types==2.0.0' >> /tmp/floor-constraints.txt
+          pip install -e ".[dev,mcp]" -c /tmp/floor-constraints.txt
+
+      - name: Record the resolved dependency tree
+        run: pip freeze | grep -i -E '^(anthropic|fastmcp|fastmcp-slim|mcp|mcp-types)=='
+
+      - name: SDK- and MCP-touching tests at the floors
+        run: |
+          pytest -q -n auto \
+            tests/test_provider.py \
+            tests/test_batch_mode.py \
+            tests/test_retry.py \
+            tests/test_retry_registry.py \
+            tests/test_thinking_seam.py \
+            tests/test_llm_schemas.py \
+            tests/test_librarian_zero_yield.py \
+            tests/test_network_guard.py \
+            tests/test_mcp_server.py \
+            tests/test_mcp_remote_mode_safety.py \
+            tests/test_mcp_oauth_resource_server.py \
+            tests/test_mcp_audience_scoping.py \
+            tests/test_mcp_remote_profile.py \
+            tests/test_mcp_steered_recall.py \
+            tests/test_serve_host_origin_guard.py \
+            tests/test_serve_auth_allowed_clients.py \
+            tests/test_serve_transport.py \
+            tests/test_cli_tool_bridge_mcp_api_guard.py \
+            tests/test_cli_tool_bridge_roundtrip.py \
+            tests/test_recall_tool_schema_parity.py
+
   # athenaeum#693 — org-agnostic public-safety leak scan, folded into the
   # required `CI Required` gate below (added to `needs:` + checked in the
   # aggregate) so a hit BLOCKS merge/promotion rather than being advisory, and
