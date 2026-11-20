@@ -351,3 +351,11 @@ limitation" judgment; it suggests the retired page's "no-hop" label was used
 loosely for what the code calls hopped-but-wrong. Exactly as athenaeum#1915
 already flagged, the label needs confirming against the specific rollout
 behind the original observation before it can inform a fix.
+
+## Addendum, 2026-11-19: oracle control re-count (athenaeum#2918)
+
+This report recorded no oracle control check. Counting the `oracle` rows of its
+stored render, five of the eight enrolled classes (`single_hop`, `redundancy`,
+`distractor_robustness`, and `disambiguation` and `multi_hop` at `medium`) were
+below 1.000 at oracle. The counts are in
+[`north-star-oracle-control-regrade-2026-11-19.md`](north-star-oracle-control-regrade-2026-11-19.md).

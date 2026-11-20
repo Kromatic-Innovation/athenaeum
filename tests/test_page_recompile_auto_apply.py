@@ -463,7 +463,13 @@ class TestAC9Documentation:
         return Path(__file__).resolve().parents[1]
 
     def test_readme_names_how_to_see_undo_and_switch_back(self) -> None:
-        text = (self._repo() / "README.md").read_text(encoding="utf-8")
+        # The operating prose lives in the nightly-cost guide; the README
+        # keeps a one-line pointer to it.
+        readme = (self._repo() / "README.md").read_text(encoding="utf-8")
+        assert "docs/guides/nightly-cost.md" in readme
+        text = (self._repo() / "docs" / "guides" / "nightly-cost.md").read_text(
+            encoding="utf-8"
+        )
         lowered = text.lower()
         assert "automatically" in lowered
         assert "recompile list --applied" in text

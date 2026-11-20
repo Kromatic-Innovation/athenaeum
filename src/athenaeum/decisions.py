@@ -56,6 +56,12 @@ common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
 ``answers.py`` for questions, ``merge.py``/``resolutions.py`` for merges).
 
+Issue athenaeum#2934: the listing is also ONE listing across stores. Every
+item names its owning store as ``store_id`` (``"personal"`` for the queues
+above); a declared store's own queue (:mod:`athenaeum.store_decisions`) is
+joined in when the owner holds ``answer`` on it, and contributes nothing
+otherwise.
+
 Issue athenaeum#1992 narrows that factoring rule for exactly the three types
 its own AC3 names. ``merge`` and ``question``/``confirmation`` are the two
 types that once had a REAL legacy CLI of their own (``athenaeum merges`` and
@@ -131,6 +137,7 @@ from athenaeum.relevance_policy_edit import (
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
 from athenaeum.schema_amendment_proposals import list_pending_schema_amendment_proposals
+from athenaeum.store_decisions import PERSONAL_STORE_ID, collect_store_decisions
 from athenaeum.tier_movement_proposals import list_pending_tier_movement_proposals
 
 log = logging.getLogger(__name__)
@@ -1100,7 +1107,8 @@ def relevance_policy_edit_to_decision(rec: dict) -> dict:
 
     A ``type: "relevance-policy-edit"`` item: a remote (``--transport http``)
     client asked to add one ``always`` / ``never`` capture rule to the
-    relevance policy (:mod:`athenaeum.relevance_policy_edit`). Approving it
+    relevance policy (:mod:`athenaeum.relevance_policy_edit`; a ``route``
+    rule, athenaeum#2796, names a ``store``). Approving it
     appends the rule to ``wiki/_schema/relevance-policy.md`` with an audit
     record; rejecting it leaves the policy unchanged. ``confidence`` is
     ``None`` -- a client request, not a detector score.
@@ -1111,6 +1119,8 @@ def relevance_policy_edit_to_decision(rec: dict) -> dict:
     )
     verdict = rule.get("verdict", "")
     effect = "always capture" if verdict == "always" else "never capture"
+    if verdict == "route":
+        effect = f"route to store {rule.get('store')}"
     summary = (
         f"A remote client asks to set the capture policy to {verdict} "
         f"({effect} facts matching {scope or 'nothing'}) -- approve to add the "
@@ -1436,7 +1446,7 @@ def collect_unframed_decisions(
                 rec.get("source", ""), caller_audience, base=knowledge_root
             ):
                 continue
-        decisions.append(rec["item"])
+        decisions.append({**rec["item"], "store_id": PERSONAL_STORE_ID})
 
     if caller_audience is None:
         # Retraction/quarantine/proposed-rule/dimension-proposal items are owner-only for a
@@ -1514,7 +1524,25 @@ def collect_unframed_decisions(
             page_recompile_plan_to_decision(rec, resolver=resolver)
             for rec in list_pending_page_recompile_plans(wiki_root)
         ]
+        # Issue athenaeum#2934: ONE listing across stores. The personal store's
+        # items above each carry ``store_id: "personal"``; here join the
+        # per-store queues of every store on which the owner holds ``answer``
+        # (a store without it contributes nothing). Owner-only like the
+        # proposal types above: a restricted caller sees no store's queue.
+        decisions += _store_decisions(knowledge_root)
     return decisions
+
+
+def _store_decisions(knowledge_root: Path) -> list[dict]:
+    """Items of every other store the owner may answer for (fail-soft read)."""
+    from athenaeum.config import load_config, resolve_owner_asserter
+
+    try:
+        config = load_config(knowledge_root)
+        return collect_store_decisions(knowledge_root, config, resolve_owner_asserter(config))
+    except Exception as exc:  # noqa: BLE001 - the personal listing must still come back
+        log.warning("store decisions: skipped (%s)", type(exc).__name__)
+        return []
 
 
 def list_pending_decisions_page(

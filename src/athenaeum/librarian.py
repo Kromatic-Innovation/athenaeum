@@ -92,7 +92,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, pii_attribution, push_state, spend, zero_yield
+from athenaeum import batch_state, pii_attribution, push_state, spend, sync_integrate, zero_yield
 from athenaeum import drops as drops_mod
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
@@ -754,6 +754,13 @@ class SurfaceSyncState:
             names = [f"{r['surface']}:{r['op']}" for r in self.results if r["outcome"] == outcome]
             if names:
                 fields[outcome] = ",".join(names)
+        why = [
+            f"{r['surface']}:{r['op']}={r['reason']}"
+            for r in self.results
+            if r["outcome"] == "failed" and r.get("reason")
+        ]
+        if why:
+            fields["failed_why"] = ",".join(why)
         fields["reason"] = (
             "failed" if any(r["outcome"] == "failed" for r in self.results) else "completed"
         )
@@ -846,7 +853,15 @@ def _maybe_pull_before_run(
     """
     if not pull_before_run or dry_run:
         return
-    if (knowledge_root / ".git").exists():
+    # athenaeum#2935: a repository whose store declares ``sync.mode: integrate``
+    # (and this install has not narrowed) is synced by the integrate sequence
+    # instead of ``git pull --ff-only``; every other repository is unchanged.
+    integrated = (
+        _integrate_before_compile(knowledge_root, config, surface_sync)
+        if surface_sync is not None
+        else set()
+    )
+    if (knowledge_root / ".git").exists() and knowledge_root.resolve() not in integrated:
         git_pull(
             knowledge_root,
             remote=resolve_push_remote(config),
@@ -855,6 +870,8 @@ def _maybe_pull_before_run(
     if surface_sync is None:
         return
     for repo, surfaces in _surface_sync_repos(knowledge_root, config, surface_sync).items():
+        if repo.resolve() in integrated:
+            continue
         # branch=None: a surface repo syncs its OWN current branch/upstream.
         # ``librarian.push_branch`` names the knowledge repo's branch and must
         # not be forced onto a separate repository (PR athenaeum#2672 review).
@@ -894,8 +911,14 @@ def _maybe_push_after_run(
     # Issue athenaeum#2615: surfaces that are their own git repository are
     # pushed independently of the knowledge repo's own gating below (which
     # returns early), each with its outcome recorded per surface.
+    integrated: set[Path] = set()
     if surface_sync is not None:
-        _push_surface_repos(knowledge_root, config=config, surface_sync=surface_sync)
+        integrated = _integrate_push(knowledge_root, config, surface_sync)
+        _push_surface_repos(
+            knowledge_root, config=config, surface_sync=surface_sync, skip=integrated
+        )
+    if knowledge_root.resolve() in integrated:
+        return  # pushed (or reported) by the integrate sequence, athenaeum#2935
     if head_at_start is None:
         log.info(
             "post-run push skipped: no pre-run HEAD captured — nothing to push "
@@ -922,11 +945,14 @@ def _push_surface_repos(
     *,
     config: dict | None,
     surface_sync: SurfaceSyncState,
+    skip: set[Path] | None = None,
 ) -> None:
     """Push each own-repo surface whose HEAD moved this run; record every outcome."""
     for repo, surfaces in _surface_sync_repos(
         knowledge_root, config, surface_sync, for_push=True
     ).items():
+        if skip and repo.resolve() in skip:
+            continue
         start = surface_sync.heads_at_start.get(repo)
         if start is None:
             log.info("post-run push skipped for %s: no pre-run HEAD captured", ", ".join(surfaces))
@@ -943,6 +969,145 @@ def _push_surface_repos(
             track_failure_streak=False,
         )
         surface_sync.record(surfaces, "push", "ok" if ok else "failed")
+
+
+def _integrate_plans(
+    knowledge_root: Path, config: dict | None, surface_sync: SurfaceSyncState
+) -> list["sync_integrate.RepoSyncPlan"]:
+    """The syncable repositories that act in integrate mode (athenaeum#2935).
+
+    A discovery or declaration failure is logged and recorded, and means "no
+    integrate": the repository then syncs exactly as it did before.
+    """
+    try:
+        plans = sync_integrate.plan_repo_syncs(knowledge_root, config)
+    except Exception as exc:  # noqa: BLE001 — falls back to today's fast-forward sync
+        log.warning("integrate sync: could not plan repositories: %s", exc)
+        surface_sync.record(("*",), "integrate-plan", "failed", type(exc).__name__)
+        return []
+    return [p for p in plans if p.decision.integrate]
+
+
+def _report_sync(
+    surface_sync: SurfaceSyncState,
+    plan: "sync_integrate.RepoSyncPlan",
+    report: "sync_integrate.SyncReport",
+) -> None:
+    for step in report.steps:
+        surface_sync.record((plan.label,), step.step, step.outcome, step.reason)
+
+
+def _integrate_before_compile(
+    knowledge_root: Path, config: dict | None, surface_sync: SurfaceSyncState
+) -> set[Path]:
+    """Steps 2 to 4 of the sync sequence for every repository in integrate mode.
+
+    Returns the resolved repository paths it handled. A local ``integrate`` on a
+    store that does not declare it is ignored and reported, never acted on.
+    """
+    handled: set[Path] = set()
+    try:
+        every = sync_integrate.plan_repo_syncs(knowledge_root, config)
+    except Exception as exc:  # noqa: BLE001 — falls back to today's fast-forward sync
+        log.warning("integrate sync: could not plan repositories: %s", exc)
+        surface_sync.record(("*",), "integrate-plan", "failed", type(exc).__name__)
+        return handled
+    for plan in every:
+        if plan.decision.local_ignored:
+            log.warning(
+                "sync mode: local sync_mode %r on %s is ignored: the store declares %r "
+                "and a local setting may only narrow it",
+                plan.decision.local,
+                plan.label,
+                plan.decision.declared,
+            )
+            surface_sync.record((plan.label,), "sync-mode", "skipped", "local-setting-ignored")
+        if not plan.decision.integrate:
+            continue
+        handled.add(plan.repo.resolve())
+        if plan.branch is None:
+            surface_sync.record((plan.label,), "integrate", "skipped", "detached-head")
+            continue
+        report = sync_integrate.sync_before_compile(plan.repo, plan.branch, plan.settings)
+        _report_sync(surface_sync, plan, report)
+    return handled
+
+
+def _filing_checks_after_push(
+    knowledge_root: Path,
+    config: dict | None,
+    plan: "sync_integrate.RepoSyncPlan",
+    outcome: "sync_integrate.PushOutcome",
+    report: "sync_integrate.SyncReport",
+) -> None:
+    """The filing checks on what a successful push published (athenaeum#2928).
+
+    Runs after the push has been recorded and cannot change it: a failure here is a
+    ``filing-checks`` row in the run summary and nothing else.
+    """
+    if not outcome.ok:
+        return
+    try:
+        from athenaeum import sync_filing_checks
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_access import StoreDeclaration, load_store_declaration
+        from athenaeum.store_decisions import resolve_mounts
+
+        roots = plan.settings.page_roots
+        declaration = None
+        for root in roots:
+            declaration = load_store_declaration((plan.repo / root.rel).resolve())
+            if isinstance(declaration, StoreDeclaration):
+                break
+        if not isinstance(declaration, StoreDeclaration):
+            return
+        sync_filing_checks.run_after_push(
+            plan.repo,
+            outcome,
+            roots,
+            knowledge_root=knowledge_root,
+            store_id=declaration.store_id,
+            report=report,
+            mounts=resolve_mounts(knowledge_root, config),
+            asserter=resolve_owner_asserter(config),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the sync for a check
+        log.warning("filing checks after push could not start: %s", type(exc).__name__)
+        report.add("filing-checks", "failed", "check-crashed")
+
+
+def _integrate_push(
+    knowledge_root: Path, config: dict | None, surface_sync: SurfaceSyncState
+) -> set[Path]:
+    """Steps 6 and 7 for every repository in integrate mode; returns those handled.
+
+    Unlike the fast-forward push this does not wait for "HEAD moved this run": a
+    repository whose last push was contended is still ahead of its remote, and the
+    next run must integrate and push it.
+    """
+    handled: set[Path] = set()
+    for plan in _integrate_plans(knowledge_root, config, surface_sync):
+        handled.add(plan.repo.resolve())
+        if plan.branch is None:
+            surface_sync.record((plan.label,), "push", "skipped", "detached-head")
+            continue
+        report = sync_integrate.SyncReport()
+        outcome = sync_integrate.push_after_compile(plan.repo, plan.branch, plan.settings, report)
+        _filing_checks_after_push(knowledge_root, config, plan, outcome, report)
+        _report_sync(surface_sync, plan, report)
+        if outcome.ok:
+            log.info("Pushed %s to %s", plan.label, plan.settings.remote)
+            if plan.repo.resolve() == knowledge_root.resolve():
+                push_state.write_state(_resolve_cache_dir(None), consecutive=0, last_reason="")
+        else:
+            detail = f": {outcome.detail}" if outcome.detail else ""
+            _report_push_failure(
+                plan.settings.remote,
+                plan.branch,
+                f"push: failed, reason: {outcome.reason}{detail}",
+                track_failure_streak=plan.repo.resolve() == knowledge_root.resolve(),
+            )
+    return handled
 
 
 def _capture_head(knowledge_root: Path) -> str | None:
@@ -963,6 +1128,57 @@ def _capture_head(knowledge_root: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def _report_push_failure(
+    remote: str,
+    branch: str | None,
+    reason: str,
+    *,
+    returncode: int | None = None,
+    track_failure_streak: bool = True,
+) -> None:
+    """The ``athenaeum-push-failed`` warning and the failure-streak alert (athenaeum#1229).
+
+    Shared by :func:`git_push` and the integrate sequence's contended push
+    (athenaeum#2935), so both fire the same warning and feed the same streak.
+    """
+    # Non-fatal: surface the failure with a distinct log line so an
+    # operator (or the routine watching the run) can see exactly which
+    # remote rejected the push and why. Commits remain intact locally.
+    log.warning(
+        "athenaeum-push-failed: git push %s%s exited %s (commits "
+        "remain local; next run retries): %s",
+        remote,
+        f" {branch}" if branch else "",
+        returncode if returncode is not None else "without success",
+        reason,
+    )
+    if not track_failure_streak:
+        return
+    _push_cache_dir = _resolve_cache_dir(None)
+    _previous_push_state = push_state.load_state(_push_cache_dir)
+    _consecutive = (
+        _previous_push_state["consecutive"] + 1
+        if _previous_push_state["last_reason"] == reason[: push_state.MAX_REASON_LENGTH]
+        else 1
+    )
+    push_state.write_state(_push_cache_dir, consecutive=_consecutive, last_reason=reason)
+    _push_alert_threshold = librarian_push_failure_alert_threshold()
+    if _consecutive >= _push_alert_threshold:
+        log.error(
+            "%s: git push %s%s has failed for the SAME reason on %d "
+            "consecutive attempt(s) — at or past the alert threshold of "
+            "%d (ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD, issue athenaeum#1229); "
+            "commits remain local and keep being retried automatically, "
+            "but this is no longer a silent retry: %s",
+            PUSH_FAILURE_ALERT_PREFIX,
+            remote,
+            f" {branch}" if branch else "",
+            _consecutive,
+            _push_alert_threshold,
+            reason,
+        )
 
 
 def git_push(
@@ -1019,44 +1235,13 @@ def git_push(
         reason = (
             result.stderr or result.stdout or ""
         ).strip() or f"exit {result.returncode}"
-        # Non-fatal: surface the failure with a distinct log line so an
-        # operator (or the routine watching the run) can see exactly which
-        # remote rejected the push and why. Commits remain intact locally.
-        log.warning(
-            "athenaeum-push-failed: git push %s%s exited %d (commits "
-            "remain local; next run retries): %s",
+        _report_push_failure(
             remote,
-            f" {branch}" if branch else "",
-            result.returncode,
+            branch,
             reason,
+            returncode=result.returncode,
+            track_failure_streak=track_failure_streak,
         )
-        if not track_failure_streak:
-            return False
-        _previous_push_state = push_state.load_state(_push_cache_dir)
-        _consecutive = (
-            _previous_push_state["consecutive"] + 1
-            if _previous_push_state["last_reason"]
-            == reason[: push_state.MAX_REASON_LENGTH]
-            else 1
-        )
-        push_state.write_state(
-            _push_cache_dir, consecutive=_consecutive, last_reason=reason
-        )
-        _push_alert_threshold = librarian_push_failure_alert_threshold()
-        if _consecutive >= _push_alert_threshold:
-            log.error(
-                "%s: git push %s%s has failed for the SAME reason on %d "
-                "consecutive attempt(s) — at or past the alert threshold of "
-                "%d (ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD, issue athenaeum#1229); "
-                "commits remain local and keep being retried automatically, "
-                "but this is no longer a silent retry: %s",
-                PUSH_FAILURE_ALERT_PREFIX,
-                remote,
-                f" {branch}" if branch else "",
-                _consecutive,
-                _push_alert_threshold,
-                reason,
-            )
         return False
     if track_failure_streak:
         push_state.write_state(_push_cache_dir, consecutive=0, last_reason="")
@@ -12624,6 +12809,19 @@ def run(
     ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
+
+    # Issue athenaeum#2933: resolve the owner's declared store rights at run start
+    # and LOG them. Nothing acts on the result (access S3/S4 will); any failure
+    # is swallowed so a broken declaration cannot stop or change a run.
+    try:
+        from athenaeum.config import resolve_owner_asserter
+        from athenaeum.store_rights import record_run_start_rights
+
+        record_run_start_rights(
+            (wiki_root, knowledge_root), resolve_owner_asserter(ctx.config)
+        )
+    except Exception:
+        log.warning("store rights: run-start resolution failed", exc_info=True)
 
     # Phase: git precondition + config resolution (provider, budgets,
     # retire/push/pull opt-ins) — any failure here is a clean run failure.

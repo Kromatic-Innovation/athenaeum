@@ -91,6 +91,7 @@ from athenaeum.footnote_markers import INLINE_MARKER_RE, resolve_markers
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
+    OWNER_ONLY_ACCESS_LEVELS,
     SOURCE_TYPES,
     AmbiguousPageUidError,
     PageLocator,
@@ -3182,6 +3183,7 @@ def remember_write(
     except ValueError as exc:
         return f"Error: invalid `screening` config: {exc}"
 
+    replaced_notes: list[str] = []
     final_content = _inject_provenance_frontmatter(
         content,
         wiki_source,
@@ -3189,13 +3191,16 @@ def remember_write(
         extras,
         screened_access=screened_access,
         pinned_audience=pinned_audience,
+        replaced=replaced_notes,
     )
     if wiki_root is not None:
         override_error = _audit_relevance_override(wiki_root, final_content, audit_transport)
         if override_error:
             return override_error
     filepath = write_raw_intake(target_dir, final_content)
-    return f"Saved to {filepath}"
+    # athenaeum#2922: the reply's first line stays the bare ``Saved to <path>``;
+    # any frontmatter the server replaced rides on following ``Note:`` lines.
+    return "\n".join([f"Saved to {filepath}", *(f"Note: {n}" for n in replaced_notes)])
 
 
 def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
@@ -3205,12 +3210,13 @@ def _corpus_relative_saved_reply(result: str, raw_root: Path) -> str:
     the result reads ``Saved to raw/<session>/<file>.md``. A path that is not
     under the corpus root falls back to the file name alone, never absolute.
     """
-    written = Path(result[len("Saved to ") :])
+    first, sep, rest = result.partition("\n")
+    written = Path(first[len("Saved to ") :])
     try:
         shown = written.relative_to(raw_root.resolve().parent)
     except ValueError:
         shown = Path(written.name)
-    return f"Saved to {shown.as_posix()}"
+    return f"Saved to {shown.as_posix()}{sep}{rest}"
 
 
 def _audit_relevance_override(wiki_root: Path, final_content: str, transport: str) -> str | None:
@@ -3246,11 +3252,10 @@ def _audit_relevance_override(wiki_root: Path, final_content: str, transport: st
     return None
 
 
-#: ``access:`` levels that are owner-only for a restricted caller unless an
-#: ``audience:`` grant opens them (``models.effective_audience``). A remote
-#: ``remember`` never stamps its pinned audience onto a note carrying one of
-#: these (athenaeum#2779), so intake screening's verdict cannot be widened.
-_OWNER_ONLY_ACCESS_LEVELS = frozenset({"internal", "confidential", "personal"})
+def _audience_roles(value: object) -> set[str]:
+    """The role names a frontmatter ``audience:`` value (list or scalar) carries."""
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {str(i).strip() for i in items if str(i).strip()}
 
 
 def _inject_provenance_frontmatter(
@@ -3260,6 +3265,7 @@ def _inject_provenance_frontmatter(
     extras: dict | None = None,
     screened_access: str | None = None,
     pinned_audience: set[str] | None = None,
+    replaced: list[str] | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -3272,6 +3278,12 @@ def _inject_provenance_frontmatter(
     frontmatter injection (``source_type`` / ``source_ref`` / ``model``
     / ``on_behalf_of`` / ``asserter``) — the on-disk names the read-side
     parsers (``models.parse_asserter`` etc.) look for.
+
+    When the server-side *pinned_audience* replaces or drops caller-written
+    ``audience:`` / ``access: open`` (athenaeum#2922), each change is logged at
+    info level and appended to *replaced* (when given) as a sentence the
+    ``remember`` reply surfaces, so the caller can tell their frontmatter was
+    not honoured. A caller ``audience:`` equal to the pin is not a change.
 
     No-op when all inputs are absent — used for ``sources=None`` after
     the default-inferred-source path has supplied ``wiki_source``.
@@ -3312,17 +3324,40 @@ def _inject_provenance_frontmatter(
         access_level = (
             access_value.strip().lower() if isinstance(access_value, str) else ""
         )
+        changes: list[str] = []
         if access_level == "open":
             del meta["access"]
             access_level = ""
-        if access_level in _OWNER_ONLY_ACCESS_LEVELS:
+            changes.append(
+                "the note's own `access: open` was dropped, because a remote save "
+                "is never world-readable"
+            )
+        if access_level in OWNER_ONLY_ACCESS_LEVELS:
+            # Same set ``models.effective_audience`` treats as owner-only; a
+            # remote ``remember`` never widens it (athenaeum#2779, athenaeum#2924).
             # A restrictive `access:` (set by intake screening, or written in
             # the note itself) is owner-only, and an `audience:` grant is the
             # one thing that would open it to a role. Fail closed: stamp
             # nothing, and drop any caller-written grant too.
+            if "audience" in meta:
+                changes.append(
+                    "the note's own `audience:` was dropped, because its `access:` "
+                    "is restricted and the note stays owner-only"
+                )
             meta.pop("audience", None)
         else:
-            meta["audience"] = sorted(pinned_audience)
+            stamp = sorted(pinned_audience)
+            written = meta.get("audience")
+            if written is not None and _audience_roles(written) != set(stamp):
+                changes.append(
+                    "the note's own `audience:` was replaced by the server's "
+                    "pinned audience"
+                )
+            meta["audience"] = stamp
+        for change in changes:
+            log.info("remember: %s", change)
+            if replaced is not None:
+                replaced.append(change[0].upper() + change[1:] + ".")
 
     if has_frontmatter:
         return render_frontmatter(meta) + body
@@ -4434,7 +4469,8 @@ def create_server(
 
         Issue athenaeum#2643: answers "what are you set to remember?" by
         listing the operator's relevance-policy rules (`always` / `never`,
-        keyed on type, tag and optional subject uid) in evaluation order.
+        keyed on type, tag and optional subject uid, plus `route` rules that
+        name a destination `store`) in evaluation order.
         Read-only: the policy lives in `wiki/_schema/relevance-policy.md` and
         is edited there or through `set_capture_rule`, never through this tool.
 
@@ -4447,7 +4483,8 @@ def create_server(
             is constrained), `hash` (8-hex digest of the effective rules, the
             same value the librarian run summary reports, or null),
             `semantics`, and `rules` — each with `rule`, `line`, `verdict`,
-            `type`, `tag` and `subject`. An invalid file returns `error`
+            `type`, `tag`, `subject` and `store` (null unless a `route` rule).
+            An invalid file returns `error`
             naming each bad rule instead.
         """
         from athenaeum.relevance_policy import (
@@ -4467,6 +4504,7 @@ def create_server(
         tag: str | None = None,
         subject_uid: str | None = None,
         rationale: str = "",
+        store: str | None = None,
     ) -> dict:
         """Record a standing capture rule as POLICY, not as a fact.
 
@@ -4481,12 +4519,18 @@ def create_server(
         rule. This tool does no language parsing. Give `verdict` plus at
         least one of `type`, `tag`, `subject_uid`:
 
-        - `verdict`: `always` (capture matching facts) or `never` (do not).
+        - `verdict`: `always` (capture matching facts) or `never` (do not), or
+          `route` (record where matching facts should go; see `store`).
         - `type`: an entity type from the deployment's type vocabulary.
         - `tag`: a tag from its tag vocabulary; a tag also covers its
           `/`-separated children (`personal` covers `personal/travel`).
         - `subject_uid`: the `uid` (frontmatter) of the entity the rule is
           scoped to.
+        - `store`: required for `route`, and refused for `always` / `never`:
+          the `store_id` of the destination store (`st_` plus 12 lowercase
+          base32 characters) or the reserved word `personal`. Never an
+          adapter name. A `route` rule only records where matching facts
+          should go; nothing acts on it yet, so capture is unchanged.
 
         A rule naming several keys matches only when all of them match. The
         new rule is added LAST and the last matching rule wins, so it
@@ -4500,12 +4544,13 @@ def create_server(
         decisions queue (`mode: "proposed"`) and nothing changes until then.
 
         Args:
-            verdict: `always` or `never`.
+            verdict: `always`, `never` or `route`.
             type: Optional entity type the rule matches.
             tag: Optional tag the rule matches.
             subject_uid: Optional entity uid the rule matches.
             rationale: Optional one-line reason, shown to the operator when
                 the rule is proposed.
+            store: Destination for a `route` rule (a `store_id` or `personal`).
 
         Returns:
             A dict with `ok`, `mode` (`applied` | `proposed`), `changed`
@@ -4530,7 +4575,9 @@ def create_server(
         is_http = transport == "http"
         try:
             if is_http:
-                if rule_edit_is_noop(wiki_root, verdict, type, tag, subject_uid):
+                if rule_edit_is_noop(
+                    wiki_root, verdict, type, tag, subject_uid, store
+                ):
                     # Nothing to approve: the policy already ends with this rule.
                     return {
                         "ok": True,
@@ -4541,7 +4588,13 @@ def create_server(
                         ),
                     }
                 record, created = file_rule_edit_proposal(
-                    wiki_root, verdict, type, tag, subject_uid, rationale=rationale.strip()
+                    wiki_root,
+                    verdict,
+                    type,
+                    tag,
+                    subject_uid,
+                    store,
+                    rationale=rationale.strip(),
                 )
                 return {
                     "ok": True,
@@ -4556,7 +4609,7 @@ def create_server(
                     ),
                 }
             result = apply_rule_edit(
-                wiki_root, verdict, type, tag, subject_uid, transport="stdio"
+                wiki_root, verdict, type, tag, subject_uid, store, transport="stdio"
             )
         except RelevancePolicyError as exc:
             return {"ok": False, "error_code": "invalid_rule", "message": str(exc)}

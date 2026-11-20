@@ -11,18 +11,25 @@ where.
 
 | Client | Status | What you get |
 |---|---|---|
-| Claude Code | Supported | All MCP tools **and** auto-recall via hooks — see [Passive recall via hooks](sidecar.md) |
+| Claude Code | Works, supported | All MCP tools **and** auto-recall via hooks — see [Passive recall via hooks](sidecar.md) |
 | Cursor | Works | All MCP tools by explicit call; see [Cursor guide](cursor.md) |
 | Claude Desktop, other local (stdio) MCP clients | Works | All MCP tools, by **explicit tool call only** — no auto-recall |
-| Grok Build | Works | All MCP tools by explicit call, no auto-recall — see [I want to use Grok Build](#i-want-to-use-grok-build) |
+| Grok Build | Not yet probed | All MCP tools by explicit call, no auto-recall, as xAI documents it — see [I want to use Grok Build](#i-want-to-use-grok-build) |
 | ChatGPT | Needs remote mode | All MCP tools by explicit call, no auto-recall — once you deploy [Remote mode](remote.md) |
 | Grok apps (grok.com, iOS, Android) | Needs remote mode | All MCP tools by explicit call, no auto-recall — once you deploy [Remote mode](remote.md) |
-| xAI API | Not supported | — (out of scope) |
+| xAI API | Out of scope | — |
 | OpenAI Codex | Static snapshot | A periodically refreshed context file — see [Codex context file](codex.md) |
+
+Two words in the Status column mean something exact. A host **works** when its
+probe passes: it connects and its tools respond. A host is **supported** when its
+recall measurement is published. A host can work without being supported; neither
+word says how good the recall is. A host marked "Works" has had no recall
+measurement published yet. The method is in
+[Recall metrics](../design/recall-metrics.md#measuring-recall-on-a-host-with-no-per-turn-hook).
 
 ## I want to use Claude Code
 
-Full support. Register the server and wire the hooks: [Install](install.md) and
+It works and is supported (see the [published measurement](../measurements/recall-metrics-real-sessions-2026-11-15.md)). Register the server and wire the hooks: [Install](install.md) and
 [Passive recall via hooks](sidecar.md).
 
 ## I want to use Claude Desktop, Cursor, or another local MCP client
@@ -31,7 +38,7 @@ Any client that can launch a local process over stdio can run `athenaeum serve`.
 The model gets every MCP tool (`remember`, `recall`, the decision-queue tools), but
 it calls them only when it decides to — there is no per-turn auto-recall outside
 Claude Code. **Cursor has its own guide** — see [Cursor](cursor.md) for setup, the
-Claude Code hook passthrough, and what stays unsupported. Further Cursor work is
+Claude Code hook passthrough, and what it does not do. Further Cursor work is
 tracked in the
 [Cursor support issue](https://github.com/Kromatic-Innovation/athenaeum/issues/2202).
 

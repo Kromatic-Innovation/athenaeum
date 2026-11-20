@@ -233,6 +233,7 @@ arrays generally, per the sources cited above.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -258,6 +259,17 @@ from athenaeum.config import (
 #: -- the two are deliberately independent knobs (the hook never loads
 #: athenaeum.yaml) but share the same default on purpose.
 _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT = 15
+
+# Issue athenaeum#2914: markup Claude Code injects into the prompt channel
+# (background-task completion notices, messages from other agents, system
+# reminders). This adapter supplies the patterns; the engine
+# (`athenaeum.context`) owns the skip. Each requires its closing tag, so a
+# stray literal opening tag in a person's own text is never swallowed.
+_INJECTED_TEXT_PATTERNS = (
+    r"<task-notification\b[^>]*>.*?</task-notification>",
+    r"<teammate-message\b[^>]*>.*?</teammate-message>",
+    r"<system-reminder\b[^>]*>.*?</system-reminder>",
+)
 
 
 #: Keys unique to Grok Build's camelCase hook payload (issue athenaeum#2371)
@@ -759,6 +771,13 @@ def main(argv: list[str] | None = None) -> int:
     matches the zero-argument console-script calling convention; the hook
     input is read from stdin, per the ``UserPromptSubmit`` contract.
     """
+    # A bare `logging.warning` with no handler falls to `logging.lastResort`,
+    # which writes to stderr -- and this hook must never write to stderr
+    # (fail-safe axis above). A NullHandler on the package logger stops that
+    # for every library warning (e.g. query_topics' one-time regex-fallback
+    # notice, athenaeum#2906) without touching the CLI path, which keeps its
+    # own logging setup.
+    logging.getLogger("athenaeum").addHandler(logging.NullHandler())
     try:
         cache_dir = resolve_cache_dir(None)
         # Issue athenaeum#2538 (AC8): a pure Path computation, no I/O -- the
@@ -837,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 n=_resolve_recall_cap_ceiling(),
                 wiki_root=wiki_root,
+                injected_patterns=_INJECTED_TEXT_PATTERNS,
             )
             text = envelope["render"]["text"]
             preamble = envelope["render"]["preamble"]

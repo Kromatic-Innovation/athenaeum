@@ -108,10 +108,12 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import tempfile
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -1021,6 +1023,24 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="raise-acceptance-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "raise_acceptance_ledger.py ACCEPTANCE_LEDGER_FILENAME "
+            "'_raise_acceptance.jsonl' (issue athenaeum#2938; "
+            "docs/design/federation-raise-retract.md §4.4, §6.2, slice S5) — one "
+            "disposition row per raise message (accepted, rejected with a reason "
+            "code, or held), ids and metadata only: no page text and no source "
+            "page identifier. Durable and not reconstructible, the install's own "
+            "state in the cache dir, outside the wiki and raw roots so it is "
+            "never a page and never enters the recall index. Same shape as "
+            "push-records-ledger and drop-ledger; keeping it on a bench is a "
+            "later slice (S14)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="drop-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
@@ -1221,6 +1241,19 @@ class StoreCapabilities:
     bulk_read: bool
     cheap_local_scan: bool
     local_path_for: Callable[[StoreKey], Path] | None = None
+    # Multi-writer sync (athenaeum#2931, design note federation-multi-writer-sync
+    # §3.3): the store is versioned by git AND has a remote, so several installs
+    # may each write it and be integrated by a merge commit. ``has_remote`` is
+    # the fact the invariant needs; it is declared alongside, never inferred.
+    has_remote: bool = False
+    multi_writer: bool = False
+
+    def __post_init__(self) -> None:
+        if self.multi_writer and not (self.versioned and self.has_remote):
+            raise ValueError(
+                "multi_writer requires a store that is versioned by git and has a remote "
+                f"(versioned={self.versioned}, has_remote={self.has_remote})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1319,6 +1352,46 @@ def commit_repo(repo: Path, label: str) -> str | None:
     return _commit_all(repo, label)
 
 
+def commit_paths(root: Path, paths: Sequence[Path], message: str) -> str | None:
+    """Commit exactly *paths* (and nothing else that is staged or modified) in
+    the git repository containing *root*; return the new HEAD SHA.
+
+    ``None`` when *root* is not inside a git repository (nothing is committed).
+    Raises ``subprocess.CalledProcessError`` when git refuses.
+    """
+    top = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if top.returncode != 0 or not top.stdout.strip():
+        return None
+    repo = top.stdout.strip()
+    rels = [str(p) for p in paths]
+    subprocess.run(["git", "-C", repo, "add", "--", *rels], check=True, capture_output=True)
+    try:
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-m", message, "--only", "--", *rels],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        # Leave the index as it was (review on PR athenaeum#2984): a path this
+        # call staged must not ride along in a later whole-index commit.
+        subprocess.run(["git", "-C", repo, "reset", "-q", "--", *rels], capture_output=True)
+        raise
+    return subprocess.run(
+        ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def blob_id(path: Path) -> str:
+    """The git object id *path*'s bytes have (``git hash-object``), committed or not."""
+    return subprocess.run(
+        ["git", "hash-object", "--", str(path)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
 def repo_head(repo: Path) -> str | None:
     """The HEAD commit SHA of the git repository at *repo*, or ``None`` (no repo / no commit)."""
     result = subprocess.run(
@@ -1345,6 +1418,367 @@ def restore_repo(repo: Path, sha: str) -> None:
     """
     subprocess.run(["git", "reset", "--hard", sha], cwd=str(repo), check=True, capture_output=True)
     subprocess.run(["git", "clean", "-fd"], cwd=str(repo), check=True, capture_output=True)
+
+
+# -- Sync read side (athenaeum#2930, design note federation-multi-writer-sync §3.1) --
+#
+# Read-only git operations a multi-writer sync needs. None writes a commit, moves
+# a branch, or touches the working tree; ``fetch_remote_branch`` only adds objects
+# and remote-tracking refs. The seam holds no opinion about page content.
+
+
+def _git_out(repo: Path, *args: str) -> bytes:
+    """Run ``git *args`` in *repo*; return stdout bytes. Raises ``CalledProcessError``."""
+    return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True).stdout
+
+
+def fetch_remote_branch(repo: Path, branch: str, remote: str = "origin") -> str:
+    """Fetch *branch* from *remote* and return the fetched tip commit SHA.
+
+    The local branch and working tree are untouched. Raises
+    ``subprocess.CalledProcessError`` when the fetch fails (no network, unknown
+    remote or branch).
+    """
+    _git_out(repo, "fetch", "--quiet", remote, branch)
+    return _git_out(repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}").decode().strip()
+
+
+def common_ancestor(repo: Path, rev_a: str, rev_b: str) -> str | None:
+    """The best common ancestor commit of two revisions, or ``None`` for unrelated histories."""
+    result = subprocess.run(
+        ["git", "merge-base", rev_a, rev_b], cwd=str(repo), capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return result.stdout.strip() or None
+    if result.returncode == 1:
+        return None
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
+
+
+def read_file_at_revision(repo: Path, rev: str, path: str) -> bytes | None:
+    """The bytes of *path* as committed at *rev*, or ``None`` if the path is absent there.
+
+    Reads the object database only; the working tree and index are not touched.
+    Raises ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    _git_out(repo, "rev-parse", "--verify", f"{rev}^{{commit}}")
+    entry = _git_out(repo, "ls-tree", "-z", rev, "--", path)
+    if not entry:
+        return None
+    meta = entry.split(b"\t", 1)[0].split()
+    if len(meta) != 3 or meta[1] != b"blob":
+        return None
+    return _git_out(repo, "cat-file", "blob", meta[2].decode())
+
+
+def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
+    """Sorted paths that differ between two revisions (added, modified or deleted).
+
+    Renames are reported as a delete plus an add; pairing a page by uid is the
+    caller's business, not the seam's.
+    """
+    raw = _git_out(repo, "diff", "--name-only", "-z", "--no-renames", rev_a, rev_b)
+    return sorted(p.decode() for p in raw.split(b"\0") if p)
+
+
+def merge_commits_between(repo: Path, rev_a: str, rev_b: str) -> list[str]:
+    """The merge commits (two or more parents) reachable from *rev_b* and not from *rev_a*.
+
+    Read-only; an empty list when the range holds none. Raises
+    ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    raw = _git_out(repo, "rev-list", "--merges", f"{rev_a}..{rev_b}")
+    return [line for line in raw.decode().split("\n") if line.strip()]
+
+
+def remote_history_rewritten(repo: Path, last_seen: str | None, fetched_tip: str) -> bool:
+    """Whether the fetched remote tip no longer contains the commit last seen there.
+
+    ``True`` when *last_seen* is not an ancestor of (or equal to) *fetched_tip*.
+    An ordinary fast-forward keeps *last_seen* in the history and is ``False``,
+    as is a first sync (``last_seen`` is ``None``). Where "last seen" is kept is
+    the caller's concern; this takes it as an argument and stores nothing.
+    """
+    if last_seen is None:
+        return False
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", last_seen, fetched_tip],
+        cwd=str(repo),
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
+
+
+# -- Sync write side (athenaeum#2931, design note federation-multi-writer-sync §4.1/§4.2) --
+#
+# The merge commit and the push. Nothing here rewrites a commit that exists: the
+# merge commit is a new object whose parents are the two tips, the branch only ever
+# moves forward onto it, and a push names its refspec without the forcing prefix.
+
+
+class WorkingTreeNotCleanError(RuntimeError):
+    """Raised when a merge is asked of a checked-out branch with uncommitted changes."""
+
+
+class PushFailureReason(str, Enum):
+    """Why a push failed (design note §4.2): distinguishable, never merged into one."""
+
+    REJECTED_REMOTE_MOVED = "rejected_remote_moved"  # remote branch moved: integrate, retry
+    OTHER = "other"  # no network, no permission, unknown remote, a remote-side hook...
+
+
+@dataclass(frozen=True)
+class PushResult:
+    """Outcome of :func:`push_branch`. ``reason`` is ``None`` exactly when ``ok``."""
+
+    ok: bool
+    reason: PushFailureReason | None = None
+    detail: str = ""
+
+
+def _git_env_c() -> dict[str, str]:
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    return env
+
+
+def build_merged_tree(repo: Path, base_rev: str, changes: Mapping[str, bytes | None]) -> str:
+    """Write a tree object: *base_rev*'s tree with *changes* applied; return its SHA.
+
+    *changes* maps a repository path to its merged bytes, or to ``None`` to delete
+    it. Built in a throwaway index, so the repository's index, working tree and
+    branches are not touched; the only effect is new objects in the object database.
+    """
+    with tempfile.TemporaryDirectory(prefix="athenaeum-merge-index-") as tmp:
+        env = _git_env_c()
+        env["GIT_INDEX_FILE"] = str(Path(tmp) / "index")
+
+        def run(*args: str, stdin: bytes | None = None) -> bytes:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(repo),
+                check=True,
+                capture_output=True,
+                input=stdin,
+                env=env,
+            ).stdout
+
+        run("read-tree", base_rev)
+        for path, data in sorted(changes.items()):
+            if data is None:
+                run("update-index", "--force-remove", "--", path)
+                continue
+            existing = run("ls-files", "-s", "--", path).split()
+            mode = existing[0].decode() if existing else "100644"
+            blob = run("hash-object", "-w", "--stdin", stdin=data).decode().strip()
+            run("update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}")
+        return run("write-tree").decode().strip()
+
+
+def commit_merge(repo: Path, tree: str, local_rev: str, remote_rev: str, message: str) -> str:
+    """Create (do not attach to any branch) a merge commit of *tree* with two parents.
+
+    Parents are, in order, *local_rev* and *remote_rev*. Returns the commit SHA.
+    """
+    out = _git_out(
+        repo, "commit-tree", tree, "-p", local_rev, "-p", remote_rev, "-m", message
+    )
+    return out.decode().strip()
+
+
+def _move_branch(repo: Path, branch: str, old: str, new: str) -> None:
+    """Move *branch* from *old* to *new*, a descendant of *old*. The last step of a merge."""
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=str(repo), capture_output=True, text=True
+    )
+    if head.returncode == 0 and head.stdout.strip() == f"refs/heads/{branch}":
+        # Checked out: advance branch, index and working tree together. A
+        # fast-forward cannot leave a conflict marker, and git refuses it rather
+        # than overwrite a local change.
+        _git_out(repo, "merge", "--ff-only", "--quiet", new)
+    else:
+        _git_out(repo, "update-ref", f"refs/heads/{branch}", new, old)
+
+
+def write_merge_commit(
+    repo: Path,
+    branch: str,
+    remote_rev: str,
+    changes: Mapping[str, bytes | None],
+    message: str,
+) -> str:
+    """Integrate *remote_rev* into local *branch* as one two-parent merge commit.
+
+    *changes* is the merged tree expressed against the branch's current tree: the
+    path -> merged bytes (``None`` deletes) for every path whose merged content
+    differs from the local one. All-or-nothing (design note §4.1): the tree and the
+    commit are built first; the branch is moved to the commit last. A failure
+    anywhere before that leaves the branch, index and working tree exactly as they
+    were. Returns the new commit SHA.
+
+    Raises :class:`WorkingTreeNotCleanError` if *branch* is checked out with
+    uncommitted changes (snapshot them as a local commit first, design note §4
+    step 2), and ``subprocess.CalledProcessError`` on any git failure.
+    """
+    local_rev = _git_out(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    local = local_rev.decode().strip()
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=str(repo), capture_output=True, text=True
+    )
+    if head.stdout.strip() == f"refs/heads/{branch}" and not repo_is_clean(repo):
+        raise WorkingTreeNotCleanError(
+            f"refusing to merge into checked-out branch {branch!r}: uncommitted changes"
+        )
+    tree = build_merged_tree(repo, local, changes)
+    commit = commit_merge(repo, tree, local, remote_rev, message)
+    _move_branch(repo, branch, local, commit)
+    return commit
+
+
+def push_branch(repo: Path, branch: str, remote: str = "origin") -> PushResult:
+    """Push *branch* to *remote* without force and report why it failed (design note §4.2).
+
+    ``REJECTED_REMOTE_MOVED`` means the remote branch has commits this one lacks
+    (fetch, integrate, push again); ``OTHER`` is anything else (no network, no
+    permission, unknown remote). The refspec is a plain ``branch:branch``, so the
+    remote can only be fast-forwarded.
+    """
+    result = subprocess.run(
+        ["git", "push", "--porcelain", remote, f"refs/heads/{branch}:refs/heads/{branch}"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env=_git_env_c(),
+    )
+    if result.returncode == 0:
+        return PushResult(ok=True)
+    detail = (result.stderr.strip() or result.stdout.strip())[:2000]
+    for line in result.stdout.splitlines():
+        if line.startswith("!") and "[rejected]" in line:
+            if "(fetch first)" in line or "(non-fast-forward)" in line:
+                return PushResult(False, PushFailureReason.REJECTED_REMOTE_MOVED, detail)
+    return PushResult(False, PushFailureReason.OTHER, detail)
+
+
+# -- Sync orchestration helpers (athenaeum#2935, design note §4) -----------
+#
+# Small read helpers and the fast-forward the integrate sequence needs, so the
+# orchestrator in ``sync_integrate`` never shells out to git itself.
+
+
+def current_branch(repo: Path) -> str | None:
+    """The checked-out branch name of *repo*, or ``None`` (detached HEAD / no repo)."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """Whether commit *ancestor* is *descendant* or reachable from it."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=str(repo),
+        capture_output=True,
+    )
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    raise subprocess.CalledProcessError(
+        result.returncode, result.args, result.stdout, result.stderr
+    )
+
+
+def fast_forward_branch(repo: Path, branch: str, rev: str) -> None:
+    """Move *branch* forward to *rev*, a descendant of its tip (design note §4.1 step 2).
+
+    Never rewrites history: refuses (``CalledProcessError``) if *rev* does not
+    descend from the branch tip, or would overwrite an uncommitted change.
+    """
+    tip = _git_out(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    old = tip.decode().strip()
+    if not is_ancestor(repo, old, rev):
+        raise subprocess.CalledProcessError(1, ["fast-forward", branch, rev])
+    _move_branch(repo, branch, old, rev)
+
+
+def blob_id_at_revision(repo: Path, rev: str, path: str) -> str | None:
+    """The git blob id of *path* at *rev*, or ``None`` when absent there."""
+    entry = _git_out(repo, "ls-tree", "-z", rev, "--", path)
+    if not entry:
+        return None
+    meta = entry.split(b"\t", 1)[0].split()
+    if len(meta) != 3 or meta[1] != b"blob":
+        return None
+    return meta[2].decode()
+
+
+def read_blob(repo: Path, blob: str) -> bytes | None:
+    """The bytes of the git blob *blob*, or ``None`` when *repo* has no such blob.
+
+    Reads the object database only (athenaeum#2940: the last accepted version of
+    a raised copy is read back by the blob id the acceptance ledger holds).
+    *blob* must be a full 40- or 64-hex object id; anything else is ``None``.
+    """
+    if len(blob) not in (40, 64) or any(c not in "0123456789abcdef" for c in blob):
+        return None
+    result = subprocess.run(
+        ["git", "cat-file", "blob", blob], cwd=str(repo), capture_output=True
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def write_blob(repo: Path, data: bytes, pin_ref: str | None = None) -> str:
+    """Write *data* into *repo*'s object database as a blob and return its id.
+
+    With *pin_ref* (a ref name under ``refs/``) the blob is also referenced from
+    that ref, so ``git gc`` never prunes a version that no commit holds
+    (athenaeum#2940: the raiser's payload as last accepted, when the committed
+    copy is a merge of it with the target's own edits). Raises
+    ``subprocess.CalledProcessError`` when git refuses.
+    """
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        input=data,
+    ).stdout.decode().strip()
+    if pin_ref is not None:
+        subprocess.run(
+            ["git", "update-ref", pin_ref, blob], cwd=str(repo), check=True, capture_output=True
+        )
+    return blob
+
+
+def blob_id_of(repo: Path, data: bytes) -> str:
+    """The blob id git would give *data*; nothing is written to the object database."""
+    return subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        input=data,
+    ).stdout.decode().strip()
+
+
+def list_files_at_revision(repo: Path, rev: str, prefix: str = "") -> list[str]:
+    """Sorted blob paths at *rev* under *prefix* (the whole tree when empty)."""
+    args = ["ls-tree", "-r", "-z", "--name-only", rev]
+    if prefix:
+        args += ["--", prefix.rstrip("/") + "/"]
+    raw = _git_out(repo, *args)
+    return sorted(p.decode() for p in raw.split(b"\0") if p)
 
 
 class FilesystemStore:
@@ -1408,6 +1842,8 @@ class FilesystemStore:
         # Surfaces whose adapter declares ``read_only: true`` (athenaeum#2621):
         # every mutating method refuses a key on one of these.
         self._read_only = frozenset(read_only_surfaces)
+        _versioned = (self._knowledge_root / ".git").exists()
+        _has_remote = _versioned and _repo_has_remote(self._knowledge_root)
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
@@ -1417,7 +1853,9 @@ class FilesystemStore:
             # refusal the old ad-hoc ``(knowledge_root / ".git").exists()``
             # check gave — just expressed as a capability instead of a
             # duplicated filesystem probe.
-            versioned=(self._knowledge_root / ".git").exists(),
+            versioned=_versioned,
+            has_remote=_has_remote,
+            multi_writer=_versioned and _has_remote,
             purgeable=True,
             compare_and_swap=True,
             leases=True,  # S4 (athenaeum#979): FileLease over flock, see .lease()
@@ -1472,10 +1910,15 @@ class FilesystemStore:
         declared otherwise. Every other flag is the store-level value. The
         store-level :attr:`capabilities` stays the default-surface (knowledge
         root) profile, unchanged, so existing callers keep working.
+        ``has_remote`` and ``multi_writer`` follow the surface's own repository.
         """
+        repo = self._surface_repo(surface)
+        has_remote = repo is not None and _repo_has_remote(repo)
         return replace(
             self.capabilities,
-            versioned=self._surface_repo(surface) is not None,
+            versioned=repo is not None,
+            has_remote=has_remote,
+            multi_writer=has_remote,
             purgeable=surface not in self._non_purgeable,
         )
 

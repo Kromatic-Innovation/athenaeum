@@ -4846,6 +4846,34 @@ recording BEFORE any later slice changes what recall pushes. Precedence:
 through to the default. No seed in ``_DEFAULTS`` — mirrors
 `resolve_spend_ledger_enabled`'s shape exactly.
 
+### `resolve_push_record_query_terms`
+
+- **YAML path:** `push_metrics.record_query_terms`
+- **Environment variable:** `ATHENAEUM_PUSH_RECORD_QUERY_TERMS`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve whether a push ledger row records its extracted query terms
+and the extractor that produced them.
+
+ON by default. The ledger otherwise holds only opaque page ids, a query
+hash and token counts; these terms are the one free-text-derived field it
+carries, so the default is a judgement, made for this reason: the terms
+are what separates "the extractor picked the wrong terms" from "ranking
+missed", and a measurement field that is off records nothing until
+someone has already lost the data they needed. The risk is bounded: the
+prompt itself is never stored, only the few short topic terms the
+extractor derived from it (at most 12, each cut to 64 characters), in the
+same local cache-dir ledger as the pushed-page ids, which never enters
+the wiki corpus. A deployment that treats a topic word as sensitive
+should set this ``false``: new rows then carry neither field. Precedence:
+``ATHENAEUM_PUSH_RECORD_QUERY_TERMS`` env >
+``push_metrics.record_query_terms`` yaml > ``True``. Any env value other
+than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+case-insensitive) is truthy; a non-bool yaml value falls through to the
+default. No seed in ``_DEFAULTS``.
+
 ## `recall`
 
 ### `resolve_recall_cap_ceiling`
@@ -6135,6 +6163,8 @@ storage:
       surface_root: ~/shared-recipes   # the clone
       read_only: true                  # pulled and indexed, never written
       visibility: 1
+      # sync_mode: fast_forward        # optional: never merge, even if the
+      #                                # store declares sync.mode: integrate
       corpus_policy: {embedded: true, recallable: true}
   mapping:
     recipe: shared-recipes

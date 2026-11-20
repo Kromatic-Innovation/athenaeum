@@ -172,6 +172,7 @@ class TestExclusionGuards:
 
 class TestIndexContents:
     def test_excluded_page_never_enters_either_index(self, kb: Path) -> None:
+        pytest.importorskip("chromadb")  # the vector half needs the real backend
         _page(kb / "wiki", "ok.md", "publicmarker")
         _page(kb / "excluded", "secret.md", "hushmarker")
         cfg = _cfg({})
@@ -196,6 +197,8 @@ class TestIndexContents:
     def test_indexed_surface_outside_wiki_is_indexed_and_recalled(
         self, kb: Path, backend: str
     ) -> None:
+        if backend == "vector":
+            pytest.importorskip("chromadb")
         _page(kb / "wiki", "ok.md", "publicmarker")
         _page(kb / "projects-notes" / "sub", "roadmap.md", "zephyrmarker")
         cfg = _cfg({"projects": _surface("projects-notes", True)})
@@ -231,6 +234,8 @@ class TestIndexContents:
 class TestByteIdenticalManifestWithoutSurfaces:
     @pytest.mark.parametrize("backend", ["fts5", "vector"])
     def test_manifest_unchanged_by_the_resolver(self, kb: Path, backend: str) -> None:
+        if backend == "vector":
+            pytest.importorskip("chromadb")
         _page(kb / "wiki", "alpha.md", "alphamarker")
         extra = kb / "raw" / "auto-memory"
         _page(extra, "note.md", "notemarker")

@@ -168,7 +168,7 @@ def test_failed_init_leaves_no_partial_state(
     original_run = subprocess.run
 
     def mock_run(cmd, **kwargs):
-        if cmd[:2] == ["git", "commit"] or cmd[:3] == ["git", "config", "--local"]:
+        if "commit" in cmd or cmd[:3] == ["git", "config", "--local"]:
             raise subprocess.CalledProcessError(128, cmd, stderr=b"user.name unknown")
         return original_run(cmd, **kwargs)
 
@@ -190,7 +190,7 @@ def test_failed_init_preserves_preexisting_content(
     original_run = subprocess.run
 
     def mock_run(cmd, **kwargs):
-        if cmd[:2] == ["git", "commit"]:
+        if "commit" in cmd:
             raise subprocess.CalledProcessError(1, cmd, stderr=b"boom")
         return original_run(cmd, **kwargs)
 
@@ -232,16 +232,21 @@ def test_non_identity_commit_failure_is_a_clean_message(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """athenaeum#2730: a rejecting pre-commit hook -> short message, rollback."""
-    hooks = tmp_path / "hooks"
-    hooks.mkdir()
-    hook = hooks / "pre-commit"
-    hook.write_text("#!/bin/sh\necho 'hook says no' >&2\nexit 1\n")
-    hook.chmod(0o755)
-    # Env config overrides any global core.hooksPath set by test isolation.
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hooks))
+    """athenaeum#2730: a non-identity commit failure -> short message, rollback.
+
+    The seed commit now runs with hooks disabled (athenaeum#2901), so a hook can
+    no longer be the trigger; the failure is simulated at the subprocess call.
+    """
+    import subprocess
+
+    original_run = subprocess.run
+
+    def mock_run(cmd, **kwargs):
+        if "commit" in cmd:
+            raise subprocess.CalledProcessError(1, cmd, stderr=b"hook says no")
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "T")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "T")
@@ -251,7 +256,7 @@ def test_non_identity_commit_failure_is_a_clean_message(
     target.mkdir()
     (target / "keep.txt").write_text("mine")
     before = _snapshot(target)
-    _assert_clean_git_failure(capsys, target, "git commit", "hook says no")
+    _assert_clean_git_failure(capsys, target, "commit", "hook says no")
     assert _snapshot(target) == before
     assert (target / "keep.txt").read_text() == "mine"
 
@@ -413,3 +418,41 @@ def test_fresh_init_creates_claude_session_intake_root(
     assert not [
         r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
     ]
+
+
+def test_init_seed_commit_ignores_a_failing_global_hooks_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2901: a global ``core.hooksPath`` commit hook cannot abort init."""
+    import subprocess
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    for hook in ("pre-commit", "commit-msg", "pre-merge-commit"):
+        script = hooks / hook
+        script.write_text("#!/bin/sh\necho blocked by hook >&2\nexit 1\n")
+        script.chmod(0o755)
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(
+        f"[core]\n\thooksPath = {hooks}\n[user]\n\tname = Test\n\temail = test@example.com\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    # Control: the hook really does block an ordinary commit in this environment.
+    control = tmp_path / "control"
+    subprocess.run(["git", "init", "-q", str(control)], check=True)
+    (control / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=control, check=True)
+    blocked = subprocess.run(
+        ["git", "commit", "-q", "-m", "x"], cwd=control, capture_output=True
+    )
+    assert blocked.returncode != 0
+
+    target = tmp_path / "knowledge"
+    init_knowledge_dir(target)
+
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=target, capture_output=True, text=True, check=True
+    )
+    assert "Initialize knowledge directory" in log.stdout
