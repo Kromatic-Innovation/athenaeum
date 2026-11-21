@@ -25,6 +25,51 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-21
+
+**Summary.** 0.29.0 makes the per-turn push carry more of the answer: it now
+ends with an excerpt of the top match and names the pages that match links
+to, so a turn that needs one passage, or a page one link away, often needs no
+`recall` call. It also adds more experimental groundwork for sharing a store
+between several installs: per-store intake routing, raising pages between
+stores and retracting them, declared store rights, a search index separable
+by store, and a safer `sync.mode: integrate`. It is a MINOR release because it
+adds features (0.28.1 to 0.28.13 were never published). `athenaeum.__all__`
+and the declared dependencies are unchanged.
+
+For most users:
+
+- Breaking changes: none.
+- Behaviour changes: each per-turn push is longer. The excerpt (default 600
+  characters) and up to six linked-page lines are added after the bullets,
+  inside the existing push-token budget and Claude Code's 10,000-character
+  hook output cap. Set `ATHENAEUM_PUSH_EXCERPT_CHARS=0` (or
+  `recall.push_excerpt_chars: 0`) to turn the excerpt off. `athenaeum recall`
+  now prints a line to stderr on an empty result and adds a line when the
+  query names something no returned page mentions.
+- The search index is rebuilt automatically on the first run after upgrading
+  (FTS5 schema version 7, vector metadata schema version 4). On a large
+  corpus that run takes longer than usual.
+
+Experimental and not called by a single-store install: intake routing,
+the raise ledger and retract, `athenaeum.store_intake_dispatch`,
+`athenaeum.store_reviews`, the erasure mark and the integrate-mode sync
+changes build on the 0.28.0 federated-store groundwork. They may change
+without notice. See `docs/guides/stability.md` for which surfaces count as
+stable.
+
+Security-relevant: an install now refuses to mount a declared store whose
+`_store/access.yaml` does not grant it read, and a store's declared rights
+can only narrow the write guard, never widen local config. Both apply only
+to a surface that carries a declaration; a surface without one behaves as
+before.
+
+**Upgrading from 0.28.0**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`.
+2. Expect the first run to rebuild the search index. No other steps.
+
 ### Changed
 
 - Docs and eval harness: native memory against the push at 1,000 and 3,000 pages (the native `MEMORY.md` index truncated at Claude Code's 200-line cap, verified live), and a push carrying the linked neighbours of every hit. Native memory's advantage on `unprompted_push` tasks does not survive at that size; the neighbour push answers them at every size tested (athenaeum#3066)
@@ -37,6 +82,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - `athenaeum recall` no longer ends silently on an empty result: it prints one line to stderr saying nothing matched, and points to `athenaeum doctor` when the search index is missing or empty. A raw-intake hit now carries the `[uncompiled]` marker (at the start of the preview column, so the tab-separated columns are unchanged), using the same predicate as the MCP `recall` tool. Stdout for an empty result and the exit code are unchanged (athenaeum#3043)
 - The `claude` CLI not-logged-in error now leads with the fix (run `claude` then `/login`, or set `ANTHROPIC_API_KEY` and use `llm.provider: api`) and puts the CLI's own output after it as detail, cut at a word boundary with `...` when long instead of mid-token (athenaeum#3044)
 - Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
+
+- Docs: `docs/design/host-cursor.md` is corrected against the Cursor probe (athenaeum#2395). The interactive CLI does deliver a Claude-format `UserPromptSubmit` hook's `additionalContext` to the model every turn, `beforeSubmitPrompt` carries `session_id`, `type: "stdio"` is not required, and `sessionStart` injection lands for hooks that finish within about 60 seconds. Claude-format hook groups need a `matcher` key, and `--print` mode does not run the prompt hook
+- Clean-machine check of the Claude Code plugin on Linux, in a throwaway container with no mounts (athenaeum#2308). The plugin installs from its private self-hosted marketplace, but its MCP server cannot start as shipped: the launcher omits the `[mcp]` extra and nothing creates the knowledge directory. With three workarounds a fact was remembered, compiled on the Claude Code login and recalled in a new session. The first-session "still preparing" message and the uninstall check pass; the `uv`-missing message is written but discarded by `2>/dev/null`. Report: `docs/measurements/plugin-clean-install-linux-2026-11-20.md`.
+
+- First recall without an API key, measured live on 0.28.0 (athenaeum#2307): with no `ANTHROPIC_API_KEY` and a Claude Code login, a fact told through `remember` was compiled by the default `claude-cli` provider and returned by `recall` in a new session, and the no-login counter-example now names what is missing in `init`, `doctor` and the failed run. A single-note compile took 3 calls, 3,625 to 7,025 tokens and 24 to 50 s; the CLI gives no share of the plan's limit. The counts are in `docs/measurements/first-recall-no-api-key-2026-11-20.md`.
+- `recall` now says so when the query names something no returned page mentions. A capitalised query word that appears on none of the pages shown (`Yusuf Adeyemi` when no page names him) adds one line after the results, telling the agent that the store most likely has no page on that name, so searching again for part of the name or another spelling will not help. It targets the abstention cost on the native-memory grid, where the verdict arm spent four `recall` calls per unknown name before saying it did not know. Over every `recall` call stored from run 44783114473, the line would have appeared on 49 of 71 abstention calls and on none of 451 others. The per-row counts and projection are in `docs/measurements/abstention-cost-2026-11-21.md` (athenaeum#3033).
+
+- North-star grid: the oracle control now tolerates one delivered-page omission. When an enrolled class and scale has failing `oracle` rows that are all marker misses with delivery, and at most one probe is involved, that (probe, scale) pair is excluded from every arm, native arms included, for conditions 1, 2 and 3, and the report names it in an "Excluded by the oracle tolerance" table; a second failing probe, or a miss without delivery, still voids. `spend_approver_named` gains the alternative marker `requester explain` on its second page. `grader_revision` moves to `athenaeum#3029`; `corpus_digest` does not (pages are untouched). Run 44783114473's stored rows are re-read offline in `docs/measurements/native-memory-baseline-2026-11-20-regrade.md` (athenaeum#3029).
 
 ### Added
 
@@ -60,16 +113,6 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - Sync: a repository in `sync.mode: integrate` is now checked, before each integrate, for tracked machine-local files (the artifact registry's `operational` / `machine-local` entries). A finding is a `machine-local-files` row in the run summary and a log warning; the sync goes on and nothing is untracked. `athenaeum machine-local-check` runs the same check read-only and exits 2 on a finding. (athenaeum#2994)
 - Integrate mode no longer blocks the whole sync when two installs minted the same page uid. A uid added on both sides with a different `type` or normalised `name` is a collision: the local, unpublished page gets a new 16-hex uid, its file is renamed, references to the old uid made in the same unpublished local commits are rewritten (a reference in anything already published is left alone), and the merge commit records `Athenaeum-Uid-Reminted: <old uid> <new uid>`; the run summary counts re-mints as `uid_reminted`. The same uid with the same `type` and name is one page merged against an empty ancestor. A uid already in the common ancestor on two pages still blocks (athenaeum#2996)
 - A page that integrate mode holds because two installs changed it and the librarian could not settle it is now filed as a `held-page` decision in the owning store's own decision queue, naming the uid, the contested units, the reason codes and the base, local and remote blob ids (no page text from another store). The `Athenaeum-Page` line of the merge commit carries `decision=<id>`, the decision shows in the one decision listing, and `answer_held_decision` applies "keep the published version", "take the local version" or a supplied merged text as one ordinary new commit and closes the decision. The published version stays on the page until then; a `deferred` page is not filed and a page settled by rule files nothing; filing the same held page twice makes one decision (athenaeum#2995)
-
-### Changed
-
-- Docs: `docs/design/host-cursor.md` is corrected against the Cursor probe (athenaeum#2395). The interactive CLI does deliver a Claude-format `UserPromptSubmit` hook's `additionalContext` to the model every turn, `beforeSubmitPrompt` carries `session_id`, `type: "stdio"` is not required, and `sessionStart` injection lands for hooks that finish within about 60 seconds. Claude-format hook groups need a `matcher` key, and `--print` mode does not run the prompt hook
-- Clean-machine check of the Claude Code plugin on Linux, in a throwaway container with no mounts (athenaeum#2308). The plugin installs from its private self-hosted marketplace, but its MCP server cannot start as shipped: the launcher omits the `[mcp]` extra and nothing creates the knowledge directory. With three workarounds a fact was remembered, compiled on the Claude Code login and recalled in a new session. The first-session "still preparing" message and the uninstall check pass; the `uv`-missing message is written but discarded by `2>/dev/null`. Report: `docs/measurements/plugin-clean-install-linux-2026-11-20.md`.
-
-- First recall without an API key, measured live on 0.28.0 (athenaeum#2307): with no `ANTHROPIC_API_KEY` and a Claude Code login, a fact told through `remember` was compiled by the default `claude-cli` provider and returned by `recall` in a new session, and the no-login counter-example now names what is missing in `init`, `doctor` and the failed run. A single-note compile took 3 calls, 3,625 to 7,025 tokens and 24 to 50 s; the CLI gives no share of the plan's limit. The counts are in `docs/measurements/first-recall-no-api-key-2026-11-20.md`.
-- `recall` now says so when the query names something no returned page mentions. A capitalised query word that appears on none of the pages shown (`Yusuf Adeyemi` when no page names him) adds one line after the results, telling the agent that the store most likely has no page on that name, so searching again for part of the name or another spelling will not help. It targets the abstention cost on the native-memory grid, where the verdict arm spent four `recall` calls per unknown name before saying it did not know. Over every `recall` call stored from run 44783114473, the line would have appeared on 49 of 71 abstention calls and on none of 451 others. The per-row counts and projection are in `docs/measurements/abstention-cost-2026-11-21.md` (athenaeum#3033).
-
-- North-star grid: the oracle control now tolerates one delivered-page omission. When an enrolled class and scale has failing `oracle` rows that are all marker misses with delivery, and at most one probe is involved, that (probe, scale) pair is excluded from every arm, native arms included, for conditions 1, 2 and 3, and the report names it in an "Excluded by the oracle tolerance" table; a second failing probe, or a miss without delivery, still voids. `spend_approver_named` gains the alternative marker `requester explain` on its second page. `grader_revision` moves to `athenaeum#3029`; `corpus_digest` does not (pages are untouched). Run 44783114473's stored rows are re-read offline in `docs/measurements/native-memory-baseline-2026-11-20-regrade.md` (athenaeum#3029).
 
 ### Fixed
 
@@ -11181,7 +11224,8 @@ knowledge librarian.
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
 <!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...v0.28.0
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
 [0.27.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.26.0...v0.27.0
