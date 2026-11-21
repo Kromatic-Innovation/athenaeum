@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- `athenaeum recall` no longer ends silently on an empty result: it prints one line to stderr saying nothing matched, and points to `athenaeum doctor` when the search index is missing or empty. A raw-intake hit now carries the `[uncompiled]` marker (at the start of the preview column, so the tab-separated columns are unchanged), using the same predicate as the MCP `recall` tool. Stdout for an empty result and the exit code are unchanged (athenaeum#3043)
 - Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
 
 ### Added
