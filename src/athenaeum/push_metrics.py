@@ -735,6 +735,10 @@ class PushRecord:
     skip_reason: str = ""
     query_terms: list[str] | None = None
     extractor: str = ""
+    #: Issue athenaeum#3070: how many linked-neighbour lines the per-turn push
+    #: carried. ``None`` (key omitted) for every writer that does not render
+    #: neighbours, and for every row written before the field existed.
+    neighbour_lines: int | None = None
 
     @property
     def total_token_cost(self) -> int:
@@ -779,6 +783,9 @@ class PushRecord:
             d["query_terms"] = list(self.query_terms)
         if self.extractor:
             d["extractor"] = self.extractor
+        # Issue athenaeum#3070: optional on read, like `query_terms`.
+        if self.neighbour_lines is not None:
+            d["neighbour_lines"] = self.neighbour_lines
         return d
 
 
@@ -1477,6 +1484,10 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
     extractor = raw.get("extractor")
     if extractor:
         shaped["extractor"] = extractor
+    # Issue athenaeum#3070: include-only-when-present, like ``query_terms``.
+    neighbour_lines = raw.get("neighbour_lines")
+    if isinstance(neighbour_lines, int) and not isinstance(neighbour_lines, bool):
+        shaped["neighbour_lines"] = neighbour_lines
     return shaped
 
 

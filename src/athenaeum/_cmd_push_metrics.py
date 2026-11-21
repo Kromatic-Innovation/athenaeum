@@ -414,6 +414,7 @@ def _print_tail_row(rec: dict) -> None:
             f"push  session={rec['session_id']} ts={rec['ts']} source={source} "
             f"backend={rec['backend']} pushed={rec['pushed_count']} "
             f"token_cost={rec['token_cost']}"
+            + (f" neighbours={rec['neighbour_lines']}" if "neighbour_lines" in rec else "")
         )
         if "query_terms" in rec:
             print(f"      terms={rec['query_terms']} extractor={rec.get('extractor', '')}")

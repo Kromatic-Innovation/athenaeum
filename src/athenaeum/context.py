@@ -980,6 +980,154 @@ def _resolve_parent_names(candidates: list[Candidate], wiki_root: Path | None) -
         if resolved:
             c.parent_name = resolved
 
+
+# ---------------------------------------------------------------------------
+# Linked neighbours of the hits (issue athenaeum#3070)
+# ---------------------------------------------------------------------------
+#
+# On tasks that never mention memory, the page that answers is usually one
+# `related` link away from the pages the breadcrumb names. The athenaeum#3066
+# measurement (docs/measurements/native-vs-push-at-scale-2026-11-21.md, arm
+# PLA) pushed the pooled `related` pages of every hit as one block of
+# `name — description` lines and went from 0 of 36 to 13-14 of 36 at 1,000 and
+# 3,000 pages, at a lower cost per correct answer. This is that block, in the
+# shape that arm measured.
+
+#: Most neighbour lines one push carries, pooled across every hit -- the
+#: athenaeum#3066 arm PLA's ``NEIGHBOUR_LIMIT_ALL``.
+NEIGHBOUR_LINE_CAP = 6
+
+#: First line of the neighbour block. It marks the pages as linked from the
+#: matches, not matched themselves. The wording the athenaeum#3066 arm measured.
+NEIGHBOUR_HEADER = "Linked from the matches above:"
+
+#: Most ``related`` targets one push tries to resolve, so a hub page with
+#: dozens of edges, or a run of dangling ones, cannot stretch the per-turn
+#: hook's wall clock. Each try is one targeted glob plus one page read.
+NEIGHBOUR_LOOKUP_LIMIT = 24
+
+
+@dataclass(frozen=True)
+class _Neighbour:
+    name: str
+    description: str
+
+    @property
+    def line(self) -> str:
+        # Same shape as a candidate bullet, name-only without a description.
+        return f"  - {self.name} — {self.description}" if self.description else f"  - {self.name}"
+
+
+def _flat_description(raw: object) -> str:
+    """A frontmatter ``description`` as one line of at most 200 characters --
+    the same tab/newline collapse and clamp :data:`_DESC_EXPR` applies to a
+    bullet's description in SQL, so a neighbour line and a bullet render a
+    description identically."""
+    if not isinstance(raw, str):
+        return ""
+    flat = raw.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+    return flat[:200].strip()
+
+
+def _collect_neighbours(
+    hits: Sequence[Candidate],
+    wiki_root: Path,
+    *,
+    limit: int,
+    lookup_limit: int = NEIGHBOUR_LOOKUP_LIMIT,
+) -> list[_Neighbour]:
+    """The pages the ``related`` edges of *hits* point to, at most *limit*.
+
+    Walks *hits* in rank order and each hit's ``related`` rows in their
+    frontmatter order, so the neighbours of a higher-ranked hit come first and
+    the same push always yields the same list. A target is dropped when it is
+    one of *hits* itself, already listed, dangling (no page has its uid),
+    inactive (tombstoned, retired or superseded:
+    :func:`athenaeum.page_relations.is_inactive_relation_target`) or has no
+    ``name``. A hit whose page cannot be read, or that has no ``related``
+    rows, adds nothing. At most *lookup_limit* targets are resolved.
+
+    Reads the hits' own pages and, per target, one page found by
+    :func:`athenaeum.page_relations.resolve_page_meta_by_uid` (the one
+    uid-to-page resolver). Imports are lazy, like
+    :func:`_resolve_parent_names`, so a caller that never asks for neighbours
+    never pays for them.
+    """
+    if limit <= 0 or not hits:
+        return []
+    from athenaeum.models import parse_frontmatter
+    from athenaeum.page_relations import (
+        is_inactive_relation_target,
+        resolve_page_meta_by_uid,
+    )
+
+    hit_uids: set[str] = set()
+    hit_stems = [Path(c.filename).stem for c in hits]
+    edges: list[str] = []
+    for c in hits:
+        try:
+            text = (wiki_root / c.filename).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _body = parse_frontmatter(text)
+        if not meta:
+            continue
+        uid = meta.get("uid")
+        if isinstance(uid, str) and uid:
+            hit_uids.add(uid)
+        rows = meta.get("related")
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and isinstance(row.get("uid"), str) and row["uid"]:
+                edges.append(row["uid"])
+
+    def _is_hit(uid: str) -> bool:
+        # A hit whose page has no `uid:` is still recognised by its filename,
+        # which the writer names `<uid>-<slug>.md` (or `<uid>.md`).
+        return uid in hit_uids or any(s == uid or s.startswith(f"{uid}-") for s in hit_stems)
+
+    out: list[_Neighbour] = []
+    tried: set[str] = set()
+    for uid in edges:
+        if len(out) >= limit or len(tried) >= lookup_limit:
+            break
+        if uid in tried or _is_hit(uid):
+            continue
+        tried.add(uid)
+        target = resolve_page_meta_by_uid(wiki_root, uid)
+        if not target or is_inactive_relation_target(target):
+            continue
+        name = target.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        out.append(
+            _Neighbour(name=name.strip(), description=_flat_description(target.get("description")))
+        )
+    return out
+
+
+def _render_neighbours(
+    neighbours: Sequence[_Neighbour], *, tokens_left: int, chars_left: int
+) -> tuple[str, int]:
+    """``(the rendered neighbour block, how many lines it carries)``.
+
+    Greedy over *neighbours* in order, the same rule :func:`_apply_budget`
+    uses for bullets: a line goes in only if the block, with the newline that
+    joins it to the push, still fits both what the push-token budget has left
+    (*tokens_left*) and what the hook output cap has left (*chars_left*). A
+    line that does not fit is skipped, never cut; a later, shorter one is
+    still tried. With no line fitting, the header is not rendered either.
+    """
+    lines: list[str] = []
+    for nb in neighbours:
+        block = "\n".join([NEIGHBOUR_HEADER, *lines, nb.line])
+        if estimate_tokens(f"\n{block}") > tokens_left or len(block) + 1 > chars_left:
+            continue
+        lines.append(nb.line)
+    if not lines:
+        return "", 0
+    return "\n".join([NEIGHBOUR_HEADER, *lines]), len(lines)
+
+
 #: Issue athenaeum#1905: how far past the cap each backend fetches, so the
 #: cap has real withheld candidates to count. Same width as
 #: ``athenaeum.mcp_server._HYBRID_CANDIDATE_POOL`` and the shell hook's own
@@ -1007,6 +1155,7 @@ def build_context(
     trace: dict[str, Any] | None = None,
     relevance_floor: Mapping[str, float | None] | None = None,
     excerpt_chars: int = 0,
+    neighbour_lines: int = 0,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -1060,6 +1209,20 @@ def build_context(
     default for a direct caller) renders no excerpt, so the envelope is exactly
     what it was before this parameter existed; :func:`build_context_for_turn`
     resolves the per-turn value.
+
+    ``neighbour_lines`` (issue athenaeum#3070): when positive and *wiki_root*
+    is given, the rendered text ends with a block of the pages the final
+    candidates' ``related`` edges point to, under :data:`NEIGHBOUR_HEADER`:
+    pooled, deduplicated, never a page the bullets already name, the
+    neighbours of higher-ranked candidates first, at most this many lines
+    (see :func:`_collect_neighbours`). It goes after the excerpt and takes
+    only what the token budget and :data:`HOOK_OUTPUT_CAP_CHARS` leave after
+    it; a line that does not fit is skipped, never cut. Its token cost is added
+    to the top candidate's ``token_cost``, as the excerpt's is. When
+    requested, the number of lines pushed is written to *trace* as
+    ``neighbour_lines`` for the push ledger. ``0`` (the default for a direct
+    caller) renders no block; :func:`build_context_for_turn` passes
+    :data:`NEIGHBOUR_LINE_CAP`.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -1202,6 +1365,23 @@ def build_context(
         if excerpt:
             packed[0].token_cost += estimate_tokens(f"\n{excerpt}")
 
+    # Issue athenaeum#3070: the linked neighbours of every hit, in what the
+    # token budget and the hook output cap leave after the excerpt.
+    neighbours = ""
+    neighbour_count = 0
+    if neighbour_lines > 0 and packed and wiki_root is not None:
+        so_far = "\n".join(t for t in (render_text(packed), overflow, excerpt) if t)
+        used_tokens = estimate_tokens(PREAMBLE) + sum(c.token_cost for c in packed)
+        neighbours, neighbour_count = _render_neighbours(
+            _collect_neighbours(packed, wiki_root, limit=neighbour_lines),
+            tokens_left=budget - used_tokens,
+            chars_left=HOOK_OUTPUT_CAP_CHARS - len(f"{PREAMBLE}\n{so_far}"),
+        )
+        if neighbours:
+            packed[0].token_cost += estimate_tokens(f"\n{neighbours}")
+    if trace is not None and neighbour_lines > 0:
+        trace["neighbour_lines"] = neighbour_count
+
     return _make_envelope(
         prompt,
         session_id,
@@ -1211,6 +1391,7 @@ def build_context(
         t0,
         overflow=overflow,
         excerpt=excerpt,
+        neighbours=neighbours,
     )
 
 
@@ -1224,15 +1405,18 @@ def _make_envelope(
     *,
     overflow: str = "",
     excerpt: str = "",
+    neighbours: str = "",
 ) -> dict[str, Any]:
     """Assemble the envelope. *overflow* is the rendered overflow-breadcrumb
     line (issue athenaeum#1905), or ``""``. *excerpt* is the rendered top-hit
     excerpt block (issue athenaeum#3032), or ``""``; it goes last in
     ``render.text``, after the overflow line, for the same reason the overflow
     line lives in that field (below), and in the order the athenaeum#3061 arm
-    measured.
+    measured. *neighbours* is the rendered linked-neighbour block (issue
+    athenaeum#3070), or ``""``; it follows the excerpt, the order the
+    athenaeum#3066 arm measured.
 
-It rides inside ``render.text``, appended after the last
+    It rides inside ``render.text``, appended after the last
     bullet, rather than arriving as a sibling ``render`` key: ``text`` is
     the string every Tier-1 caller actually injects (the packaged adapter
     renders ``preamble + "\n" + text`` verbatim), and the envelope's field
@@ -1252,6 +1436,8 @@ It rides inside ``render.text``, appended after the last
         text = f"{text}\n{overflow}"
     if text and excerpt:
         text = f"{text}\n{excerpt}"
+    if text and neighbours:
+        text = f"{text}\n{neighbours}"
     return {
         "v": ENVELOPE_VERSION,
         "query": prompt,
@@ -1391,6 +1577,12 @@ def record_context_push(
                     str(t)[:_RECORDED_TERM_CHARS] for t in trace["terms"][:_RECORDED_TERMS_MAX]
                 ]
                 record.extractor = str(trace.get("extractor", ""))
+        # Issue athenaeum#3070: how many linked-neighbour lines this push
+        # carried. Present only when the caller asked for neighbours, so a
+        # row with `0` means "asked, none fit or none linked", and a row
+        # without the key predates the field or did not ask.
+        if trace and isinstance(trace.get("neighbour_lines"), int):
+            record.neighbour_lines = int(trace["neighbour_lines"])
         return push_metrics.record_push(
             record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
         )
@@ -1583,6 +1775,7 @@ def build_context_for_turn(
     wiki_root: Path | None = None,
     injected_patterns: Sequence[str] = (),
     excerpt_chars: int | None = None,
+    neighbour_lines: int = NEIGHBOUR_LINE_CAP,
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1635,6 +1828,14 @@ def build_context_for_turn(
     default) resolves the length through
     :func:`athenaeum.config.resolve_push_excerpt_chars` (env > yaml > 600), so
     every Tier-1 caller renders the same excerpt. Pass ``0`` to turn it off.
+
+    Linked neighbours (issue athenaeum#3070): ``neighbour_lines`` (default
+    :data:`NEIGHBOUR_LINE_CAP`) is forwarded to :func:`build_context`, so every
+    Tier-1 caller that passes a *wiki_root* pushes the same neighbour block,
+    and the push ledger row records how many lines it carried
+    (``neighbour_lines``). Pass ``0`` to turn it off. Neighbours are never
+    added to the session seen-list: a page shown only as a neighbour can
+    still be pushed as a match on a later turn.
     """
     if injected_patterns:
         user_text, matched = split_injected_text(prompt, injected_patterns)
@@ -1688,6 +1889,7 @@ def build_context_for_turn(
         trace=trace,
         relevance_floor=relevance_floor,
         excerpt_chars=excerpt_chars,
+        neighbour_lines=neighbour_lines,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 

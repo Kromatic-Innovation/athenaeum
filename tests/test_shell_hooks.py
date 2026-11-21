@@ -4226,8 +4226,8 @@ exec "$REAL_AWK" "$@"
         pinned by an explicit key-set assertion, not a spot-check, so this
         cannot regress by a future edit adding `topics` (or anything else)
         to the ledger row. `query_terms` / `extractor` joined the pinned set
-        deliberately (athenaeum#2916). athenaeum#711 stays intact: the ledger keeps a
-        query HASH only.
+        deliberately (athenaeum#2916), and `neighbour_lines` (athenaeum#3070).
+        athenaeum#711 stays intact: the ledger keeps a query HASH only.
         """
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
@@ -4260,6 +4260,8 @@ exec "$REAL_AWK" "$@"
             # produced them (on by default; a setting omits both).
             "query_terms",
             "extractor",
+            # athenaeum#3070: how many linked-neighbour lines the push carried.
+            "neighbour_lines",
         }, f"push record shape changed: {sorted(rec)}"
         assert "topics" not in rec
 
