@@ -281,6 +281,7 @@ Evidence, kept out of the reading path.
 - [Witness-attestation readout — template](measurements/witness-attestation-readout.md) — the fill-in shape for a witnessed-hits / per-miss-incident reading from `athenaeum receipts attest-readout`; a template, not a reading.
 - [Schedule install/remove host verification — 2026-11-14](measurements/schedule-host-verification-2026-11-14.md) — a real scheduled tick on macOS (launchd) and Linux (cron, in a container), the no-key counter-example, `doctor` states and `remove` listings against baseline.
 - [Schedule install/remove with systemd — 2026-11-16](measurements/schedule-systemd-verification-2026-11-16.md) — the systemd user timer in a container with systemd as PID 1: a timer-fired tick with no login environment, `doctor` states, and the unit-path listings before and after `remove`.
+- [First recall without an API key — 2026-11-20](measurements/first-recall-no-api-key-2026-11-20.md) — the published package in a clean Linux container on a Claude Code login: remember, compile and recall in a new session, plan usage per compile, and the no-key, no-login counter-example.
 - [Per-type guidance before/after on Tier-3 merges — 2026-11-17](measurements/type-guidance-eval-2026-11-17.md) — verbatim retention of planted rule phrases across sequential merges (patch vs full-echo), the `ESCALATE:` rate for other-person observations with and without guidance, and the keep verdict on the precedence clause.
 
 ---
