@@ -57,6 +57,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- A note saved with `remember` now reaches `recall` as `[uncompiled]` before any compile, with no credential. On an install without chromadb, `remember` refreshed the vector index (which cannot build there) while `recall` reads the fts5 one, so the note stayed invisible until a manual reindex. And `session-end` now reindexes raw intake even when the compile fails, for a missing credential too, so the index is not left older than raw intake; its exit code and message are unchanged (athenaeum#3042).
 - Removing one surface's derived data no longer misbehaves in two edge cases: a vector index that cannot be opened now raises instead of pruning the manifest and orphaning embeddings, and an index built before the `surface` column existed is handled by deriving the surface from the filename instead of raising. (athenaeum#2990)
 
 - `athenaeum doctor`'s `hooks` check no longer reports a flag as a missing hook script. A hook command with an env assignment holding a command substitution (`SID=$(jq -r '.session_id // empty'); nohup bash <script>`) used to fail with `-> -r`; each simple command of a `;`, `&&`, `||`, `|` or `&`-joined command is now resolved separately, `bash <script>` resolves to the script rather than to `bash`, a word starting with `-` is never taken as the target, and a compound command whose target cannot be determined is a warning instead of a failure. (athenaeum#3021)

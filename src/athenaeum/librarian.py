@@ -14232,7 +14232,10 @@ def session_end(
     2. **Then** :func:`reindex` — when the compile actually ran (``ingest`` was
        not a no-op), or when the index MANIFEST disagrees with the corpus scan
        even though nothing new was compiled (issue athenaeum#1456). A failed
-       compile or a ``dry_run`` never touches the index.
+       compile takes the manifest-disagreement arm only, so raw intake is still
+       indexed and ``recall`` can return it as ``[uncompiled]`` (issue
+       athenaeum#3042); the failure's exit code is unchanged. A ``dry_run``
+       never touches the index.
 
     Note the precision: the staleness arm compares *manifest hashes*, which is
     narrower than "the index is stale". It does NOT notice a deleted index file
@@ -14293,8 +14296,17 @@ def session_end(
     #                   and we reindex only if it reports pending work. A
     #                   genuinely current index still short-circuits to no
     #                   reindex, so idle ticks stay cheap.
-    compile_ran = not ingest_result.noop
-    gate_open = ingest_result.exit_code == 0 and not dry_run
+    #
+    # Issue athenaeum#3042: a FAILED compile (a missing credential, say) no
+    # longer skips the index outright. The index would otherwise stay older
+    # than raw intake, and a `remember`'d note stayed invisible to `recall`.
+    # A failed compile takes the staleness arm only (never the unconditional
+    # "compile ran" arm), so what gets indexed is the corpus as it stands, raw
+    # intake included, and only when the index actually disagrees with it. The
+    # run's exit code and message are untouched.
+    compile_failed = ingest_result.exit_code != 0
+    compile_ran = not ingest_result.noop and not compile_failed
+    gate_open = not dry_run
     should_reindex = gate_open and compile_ran
     if gate_open and not compile_ran:
         reindex_would_change = _reindex_would_change(
@@ -14330,16 +14342,26 @@ def session_end(
             )
         sys.stdout.flush()
         sys.stderr.flush()
-        backend_name, reindex_pages = reindex(
-            knowledge_root=knowledge_root,
-            wiki_root=wiki_root,
-            cache_dir=cache_dir,
-            config=config,
-            backend=backend,
-            incremental=incremental,
-        )
-        log.info("session-end: reindex complete — %d page(s) indexed", reindex_pages)
-        reindexed = True
+        try:
+            backend_name, reindex_pages = reindex(
+                knowledge_root=knowledge_root,
+                wiki_root=wiki_root,
+                cache_dir=cache_dir,
+                config=config,
+                backend=backend,
+                incremental=incremental,
+            )
+            log.info("session-end: reindex complete — %d page(s) indexed", reindex_pages)
+            reindexed = True
+        except Exception:
+            if not compile_failed:
+                raise
+            # The compile already failed and owns the exit code and message; a
+            # reindex problem on top must not replace them.
+            log.warning(
+                "session-end: reindex after a failed compile also failed",
+                exc_info=True,
+            )
     elif dry_run:
         # Issue athenaeum#370: cheap dry-run preview — count how many pages a reindex
         # WOULD touch via a manifest hash-diff (the SAME delta reindex applies)
