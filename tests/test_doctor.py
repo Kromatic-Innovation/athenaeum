@@ -473,6 +473,36 @@ def test_compound_hook_commands_resolve_to_the_script(
     assert hooks.status == "ok", hooks.detail
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # Combined short flags carrying ``-c``: the operand is a command string.
+        ("bash -lc 'athenaeum-claude-hook --event Stop'", "athenaeum-claude-hook"),
+        ("sh -ec 'athenaeum-claude-hook'", "athenaeum-claude-hook"),
+        # An option that takes a value never has that value read as the script.
+        ("bash -o pipefail {script}", "{script}"),
+        ("python3 -W ignore {script}", "{script}"),
+        ("node -r ./setup.js {script}", "{script}"),
+        # Inline code / a module: the interpreter is the only on-disk target.
+        ("python3 -c 'import athenaeum'", "python3"),
+        ("python3 -m athenaeum.claude_code_adapter", "python3"),
+        # ``exec`` wraps the command rather than interpreting a script.
+        ("exec {script}", "{script}"),
+        # A ``#`` inside a word is not a comment (``shlex.split`` semantics).
+        ("{script} --tag=#nightly", "{script}"),
+    ],
+)
+def test_interpreter_options_resolve_to_the_real_target(
+    command: str, expected: str, tmp_path: Path
+) -> None:
+    """Seer review on athenaeum#3021's PR: combined ``-lc`` flags, option
+    values, and ``#`` inside a word must not be read as the hook target."""
+    script = str(tmp_path / "hooks" / "athenaeum" / "session-start-recall.sh")
+    assert doctor._resolve_hook_target(command.format(script=script)) == expected.format(
+        script=script
+    )
+
+
 def test_interpreter_with_missing_script_is_not_masked_by_the_interpreter(
     healthy_install: dict, tmp_path: Path
 ) -> None:

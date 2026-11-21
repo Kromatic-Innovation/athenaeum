@@ -387,9 +387,19 @@ def _is_athenaeum_hook(command: str) -> bool:
 #: Interpreters whose first non-flag argument is the script they run, so a
 #: ``bash /path/to/hook.sh`` command resolves to the script rather than to
 #: ``bash`` (which always exists, and would hide a missing script).
-_INTERPRETERS = frozenset(
-    {"sh", "bash", "zsh", "dash", "ksh", "python", "python3", "node", "exec"}
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_INTERPRETERS = _SHELL_INTERPRETERS | {"python", "python3", "node"}
+
+#: Interpreter options that consume the next word as their value, so that
+#: value is never mistaken for the script (``bash -o pipefail <script>``).
+_OPTIONS_WITH_VALUE = frozenset(
+    {"-o", "+o", "-O", "+O", "--rcfile", "--init-file", "-W", "-X", "-r", "--require"}
 )
+
+#: Non-shell interpreter options whose value is inline code, not a file:
+#: ``python3 -c '...'``, ``node -e '...'``. The interpreter is the only
+#: on-disk target such a command has.
+_INLINE_CODE_OPTIONS = frozenset({"-c", "-m", "-e", "--eval", "-p", "--print"})
 
 #: Shell control operators that separate one simple command from the next.
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", ";;", "(", ")"})
@@ -399,7 +409,7 @@ _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", ";;", "(", ")"})
 _CMDSUB_PLACEHOLDER = "__athenaeum_cmdsub__"
 
 #: Leading words that wrap the real command rather than being it.
-_COMMAND_PREFIXES = frozenset({"nohup", "env", "command", "time"})
+_COMMAND_PREFIXES = frozenset({"nohup", "env", "command", "time", "exec"})
 
 
 def _strip_command_substitutions(command: str) -> str:
@@ -469,6 +479,9 @@ def _split_simple_commands(command: str) -> list[list[str]]:
     text = _strip_command_substitutions(command).replace("\n", " ; ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    # ``shlex.split`` (what this check used before) disables comments; keep
+    # that, so a ``#`` inside a word (``--tag=#x``) never truncates the rest.
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
@@ -514,21 +527,29 @@ def _simple_command_target(words: list[str]) -> str | None:
     if Path(head).name not in _INTERPRETERS:
         return head
     rest = words[i + 1 :]
+    is_shell = Path(head).name in _SHELL_INTERPRETERS
+    command_string_next = False
     j = 0
     while j < len(rest):
         word = rest[j]
-        if word in ("-c",) and j + 1 < len(rest):
-            # ``bash -c 'athenaeum-claude-hook ...'`` -- the script is the string.
-            return _resolve_hook_target(rest[j + 1])
-        if word == "-m":
-            # ``python3 -m pkg`` runs a module, not a file: the interpreter
-            # is the only on-disk target there is.
+        if word in _OPTIONS_WITH_VALUE:
+            j += 2  # the option and its value
+            continue
+        if is_shell and word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+            # ``bash -c '<cmd>'`` / ``bash -lc '<cmd>'``: the first operand
+            # is a command string, resolved as a hook command of its own.
+            command_string_next = True
+            j += 1
+            continue
+        if not is_shell and word in _INLINE_CODE_OPTIONS:
             return head
-        if word.startswith("-"):
+        if word.startswith("-") or word.startswith("+"):
             j += 1
             continue
         if word == _CMDSUB_PLACEHOLDER or word[:1] in "<>":
             return None
+        if command_string_next:
+            return _resolve_hook_target(word)
         return word
     # A bare ``bash`` with no script argument reads its script from stdin.
     return head
