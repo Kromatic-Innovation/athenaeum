@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
+
 ### Added
 
 - Sync: the erasure mark. `erasure.erase_pages_and_commit` deletes pages and commits the deletion with one `Athenaeum-Erasure: <uid>` line per page (a uid and nothing else, no name, path or reason). Integrate reads the history between the common ancestor and each side through the store seam (`store.deletion_commit_messages`); a page deleted on either side by a commit marked for its uid is deleted in the merge even when the other side edited it, and the merge commit records `Athenaeum-Erasure: <uid>` for it with no page line. A deletion without the mark is still an ordinary retire, contested against an edit (athenaeum#2998)

@@ -8,9 +8,9 @@ page decomposes it into the questions a memory system is actually asked, so
 that each one can be represented by an eval and the bar becomes falsifiable.
 
 Two tiers. **Current** use cases are backed by evals now, or are the direct
-next eval to build. **Aspirational** use cases are not implemented and have no
-evals; they exist so the architecture does not paint itself into a corner
-that makes them impossible later.
+next eval to build. **Aspirational** use cases have no evals yet; federation is
+being built toward them (§3), and they also keep the architecture from
+painting itself into a corner that makes them impossible later.
 
 ---
 
@@ -117,9 +117,22 @@ directions.
 
 ## 3. Aspirational use cases
 
-Not implemented. No evals. These exist to constrain the architecture so the
-single-operator deployment of today does not become the ceiling. They
-describe an organisation, not a person.
+These describe an organisation, not a person. By operator ruling of
+2026-11-19, federation is being built: the design is fixed in four notes, and
+the work is tracked under epic athenaeum#2631.
+
+- [Federation: store access](design/federation-store-access.md), who may
+  read, propose, compile and answer.
+- [Federation: intake routing](design/federation-intake-routing.md), which
+  store a fact is filed in.
+- [Federation: multi-writer sync](design/federation-multi-writer-sync.md),
+  conflict adjudication and wider uids.
+- [Federation: raise and retract](design/federation-raise-retract.md), how a
+  fact moves up to another store and how it is withdrawn.
+
+These use cases are still not graded by evals, so the kill criterion in §1 is
+unchanged: it is measured on the current use cases of §2. They also remain
+constraints on the architecture (§3.5).
 
 ### 3.1 Roll-up: a division librarian compiles team wikis
 
