@@ -384,20 +384,187 @@ def _is_athenaeum_hook(command: str) -> bool:
     return Path(target).name in _KNOWN_HOOK_BASENAMES
 
 
-def _resolve_hook_target(command: str) -> str | None:
-    """First real token of a hook ``command`` string -- the script/binary it
-    invokes -- skipping a leading ``nohup`` and any ``KEY=VALUE`` env
-    assignment. Returns ``None`` only for an empty/unparseable command."""
+#: Interpreters whose first non-flag argument is the script they run, so a
+#: ``bash /path/to/hook.sh`` command resolves to the script rather than to
+#: ``bash`` (which always exists, and would hide a missing script).
+_INTERPRETERS = frozenset(
+    {"sh", "bash", "zsh", "dash", "ksh", "python", "python3", "node", "exec"}
+)
+
+#: Shell control operators that separate one simple command from the next.
+_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", ";;", "(", ")"})
+
+#: Stands in for a ``$(...)`` / backtick command substitution, so the words
+#: inside it (``jq -r ...``) are never read as the hook command's own words.
+_CMDSUB_PLACEHOLDER = "__athenaeum_cmdsub__"
+
+#: Leading words that wrap the real command rather than being it.
+_COMMAND_PREFIXES = frozenset({"nohup", "env", "command", "time"})
+
+
+def _strip_command_substitutions(command: str) -> str:
+    """Replace every ``$(...)`` and backtick substitution with a placeholder
+    word, respecting quotes and nested parentheses.
+
+    ``shlex`` knows nothing about command substitution: it splits
+    ``SID=$(jq -r '.x')`` into ``SID=$(jq``, ``-r`` and so on, which is how
+    the flag ``-r`` used to be reported as the hook's script path
+    (athenaeum#3021). A single-quoted ``$(`` is literal text and is kept.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(command)
+    quote: str | None = None
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        if ch == "$" and command.startswith("$(", i):
+            depth = 0
+            j = i + 1
+            inner_quote: str | None = None
+            while j < n:
+                c = command[j]
+                if inner_quote:
+                    if c == inner_quote:
+                        inner_quote = None
+                elif c in "'\"":
+                    inner_quote = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            out.append(_CMDSUB_PLACEHOLDER)
+            i = j + 1
+            continue
+        if ch == "`":
+            end = command.find("`", i + 1)
+            out.append(_CMDSUB_PLACEHOLDER)
+            i = n if end == -1 else end + 1
+            continue
+        if ch == '"':
+            quote = None if quote == '"' else '"'
+        elif ch == "'" and quote is None:
+            quote = "'"
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_simple_commands(command: str) -> list[list[str]]:
+    """Split a hook command into its simple commands (word lists), on the
+    shell control operators ``;``, ``&&``, ``||``, ``|``, ``&`` and
+    parentheses. Newlines separate commands too."""
+    text = _strip_command_substitutions(command).replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
     try:
-        tokens = shlex.split(command)
+        tokens = list(lexer)
     except ValueError:
-        tokens = command.split()
+        tokens = text.split()
+    commands: list[list[str]] = []
+    current: list[str] = []
     for token in tokens:
-        if token == "nohup":
+        if token in _SHELL_SEPARATORS:
+            if current:
+                commands.append(current)
+            current = []
             continue
-        if _ENV_ASSIGN_RE.match(token):
+        current.append(token)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def _simple_command_target(words: list[str]) -> str | None:
+    """The script/binary one simple command invokes, or ``None`` when it
+    cannot be read with confidence.
+
+    Skips leading wrappers (``nohup``, ``env``) and ``KEY=VALUE``
+    assignments; looks through an interpreter (``bash script.sh``) to its
+    script; stops at a redirection. Never returns a word that starts with
+    ``-`` -- a flag is never a hook target.
+    """
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in _COMMAND_PREFIXES or _ENV_ASSIGN_RE.match(word):
+            i += 1
             continue
-        return token
+        if word.startswith("-") and i > 0 and words[i - 1] == "env":
+            i += 1  # ``env -i FOO=bar cmd``
+            continue
+        break
+    if i >= len(words):
+        return None
+    head = words[i]
+    if head.startswith("-") or head == _CMDSUB_PLACEHOLDER or head[:1] in "<>":
+        return None
+    if Path(head).name not in _INTERPRETERS:
+        return head
+    rest = words[i + 1 :]
+    j = 0
+    while j < len(rest):
+        word = rest[j]
+        if word in ("-c",) and j + 1 < len(rest):
+            # ``bash -c 'athenaeum-claude-hook ...'`` -- the script is the string.
+            return _resolve_hook_target(rest[j + 1])
+        if word == "-m":
+            # ``python3 -m pkg`` runs a module, not a file: the interpreter
+            # is the only on-disk target there is.
+            return head
+        if word.startswith("-"):
+            j += 1
+            continue
+        if word == _CMDSUB_PLACEHOLDER or word[:1] in "<>":
+            return None
+        return word
+    # A bare ``bash`` with no script argument reads its script from stdin.
+    return head
+
+
+def _references_athenaeum(target: str) -> bool:
+    return "athenaeum" in target.lower() or Path(target).name in _KNOWN_HOOK_BASENAMES
+
+
+def _resolve_hook_target(command: str) -> str | None:
+    """The script/binary a hook ``command`` string invokes.
+
+    A plain command resolves to its first real word, skipping a leading
+    ``nohup`` and any ``KEY=VALUE`` env assignment, and looking through an
+    interpreter (``bash script.sh``) to the script it runs.
+
+    A compound command (``;``, ``&&``, ``||``, ``|``, ``&``, ``$(...)``) is
+    split into simple commands and each is resolved separately
+    (athenaeum#3021). The target is the one that references an athenaeum
+    hook script or console entry point; failing that, the single simple
+    command whose target is a path. Returns ``None`` when the target cannot
+    be determined with confidence -- including an empty command. A word
+    starting with ``-`` is never returned.
+    """
+    simple = _split_simple_commands(command)
+    targets = [t for t in (_simple_command_target(w) for w in simple) if t is not None]
+    if not targets:
+        return None
+    if len(simple) == 1:
+        return targets[0]
+    athenaeum_targets = [t for t in targets if _references_athenaeum(t)]
+    if athenaeum_targets:
+        return athenaeum_targets[0]
+    path_targets = [t for t in targets if "/" in t]
+    if len(path_targets) == 1:
+        return path_targets[0]
     return None
 
 
@@ -454,10 +621,16 @@ def check_hooks_present(claude_config_dir: Path) -> CheckResult:
         )
 
     missing: list[str] = []
+    undetermined: list[str] = []
     for event, command in commands:
         target = _resolve_hook_target(command)
-        if target is None or not _hook_target_exists(target):
-            missing.append(f"{event} -> {target or command}")
+        if target is None:
+            # Not knowing the target is not evidence it is missing
+            # (athenaeum#3021): a false FAIL sends a new user to re-copy
+            # scripts that are already in place.
+            undetermined.append(f"{event} -> {command}")
+        elif not _hook_target_exists(target):
+            missing.append(f"{event} -> {target}")
     if missing:
         return CheckResult(
             name="hooks",
@@ -467,6 +640,15 @@ def check_hooks_present(claude_config_dir: Path) -> CheckResult:
             fix="re-copy the scripts from examples/claude-code/ to the "
             "directory settings.json references, or fix the path — see "
             "docs/guides/sidecar.md",
+        )
+    if undetermined:
+        return CheckResult(
+            name="hooks",
+            status="warn",
+            detail="could not determine hook target from a compound shell "
+            "command: " + "; ".join(undetermined),
+            fix="check that the script each command runs exists, or register "
+            "the script directly as the hook command — see docs/guides/sidecar.md",
         )
     return CheckResult(
         name="hooks",
