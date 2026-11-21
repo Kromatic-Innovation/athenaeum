@@ -668,12 +668,30 @@ def test_serve_default_path_is_home_knowledge_when_unconfigured(tmp_path: Path) 
         assert result.returncode == 0, result.stderr
         assert (home / "knowledge").is_dir()
         assert any(f"init --path {home}/knowledge" in c for c in calls), calls
+        # serve must be handed the SAME resolved path, never the raw token/empty.
+        serve = next(c for c in calls if " athenaeum serve" in c)
+        assert serve.endswith(f"serve --path {home}/knowledge"), serve
 
 
 def test_serve_expands_a_tilde_in_a_configured_path(tmp_path: Path) -> None:
     result, calls, home = _serve(tmp_path, "--path", "~/my-kb")
     assert result.returncode == 0
     assert (home / "my-kb").is_dir()
+    assert any(c.endswith(f"serve --path {home}/my-kb") for c in calls), calls
+
+
+def test_serve_without_a_path_gets_the_default_appended(tmp_path: Path) -> None:
+    result, calls, home = _serve(tmp_path)
+    assert result.returncode == 0
+    assert (home / "knowledge").is_dir()
+    assert any(c.endswith(f"serve --path {home}/knowledge") for c in calls), calls
+
+
+def test_serve_equals_form_path_is_rewritten_too(tmp_path: Path) -> None:
+    result, calls, _ = _serve(tmp_path, "--path=" + str(tmp_path / "eq"))
+    assert result.returncode == 0
+    assert (tmp_path / "eq").is_dir()
+    assert any(c.endswith(f"serve --path={tmp_path / 'eq'}") for c in calls), calls
 
 
 def test_mcp_json_passes_user_config_knowledge_path_to_serve() -> None:

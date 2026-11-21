@@ -134,6 +134,9 @@ _run_pinned() {
 # start-up race must not be able to fail it (athenaeum#3046). `init` output
 # goes to stderr: stdout is the MCP protocol channel.
 # ---------------------------------------------------------------------------
+# Sets _ek_dir to the resolved directory; the caller then rewrites `--path`
+# in the forwarded args to that same value, so `serve` never sees an empty or
+# unsubstituted token (it would otherwise use the cwd or fail on the literal).
 _ensure_knowledge_dir() {
   _ek_path="$DEFAULT_KNOWLEDGE_PATH"
   _ek_prev=""
@@ -272,5 +275,27 @@ fi
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "serve" ]; then
   _ensure_knowledge_dir "$@"
+  # Rebuild the args with `--path` pinned to the resolved directory.
+  _n=$#
+  _prev=""
+  _has_path=0
+  while [ "$_n" -gt 0 ]; do
+    _a="$1"
+    shift
+    _n=$((_n - 1))
+    if [ "$_prev" = "--path" ]; then
+      set -- "$@" "$_ek_dir"
+      _has_path=1
+    else
+      case "$_a" in
+        --path=*) set -- "$@" "--path=${_ek_dir}"; _has_path=1 ;;
+        *) set -- "$@" "$_a" ;;
+      esac
+    fi
+    _prev="$_a"
+  done
+  if [ "$_has_path" = 0 ]; then
+    set -- "$@" --path "$_ek_dir"
+  fi
 fi
 _run_pinned "$@"
