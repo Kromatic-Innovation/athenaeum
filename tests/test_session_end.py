@@ -2733,8 +2733,9 @@ class TestSessionEndDerivedDeadlineGracefulStop:
         # Resumable graceful-partial exit (issue athenaeum#897), propagated
         # through IngestResult.exit_code -> SessionEndResult.exit_code.
         assert result.exit_code == EXIT_GRACEFUL_PARTIAL
-        # A half-compiled wiki is never indexed (session_end's change-gate).
-        assert result.reindexed is False
+        # athenaeum#3042: a non-zero compile no longer skips the index; the
+        # pages committed so far are whole files, so the index catches up.
+        assert result.reindexed is True
         # Partial progress committed; nothing left uncommitted.
         assert _porcelain(root) == ""
         assert _last_subject(root).startswith("librarian: processed 1 file(s)")

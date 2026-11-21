@@ -62,7 +62,18 @@ MANIFEST="${PLUGIN_ROOT}/.claude-plugin/plugin.json"
 # lifted from doctor.py. See README.md's "What we could not verify" note.
 # ---------------------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
-  echo "[athenaeum plugin] 'uv' was not found on PATH. This plugin requires uv to run the pinned athenaeum release -- there is no pip fallback here. Install it (see https://docs.astral.sh/uv/getting-started/installation/ or run: curl -LsSf https://astral.sh/uv/install.sh | sh), then restart this session." >&2
+  _uv_msg="[athenaeum plugin] 'uv' was not found on PATH. This plugin requires uv to run the pinned athenaeum release -- there is no pip fallback here. Install it (see https://docs.astral.sh/uv/getting-started/installation/ or run: curl -LsSf https://astral.sh/uv/install.sh | sh), then restart this session."
+  if [ "${1:-}" = "--ensure-ready" ]; then
+    # SessionStart hook: stdout is the ONLY channel the user and the model
+    # both see (stderr only reaches a debug log -- athenaeum#3046). Emit hook
+    # JSON: `systemMessage` shows to the user, `additionalContext` goes to the
+    # model. The message has no double quotes or backslashes, so it is
+    # JSON-safe as written.
+    echo "{\"systemMessage\": \"${_uv_msg}\", \"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"${_uv_msg}\"}}"
+  else
+    # MCP passthrough: stdout is the protocol channel, so use stderr.
+    echo "$_uv_msg" >&2
+  fi
   exit 0
 fi
 
@@ -92,7 +103,7 @@ fi
 
 CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"
 PLUGIN_CACHE_DIR="${CACHE_DIR}/claude-code-plugin"
-READY_MARKER="${PLUGIN_CACHE_DIR}/ready-${PINNED_VERSION}"
+READY_MARKER="${PLUGIN_CACHE_DIR}/ready-mcp-${PINNED_VERSION}"
 LOCK_DIR="${PLUGIN_CACHE_DIR}/prepare.lock"
 PREPARE_LOG="${PLUGIN_CACHE_DIR}/prepare.log"
 
@@ -103,8 +114,55 @@ PREPARE_LOG="${PLUGIN_CACHE_DIR}/prepare.log"
 #: happens to resolve to SOME running process (PIDs get reused).
 STALE_LOCK_TIMEOUT_SECONDS=1800
 
+#: The pinned requirement. The `[mcp]` extra is what puts `fastmcp` in the
+#: environment; without it `athenaeum serve` dies on import (athenaeum#3046).
+PINNED_SPEC="athenaeum[mcp]==${PINNED_VERSION}"
+
+#: Default matches `athenaeum serve --path` / `athenaeum init --path`.
+DEFAULT_KNOWLEDGE_PATH="~/knowledge"
+
 _run_pinned() {
-  exec uv run --python 3.13 --with "athenaeum==${PINNED_VERSION}" athenaeum "$@"
+  exec uv run --python 3.13 --with "$PINNED_SPEC" athenaeum "$@"
+}
+
+# ---------------------------------------------------------------------------
+# MCP passthrough only: make sure the knowledge directory exists before
+# `serve`, by calling `athenaeum init` (no layout re-implemented in shell;
+# init is non-interactive). Runs synchronously inside the MCP start so a
+# first session never depends on the SessionStart warm-up having finished --
+# Claude Code caches a failed first MCP connect for ~15 minutes, so a
+# start-up race must not be able to fail it (athenaeum#3046). `init` output
+# goes to stderr: stdout is the MCP protocol channel.
+# ---------------------------------------------------------------------------
+# Sets _ek_dir to the resolved directory; the caller then rewrites `--path`
+# in the forwarded args to that same value, so `serve` never sees an empty or
+# unsubstituted token (it would otherwise use the cwd or fail on the literal).
+_ensure_knowledge_dir() {
+  _ek_path="$DEFAULT_KNOWLEDGE_PATH"
+  _ek_prev=""
+  for _ek_arg in "$@"; do
+    case "$_ek_prev" in
+      --path) _ek_path="$_ek_arg" ;;
+    esac
+    case "$_ek_arg" in
+      --path=*) _ek_path="${_ek_arg#--path=}" ;;
+    esac
+    _ek_prev="$_ek_arg"
+  done
+  # An empty value or an unsubstituted `${user_config...}` token means the
+  # option was not supplied: fall back to the default.
+  case "$_ek_path" in
+    '' | *'${'*) _ek_path="$DEFAULT_KNOWLEDGE_PATH" ;;
+  esac
+  case "$_ek_path" in
+    '~') _ek_dir="$HOME" ;;
+    '~/'*) _ek_dir="${HOME}/${_ek_path#\~/}" ;;
+    *) _ek_dir="$_ek_path" ;;
+  esac
+  if [ ! -d "$_ek_dir" ]; then
+    echo "[athenaeum plugin] knowledge directory ${_ek_dir} is missing -- running athenaeum init." >&2
+    uv run --python 3.13 --with "$PINNED_SPEC" athenaeum init --path "$_ek_dir" >&2 || true
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -157,7 +215,7 @@ if [ "${1:-}" = "--prepare" ]; then
   mkdir -p "$PLUGIN_CACHE_DIR" 2>/dev/null || true
   {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] prepare: start pin=${PINNED_VERSION}"
-    if uv run --python 3.13 --with "athenaeum==${PINNED_VERSION}" athenaeum --version; then
+    if uv run --python 3.13 --with "$PINNED_SPEC" athenaeum --version; then
       : > "$READY_MARKER"
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] prepare: ready"
     else
@@ -215,4 +273,29 @@ fi
 # `uv run` materializes the environment itself on a cold cache -- this is
 # allowed to block, unlike --ensure-ready above.
 # ---------------------------------------------------------------------------
+if [ "${1:-}" = "serve" ]; then
+  _ensure_knowledge_dir "$@"
+  # Rebuild the args with `--path` pinned to the resolved directory.
+  _n=$#
+  _prev=""
+  _has_path=0
+  while [ "$_n" -gt 0 ]; do
+    _a="$1"
+    shift
+    _n=$((_n - 1))
+    if [ "$_prev" = "--path" ]; then
+      set -- "$@" "$_ek_dir"
+      _has_path=1
+    else
+      case "$_a" in
+        --path=*) set -- "$@" "--path=${_ek_dir}"; _has_path=1 ;;
+        *) set -- "$@" "$_a" ;;
+      esac
+    fi
+    _prev="$_a"
+  done
+  if [ "$_has_path" = 0 ]; then
+    set -- "$@" --path "$_ek_dir"
+  fi
+fi
 _run_pinned "$@"
