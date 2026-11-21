@@ -1046,6 +1046,23 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         ),
     ),
     ArtifactDeclaration(
+        name="raise-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "raise_ledger.py RAISE_LEDGER_FILENAME '_raise_ledger.jsonl' (issue "
+            "athenaeum#3001; docs/design/federation-raise-retract.md §4.3, §7.1, "
+            "slice S4) — the raiser's record of each raise, keyed by raise_id and "
+            "seq: ids and a payload hash, no page text. Durable and not "
+            "reconstructible (the mapping from a raise_id to its source page "
+            "exists nowhere else), the install's own state in the cache dir, "
+            "outside the wiki and raw roots so it is never a page of any store "
+            "and never enters the recall index. A record file merged by record, "
+            "never as text; keeping it on a bench is a later slice (S14)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="store-review-state",
         persistence_class="operational",
         operational_scope="store-durable",
@@ -1530,6 +1547,22 @@ def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
     """
     raw = _git_out(repo, "diff", "--name-only", "-z", "--no-renames", rev_a, rev_b)
     return sorted(p.decode() for p in raw.split(b"\0") if p)
+
+
+def deletion_commit_messages(repo: Path, rev_a: str, rev_b: str, path: str) -> list[str]:
+    """Full messages of the commits in ``rev_a..rev_b`` that delete *path*.
+
+    Read-only; the range is the history one side of a merge added since the
+    common ancestor. Merge commits are not counted (a merge carries no diff of
+    its own against its first parent). Renames are not followed: a path that
+    moved away reads as deleted, matching :func:`changed_paths`. Raises
+    ``subprocess.CalledProcessError`` for an unknown revision.
+    """
+    raw = _git_out(
+        repo, "log", "--no-renames", "--diff-filter=D", "--format=%B%x00",
+        f"{rev_a}..{rev_b}", "--", path,
+    )
+    return [m.strip("\n") for m in raw.decode("utf-8", "replace").split("\0") if m.strip()]
 
 
 def merge_commits_between(repo: Path, rev_a: str, rev_b: str) -> list[str]:

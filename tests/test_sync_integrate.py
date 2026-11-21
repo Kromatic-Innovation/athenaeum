@@ -555,3 +555,103 @@ def test_sync_records_fetch_and_push_evidence(tmp_path: Path) -> None:
     entry = evidence.load_evidence()[evidence.location_key(repo)]
     assert entry["fetch"]["ok"] is False and entry["push"]["ok"] is False
     assert entry["remote"] == "origin"
+
+
+# -- the erasure mark (sync S16, design note section 5.1) ---------------------
+
+
+def _delete(inst: Install, path: str, message: str) -> None:
+    git(inst.root, "rm", "-q", "--", path)
+    git(inst.root, "commit", "-q", "-m", message)
+
+
+def _erase(inst: Install, path: str, uid: str) -> None:
+    from athenaeum.erasure import erase_pages_and_commit
+
+    assert erase_pages_and_commit(inst.root, [(inst.root / path, uid)])
+
+
+EDITED = BASE.replace("Acme Corp.", "Acme Corp, in Lisbon.")
+
+
+def test_erasure_on_the_remote_side_wins_over_a_local_edit(harness: TwoCloneHarness) -> None:
+    first, second = harness.first, harness.second
+    _erase(first, "wiki/jordan.md", "person-jordan-reyes")
+    second.commit("wiki/jordan.md", EDITED)
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    result = integrate_remote(second.root, "main", SETTINGS)
+    assert result.status == "merged"
+    assert not (second.root / "wiki" / "jordan.md").exists()
+    assert result.erased == ("person-jordan-reyes",)
+    assert result.held == ()
+
+
+def test_erasure_on_the_local_side_wins_over_a_remote_edit(harness: TwoCloneHarness) -> None:
+    first, second = harness.first, harness.second
+    first.commit("wiki/jordan.md", EDITED)
+    _erase(second, "wiki/jordan.md", "person-jordan-reyes")
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    result = integrate_remote(second.root, "main", SETTINGS)
+    assert result.status == "merged"
+    assert not (second.root / "wiki" / "jordan.md").exists()
+    assert result.erased == ("person-jordan-reyes",)
+
+
+def test_a_retire_without_the_mark_and_an_edit_is_contested_not_erased(
+    harness: TwoCloneHarness,
+) -> None:
+    first, second = harness.first, harness.second
+    _delete(first, "wiki/jordan.md", "retire jordan")
+    second.commit("wiki/jordan.md", EDITED)
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    result = integrate_remote(second.root, "main", SETTINGS)
+    assert result.status == "merged"
+    assert result.erased == ()
+    assert "Lisbon" in (second.root / "wiki" / "jordan.md").read_text()  # the edit survives
+    assert [(h.kind, h.reasons) for h in result.held] == [("page", ("contested",))]
+
+
+def test_a_mark_for_a_different_uid_does_not_erase_the_page(harness: TwoCloneHarness) -> None:
+    first, second = harness.first, harness.second
+    git(first.root, "rm", "-q", "--", "wiki/jordan.md")
+    git(first.root, "commit", "-q", "-m", "x\n\nAthenaeum-Erasure: person-someone-else")
+    second.commit("wiki/jordan.md", EDITED)
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    result = integrate_remote(second.root, "main", SETTINGS)
+    assert result.erased == () and result.held
+
+
+def test_the_mark_is_found_anywhere_in_the_side_history_since_the_ancestor(
+    harness: TwoCloneHarness,
+) -> None:
+    first, second = harness.first, harness.second
+    _erase(first, "wiki/jordan.md", "person-jordan-reyes")
+    first.commit("wiki/other.md", page("person-priya-raman", "Priya Raman"))  # a later commit
+    second.commit("wiki/jordan.md", EDITED)
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    assert integrate_remote(second.root, "main", SETTINGS).erased == ("person-jordan-reyes",)
+
+
+def test_the_merge_commit_records_the_erasure_with_the_uid_only(harness: TwoCloneHarness) -> None:
+    first, second = harness.first, harness.second
+    _erase(first, "wiki/jordan.md", "person-jordan-reyes")
+    second.commit("wiki/jordan.md", EDITED)
+    assert push_after_compile(first.root, "main", SETTINGS).ok
+    integrate_remote(second.root, "main", SETTINGS)
+    message = git(second.root, "log", "-1", "--format=%B")
+    assert "Athenaeum-Erasure: person-jordan-reyes" in message.splitlines()
+    assert not [ln for ln in message.splitlines() if ln.startswith("Athenaeum-Page:")]
+    for forbidden in ("Jordan Reyes", "jordan.md", "Lisbon", "Acme", "Engineer"):
+        assert forbidden not in message
+
+
+def test_the_erasure_deletion_commit_carries_the_uid_and_nothing_else(
+    harness: TwoCloneHarness,
+) -> None:
+    _erase(harness.first, "wiki/jordan.md", "person-jordan-reyes")
+    message = git(harness.first.root, "log", "-1", "--format=%B")
+    assert message.splitlines() == [
+        "athenaeum: erasure",
+        "",
+        "Athenaeum-Erasure: person-jordan-reyes",
+    ]

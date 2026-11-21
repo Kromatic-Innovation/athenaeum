@@ -531,7 +531,18 @@ def page_write_root_for_class(
     declared ``read_only`` (athenaeum#2621), and :class:`StorageConfigError`
     for an unknown adapter.
     """
-    adapter = resolve_adapter_for_class(entity_class, config)
+    return _write_root_for_adapter(
+        resolve_adapter_for_class(entity_class, config), entity_class, config, knowledge_root
+    )
+
+
+def _write_root_for_adapter(
+    adapter: StorageAdapter,
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """The write-guard checks shared by the type-derived and store-named routes."""
     if adapter.read_only:
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -548,6 +559,34 @@ def page_write_root_for_class(
             "not indexed (embedded: false); compile cannot write pages there"
         )
     return adapter.resolve_root(knowledge_root)
+
+
+def page_write_root_for_store(
+    store: str,
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """Directory a NEW page is written to for the store an intake decision named.
+
+    ``personal`` is the default wiki surface; any other word names a configured
+    adapter. Same guards as :func:`page_write_root_for_class` (read-only,
+    declared-refusal, not-indexed). A store this install does not hold raises
+    :class:`StorageConfigError`. Intake routing S3a (athenaeum#2999).
+    """
+    adapters = available_adapters(config)
+    if "personal" in adapters:
+        raise StorageConfigError(
+            "storage.adapters.personal collides with the reserved store word "
+            "'personal' (the default wiki surface) -- pick a different adapter name"
+        )
+    name = DEFAULT_ADAPTER_NAME if store == "personal" else store
+    adapter = adapters.get(name)
+    if adapter is None:
+        raise StorageConfigError(
+            f"intake decision names store {store!r}, which this install does not hold"
+        )
+    return _write_root_for_adapter(adapter, entity_class, config, knowledge_root)
 
 
 def resolve_store_for_class(
@@ -846,6 +885,13 @@ def _is_within(inner: Path, outer: Path) -> bool:
     return inner == outer or outer in inner.parents
 
 
+#: Directory under ``raw/`` holding one raw-intake directory per store a single
+#: compiling install compiles (``raw/_stores/<store_id>/``; intake routing S15,
+#: ``docs/design/federation-intake-routing.md`` §8.1). It is raw intake of that
+#: store, never an indexed surface.
+STORE_RAW_DIRNAME = "_stores"
+
+
 def validate_indexed_surfaces(
     indexed: Sequence[IndexedSurface],
     non_indexed: Mapping[str, Path],
@@ -897,6 +943,20 @@ def validate_indexed_surfaces(
                     f"non-indexed surface {ex_name!r} ({ex_root}): it equals, "
                     "contains, or sits inside it, so excluded pages could enter "
                     "the index -- move one of them"
+                )
+    if wiki_root is not None:
+        # Intake routing S15 (§8.1): a store's raw intake is never indexed -- a
+        # message waiting for a store is not something the member's assistant
+        # recalls. Refuse a root that is, holds or sits inside it, however it
+        # got on the list (a surface, or ``recall.extra_intake_roots``).
+        store_raw = (wiki_root.parent / "raw" / STORE_RAW_DIRNAME).resolve()
+        for label, root in checked:
+            if _is_within(root.resolve(), store_raw) or _is_within(store_raw, root.resolve()):
+                raise IndexedSurfaceError(
+                    f"indexed root {root} ({label!r}) equals, contains, or sits inside "
+                    f"{store_raw}, a store's raw intake: messages waiting for a store "
+                    "are never indexed or recalled -- remove it (for example from "
+                    "recall.extra_intake_roots)"
                 )
 
 

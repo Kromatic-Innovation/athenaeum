@@ -172,6 +172,7 @@ from athenaeum.declared_relationships import (
     declared_relationship,
 )
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
+from athenaeum.intake_destination import destination_for_entity
 from athenaeum.models import (
     EntityIndex,
     TokenUsage,
@@ -237,7 +238,6 @@ from athenaeum.storage import (
     ReadOnlySurfaceError,
     SurfaceNotIndexedError,
     open_store,
-    page_write_root_for_class,
     refuse_read_only_write,
     resolve_locator_surfaces,
 )
@@ -1125,7 +1125,7 @@ def compute_apply(
         """Surface a new page of *entity_type* is written to (athenaeum#2618);
         a non-indexed surface is refused as a plan issue."""
         try:
-            return page_write_root_for_class(entity_type, config, wiki_root.parent)
+            return destination_for_entity(entity_type, config, wiki_root.parent).root
         except SurfaceNotIndexedError as exc:
             issues.append(PlanIssue("surface-not-indexed", str(exc)))
             return None
