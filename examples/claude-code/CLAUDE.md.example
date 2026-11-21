@@ -16,6 +16,13 @@ the user's first message**, call `recall` with keywords relevant to the actual t
 Call `recall` again whenever a new topic, person, or project comes up that might have
 wiki context.
 
+### Per-turn push
+
+Each message you receive may start with a `[Knowledge context]` block: a few wiki
+page names, and an excerpt of the best match. The excerpt is often enough on its own.
+
+When a `[Knowledge context]` item pushed into your turn looks relevant, call `recall` yourself with its name or the task's key terms before you answer, and read what it returns.
+
 ### Auto-remember (proactive)
 
 When you encounter important facts during a session, proactively call `remember` to

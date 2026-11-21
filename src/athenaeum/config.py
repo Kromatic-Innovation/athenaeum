@@ -3773,6 +3773,47 @@ def resolve_recall_cap_ceiling(config: dict[str, Any] | None) -> int:
     return RECALL_CAP_CEILING_DEFAULT
 
 
+#: Issue athenaeum#3032: how many characters of the top hit's matching passage
+#: the per-turn push carries under its bullets. 600 is the excerpt length the
+#: athenaeum#3061 measurement ran (``docs/measurements/native-baseline-models-2026-11-21.md``
+#: section 5, arm PE): same correctness as the bare breadcrumb, about 11-13%
+#: lower cost per correct answer.
+PUSH_EXCERPT_CHARS_DEFAULT = 600
+
+#: Upper bound on :func:`resolve_push_excerpt_chars`. An override above it is
+#: clamped, never honoured: the excerpt is a pointer into one page, not a copy
+#: of it, and the push-token budget and the host's hook output cap still bound
+#: what is actually rendered (:func:`athenaeum.context.build_context`).
+PUSH_EXCERPT_CHARS_MAX = 2000
+
+
+def resolve_push_excerpt_chars(config: dict[str, Any] | None) -> int:
+    """Resolve the per-turn push's top-hit excerpt length in characters
+    (issue athenaeum#3032).
+
+    Precedence: ``ATHENAEUM_PUSH_EXCERPT_CHARS`` env > ``recall.push_excerpt_chars``
+    yaml > :data:`PUSH_EXCERPT_CHARS_DEFAULT`. ``0`` turns the excerpt off
+    (the push is then the bare breadcrumb it was before), and is honoured from
+    either source. A negative or malformed env value WARNs or falls through
+    (see :func:`_env_number`); a non-int / negative yaml value falls through to
+    the default. A value above :data:`PUSH_EXCERPT_CHARS_MAX` is clamped to it.
+    YAML shape::
+
+        recall:
+          push_excerpt_chars: 600
+    """
+    value = _env_number("ATHENAEUM_PUSH_EXCERPT_CHARS", int)
+    if value is not None and value >= 0:
+        return min(value, PUSH_EXCERPT_CHARS_MAX)
+    if isinstance(config, dict):
+        recall_cfg = config.get("recall")
+        if isinstance(recall_cfg, dict):
+            raw = recall_cfg.get("push_excerpt_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return min(raw, PUSH_EXCERPT_CHARS_MAX)
+    return PUSH_EXCERPT_CHARS_DEFAULT
+
+
 # Issue athenaeum#2204: the SHARED foreground time budget (whole seconds) for
 # every shipped Claude Code hook that still does synchronous work in its own
 # critical path -- today that is `session-start-recall.sh`'s cheap residual
