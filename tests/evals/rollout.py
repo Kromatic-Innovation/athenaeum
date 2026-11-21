@@ -1612,6 +1612,8 @@ class HostConfig:
     tool_search: bool | None = None
     plugin_dir: Path | None = None
     allowed_tools: tuple[str, ...] = ()
+    #: Extra environment variables for the spawned session.
+    env: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
 
 def build_pull_mcp_config(
@@ -2034,11 +2036,11 @@ def run_push_breadcrumb_pull(
         config_path = Path(tmp_dir) / "mcp-config.json"
         config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
         argv = build_pull_argv(claude_binary, config_path, model, host_config=host_config)
-        spawn_env = (
-            {**os.environ, "ENABLE_TOOL_SEARCH": "true" if host_config.tool_search else "false"}
-            if host_config is not None and host_config.tool_search is not None
-            else None
-        )
+        spawn_env = None
+        if host_config is not None and (host_config.tool_search is not None or host_config.env):
+            spawn_env = {**os.environ, **host_config.env}
+            if host_config.tool_search is not None:
+                spawn_env["ENABLE_TOOL_SEARCH"] = "true" if host_config.tool_search else "false"
         proc = subprocess.run(
             argv,
             input=prompt_text,
