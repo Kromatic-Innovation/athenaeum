@@ -772,6 +772,164 @@ PREAMBLE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Top-hit excerpt (issue athenaeum#3032)
+# ---------------------------------------------------------------------------
+#
+# The per-turn push can carry a short excerpt of its top hit -- the passage of
+# that page which matched the turn's terms -- under the bullets, so a turn that
+# needs only that passage is answered without a `recall` round trip. The
+# athenaeum#3061 measurement (arm PE, 600 characters) kept correctness equal
+# and cut cost per correct answer by about 11% on Sonnet and 13% on Opus.
+#
+# Off unless the caller passes a positive `excerpt_chars` to `build_context`.
+# `build_context_for_turn` resolves one from
+# `athenaeum.config.resolve_push_excerpt_chars`, so every Tier-1 push (the
+# Claude Code adapter, `athenaeum context`, the Codex adapter) gets the same
+# excerpt and they cannot drift apart.
+
+#: Claude Code caps the per-turn context a hook injects at 10,000 characters; past
+#: that it writes the text to a file and shows the agent only a path and a
+#: 2,000-character preview (https://code.claude.com/docs/en/hooks). The
+#: excerpt is shrunk, or dropped, so the rendered push (preamble, newline,
+#: text) never crosses this cap. It never trims a bullet: bullets were already
+#: bounded by the token budget before this feature existed.
+HOOK_OUTPUT_CAP_CHARS = 10_000
+
+#: First line of the excerpt block. The same wording the athenaeum#3061 arm
+#: PE measured.
+EXCERPT_HEADER = 'Top match, excerpt of "{name}":'
+
+#: An excerpt that the budget or the cap would cut below this many characters
+#: is dropped rather than rendered: a sentence fragment is noise, not a passage.
+EXCERPT_MIN_CHARS = 80
+
+_ELLIPSIS = "\u2026"
+_BLANK_LINE_RE = re.compile(r"\n\s*\n")
+
+
+def _fetch_body(db_file: Path, filename: str) -> str:
+    """The indexed body of *filename* (frontmatter already stripped by the
+    indexer), or ``""``. One bounded read-only lookup; any failure, including a
+    legacy index with no ``body`` column, degrades to no excerpt."""
+    try:
+        conn = _open_ro(db_file)
+    except sqlite3.Error:
+        return ""
+    try:
+        row = conn.execute(
+            "SELECT body FROM wiki WHERE filename = ? LIMIT 1", (filename,)
+        ).fetchone()
+    except sqlite3.Error as exc:
+        log.debug("excerpt body lookup failed, no excerpt this turn: %s", exc)
+        return ""
+    finally:
+        conn.close()
+    return str(row[0]) if row and row[0] else ""
+
+
+def _is_heading(block: str) -> bool:
+    return all(line.lstrip().startswith("#") for line in block.splitlines() if line.strip())
+
+
+def _section_label(blocks: list[str], i: int) -> str:
+    """The section heading (``##`` or deeper) directly above block *i*, or
+    ``""``. A page's ``#`` title is not a label: the bullet already names the
+    page, and every block sits under it."""
+    if i > 0 and _is_heading(blocks[i - 1]) and blocks[i - 1].lstrip().startswith("##"):
+        return blocks[i - 1]
+    return ""
+
+
+def select_excerpt(body: str, terms: Sequence[str], max_chars: int) -> str:
+    """The passage of *body* that best matches *terms*, at most *max_chars*
+    characters long.
+
+    *body* is split into blank-line-separated blocks. Heading-only blocks are
+    never chosen as the start. The block that contains the most distinct term
+    words (case-insensitive), counting the section heading directly above it,
+    wins, the earliest on a tie, and that heading is kept as its label. With no
+    term word in any block the first non-heading block is used: the page's
+    opening, the shape the measurement ran, without the title the bullet
+    already names. The excerpt runs on from there through following blocks and
+    is cut at a word boundary, with an ellipsis, when it would exceed
+    *max_chars*. Returns ``""`` when *max_chars* is not positive or *body* has
+    no text.
+    """
+    if max_chars <= 0:
+        return ""
+    blocks = [b.strip() for b in _BLANK_LINE_RE.split(body) if b.strip()]
+    if not blocks:
+        return ""
+    # Terms can be multi-word topics ("supply chain"); match their words, so
+    # a passage naming either word counts. Substring match, so a term also
+    # finds its inflections ("supply" in "supplying").
+    words = {
+        w for t in terms for w in _TOKEN_RE.findall(t.lower()) if len(w) >= _MIN_TERM_LENGTH
+    }
+    start = None
+    best = 0
+    for i, block in enumerate(blocks):
+        if _is_heading(block):
+            continue
+        if start is None:
+            start = i
+        if words:
+            # A section heading counts toward its passage's match: a
+            # "## Supply" section matches "supply".
+            text = f"{_section_label(blocks, i)}\n{block}".lower()
+            hits = sum(1 for w in words if w in text)
+            if hits > best:
+                best, start = hits, i
+    if start is None:
+        start = 0
+    if best and _section_label(blocks, start):
+        start -= 1
+    text = "\n\n".join(blocks[start:])
+    if len(text) <= max_chars:
+        return text
+    cut = text[: max(0, max_chars - len(_ELLIPSIS))]
+    space = max(cut.rfind(" "), cut.rfind("\n"))
+    if space > len(cut) // 2:
+        cut = cut[:space]
+    return cut.rstrip() + _ELLIPSIS
+
+
+def _render_excerpt(name: str, excerpt: str) -> str:
+    return f"{EXCERPT_HEADER.format(name=name)}\n{excerpt}"
+
+
+def _build_excerpt(
+    top: Candidate,
+    *,
+    db_file: Path,
+    terms: Sequence[str],
+    excerpt_chars: int,
+    tokens_left: int,
+    chars_left: int,
+) -> str:
+    """The rendered excerpt block for *top*, or ``""``.
+
+    The excerpt is cut to whichever is smallest: *excerpt_chars*, what the
+    push-token budget has left (*tokens_left*, by :func:`estimate_tokens`'s
+    four characters per token), and what the hook output cap has left
+    (*chars_left*). The header and the separating newline count against both
+    limits. Below :data:`EXCERPT_MIN_CHARS` it is dropped.
+    """
+    header = EXCERPT_HEADER.format(name=top.name)
+    # One newline before the block (it follows the bullets) and one after the
+    # header.
+    overhead = len(header) + 2
+    room = min(excerpt_chars, tokens_left * 4 - overhead, chars_left - overhead)
+    if room < EXCERPT_MIN_CHARS:
+        return ""
+    body = _fetch_body(db_file, top.filename)
+    excerpt = select_excerpt(body, terms, room)
+    if not excerpt:
+        return ""
+    return _render_excerpt(top.name, excerpt)
+
+
 def _resolve_parent_names(candidates: list[Candidate], wiki_root: Path | None) -> None:
     """Fill in each candidate's :attr:`Candidate.parent_name`, in place
     (issue athenaeum#2538 AC8).
@@ -848,6 +1006,7 @@ def build_context(
     wiki_root: Path | None = None,
     trace: dict[str, Any] | None = None,
     relevance_floor: Mapping[str, float | None] | None = None,
+    excerpt_chars: int = 0,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -891,6 +1050,16 @@ def build_context(
     envelope is exactly what it was before this parameter existed. Only
     :func:`build_context_for_turn` resolves and passes one; the static-refresh
     adapter and other direct callers never do.
+
+    ``excerpt_chars`` (issue athenaeum#3032): when positive, the rendered text
+    ends with an excerpt of the top candidate's matching passage (see
+    :func:`select_excerpt`), at most this many characters, and further cut to
+    fit what the token budget and :data:`HOOK_OUTPUT_CAP_CHARS` leave after the
+    preamble and bullets. Its token cost is added to the top candidate's
+    ``token_cost``, so ``budget.used`` and the push ledger meter it. ``0`` (the
+    default for a direct caller) renders no excerpt, so the envelope is exactly
+    what it was before this parameter existed; :func:`build_context_for_turn`
+    resolves the per-turn value.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -1014,8 +1183,34 @@ def build_context(
     packed = _apply_budget(capped, budget, PREAMBLE, withheld_by_type)
     overflow = render_overflow_line(withheld_by_type, at_least=len(merged) >= window)
 
+    # Issue athenaeum#3032: the top hit's excerpt, inside whatever the token
+    # budget and the hook output cap leave after the preamble and bullets.
+    excerpt = ""
+    if excerpt_chars > 0 and packed and db_file.is_file():
+        base_text = render_text(packed)
+        if overflow:
+            base_text = f"{base_text}\n{overflow}"
+        used_tokens = estimate_tokens(PREAMBLE) + sum(c.token_cost for c in packed)
+        excerpt = _build_excerpt(
+            packed[0],
+            db_file=db_file,
+            terms=terms,
+            excerpt_chars=excerpt_chars,
+            tokens_left=budget - used_tokens,
+            chars_left=HOOK_OUTPUT_CAP_CHARS - len(f"{PREAMBLE}\n{base_text}"),
+        )
+        if excerpt:
+            packed[0].token_cost += estimate_tokens(f"\n{excerpt}")
+
     return _make_envelope(
-        prompt, session_id, budget, search_backend, packed, t0, overflow=overflow
+        prompt,
+        session_id,
+        budget,
+        search_backend,
+        packed,
+        t0,
+        overflow=overflow,
+        excerpt=excerpt,
     )
 
 
@@ -1028,9 +1223,14 @@ def _make_envelope(
     t0: float,
     *,
     overflow: str = "",
+    excerpt: str = "",
 ) -> dict[str, Any]:
     """Assemble the envelope. *overflow* is the rendered overflow-breadcrumb
-    line (issue athenaeum#1905), or ``""``.
+    line (issue athenaeum#1905), or ``""``. *excerpt* is the rendered top-hit
+    excerpt block (issue athenaeum#3032), or ``""``; it goes last in
+    ``render.text``, after the overflow line, for the same reason the overflow
+    line lives in that field (below), and in the order the athenaeum#3061 arm
+    measured.
 
 It rides inside ``render.text``, appended after the last
     bullet, rather than arriving as a sibling ``render`` key: ``text`` is
@@ -1050,6 +1250,8 @@ It rides inside ``render.text``, appended after the last
     text = render_text(candidates)
     if text and overflow:
         text = f"{text}\n{overflow}"
+    if text and excerpt:
+        text = f"{text}\n{excerpt}"
     return {
         "v": ENVELOPE_VERSION,
         "query": prompt,
@@ -1380,6 +1582,7 @@ def build_context_for_turn(
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
     injected_patterns: Sequence[str] = (),
+    excerpt_chars: int | None = None,
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1427,6 +1630,11 @@ def build_context_for_turn(
     each candidate backend is passed to :func:`build_context`, which drops
     candidates that fail it before the count cap. Unset (the default), no
     floor is passed and the envelope is unchanged.
+
+    Top-hit excerpt (issue athenaeum#3032): ``excerpt_chars=None`` (the
+    default) resolves the length through
+    :func:`athenaeum.config.resolve_push_excerpt_chars` (env > yaml > 600), so
+    every Tier-1 caller renders the same excerpt. Pass ``0`` to turn it off.
     """
     if injected_patterns:
         user_text, matched = split_injected_text(prompt, injected_patterns)
@@ -1459,6 +1667,11 @@ def build_context_for_turn(
     # at all, so `build_context` runs exactly as before.
     relevance_floor = _resolve_push_relevance_floor(config)
 
+    if excerpt_chars is None:
+        from athenaeum.config import resolve_push_excerpt_chars
+
+        excerpt_chars = resolve_push_excerpt_chars(config)
+
     trace: dict[str, Any] = {}
     envelope = build_context(
         prompt,
@@ -1474,6 +1687,7 @@ def build_context_for_turn(
         wiki_root=wiki_root,
         trace=trace,
         relevance_floor=relevance_floor,
+        excerpt_chars=excerpt_chars,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 
