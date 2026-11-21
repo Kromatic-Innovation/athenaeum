@@ -135,7 +135,7 @@ turns native auto-memory off. What that default would lose is the native-memory 
 a raw-intake source: with `CLAUDE_CODE_DISABLE_AUTO_MEMORY` set, new auto-memory topic files stop
 accruing for the librarian to file, and any already written stay readable. Whether that intake is worth
 about 1.3x to 1.7x the per-answer cost is the operator's call; this report supplies the cost and the
-absence of any read benefit, not the intake's value. The build issue is filed from this PR.
+absence of any read benefit, not the intake's value. The build issue is athenaeum#3094.
 
 ## 4. athenaeum#3068, the grid half: does the push keep the relationship win
 
