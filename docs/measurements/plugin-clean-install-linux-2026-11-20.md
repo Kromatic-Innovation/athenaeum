@@ -40,15 +40,12 @@ Container A had `uv`. Container B was the same image with `uv` never installed.
 Both were passed as `-e` from environment variables and never printed or
 written to the report.
 
-- **Claude Code:** the long-lived OAuth token from the Agent Tools 1Password
-  vault, read with `op read` into the shell that ran `docker run`. No
+- **Claude Code:** a long-lived Claude Code OAuth token
+  (`CLAUDE_CODE_OAUTH_TOKEN`). No
   `ANTHROPIC_API_KEY` existed in the container, so the compile ran on the
   Claude Code login (`llm.provider: claude-cli`).
-- **Plugin repo:** a GitHub App installation token minted for this run with
-  `contents: read` only and a one-hour life. **Deviation from the brief:** the
-  workspace minter cannot restrict a token to one repository, so this token
-  could read every repository the App is installed on, not only the plugin
-  repo. It could not write. The token file was deleted after the run.
+- **Plugin repo:** a short-lived, read-only GitHub token, discarded after
+  the run.
 - The container's git was given a credential helper that reads the token from
   the environment. That is needed only because the repo is private; a user who
   is signed in to GitHub would not need it.
