@@ -4,6 +4,7 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -26,6 +27,7 @@
     ],
     "UserPromptSubmit": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -37,6 +39,7 @@
     ],
     "PreCompact": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -48,6 +51,7 @@
     "_SessionEnd_optional": "Wire rebuild-index.sh as a SessionEnd hook for large wikis where the synchronous SessionStart rebuild becomes painful. Detach with nohup so session exit is instant.",
     "SessionEnd": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",

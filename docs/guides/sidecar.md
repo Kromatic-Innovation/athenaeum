@@ -96,6 +96,7 @@ Point the `UserPromptSubmit` hook in `~/.claude/settings.json` at it:
 "hooks": {
   "UserPromptSubmit": [
     {
+      "matcher": "",
       "hooks": [
         {
           "type": "command",
@@ -112,6 +113,10 @@ Use the full path to the console script (for example
 `/path/to/venv/bin/athenaeum-claude-hook`) if the venv that installed
 `athenaeum` is not already on the `PATH` Claude Code's hook subprocess
 inherits.
+
+The empty `"matcher": ""` means "no filter": Claude Code runs the group on every
+event. Keep the key: Cursor's CLI skips a Claude-format hook group that has no
+`matcher` key, silently, so a group without it gives you no push and no error.
 
 The adapter reads no flags — it takes its input from the hook's stdin JSON
 and its cache directory from `ATHENAEUM_CACHE_DIR` (or the same

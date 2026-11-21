@@ -57,6 +57,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- Every Claude-format hook group we ship now has a `matcher` key (`""` where no filter is wanted): `examples/claude-code/settings-snippet.json`, the staged plugin `hooks/hooks.json`, and the hook examples in `docs/guides/sidecar.md` and `docs/design/contradiction-detection.md`. Cursor's CLI silently skips a group without one, so a Cursor user got no per-turn push and no error; Claude Code accepts the key and fires every hook as before. A new test sweeps every JSON example and fenced `json` block and fails if a group lacks the key (athenaeum#3048)
 - Removing one surface's derived data no longer misbehaves in two edge cases: a vector index that cannot be opened now raises instead of pruning the manifest and orphaning embeddings, and an index built before the `surface` column existed is handled by deriving the surface from the filename instead of raising. (athenaeum#2990)
 
 - `athenaeum doctor`'s `hooks` check no longer reports a flag as a missing hook script. A hook command with an env assignment holding a command substitution (`SID=$(jq -r '.session_id // empty'); nohup bash <script>`) used to fail with `-> -r`; each simple command of a `;`, `&&`, `||`, `|` or `&`-joined command is now resolved separately, `bash <script>` resolves to the script rather than to `bash`, a word starting with `-` is never taken as the target, and a compound command whose target cannot be determined is a warning instead of a failure. (athenaeum#3021)
