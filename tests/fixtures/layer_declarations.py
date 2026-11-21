@@ -113,6 +113,7 @@ MODULE_LAYER: dict[str, int] = {
     "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
     "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
     "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
+    "raise_ledger": 3,  # issue athenaeum#3001: the raiser's raise ledger
     "raise_acceptance_ledger": 3,  # issue athenaeum#2938: raise acceptance ledger
     "raise_acceptance": 3,  # issue athenaeum#2939: accept a raised page, asking every time
     "store_intake_dispatch": 3,  # issue athenaeum#3000: per-store raw intake dispatcher; imports L3
@@ -191,6 +192,7 @@ MODULE_LAYER: dict[str, int] = {
     # (L4) and _cmd_drops.py (L5), both strictly above.
     "drops": 3,
     "relevance_policy": 2,  # issue athenaeum#2643
+    "intake_destination": 3,  # issue athenaeum#2999: decision store -> write root
     "intake_decision": 2,  # issue athenaeum#2797: pure decide(); a leaf
     "erasure": 3,
     "fingerprint": 3,

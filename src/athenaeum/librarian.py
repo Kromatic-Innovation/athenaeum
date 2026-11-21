@@ -197,6 +197,7 @@ from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
     run_intake_audit,
 )
+from athenaeum.intake_destination import destination_for_entity
 from athenaeum.logconf import run_id_var
 from athenaeum.merge import (
     RunDeadlineExceeded,
@@ -306,7 +307,6 @@ from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.storage import (
     ReadOnlySurfaceError,
     open_store,
-    page_write_root_for_class,
     refuse_read_only_write,
     require_writable_path,
     resolve_indexed_surfaces,
@@ -2760,7 +2760,11 @@ def _apply_tier3_results(
     _create_roots: list[Path | None] = []
     for _e in new_entities:
         try:
-            _create_roots.append(page_write_root_for_class(_e.type, _page_config, wiki_root.parent))
+            _create_roots.append(
+                destination_for_entity(
+                    _e.type, _page_config, wiki_root.parent, tags=tuple(_e.tags)
+                ).root
+            )
         except ReadOnlySurfaceError as _exc:
             _retain_raw_on_read_only(result, _exc)
             _create_roots.append(None)

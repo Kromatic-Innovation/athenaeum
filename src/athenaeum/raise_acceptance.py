@@ -46,9 +46,22 @@ acceptance recorded, :func:`accept_raise` runs them on the copy and a failure
 opens a ``filing-check`` item naming it. They are never a reason to hold, ask
 about or reject a raise, and the outcome of an acceptance never depends on them.
 
-Out of scope here: rejection mechanics, dropping later messages and the detail
-of the taken-uid hold (S7b), and the ``raise:`` declaration block and acceptance
-without asking (S8).
+**Rejection and holds (S7b, athenaeum#3002).** :func:`reject_raise` is the
+person's answer *reject* to a ``raise`` or ``raise_held`` decision, with a reason
+code from :data:`REJECT_REASONS` (there is no free text). The ledger records the
+``raise_id`` as ``rejected`` and the message is removed from the store's raw
+intake (:func:`consume_raw_file`: a file goes once the ledger gives every message
+in it its final disposition, §6.2). Every later message for a rejected
+``raise_id``, whatever its ``seq`` or kind, is **dropped by rule**: recorded
+``rejected`` with reason ``already_rejected`` and no decision raised. A raise that
+is merely *held* is not rejected, so its later messages are processed. A
+``raise_held`` decision names the uid, the reason and the waiting message; it is
+answered reject, or accept once a ``uid_taken`` uid is free
+(:func:`answer_decision`). Each message ends in exactly one recorded
+disposition.
+
+Out of scope here: the ``raise:`` declaration block and acceptance without
+asking (S8).
 
 Layering: L3 (service). Imports :mod:`athenaeum.raise_acceptance_ledger` (L3),
 :mod:`athenaeum.store_decisions`, :mod:`athenaeum.store_intake`,
@@ -77,6 +90,8 @@ from athenaeum.models import (
 from athenaeum.raise_acceptance_ledger import (
     DISPOSITION_ACCEPTED,
     DISPOSITION_HELD,
+    DISPOSITION_REJECTED,
+    REASON_CODES,
     AcceptanceRow,
     Adjustment,
     disposition_of,
@@ -111,7 +126,14 @@ from athenaeum.store_access import (
     StoreDeclarationInvalid,
     load_store_declaration,
 )
-from athenaeum.store_decisions import file_decision, load_queue, resolve_decision
+from athenaeum.store_decisions import (
+    ANSWER_ACCEPT,
+    ANSWER_REJECT,
+    answers_for,
+    file_decision,
+    load_queue,
+    resolve_decision,
+)
 from athenaeum.store_intake import intake_accepts
 from athenaeum.store_rights import StaticDirectory, resolve_rights
 
@@ -119,10 +141,14 @@ __all__ = [
     "DECISION_KIND_RAISE",
     "DECISION_KIND_HELD",
     "COMMIT_LINE_KEY",
+    "REJECT_REASONS",
     "Outcome",
     "RaiseAcceptRefused",
     "accept_raise",
+    "answer_decision",
     "commit_line",
+    "consume_raw_file",
+    "reject_raise",
     "run_checks",
     "submit_raise",
 ]
@@ -130,7 +156,7 @@ __all__ = [
 #: The decision kind a raise that passed the checks is shown under.
 DECISION_KIND_RAISE = "raise"
 #: The decision kind for a message that failed a check, or whose derived uid is
-#: taken. The detail of that decision is raise S7b.
+#: taken. It names the uid, the reason and the waiting message (raise S7b).
 DECISION_KIND_HELD = "raise_held"
 
 #: The commit trailer key (§4.4).
@@ -141,6 +167,29 @@ ASKED = "asked"
 HELD = "held"
 DUPLICATE = "duplicate"
 ACCEPTED = "accepted"
+REJECTED = "rejected"
+#: A message dropped because its ``raise_id`` is rejected (recorded, no decision).
+DROPPED = "dropped"
+
+#: The fixed list of reason codes a person may reject a raise with: the person's
+#: own ruling (``declined``), the store's ``intake`` rules refusing the type and
+#: tags (``store_refuses``), and one code per rule check or hold the person
+#: agrees with (§4.4). ``duplicate`` and ``already_rejected`` are recorded by
+#: rule and are not a person's reason.
+REJECT_REASONS = frozenset(
+    {
+        "declined",
+        "store_refuses",
+        "uid_taken",
+        "unparseable",
+        "target_mismatch",
+        "proposer_lacks_right",
+        "payload_has_link",
+        "page_invalid",
+        "hash_mismatch",
+    }
+)
+assert REJECT_REASONS <= REASON_CODES
 
 _RIGHTS_TO_RAISE = ("propose", "compile")
 
@@ -323,7 +372,7 @@ def _record(cache_dir: Path, msg: RaiseMessage, target: str, location: str, **kw
     try:
         return record_acceptance(
             cache_dir,
-            kind=KIND_RAISE,
+            kind=msg.kind,
             raise_id=msg.raise_id,
             message_id=msg.message_id,
             seq=msg.seq,
@@ -356,14 +405,33 @@ def _file_held(
     msg: RaiseMessage | None,
     mounts: Any,
     asserter: Any,
+    uid: str | None = None,
+    location: str = "",
+    source: Path | str | None = None,
 ) -> dict:
+    """File a ``raise_held`` decision: the reason, and (when the message parsed)
+    the uid, the ids and the waiting message itself, so the decision can be
+    answered reject, or accept once a taken uid is free."""
     detail: dict[str, Any] = {"reason": reason}
     if msg is not None:
         detail.update(raise_id=msg.raise_id, message_id=msg.message_id, seq=msg.seq)
+        detail["message"] = _message_dict(msg)
+        detail["location"] = location
+        if uid is not None:
+            detail["uid"] = uid
+        if source is not None:
+            detail["source"] = str(source)
+    question = f"A raised message could not be applied by rule (reason: {reason})."
+    if reason == "uid_taken" and uid is not None:
+        question = (
+            f"A raised page cannot be filed: its uid {uid} belongs to another page, which is "
+            "never overwritten (reason: uid_taken). Reject the raise, or accept it once the "
+            "uid is free."
+        )
     return file_decision(
         knowledge_root,
         store_id=target_store_id,
-        question=f"A raised message could not be applied by rule (reason: {reason}).",
+        question=question,
         kind=DECISION_KIND_HELD,
         mounts=mounts,
         asserter=asserter,
@@ -395,6 +463,7 @@ def submit_raise(
     location: str,
     mounts: Any = None,
     asserter: Any = None,
+    source: Path | None = None,
 ) -> Outcome:
     """Run the rule checks on a waiting ``raise`` message and file the decision.
 
@@ -402,9 +471,18 @@ def submit_raise(
     payload (the ledger records the message ``held`` meanwhile). A failure is
     recorded with its reason code and, unless it is a duplicate, raised as a
     decision. Nothing is written to the store's pages.
+
+    A message (of any kind) for a ``raise_id`` that is already rejected is
+    dropped by rule: recorded, no decision (status ``dropped``). *source* is the
+    raw intake file holding the message; it is kept on the decision so a later
+    rejection can remove it (:func:`consume_raw_file`), and a dropped message's
+    file is removed when every message in it has its final disposition.
     """
     parsed = parse_message(record)
-    if isinstance(parsed, Fallthrough) or parsed.kind != KIND_RAISE:
+    if isinstance(parsed, Fallthrough) or (
+        parsed.kind != KIND_RAISE
+        and not (parsed.raise_id is not None and is_rejected(cache_dir, parsed.raise_id))
+    ):
         # No ids to record against: it goes up the ladder as a decision alone.
         decision = _file_held(
             knowledge_root, target_store_id, reason="unparseable", msg=None,
@@ -424,6 +502,17 @@ def submit_raise(
         )
         return Outcome(DUPLICATE, "duplicate", None, row, uid)
 
+    # The drop rule (§4.4): a later message for a rejected raise_id, any seq and
+    # any kind, is recorded and dropped; no decision is raised.
+    if is_rejected(cache_dir, msg.raise_id):
+        row = _record(
+            cache_dir, msg, target_store_id, location,
+            disposition=DISPOSITION_REJECTED, reason="already_rejected",
+        )
+        if source is not None:
+            consume_raw_file(source, cache_dir)
+        return Outcome(DROPPED, "already_rejected", None, row, uid)
+
     declaration = load_store_declaration(target_root)
     reason = _check_message(
         msg, target_store_id=target_store_id, declaration=declaration, cache_dir=cache_dir
@@ -437,7 +526,7 @@ def submit_raise(
         )
         decision = _file_held(
             knowledge_root, target_store_id, reason=reason, msg=msg,
-            mounts=mounts, asserter=asserter,
+            mounts=mounts, asserter=asserter, uid=uid, location=location, source=source,
         )
         return Outcome(HELD, reason, decision, row, uid)
 
@@ -449,7 +538,11 @@ def submit_raise(
         kind=DECISION_KIND_RAISE,
         mounts=mounts,
         asserter=asserter,
-        detail={"message": _message_dict(msg), "location": location},
+        detail={
+            "message": _message_dict(msg),
+            "location": location,
+            **({"source": str(source)} if source is not None else {}),
+        },
     )
     row = _record(
         cache_dir, msg, target_store_id, location,
@@ -495,6 +588,11 @@ def accept_raise(
     """Accept the waiting raise named by *decision_id*, optionally adjusting
     ``type`` and ``tags``.
 
+    Also answers a ``raise_held`` decision whose reason is ``uid_taken``: accept
+    once the uid is free. While the uid is still taken, or a rule check still
+    fails, :class:`RaiseAcceptRefused` is raised (reason ``uid_taken`` or the
+    check's code), nothing is written and the decision stays pending.
+
     Raises :class:`RaiseAcceptRefused` (nothing written) when the decision is
     not a pending ``raise`` decision, or when the type and tags that would be
     filed are refused by the store's ``intake`` rules (reason
@@ -502,8 +600,17 @@ def accept_raise(
     taken, nothing is written: the message is held and a decision is raised.
     """
     rec = _find_decision(knowledge_root, target_store_id, decision_id)
-    if rec.get("kind") != DECISION_KIND_RAISE or rec.get("disposition") != "pending":
+    is_held_kind = rec.get("kind") == DECISION_KIND_HELD
+    if (
+        rec.get("kind") not in (DECISION_KIND_RAISE, DECISION_KIND_HELD)
+        or rec.get("disposition") != "pending"
+    ):
         raise RaiseAcceptRefused("not_pending", f"{decision_id} is not a pending raise decision")
+    if is_held_kind and ANSWER_ACCEPT not in answers_for(rec):
+        raise RaiseAcceptRefused(
+            "not_acceptable",
+            f"{decision_id} was held for a reason that only a rejection settles",
+        )
     detail = rec.get("detail") or {}
     parsed = parse_message(detail.get("message"))
     if isinstance(parsed, Fallthrough) or parsed.kind != KIND_RAISE:
@@ -524,6 +631,9 @@ def accept_raise(
     )
     if reason is None and _uid_state(target_root, uid, msg.raise_id) == "taken":
         reason = "uid_taken"
+    if reason is not None and is_held_kind:
+        # Already held and asked about: nothing new to record or raise.
+        raise RaiseAcceptRefused(reason, f"{decision_id} cannot be accepted yet ({reason})")
     if reason is not None:
         row = _record(
             cache_dir, msg, target_store_id, location,
@@ -531,7 +641,8 @@ def accept_raise(
         )
         held = _file_held(
             knowledge_root, target_store_id, reason=reason, msg=msg,
-            mounts=mounts, asserter=asserter,
+            mounts=mounts, asserter=asserter, uid=uid, location=location,
+            source=detail.get("source"),
         )
         resolve_decision(
             knowledge_root, store_id=target_store_id, decision_id=decision_id, disposition="held"
@@ -600,13 +711,18 @@ def accept_raise(
             _create_exclusive(path, text)
         except FileExistsError:
             # Lost a race to another writer of the same path: never overwrite.
+            if is_held_kind:
+                raise RaiseAcceptRefused(
+                    "uid_taken", f"{decision_id} cannot be accepted yet (uid_taken)"
+                ) from None
             row = _record(
                 cache_dir, msg, target_store_id, location,
                 disposition=DISPOSITION_HELD, reason="uid_taken",
             )
             held = _file_held(
                 knowledge_root, target_store_id, reason="uid_taken", msg=msg,
-                mounts=mounts, asserter=asserter,
+                mounts=mounts, asserter=asserter, uid=uid, location=location,
+                source=detail.get("source"),
             )
             return Outcome(HELD, "uid_taken", held, row, uid)
         try:
@@ -637,6 +753,9 @@ def accept_raise(
     resolve_decision(
         knowledge_root, store_id=target_store_id, decision_id=decision_id, disposition="accepted"
     )
+    # §6.2: a raw intake file goes once every message in it has its final disposition.
+    if detail.get("source"):
+        consume_raw_file(detail["source"], cache_dir)
     # The copy is published and its acceptance recorded; only now do the filing
     # checks run (S21). They never change this outcome.
     filing = run_after_publish(
@@ -651,3 +770,164 @@ def accept_raise(
         asserter=asserter,
     )
     return Outcome(ACCEPTED, None, rec, row, uid, commit, filing)
+
+
+# -- step 2 (the other answer): reject ---------------------------------------
+
+
+def consume_raw_file(path: Path | str, cache_dir: Path) -> bool:
+    """Remove a raw intake file once every message in it has its final disposition.
+
+    A file is written once and never edited (§6.1), so a message cannot be taken
+    out of a file that carries others: the file goes when the ledger records
+    ``accepted`` or ``rejected`` for every message in it (§6.2). A line that is
+    not a parseable message with a final disposition keeps the file. Returns
+    whether the file was removed; never raises on a missing or unreadable file.
+    """
+    target = Path(path)
+    try:
+        lines = [ln for ln in target.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not lines:
+        return False
+    for line in lines:
+        try:
+            parsed = parse_message(json.loads(line))
+        except ValueError:
+            return False
+        if isinstance(parsed, Fallthrough):
+            return False
+        row = disposition_of(cache_dir, parsed.message_id)
+        if row is None or row.disposition not in (DISPOSITION_ACCEPTED, DISPOSITION_REJECTED):
+            return False
+    try:
+        target.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _waiting_message(rec: dict) -> tuple[RaiseMessage | None, dict]:
+    detail = rec.get("detail") or {}
+    parsed = parse_message(detail.get("message"))
+    if isinstance(parsed, Fallthrough) or parsed.raise_id is None or parsed.seq is None:
+        return None, detail
+    return parsed, detail
+
+
+def reject_raise(
+    knowledge_root: Path,
+    *,
+    target_store_id: str,
+    cache_dir: Path,
+    decision_id: str,
+    reason: str = "declined",
+    now: datetime | None = None,
+) -> Outcome:
+    """Answer a pending ``raise`` or ``raise_held`` decision *reject*.
+
+    *reason* is a code from :data:`REJECT_REASONS`. The ledger records the
+    message ``rejected`` with it (so the ``raise_id`` is rejected, and every
+    later message for it is dropped by rule), the decision is settled, and the
+    message is removed from the store's raw intake (:func:`consume_raw_file`).
+    Any other message of the same ``raise_id`` still waiting on a decision of
+    its own is rejected with it, so each message ends in one disposition.
+
+    Raises :class:`RaiseAcceptRefused` (nothing written) for a decision that is
+    not pending, a *reason* outside the fixed list, or a message already accepted.
+    """
+    if reason not in REJECT_REASONS:
+        raise RaiseAcceptRefused(
+            "bad_reason", f"{reason!r} is not one of the fixed rejection reason codes"
+        )
+    rec = _find_decision(knowledge_root, target_store_id, decision_id)
+    if (
+        rec.get("kind") not in (DECISION_KIND_RAISE, DECISION_KIND_HELD)
+        or rec.get("disposition") != "pending"
+    ):
+        raise RaiseAcceptRefused("not_pending", f"{decision_id} is not a pending raise decision")
+    msg, detail = _waiting_message(rec)
+    if msg is None:
+        # A held message that never parsed has no ids to record against.
+        resolve_decision(
+            knowledge_root, store_id=target_store_id, decision_id=decision_id,
+            disposition="rejected",
+        )
+        return Outcome(REJECTED, reason)
+    current = disposition_of(cache_dir, msg.message_id)
+    if current is not None and current.disposition == DISPOSITION_ACCEPTED:
+        raise RaiseAcceptRefused("already_accepted", f"{msg.message_id} is already accepted")
+    assert msg.raise_id is not None
+    uid = derived_uid(target_store_id, msg.raise_id)
+    row = _record(
+        cache_dir, msg, target_store_id, str(detail.get("location", "")),
+        disposition=DISPOSITION_REJECTED, reason=reason, now=now,
+    )
+    resolve_decision(
+        knowledge_root, store_id=target_store_id, decision_id=decision_id, disposition="rejected"
+    )
+    sources = [detail.get("source")]
+    # Other waiting messages of this raise_id are rejected with it.
+    for other in load_queue(knowledge_root, target_store_id):
+        if other.get("id") == decision_id or other.get("disposition") != "pending":
+            continue
+        if other.get("kind") not in (DECISION_KIND_RAISE, DECISION_KIND_HELD):
+            continue
+        omsg, odetail = _waiting_message(other)
+        if omsg is None or omsg.raise_id != msg.raise_id:
+            continue
+        ocur = disposition_of(cache_dir, omsg.message_id)
+        if ocur is None or ocur.disposition == DISPOSITION_HELD:
+            _record(
+                cache_dir, omsg, target_store_id, str(odetail.get("location", "")),
+                disposition=DISPOSITION_REJECTED, reason=reason, now=now,
+            )
+        resolve_decision(
+            knowledge_root, store_id=target_store_id, decision_id=str(other["id"]),
+            disposition="rejected",
+        )
+        sources.append(odetail.get("source"))
+    for src in dict.fromkeys(x for x in sources if x):
+        consume_raw_file(src, cache_dir)
+    return Outcome(REJECTED, reason, rec, row, uid)
+
+
+def answer_decision(
+    knowledge_root: Path,
+    *,
+    target_store_id: str,
+    target_root: Path,
+    cache_dir: Path,
+    decision_id: str,
+    answer: str,
+    reason: str | None = None,
+    type: str | None = None,
+    tags: list[str] | None = None,
+    mounts: Any = None,
+    asserter: Any = None,
+    now: datetime | None = None,
+) -> Outcome:
+    """Settle a ``raise`` or ``raise_held`` decision with the person's *answer*.
+
+    ``reject`` takes a *reason* code (default ``declined``). ``accept`` is
+    offered on a ``raise`` decision and on a ``raise_held`` decision whose reason
+    is ``uid_taken`` (it goes through once the uid is free); *type* and *tags*
+    adjust the copy as in :func:`accept_raise`. An answer the decision does not
+    offer is refused (:class:`RaiseAcceptRefused`, reason ``unknown_answer``).
+    """
+    rec = _find_decision(knowledge_root, target_store_id, decision_id)
+    if answer not in answers_for(rec):
+        raise RaiseAcceptRefused(
+            "unknown_answer", f"{decision_id} does not take the answer {answer!r}"
+        )
+    if answer == ANSWER_REJECT:
+        return reject_raise(
+            knowledge_root, target_store_id=target_store_id, cache_dir=cache_dir,
+            decision_id=decision_id, reason=reason or "declined", now=now,
+        )
+    return accept_raise(
+        knowledge_root, target_store_id=target_store_id, target_root=target_root,
+        cache_dir=cache_dir, decision_id=decision_id, type=type, tags=tags,
+        mounts=mounts, asserter=asserter, now=now,
+    )

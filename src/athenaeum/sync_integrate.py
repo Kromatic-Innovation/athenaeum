@@ -77,6 +77,7 @@ from athenaeum.config import (
     resolve_push_remote,
     resolve_structured_upsert,
 )
+from athenaeum.erasure import erasure_commit_line, erasure_marks
 from athenaeum.models import generate_uid, parse_frontmatter
 from athenaeum.page_merge import merge_page
 from athenaeum.record_merge import KIND_PENDING_MERGES, merge_derived, merge_records
@@ -93,6 +94,7 @@ from athenaeum.store import (
     commit_repo,
     common_ancestor,
     current_branch,
+    deletion_commit_messages,
     fast_forward_branch,
     fetch_remote_branch,
     is_ancestor,
@@ -310,6 +312,9 @@ class IntegrateResult:
     remote_tip: str | None = None
     #: ``(old uid, new uid)`` of each local page re-minted by this integrate (§7.4).
     reminted: tuple[tuple[str, str], ...] = ()
+    #: The uid of each page deleted in this integrate because a side's deletion
+    #: commit carried the erasure mark (§5.1). Uids only.
+    erased: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -629,6 +634,7 @@ def _merge(
     final: dict[str, bytes | None] = {}  # merged content of every path either side changed
     held: list[HeldItem] = []
     page_lines: list[tuple[str, str]] = []  # (uid, rest) of a Page line, in path order
+    erased: list[str] = []  # uids of pages deleted as an erasure (§5.1)
     both_pages: dict[str, tuple[str, bytes | None, str | None, str | None]] = {}
     roots = cfg.page_roots
 
@@ -666,6 +672,11 @@ def _merge(
         if kind == "store":
             final[path] = theirs
             held.append(_held_item(HELD_STORE_FILE, ("config-never-merged",), blobs))
+        elif kind == "page" and root is not None and _erased_uid(
+            repo, (ancestor, local, tip), path, (base_t, mine_t, theirs_t)
+        ):
+            erased.append(_uid_of(base_t, mine_t, theirs_t))
+            final[path] = None
         elif kind == "page" and root is not None:
             _merge_one_page(
                 path,
@@ -727,7 +738,7 @@ def _merge(
     changes = {
         p: data for p, data in final.items() if data != read_file_at_revision(repo, local, p)
     }
-    message = _message(tip, page_lines, held, reminted)
+    message = _message(tip, page_lines, held, reminted, erased)
     try:
         commit = write_merge_commit(repo, branch, tip, changes, message)
     except WorkingTreeNotCleanError:
@@ -742,7 +753,34 @@ def _merge(
         held=tuple(held),
         pages_changed_both=uids,
         reminted=tuple(reminted),
+        erased=tuple(erased),
     )
+
+
+def _erased_uid(
+    repo: Path,
+    revs: tuple[str, str, str],
+    path: str,
+    texts: tuple[str | None, str | None, str | None],
+) -> bool:
+    """Whether *path* was deleted on a side by a commit marked as an erasure (§5.1).
+
+    Reads the history between the common ancestor and the side that deleted the
+    page, through the store seam. A deletion without the mark is an ordinary
+    retire and is left to the page merge.
+    """
+    ancestor, local, tip = revs
+    base_t, mine_t, theirs_t = texts
+    uid = _uid_of(base_t, mine_t, theirs_t)
+    if not uid:
+        return False
+    for side_rev, side_text in ((local, mine_t), (tip, theirs_t)):
+        if side_text is not None:
+            continue  # this side did not delete the page
+        for message in deletion_commit_messages(repo, ancestor, side_rev, path):
+            if uid in erasure_marks(message):
+                return True
+    return False
 
 
 def _merge_one_page(
@@ -882,6 +920,7 @@ def _message(
     page_lines: list[tuple[str, str]],
     held: list[HeldItem],
     reminted: list[tuple[str, str]] | None = None,
+    erased: list[str] | None = None,
 ) -> str:
     lines = [f"athenaeum sync: integrate {tip[:12]}", "", "Athenaeum-Sync: 1"]
     lines += [f"Athenaeum-Page: {uid} {rest}" for uid, rest in page_lines]
@@ -892,6 +931,7 @@ def _message(
         if not h.uid
     ]
     lines += [f"Athenaeum-Uid-Reminted: {old} {new}" for old, new in reminted or ()]
+    lines += [erasure_commit_line(uid) for uid in erased or ()]
     return "\n".join(lines) + "\n"
 
 
