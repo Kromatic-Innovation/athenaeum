@@ -46,6 +46,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- Docs: `docs/design/host-cursor.md` is corrected against the Cursor probe (athenaeum#2395). The interactive CLI does deliver a Claude-format `UserPromptSubmit` hook's `additionalContext` to the model every turn, `beforeSubmitPrompt` carries `session_id`, `type: "stdio"` is not required, and `sessionStart` injection lands for hooks that finish within about 60 seconds. Claude-format hook groups need a `matcher` key, and `--print` mode does not run the prompt hook
 - North-star grid: the oracle control now tolerates one delivered-page omission. When an enrolled class and scale has failing `oracle` rows that are all marker misses with delivery, and at most one probe is involved, that (probe, scale) pair is excluded from every arm, native arms included, for conditions 1, 2 and 3, and the report names it in an "Excluded by the oracle tolerance" table; a second failing probe, or a miss without delivery, still voids. `spend_approver_named` gains the alternative marker `requester explain` on its second page. `grader_revision` moves to `athenaeum#3029`; `corpus_digest` does not (pages are untouched). Run 44783114473's stored rows are re-read offline in `docs/measurements/native-memory-baseline-2026-11-20-regrade.md` (athenaeum#3029).
 
 ### Fixed
