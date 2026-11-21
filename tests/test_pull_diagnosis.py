@@ -240,6 +240,21 @@ class TestSignals:
         assert ch["calls"]["native_topic_read_other"] == 2
         assert ch["calls"]["native_topic_read"] == 2
 
+    def test_absolute_path_with_a_space_in_the_home_dir_counts(self, tmp_path: Path) -> None:
+        spaced = "/Users/Ann Lee/.claude/projects/-scope-hash/memory/t.md"
+        ch = self._one_window(
+            tmp_path,
+            [
+                _tool("2026-01-01T00:00:02Z", "mcp__p__Read", {"path": spaced}),
+                _tool(
+                    "2026-01-01T00:00:03Z",
+                    "mcp__p__Read",
+                    {"path": f"C:\\Users\\Ann Lee\\{MEM}/t.md"},
+                ),
+            ],
+        )
+        assert ch["calls"]["native_topic_read_other"] == 2
+
     def test_builtin_and_other_split_and_window_total(self, tmp_path: Path) -> None:
         ch = self._one_window(
             tmp_path,

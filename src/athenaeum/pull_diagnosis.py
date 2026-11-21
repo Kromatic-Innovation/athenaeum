@@ -126,6 +126,7 @@ _WRITE_TOOL_WORDS: frozenset[str] = frozenset(
         "write",
     }
 )
+_ABSOLUTE_PATH_RE = re.compile(r"(?:/|~/|[A-Za-z]:/)")
 _NAME_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 
 #: Per-window boolean signals. Each is counted as "windows where it happened
@@ -214,15 +215,20 @@ def _names_memory_topic_path(text: str) -> bool:
     """True when *text* starts as a path into an auto-memory directory and is
     not the ``MEMORY.md`` index.
 
-    "Starts as a path": no whitespace before the memory directory and no line
-    break at all, so a field holding a path or a glob counts while prose that
-    mentions one (a sub-agent prompt, a message) does not.
+    "Starts as a path": no line break at all, and either no whitespace before
+    the memory directory or a field that opens as an absolute path (``/``,
+    ``~`` or a drive letter), so ``/Users/Ann Lee/.claude/...`` counts. A field
+    holding a path or a glob counts while prose that mentions one (a sub-agent
+    prompt, a message) does not.
     """
     norm = text.strip().replace("\\", "/")
     if "\n" in norm:
         return False
     match = _MEMORY_DIR_RE.search(norm)
-    if match is None or any(c.isspace() for c in norm[: match.start()]):
+    if match is None:
+        return False
+    prefix = norm[: match.start()]
+    if any(c.isspace() for c in prefix) and not _ABSOLUTE_PATH_RE.match(prefix):
         return False
     return PurePosixPath(norm).name != NATIVE_INDEX_FILENAME
 
