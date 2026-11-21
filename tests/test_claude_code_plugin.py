@@ -355,11 +355,17 @@ def _minimal_path_dir(tmp_path: Path, *, with_uv: bool) -> Path:
 
 
 def _run_launcher(
-    *args: str, tmp_path: Path, path_dir: Path, cache_dir: Path | None = None
+    *args: str,
+    tmp_path: Path,
+    path_dir: Path,
+    cache_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {"PATH": str(path_dir), "CLAUDE_PLUGIN_ROOT": str(_PLUGIN_DIR)}
     if cache_dir is not None:
         env["ATHENAEUM_CACHE_DIR"] = str(cache_dir)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [str(_LAUNCHER), *args],
         env=env,
@@ -537,7 +543,7 @@ def test_ensure_ready_reports_ready_once_the_marker_exists(tmp_path: Path) -> No
     bin_dir = _minimal_path_dir(tmp_path, with_uv=True)
     cache_dir = tmp_path / "cache"
     manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
-    marker = cache_dir / "claude-code-plugin" / f"ready-{manifest['version']}"
+    marker = cache_dir / "claude-code-plugin" / f"ready-mcp-{manifest['version']}"
     marker.parent.mkdir(parents=True)
     marker.touch()
 
@@ -548,3 +554,175 @@ def test_ensure_ready_reports_ready_once_the_marker_exists(tmp_path: Path) -> No
     combined = (result.stdout + result.stderr).lower()
     assert "ready" in combined
     assert "preparing" not in combined
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#3046: a clean machine must reach a running MCP server. Stubbed
+# `uv` and `claude` on a from-scratch PATH -- no network, no login.
+# ---------------------------------------------------------------------------
+
+
+def _stubbed_path_dir(tmp_path: Path) -> tuple[Path, Path]:
+    """A PATH with a recording ``uv`` stub and a recording ``claude`` stub.
+
+    The ``uv`` stub appends its argv (one line per call) to ``calls.log`` and,
+    when it sees ``athenaeum init --path <dir>``, creates ``<dir>`` the way
+    the real ``init`` would. Returns ``(bin_dir, calls_log)``."""
+    bin_dir = _minimal_path_dir(tmp_path, with_uv=True)
+    log = tmp_path / "calls.log"
+    (bin_dir / "uv").unlink()
+    uv_stub = bin_dir / "uv"
+    uv_stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "uv $*" >> "{log}"\n'
+        'prev=""\n'
+        'init=0\n'
+        'for a in "$@"; do\n'
+        '  [ "$a" = "init" ] && init=1\n'
+        '  if [ "$init" = 1 ] && [ "$prev" = "--path" ]; then mkdir -p "$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    uv_stub.chmod(0o755)
+    claude_stub = bin_dir / "claude"
+    claude_stub.write_text(f'#!/bin/sh\necho "claude $*" >> "{log}"\nexit 0\n', encoding="utf-8")
+    claude_stub.chmod(0o755)
+    return bin_dir, log
+
+
+def _serve(
+    tmp_path: Path, *serve_args: str
+) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+    bin_dir, log = _stubbed_path_dir(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    result = _run_launcher(
+        "serve",
+        *serve_args,
+        tmp_path=tmp_path,
+        path_dir=bin_dir,
+        cache_dir=tmp_path / "cache",
+        extra_env={"HOME": str(home)},
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return result, calls, home
+
+
+def test_pinned_spec_carries_the_mcp_extra_at_the_manifest_version(tmp_path: Path) -> None:
+    """The pin is derived from the manifest (never hardcoded here), so this
+    stays true across releases; the separate pin-vs-release tests own whether
+    the manifest itself names the current release."""
+    version = json.loads(_MANIFEST.read_text(encoding="utf-8"))["version"]
+    result, calls, _ = _serve(tmp_path, "--path", str(tmp_path / "kb"))
+    assert result.returncode == 0, result.stderr
+    assert calls, "the launcher never invoked uv"
+    assert all(f"athenaeum[mcp]=={version}" in c for c in calls), calls
+    assert not any("--with athenaeum==" in c for c in calls), calls
+
+
+def test_prepare_warm_up_also_uses_the_mcp_extra(tmp_path: Path) -> None:
+    bin_dir, log = _stubbed_path_dir(tmp_path)
+    version = json.loads(_MANIFEST.read_text(encoding="utf-8"))["version"]
+    result = _run_launcher(
+        "--prepare",
+        tmp_path=tmp_path,
+        path_dir=bin_dir,
+        cache_dir=tmp_path / "cache",
+        extra_env={"HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0
+    assert f"athenaeum[mcp]=={version}" in log.read_text(encoding="utf-8")
+
+
+def test_serve_creates_a_missing_knowledge_directory_via_init(tmp_path: Path) -> None:
+    kb = tmp_path / "does" / "not" / "exist"
+    result, calls, _ = _serve(tmp_path, "--path", str(kb))
+    assert result.returncode == 0, result.stderr
+    assert kb.is_dir(), "the launcher did not create the knowledge directory"
+    init_idx = next(i for i, c in enumerate(calls) if " athenaeum init --path " in c)
+    serve_idx = next(i for i, c in enumerate(calls) if " athenaeum serve" in c)
+    assert init_idx < serve_idx, "init must run before serve"
+    assert f"init --path {kb}" in calls[init_idx]
+    # stdout is the MCP protocol channel -- init chatter must not land there.
+    assert "init" not in result.stdout
+    assert not any(c.startswith("claude") for c in calls)
+
+
+def test_serve_does_not_reinit_an_existing_knowledge_directory(tmp_path: Path) -> None:
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    result, calls, _ = _serve(tmp_path, "--path", str(kb))
+    assert result.returncode == 0
+    assert not any(" athenaeum init" in c for c in calls), calls
+
+
+def test_serve_default_path_is_home_knowledge_when_unconfigured(tmp_path: Path) -> None:
+    """An empty or unsubstituted ``${user_config.*}`` value falls back to the
+    default, and the leading ``~`` is expanded against ``$HOME``."""
+    for i, raw in enumerate(("", "${user_config.knowledgePath}")):
+        sub = tmp_path / f"run{i}"
+        sub.mkdir()
+        result, calls, home = _serve(sub, "--path", raw)
+        assert result.returncode == 0, result.stderr
+        assert (home / "knowledge").is_dir()
+        assert any(f"init --path {home}/knowledge" in c for c in calls), calls
+        # serve must be handed the SAME resolved path, never the raw token/empty.
+        serve = next(c for c in calls if " athenaeum serve" in c)
+        assert serve.endswith(f"serve --path {home}/knowledge"), serve
+
+
+def test_serve_expands_a_tilde_in_a_configured_path(tmp_path: Path) -> None:
+    result, calls, home = _serve(tmp_path, "--path", "~/my-kb")
+    assert result.returncode == 0
+    assert (home / "my-kb").is_dir()
+    assert any(c.endswith(f"serve --path {home}/my-kb") for c in calls), calls
+
+
+def test_serve_without_a_path_gets_the_default_appended(tmp_path: Path) -> None:
+    result, calls, home = _serve(tmp_path)
+    assert result.returncode == 0
+    assert (home / "knowledge").is_dir()
+    assert any(c.endswith(f"serve --path {home}/knowledge") for c in calls), calls
+
+
+def test_serve_equals_form_path_is_rewritten_too(tmp_path: Path) -> None:
+    result, calls, _ = _serve(tmp_path, "--path=" + str(tmp_path / "eq"))
+    assert result.returncode == 0
+    assert (tmp_path / "eq").is_dir()
+    assert any(c.endswith(f"serve --path={tmp_path / 'eq'}") for c in calls), calls
+
+
+def test_mcp_json_passes_user_config_knowledge_path_to_serve() -> None:
+    server = json.loads(_MCP_JSON.read_text(encoding="utf-8"))["mcpServers"]["athenaeum"]
+    args = server["args"]
+    assert args[0] == "serve"
+    assert args[args.index("--path") + 1] == "${user_config.knowledgePath}"
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    assert "knowledgePath" in manifest["userConfig"]
+    assert manifest["userConfig"]["knowledgePath"]["default"] == "~/knowledge"
+
+
+def test_uv_missing_message_reaches_the_session_through_hook_stdout(tmp_path: Path) -> None:
+    bin_dir = _minimal_path_dir(tmp_path, with_uv=False)
+    result = _run_launcher("--ensure-ready", tmp_path=tmp_path, path_dir=bin_dir)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert "uv" in payload["systemMessage"]  # shown to the user
+    context = payload["hookSpecificOutput"]["additionalContext"]  # shown to the model
+    assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "install" in context.lower() and "uv" in context
+    # MCP passthrough keeps stdout clean (protocol channel) and uses stderr.
+    mcp = _run_launcher("serve", tmp_path=tmp_path, path_dir=bin_dir)
+    assert mcp.stdout == ""
+    assert "uv" in mcp.stderr
+
+
+def test_the_warm_up_hook_does_not_discard_its_output() -> None:
+    hooks = json.loads(_HOOKS_JSON.read_text(encoding="utf-8"))
+    commands = _iter_hook_commands(hooks)
+    warm = [c for c in commands if "--ensure-ready" in c]
+    assert len(warm) == 1
+    assert "2>/dev/null" not in warm[0] and "/dev/null" not in warm[0]
+    assert warm[0].rstrip().endswith("|| true"), "the warm-up must never block the session"

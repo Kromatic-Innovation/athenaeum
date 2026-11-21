@@ -2,7 +2,7 @@
   "mcpServers": {
     "athenaeum": {
       "command": "${CLAUDE_PLUGIN_ROOT}/hooks/launcher.sh",
-      "args": ["serve"]
+      "args": ["serve", "--path", "${user_config.knowledgePath}"]
     }
   }
 }
