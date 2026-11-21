@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- `athenaeum recall` no longer ends silently on an empty result: it prints one line to stderr saying nothing matched, and points to `athenaeum doctor` when the search index is missing or empty. A raw-intake hit now carries the `[uncompiled]` marker (at the start of the preview column, so the tab-separated columns are unchanged), using the same predicate as the MCP `recall` tool. Stdout for an empty result and the exit code are unchanged (athenaeum#3043)
 - The `claude` CLI not-logged-in error now leads with the fix (run `claude` then `/login`, or set `ANTHROPIC_API_KEY` and use `llm.provider: api`) and puts the CLI's own output after it as detail, cut at a word boundary with `...` when long instead of mid-token (athenaeum#3044)
 - Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
 
@@ -58,6 +59,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- A note saved with `remember` now reaches `recall` as `[uncompiled]` before any compile, with no credential. On an install without chromadb, `remember` refreshed the vector index (which cannot build there) while `recall` reads the fts5 one, so the note stayed invisible until a manual reindex. And `session-end` now reindexes raw intake even when the compile fails, for a missing credential too, so the index is not left older than raw intake; its exit code and message are unchanged (athenaeum#3042).
 - Removing one surface's derived data no longer misbehaves in two edge cases: a vector index that cannot be opened now raises instead of pruning the manifest and orphaning embeddings, and an index built before the `surface` column existed is handled by deriving the surface from the filename instead of raising. (athenaeum#2990)
 
 - `athenaeum doctor`'s `hooks` check no longer reports a flag as a missing hook script. A hook command with an env assignment holding a command substitution (`SID=$(jq -r '.session_id // empty'); nohup bash <script>`) used to fail with `-> -r`; each simple command of a `;`, `&&`, `||`, `|` or `&`-joined command is now resolved separately, `bash <script>` resolves to the script rather than to `bash`, a word starting with `-` is never taken as the target, and a compound command whose target cannot be determined is a warning instead of a failure. (athenaeum#3021)
