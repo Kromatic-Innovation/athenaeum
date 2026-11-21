@@ -27,6 +27,7 @@ prompt, as it would not on an install with a key.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import random
 import re
@@ -70,9 +71,30 @@ from tests.evals.rollout import (
 # A 3,000-page scale, registered here rather than in ``corpus.SCALES`` so the grid's
 # own scale list and its dry-run pricing stay as they are (athenaeum#3066).
 SCALES.setdefault("medium3k", Scale("medium3k", total_pages=3_000, distractors_per_probe=2))
-ARMS = ("N", "P", "PE", "PH", "PEH", "PI", "PW", "T", "PEI", "PL", "PLEI", "PLA", "PLAEI")
+ARMS = (
+    "N",
+    "P",
+    "PE",
+    "PH",
+    "PEH",
+    "PI",
+    "PW",
+    "T",
+    "PEI",
+    "PL",
+    "PLEI",
+    "PLA",
+    "PLAEI",
+    "SOFF",
+    "SON",
+)
 #: Arms that run through ``push_breadcrumb_pull`` (athenaeum push plus pull).
-PUSH_ARMS = ("P", "PE", "PH", "PEH", "PI", "PW", "PEI", "PL", "PLEI", "PLA", "PLAEI")
+PUSH_ARMS = ("P", "PE", "PH", "PEH", "PI", "PW", "PEI", "PL", "PLEI", "PLA", "PLAEI", "SOFF", "SON")
+#: The SHIPPED push (athenaeum#3032 excerpt and recall line, athenaeum#3070 linked
+#: notes of every hit), run through the real hook with no harness shaping, with
+#: native auto memory off (``SOFF``) or on (``SON``, index and topic files
+#: rendered as for ``N``). athenaeum#3073.
+SHIP_ARMS = ("SOFF", "SON")
 #: Push arms that also write the recall instruction into ``CLAUDE.md``.
 INSTRUCTION_ARMS = ("PI", "PEI", "PLEI", "PLAEI")
 #: Arms that run as native auto memory with no athenaeum MCP server or hook.
@@ -91,6 +113,8 @@ ARM_LABELS = {
     "PLEI": "breadcrumb + excerpt + linked neighbours + CLAUDE.md recall line",
     "PLA": "breadcrumb + the linked neighbours of every hit",
     "PLAEI": "breadcrumb + excerpt + neighbours of every hit + CLAUDE.md recall line",
+    "SOFF": "shipped push (excerpt, recall line, linked notes), native memory off",
+    "SON": "shipped push (excerpt, recall line, linked notes), native memory on",
 }
 #: Neighbour lines a ``PLA`` push may carry in total (every hit's links pooled).
 NEIGHBOUR_LIMIT_ALL = 6
@@ -120,6 +144,18 @@ MODELS = {
 _PROJECT_DIR_UNSAFE = re.compile(r"[^a-zA-Z0-9]")
 UNPROMPTED = "unprompted_push"
 P_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+SHIPPED_CLAUDE_MD_EXAMPLE = (
+    Path(__file__).resolve().parents[2] / "examples" / "claude-code" / "CLAUDE.md.example"
+)
+
+
+def shipped_instruction_text(example: Path = SHIPPED_CLAUDE_MD_EXAMPLE) -> str:
+    """The "Per-turn push" section of the shipped ``CLAUDE.md.example`` (the recall
+    instruction athenaeum#3032 ships), verbatim, so the ship arms cannot drift from it."""
+    lines = example.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "### Per-turn push")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("#")), len(lines))
+    return "\n".join(lines[start:end]).strip() + "\n"
 
 
 def encode_project_dir(cwd: Path) -> str:
@@ -204,6 +240,13 @@ class RunRow:
     index_truncated: bool | None = None
     #: Native arms: any tool call on the memory directory (broader than ``reached``).
     memory_touched: bool | None = None
+    #: Per-row shape (athenaeum#3036): assistant turns, tool-call names in order,
+    #: whether a ``recall`` result carried the unmatched-names line, and how many
+    #: tool calls came after the first such result.
+    turns: int | None = None
+    tool_sequence: list[str] | None = None
+    unmatched_line_seen: bool | None = None
+    calls_after_unmatched: int | None = None
 
 
 def _init_event(events: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -218,6 +261,39 @@ def _result_cost(events: Sequence[Mapping[str, Any]]) -> float | None:
         if e.get("type") == "result" and isinstance(e.get("total_cost_usd"), (int, float)):
             return float(e["total_cost_usd"])
     return None
+
+
+#: Start of the line ``recall`` appends when a queried name is on none of the pages
+#: shown (athenaeum#3033), from ``prompts/recall_unmatched_names_breadcrumb.md``.
+UNMATCHED_LINE_MARKER = "No page shown above mentions"
+
+
+def run_shape(
+    transcript: Sequence[Mapping[str, Any]],
+) -> tuple[list[str], bool, int]:
+    """``(tool names in order, unmatched-names line seen in a tool result, tool calls
+    made after the first result that carried it)``."""
+    names: list[str] = []
+    seen = False
+    after = 0
+    for e in transcript:
+        if not isinstance(e, Mapping):
+            continue
+        message = e.get("message")
+        blocks = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            if e.get("type") == "assistant" and block.get("type") == "tool_use":
+                names.append(str(block.get("name") or ""))
+                if seen:
+                    after += 1
+            elif e.get("type") == "user" and block.get("type") == "tool_result":
+                if UNMATCHED_LINE_MARKER in json.dumps(block.get("content") or ""):
+                    seen = True
+    return names, seen, after
 
 
 def topic_reads(events: Sequence[Mapping[str, Any]], memory_dir: Path) -> list[str]:
@@ -388,6 +464,30 @@ def run_native(
             return record, memory_loaded, memory_dir
         finally:
             shutil.rmtree(project_dir, ignore_errors=True)
+
+
+def ship_memory_facts(
+    record: RolloutRecord, config_dir: Path, memory_dir: Path | None
+) -> tuple[bool, tuple[int | None, bool | None, bool | None]]:
+    """For a ship arm: ``(auto memory loaded, (index lines loaded, index truncated,
+    memory touched))`` read from the session's own init event and memory attachment.
+    With *memory_dir* None (auto memory off) it reports whether any auto memory loaded
+    at all, which must be False. Removes the rendered project directory afterwards."""
+    init = _init_event(record.transcript)
+    auto = ((init.get("memory_paths") or {}).get("auto")) or ""
+    if memory_dir is None:
+        return bool(auto), (None, None, None)
+    loaded = bool(auto) and Path(auto).resolve() == memory_dir.resolve()
+    lines: int | None = None
+    truncated: bool | None = None
+    session_id = init.get("session_id")
+    if session_id:
+        for path, content in read_loaded_memory_files(config_dir, str(session_id)).items():
+            if path.endswith("MEMORY.md"):
+                lines, truncated = index_load_facts(content)
+    touched = memory_dir_touched(record.transcript, memory_dir)
+    shutil.rmtree(memory_dir.parent, ignore_errors=True)
+    return loaded, (lines, truncated, touched)
 
 
 def reduce_native(record: RolloutRecord, memory_dir: Path) -> bool:
@@ -628,6 +728,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         corpus, _wiki, cache_dir, hook_home = _prepare_corpus(
             args.corpus_scale, root / "corpus", args.search_backend
         )
+        if any(a in SHIP_ARMS for a in arms):
+            # The shipped hook reads linked pages from ``$HOME/knowledge/wiki``; the
+            # eval's hook home is a throwaway HOME, so point that at the corpus.
+            hook_home.mkdir(parents=True, exist_ok=True)
+            (hook_home / "knowledge").symlink_to((root / "corpus").resolve())
         if args.probes:
             probe_ids = [p.strip() for p in args.probes.split(",") if p.strip()]
         elif args.probe_set == "stage2":
@@ -652,6 +757,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     allowed_tools=tuple(f"mcp__{name}" for name in servers),
                     env=P_ENV,
                 )
+            elif arm in SHIP_ARMS:
+                hosts[arm] = HostConfig(
+                    name=arm,
+                    claude_md=shipped_instruction_text(),
+                    env=P_ENV if arm == "SOFF" else {},
+                )
             elif arm in INSTRUCTION_ARMS:
                 hosts[arm] = HostConfig(name=arm, claude_md=INSTRUCTION_TEXT, env=P_ENV)
             else:
@@ -675,6 +786,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe = _find_probe(corpus, probe_id)
             model = MODELS[model_key]
             memory_loaded: bool | None = None
+            ship_facts: tuple[int | None, bool | None, bool | None] = (None, None, None)
             extractor: list[str] = []
 
             def push_context(knowledge_root: Path, hook_home_: Path, query: str, **kw: Any) -> str:
@@ -701,6 +813,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     reached = reduce_native(record, mdir)
                     failure = None if memory_loaded else "MEMORY.md was not loaded"
                 else:
+                    host = hosts[arm]
+                    ship_dir: dict[str, Path] = {}
+                    if arm == "SON":
+
+                        def render_memory(cwd: Path, _dir: dict[str, Path] = ship_dir) -> None:
+                            mdir_ = native_memory_dir(config_dir, cwd)
+                            render_auto_memory(notes_from_corpus(corpus), mdir_)
+                            _dir["memory"] = mdir_
+
+                        host = dataclasses.replace(host, on_scratch_cwd=render_memory)
                     record = run_push_breadcrumb_pull(
                         probe,
                         root / "corpus",
@@ -711,10 +833,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         model=model,
                         timeout=args.timeout,
                         context_fn=push_context,
-                        host_config=hosts[arm],
+                        host_config=host,
                     )
                     reached = RECALL_TOOL_NAME in _assistant_tool_uses(record.transcript)
                     failure = record.harness_failure
+                    if arm in SHIP_ARMS:
+                        memory_loaded, ship_facts = ship_memory_facts(
+                            record, config_dir, ship_dir.get("memory")
+                        )
+                        if arm == "SON" and not memory_loaded and failure is None:
+                            failure = "MEMORY.md was not loaded"
+                        if arm == "SOFF" and memory_loaded and failure is None:
+                            failure = "auto memory loaded in the memory-off arm"
                 correct = grade_correctness(record, probe, corpus)
                 content = content_correct(record, probe, corpus)
                 cost = _result_cost(record.transcript)
@@ -733,8 +863,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     content,
                     extractor[-1] if extractor else None,
                     args.corpus_scale,
-                    *index_facts(record),
-                    memory_touched_fact(record),
+                    *(
+                        ship_facts
+                        if arm in SHIP_ARMS
+                        else (*index_facts(record), memory_touched_fact(record))
+                    ),
+                    record.turn_count,
+                    *run_shape(record.transcript),
                 )
             except subprocess.TimeoutExpired:
                 row = RunRow(
