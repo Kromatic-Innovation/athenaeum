@@ -444,6 +444,7 @@ class TestRecallInstructionLine:
         (home / ".claude").mkdir(parents=True)
         env = {
             "HOME": str(home),
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / "cache"),
             "PATH": "/usr/bin:/bin",
             "EXAMPLES": str(EXAMPLE_CLAUDE_MD.parent),
         }
