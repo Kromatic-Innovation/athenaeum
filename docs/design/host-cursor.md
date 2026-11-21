@@ -25,7 +25,7 @@ re-check §3 before building on a claim older than about three months (§9).
 
 | Surface | How it reaches MCP | Needs athenaeum#2199? | Best recall available |
 |---|---|---|---|
-| **Cursor desktop** (the editor's agent) | Launches **local stdio** servers from `.cursor/mcp.json` or `~/.cursor/mcp.json` | **No** | Session-start context snapshot (`sessionStart` hook) plus instructed recall (a rule). Per-turn push is **not available as documented** (§3.3). |
+| **Cursor desktop** (the editor's agent) | Launches **local stdio** servers from `.cursor/mcp.json` or `~/.cursor/mcp.json` | **No** | Session-start context snapshot (`sessionStart` hook) plus instructed recall (a rule). Per-turn push is **not documented**; it works in the interactive CLI (§3.4), and the editor was not observed. |
 | **Cursor CLI** (`agent`) | Same MCP config as the editor | **No** | Same as desktop, subject to the probe (§3.6) |
 | **Cloud agents** (web, iOS, Slack, GitHub, Linear, API) | MCP inside a cloud VM; cannot reach the user's machine | **Yes** | Explicit tools only. `sessionStart` and user-level hooks do not run there. Non-goal for this epic (§5.4). |
 
@@ -33,22 +33,26 @@ re-check §3 before building on a claim older than about three months (§9).
 
 - Cursor desktop and the CLI are working stdio hosts today. They need nothing
   from remote mode.
-- **True auto-recall is not possible on Cursor as documented.** Cursor's
-  per-prompt hook, `beforeSubmitPrompt`, can allow or block a prompt but
-  cannot add context to it. The only documented injection points are
-  `sessionStart` (once per conversation, no prompt) and `postToolUse` (after
-  a tool call). An `~operator` probe must still check one undocumented path
-  before this is final (§3.4, item 3).
+- **Per-turn push is not documented, but it works in the interactive CLI.**
+  Cursor's per-prompt hook, `beforeSubmitPrompt`, is documented as able to
+  allow or block a prompt but not add context to it. The documented injection
+  points are `sessionStart` (once per conversation, no prompt) and
+  `postToolUse` (after a tool call). The athenaeum#2395 probe found the
+  undocumented path: a Claude-format `UserPromptSubmit` hook's
+  `hookSpecificOutput.additionalContext` reaches the model every turn (§3.4).
+  It does not run in `--print` mode, and the editor was not observed.
 - What Cursor can honestly get: every MCP tool by explicit call, a **context
   snapshot** injected by the host at session start, and **instructed recall**
   through an always-applied rule.
 
 **Hazard found, and it is worse than Grok's.** Cursor runs Claude Code's hooks
 from `~/.claude/settings.json` **by default**, and maps `UserPromptSubmit` to
-`beforeSubmitPrompt`, whose payload carries `prompt` but no `session_id`. So
-every existing athenaeum hook user who opens Cursor records a push under
-`session_id="unknown"` that no model ever sees (§4). That is the most urgent
-work in the epic.
+`beforeSubmitPrompt`, whose payload carries `prompt` and `session_id` (the
+Cursor conversation id) but names itself `hook_event_name:
+"beforeSubmitPrompt"`. So every existing athenaeum hook user who opens Cursor
+runs the Claude Code adapter on a host it was not written for, records the
+turn under the `claude-code` harness, and (in the interactive CLI) has the
+context reach the model (§4). That is the most urgent work in the epic.
 
 ---
 
@@ -111,6 +115,9 @@ Legend:
 - **R**: reported by a third party, including Cursor's community forum, but
   not stated in Cursor's docs.
 - **I**: inferred by this design and not observed.
+- **O**: observed by the athenaeum#2395 probe on 2026-11-20, on Cursor CLI
+  `2026.11.19-f005e9d`, macOS (arm64), Pro plan, in the interactive CLI
+  (the editor was not observed). An O line replaces the I line it settles.
 
 ### 3.1 Local stdio MCP
 
@@ -128,9 +135,12 @@ Legend:
   are assumed unsupported. Steering through them (athenaeum#2387's mechanism)
   is not counted on for Cursor.
 - **I.** The historical 40-tool cap is no longer documented. athenaeum
-  registers 15 tools, so it is not a constraint either way.
-- **I.** Whether `type: "stdio"` is required, or inferred from `command` as
-  the current `clients.md` example assumes, is unverified (probe, §3.6).
+  registers fewer tools than that, so it is not a constraint either way.
+- **O.** The CLI loaded a server with `type: "stdio"` and one without it
+  (the `clients.md` shape), and both listed every tool athenaeum 0.28.0
+  registers (18, not 15). `type` is inferred from `command` and is not
+  required. A server needs a one-time approval (`agent mcp enable <name>`, or
+  `--approve-mcps`) before it loads. Project `.cursor/mcp.json` was honoured.
 - **I.** Cursor does not read Claude Code's MCP registration (`~/.claude.json`
   or `.mcp.json`); no Cursor page mentions it. A user needs a Cursor entry of
   their own.
@@ -184,10 +194,16 @@ Legend:
   page)
 - **I.** No changelog or release-note entry adds injection to
   `beforeSubmitPrompt`. **Per-turn push is therefore not available as
-  documented.** One undocumented path remains (§3.4).
-- **I.** Because `sessionStart` is fire-and-forget, a slow hook may lose the
-  race with the first turn. Whether its `additional_context` reliably lands
-  is unobserved (probe).
+  documented.** The undocumented path in §3.4 does work (O there).
+- **O.** A native `sessionStart` hook printing `{"additional_context": ...}`
+  reached the model on the first turn, in `--print` and in the interactive
+  CLI. The CLI waited for the hook rather than racing it: a hook that slept
+  3, 10, 30, 55 and 59 seconds still landed, and one that slept 65 and 130
+  seconds did not (the CLI proceeded at about 60 seconds). The effective
+  default timeout is therefore about 60 seconds. The payload's
+  `hook_event_name` is `"sessionStart"`.
+- **O.** In `--print` mode (`agent -p`) `beforeSubmitPrompt` does not fire, for
+  native and Claude-format hooks alike. `sessionStart` and `sessionEnd` do.
 
 ### 3.4 Cursor runs Claude Code's configuration
 
@@ -207,15 +223,26 @@ Legend:
   de-duplicates it against `AGENTS.md`; <https://cursor.com/docs/release-notes>).
 - **V (absent).** The third-party page does not document the stdin payload a
   Claude-format hook receives, and says nothing about `additionalContext`.
-- **I.** The payload is Cursor's own schema: `prompt` and `conversation_id`,
-  `hook_event_name`, `cursor_version`, and **no `session_id`** on
-  `beforeSubmitPrompt`.
-- **I, open.** Whether a Claude-format `UserPromptSubmit` response's
-  `hookSpecificOutput.additionalContext` reaches the model. Cursor accepts the
-  nested format, but its native `beforeSubmitPrompt` has no field to map it
-  to. **If it does reach the model, Cursor has real auto-recall through the
-  existing adapter.** That is the single most valuable fact for the probe to
-  settle.
+- **O.** The payload is Cursor's own schema, and it **does** carry
+  `session_id` (equal to `conversation_id`) on `beforeSubmitPrompt`. It also
+  carries `prompt`, `attachments`, `generation_id`, `model`,
+  `hook_event_name`, `cursor_version`, `workspace_roots`, `user_email` and
+  `transcript_path` (null). `hook_event_name` is the native name
+  (`"beforeSubmitPrompt"`, `"sessionStart"`, `"sessionEnd"`), never the
+  Claude Code name. Hook processes get `CURSOR_VERSION`,
+  `CURSOR_PROJECT_DIR`, `CLAUDE_PROJECT_DIR`, `CURSOR_USER_EMAIL`,
+  `CURSOR_INVOKED_AS` and `CURSOR_RIPGREP_PATH`. `CURSOR_TRANSCRIPT_PATH` was
+  not set.
+- **O.** Claude-format hooks fire from both project `.claude/settings.json`
+  and user `~/.claude/settings.json`, for `UserPromptSubmit`, `SessionStart`
+  and `SessionEnd`, **only when the matcher group has a `matcher` key**
+  (`"matcher": ""` is enough). A group without one is skipped silently.
+- **O. A Claude-format `UserPromptSubmit` response's
+  `hookSpecificOutput.additionalContext` reaches the model.** A stub printed a
+  secret word that the model could not otherwise know. The model answered it
+  on the first turn, and on a second turn after the stub's output changed.
+  **Cursor has per-turn push through the existing adapter** in the interactive
+  CLI. `--print` mode does not run the hook, and the editor was not observed.
 - **R.** A forum report against Cursor 2.6.11 says `.claude/settings.json`
   hooks never fired. <https://forum.cursor.com/t/claude-hooks-dont-work/153614>
 
@@ -234,6 +261,13 @@ Legend:
   mid-conversation is not seen until a new chat. This favours `sessionStart`
   injection over a rule-referenced file for the snapshot, and makes a rule
   the natural home for an instruction, not for data.
+- **O.** A project `.cursor/rules/*.mdc` with `alwaysApply: true` was applied
+  on a fresh chat. After the rule file was edited between two turns of one
+  chat, the model still answered with the old text. An `@path` reference to a
+  file inside a rule body was not inlined into the model's context. An
+  `alwaysApply` rule telling the model to call `recall` first made it call
+  `recall` on a fresh chat, on a question with no bearing on the corpus;
+  without the rule it did not.
 
 ### 3.6 Cloud agents, CLI and plans
 
@@ -270,14 +304,15 @@ invoked on every Cursor prompt. Following
 
 1. `_witness_turn` runs first. With the witness ledger enabled, a Cursor turn
    is recorded under the `claude-code` harness ledger.
-2. `_read_hook_input` finds `prompt` (Cursor documents it) and no `session_id`
-   (Cursor sends `conversation_id`). The session falls back to `"unknown"`.
+2. `_read_hook_input` finds `prompt` and `session_id` (the probe observed
+   both; `session_id` equals `conversation_id`). The `"unknown"` fallback is
+   not taken.
 3. `build_context_for_turn` runs, records a push through
-   `record_context_push`, and appends to the one shared `unknown` seen-file.
-   Unless the open question in §3.4 resolves the other way, the model never
-   sees that context. **Every Cursor turn is a phantom push** that inflates
-   push-precision denominators, and the `unknown` seen-file then suppresses
-   those pages on every other unknown-session turn.
+   `record_context_push`, and appends to the seen-file for the Cursor
+   conversation id. In the interactive CLI the context does reach the model
+   (§3.4), so the push is real, not phantom. It is still attributed to the
+   `claude-code` harness and to a host the adapter was not written for. In
+   `--print` mode the hook does not run at all.
 4. The recall spends up to the foreground hook budget on each Cursor prompt.
 
 On Grok Build the phantom push needed an undocumented `prompt` field. On
@@ -345,13 +380,14 @@ Cloud agents (remote) ── HTTPS ──► [athenaeum#2199 remote mode]   (non
 
 | Mechanism | Tier | Where | What to call it |
 |---|---|---|---|
-| Per-turn hook push | 1 | Not documented. Possible only if the probe shows Claude-format `additionalContext` reaching the model | "Auto-recall" only if the probe proves it |
+| Per-turn hook push | 1 | Not documented, but observed in the interactive CLI (§3.4): Claude-format `additionalContext` reaches the model. Not in `--print` mode. Editor not observed | "Auto-recall", for the interactive CLI |
 | `sessionStart` `additional_context`, computed fresh per conversation | 2 (host-loaded) | Desktop, CLI | "Context snapshot" (session-start) |
 | An `alwaysApply` rule telling the model when to call `recall` | 3, instructed | Desktop, CLI, cloud agents (project rules) | "Instructed recall". Measured, not assumed |
 | `recall` by the model's own choice | 3 | Everywhere MCP reaches | Explicit tools |
 
 The epic title and `clients.md` must follow this table. "Including
-auto-recall" is not a claim Cursor can carry today.
+auto-recall" is a claim Cursor can carry only for the interactive CLI, until
+the editor is observed.
 
 ### 5.3 Security model
 
@@ -411,9 +447,10 @@ athenaeum#2382, athenaeum#2383 and athenaeum#2384:
    hazard (§4) affects existing Claude Code users today, whether or not the
    project acts on Cursor.
 2. **A `beforeSubmitPrompt` adapter that mirrors `claude_code_adapter`.**
-   Rejected unless the probe shows injected context reaching the model. The
-   documented output is allow or block, so it would record pushes no model
-   sees.
+   Rejected as documented (allow or block only), but the probe shows injected
+   context reaching the model through the Claude-format path (§3.4), so a
+   Cursor-native adapter on that path is no longer ruled out for the
+   interactive CLI.
 3. **Inject on `postToolUse`.** Rejected. It fires after tool calls, not per
    turn. A turn with no tool call gets nothing, and a turn with many calls
    gets repeated context. It is neither auto-recall nor a clean snapshot.
