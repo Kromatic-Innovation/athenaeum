@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
+
 ### Added
 
 - `athenaeum push-metrics pull-diagnosis` counts, per turn window that got a proactive push, how often the agent pulled: `recall`/`read_entity` calls, reads of a native auto-memory topic file (the `MEMORY.md` index and `Bash` reads counted apart), and `ToolSearch` calls for `recall`. It also counts, per session, whether `recall` was deferred behind tool search, whether its server failed, and whether it was called. Counts and rates only; read-only, no model calls. The diagnosis note `docs/measurements/pull-diagnosis-2026-11-21.md` sets out what the published counts already settle, and leaves the deciding counts for a run of this reader on the deployment (athenaeum#3032)

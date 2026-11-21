@@ -114,6 +114,7 @@ does not answer.
 - [Memory taxonomy](design/memory-taxonomy.md)
 - [Provenance shape](design/provenance-shape.md)
 - [One way in, one way out](design/one-way-in-one-way-out.md) — the two-path invariant.
+- [Method rejections](design/method-rejections.md) — approaches considered and declined, moved out of the north star.
 - [Field corrections](design/field-corrections.md)
 - [Note corrections](design/note-corrections.md) — why a CLI pass, not a fast-path record
   or a `decompose-page` extension.

@@ -5,7 +5,11 @@
 **Status:** PURPOSE DOCUMENT. This is the canonical statement of athenaeum's
 intent and operating principles, ratified by the operator in the 2026-08-14
 intake-architecture review and amended by the operator on 2026-10-30 (§2.2's
-resolution rule, §2.7's extension to schema, and the new §2.12). Other
+resolution rule, §2.7's extension to schema, and the new §2.12) and again on
+2026-11-20 (§3's raw-intake rule restated as shipped behaviour and three
+method rejections moved to a design note, §2.1 and §2.12 corrected to shipped
+behaviour, and §2.12 amended for the 2026-11-19 federation ruling, with
+athenaeum#2809). Other
 documents implement pieces of it and
 reference this page rather than restating it. When a design dispute has no
 obvious winner, this page is the tie-breaker.
@@ -53,7 +57,11 @@ the document that implements it.
 Every write enters as raw intake compiled by a single writer (the
 librarian); every read leaves through the recall/read interface. No caller
 opens a store directly. This is what makes any rule about the data statable
-and enforceable in one place. Canonical:
+and enforceable in one place.
+
+The read interface is not limited to compiled pages. Recall also searches
+raw intake and labels each such hit `[uncompiled]` (§3), so "one way out"
+means one interface, not "compiled knowledge only". Canonical:
 [`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md).
 
 ### 2.2 One ladder — conformance sets depth, never admission
@@ -206,8 +214,9 @@ rules and manifests).
 The librarian is the party responsible for the library being organised:
 nothing misfiled, nothing invented. Raw intake is untrusted as to its
 *truth*, not only its shape (§2.7). So every value or fact the librarian
-files is checked, before it is absorbed, for consistency with what the store
-already holds and with the source it cites. Inconsistencies look like:
+files is checked for consistency with what the store already holds and with
+the source it cites. The check runs before the value is absorbed, with one
+exception (below). Inconsistencies look like:
 
 - a contact value already attributed to someone else;
 - an address whose local part names a different person;
@@ -227,24 +236,27 @@ migrations, repairs, folds, compiles. A value moved by a repair is filed
 again, and is checked again. There is no back door around verification —
 it is part of what one way in (§2.1) means.
 
+**Federation exception (operator ruling 2026-11-19).** When a value reaches a
+store through sync or a raise (`docs/design/federation-multi-writer-sync.md`,
+`docs/design/federation-raise-retract.md`), another checked writer has already
+filed it. For such a value the filing checks may run right after it is
+published instead of before. A failed check always opens a correction in the
+store's decision queue, and it never holds the publish: the fix is an
+ordinary follow-up commit. This is a change of timing only. The value is
+still checked, and a value a writer files for the first time is still checked
+before it is absorbed.
+
 ## 3. What we deliberately do not do
 
-Durable rejections — each was considered and declined for a reason that
-outlives the session that considered it:
+Durable rejections of the vision — each was considered and declined for a
+reason that outlives the session that considered it. Rejections about *method*
+(how the engine reaches the vision, which can change without amending the
+purpose) live in
+[`docs/design/method-rejections.md`](design/method-rejections.md): per-source
+parsers or typed interfaces, an LLM as the shape detector, and a separate
+short-term memory store.
 
-- **Per-source parsers or typed interfaces in code.** A handler per producer
-  forks the seam: N interfaces to keep in sync and per-user wiki structure
-  hardcoded into a shipped library. Recurring shapes get rules (§2.7).
 - **Auto-adopted rules.** Persistent-influence injection path (§2.7).
-- **An LLM as the shape detector.** Deterministic fingerprint matching is
-  free and sufficient for machine-emitted shapes; a model in the match path
-  reintroduces per-file cost exactly where the design removes it — and puts
-  untrusted content in charge of routing.
-- **A separate short-term memory store.** Duration is frontmatter in the one
-  wiki (§2.5); a second store forks the read seam.
-- **Indexing raw intake directly.** Raw is unresolved and
-  contradiction-unchecked; surfacing it is the *wrong information* failure
-  direction.
 - **Action-policy predicates in the memory layer.** Consumers own their
   policies (§2.6).
 - **Escalating by price instead of by measured accuracy.** A question goes to
@@ -252,11 +264,21 @@ outlives the session that considered it:
   calibrated confidence (§2.2).
 - **Unverified internal writes.** Migrations, repairs, folds and compiles
   file values like any other writer, and are checked like any other
-  writer (§2.12).
+  writer (§2.12). For a value another checked writer already filed, the check
+  may run right after publishing (§2.12, federation exception).
 - **Excluding a semantically live source from intake.** If processing a
   source is too expensive, the answer is a cheaper tier for it — rules, a
   courtesy request to the producer, or both — never a locked door. Exclusion
   is reserved for content that is not memory at all (§2.3).
+
+What the engine does with raw intake: it is recallable. Recall searches the
+raw intake folders (`recall.extra_intake_roots`, three by default), labels
+each hit `[uncompiled]`, and ranks it below every compiled page regardless of
+its relevance score (`docs/modules/recall.md`, athenaeum#2313). A note one
+agent saves is therefore available to another the same day, before the next
+compile, and it can never outrank a compiled page. That serves the *right
+information, too late* failure direction (§1) without presenting raw as
+checked knowledge, which would be the *wrong information* one.
 
 ## 4. Using this document
 
