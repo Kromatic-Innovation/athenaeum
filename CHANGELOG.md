@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- The `claude` CLI not-logged-in error now leads with the fix (run `claude` then `/login`, or set `ANTHROPIC_API_KEY` and use `llm.provider: api`) and puts the CLI's own output after it as detail, cut at a word boundary with `...` when long instead of mid-token (athenaeum#3044)
 - Docs: the north star states shipped behaviour for raw intake (recallable, labelled `[uncompiled]`, ranked below compiled pages, so a note is available the same day) instead of forbidding it. Three method rejections (per-source parsers, an LLM as the shape detector, a separate short-term store) move to `docs/design/method-rejections.md`. Section 2.1 says the read interface includes uncompiled hits, and section 2.12 allows the filing checks to run right after publish for a value another checked writer already filed, with a failure opening a correction and never holding the publish. `docs/use-cases.md` section 3 now says federation is being built and names the four design notes and epic athenaeum#2631 (athenaeum#2809)
 
 ### Added
