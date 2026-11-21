@@ -428,6 +428,15 @@ The excerpt is bounded three ways:
   cap Claude Code would show the agent only a file path and a preview, so the
   excerpt is shortened, or left out, to stay under it.
 
+After the excerpt comes a short block of linked pages, under a
+`Linked from the matches above:` line: the pages the matched pages'
+`related` links point to, as `name — description` lines. The answer to a task
+is often one link away from what the message matched, so these name it
+without a lookup. The block lists at most six pages, never one the bullets
+already name, and the links of the best match come first. A store whose pages
+carry no `related` links gets no block. It takes only the room the token budget
+and the 10,000-character cap leave after the bullets and the excerpt.
+
 The push gives the agent a pointer; the agent still has to follow it when the
 excerpt is not enough. Add this line to your instruction file
 (`~/.claude/CLAUDE.md` for every project, or a project's own `CLAUDE.md`):

@@ -216,6 +216,38 @@ picks up a floor from its environment (the launcher's environment, or
 is yaml-only, so it reaches the hook only through a caller that passes the
 loaded config.
 
+## Per-turn push: the linked neighbours of every hit
+
+The per-turn push ends with a block of the pages the matched pages link to,
+under a `Linked from the matches above:` line, one `name — description` line
+each. The answer to a task is often one `related` link away from what the
+message matched; this block names that page without a `recall` round trip.
+
+- The neighbours are the targets of the final candidates' `related` rows,
+  pooled across every candidate and deduplicated. A page the bullets already
+  name is never listed again.
+- Order is fixed: candidates in rank order, and each candidate's `related` rows
+  in frontmatter order, so the neighbours of a higher-ranked hit come first.
+- At most six lines. A target that names no page, a retired, tombstoned or
+  superseded page, or a page with no `name` is left out, and at most 24 targets
+  are looked up per push. A hit with no `related` rows adds nothing, and with no
+  neighbours there is no block.
+- It goes after the excerpt and takes only what the push-token budget and the
+  10,000-character hook output cap leave. A line that does not fit is skipped,
+  never cut, and a later shorter one is still tried. Its token cost is added to
+  the top candidate's `token_cost`.
+- The edges are read from the pages themselves, so it needs a `wiki_root`.
+  `build_context_for_turn` passes `neighbour_lines=6` (the packaged Claude Code
+  hook passes a wiki root); a direct `build_context` call defaults to `0` and
+  renders none. Neighbours are not added to the session's seen list, so a page
+  shown only as a neighbour can still be pushed as a match later.
+
+Each push ledger row written by a push that asked for neighbours records how
+many lines it carried as `neighbour_lines` (`0` when none were linked or none
+fit). Rows written by a push that did not ask, and every row written before the
+field existed, have no such key. `athenaeum push-metrics tail` projects it when
+present.
+
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the
