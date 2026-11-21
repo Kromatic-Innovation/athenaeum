@@ -14,7 +14,7 @@
     "knowledgePath": {
       "type": "string",
       "title": "Knowledge base path",
-      "description": "Where athenaeum reads/writes raw observations and the compiled wiki. Default matches athenaeum serve's own --path default (~/knowledge). See this plugin's README, 'Supplying a real path', for why this value is NOT substituted into .mcp.json automatically.",
+      "description": "Where athenaeum reads/writes raw observations and the compiled wiki. Passed to athenaeum serve --path through .mcp.json; created on first start if missing. Default matches athenaeum serve's own --path default (~/knowledge).",
       "default": "~/knowledge"
     }
   },
