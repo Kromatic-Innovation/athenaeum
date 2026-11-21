@@ -8701,9 +8701,15 @@ def _run_store_intake_phase(ctx: RunContext) -> None:
     """
     if ctx.dry_run:
         return
+    import importlib
+
     from athenaeum.store_intake_dispatch import dispatch_store_intake
 
     try:
+        # The retract handler (L4) sits on top of retire_pages, which imports this
+        # module; it is loaded by name here rather than imported so the import
+        # graph keeps no librarian -> raise_retract -> retire_pages -> librarian loop.
+        importlib.import_module("athenaeum.raise_retract").register_retract_handler()
         report = dispatch_store_intake(
             ctx.knowledge_root, ctx.config, cache_dir=_resolve_cache_dir(None)
         )
