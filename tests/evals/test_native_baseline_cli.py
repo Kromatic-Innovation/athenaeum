@@ -248,3 +248,39 @@ def test_every_hit_neighbour_push_pools_links_and_skips_named_pages() -> None:
     assert "  - Alpha —" not in out.split("Linked from the matches above:")[1]
     assert nb.shape_push("PLAEI", push, corpus).count("excerpt of") == 1
     assert nb.shape_push("PLA", "[k]\n  - Nobody — x", corpus) == "[k]\n  - Nobody — x"
+
+
+def test_ship_arms_registered_and_instruction_is_the_shipped_section() -> None:
+    """athenaeum#3073: the ship arms run the real hook unshaped, with the shipped
+    ``CLAUDE.md.example`` recall instruction."""
+    from tests.evals import native_baseline_cli as nb
+
+    assert set(nb.SHIP_ARMS) <= set(nb.PUSH_ARMS) <= set(nb.ARMS)
+    text = nb.shipped_instruction_text()
+    assert text.startswith("### Per-turn push")
+    assert "call `recall` yourself" in text
+    assert "Auto-remember" not in text
+    assert nb.shape_push("SON", "push", object()) == "push"
+
+
+def test_run_shape_reads_unmatched_line_and_calls_after_it() -> None:
+    from tests.evals.native_baseline_cli import UNMATCHED_LINE_MARKER, run_shape
+
+    def use(name: str) -> dict:
+        return {
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": name, "input": {}}]},
+        }
+
+    text = [{"type": "text", "text": UNMATCHED_LINE_MARKER}]
+    result = {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "content": text}]},
+    }
+    assert run_shape([use("recall"), result, use("recall"), use("Read")]) == (
+        ["recall", "recall", "Read"],
+        True,
+        2,
+    )
+    assert run_shape([use("recall")]) == (["recall"], False, 0)
+    assert run_shape([{"type": "user", "message": "plain string"}]) == ([], False, 0)

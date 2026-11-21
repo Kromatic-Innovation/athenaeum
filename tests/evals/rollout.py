@@ -1648,6 +1648,10 @@ class HostConfig:
     claude_md: str | None = None
     #: Extra environment variables for the spawned session.
     env: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    #: Called with the session's fresh scratch working directory before the
+    #: spawn (athenaeum#3073: renders native auto memory next to the push). It
+    #: returns a cleanup callable, run after the session, or ``None``.
+    on_scratch_cwd: Callable[[Path], Callable[[], None] | None] | None = None
 
 
 def build_pull_mcp_config(
@@ -2078,16 +2082,23 @@ def run_push_breadcrumb_pull(
             spawn_env = {**os.environ, **host_config.env}
             if host_config.tool_search is not None:
                 spawn_env["ENABLE_TOOL_SEARCH"] = "true" if host_config.tool_search else "false"
-        proc = subprocess.run(
-            argv,
-            input=prompt_text,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            cwd=scratch_cwd,
-            env=spawn_env,
-        )
+        cleanup = None
+        if host_config is not None and host_config.on_scratch_cwd is not None:
+            cleanup = host_config.on_scratch_cwd(scratch_cwd)
+        try:
+            proc = subprocess.run(
+                argv,
+                input=prompt_text,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                cwd=scratch_cwd,
+                env=spawn_env,
+            )
+        finally:
+            if cleanup is not None:
+                cleanup()
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())
     # The breadcrumb is recorded as transcript[0] — the SAME
