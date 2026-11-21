@@ -123,9 +123,13 @@ recalls.
 **What does separate them: the query names something no returned page
 mentions.** Shipped as a signal in the `recall` result
 (`athenaeum.recall_overflow.unmatched_name_terms` and
-`render_unmatched_names_line`, wired into the MCP `recall` renderer). When a
-capitalised query word of three or more letters that is not a question word
-appears in none of the rendered result pages, one line is appended:
+`render_unmatched_names_line`, wired into the MCP `recall` renderer). A
+name-like query word is one that is capitalised, three or more letters long,
+and not a question or request word. An all-capitals acronym never counts, and
+neither does a sentence-initial capital followed by lowercase prose. Both
+exclusions are conservative on purpose: a false line tells the agent to stop,
+while a missed one only costs another search. When a name-like word appears in
+none of the rendered result pages, one line is appended:
 
 > No page shown above mentions "Yusuf" or "Adeyemi". If the question is about
 > that name, the store most likely has no page on it: searching again for part

@@ -84,7 +84,8 @@ _QUERY_WORD_RE = re.compile(r"[^\W\d_][\w'\u2019-]*")
 _NON_NAME_WORDS = frozenset(
     "what who whom whose which when where why how does did do is are was were "
     "can could should would will has have had the and for any all tell find "
-    "list show give about from with into".split()
+    "list show give about from with into summarize summarise explain describe "
+    "quote compare check search look get fetch recall lookup please".split()
 )
 
 #: Shortest query word treated as a name. Two-letter words (``HR``, ``IT``,
@@ -184,8 +185,11 @@ def unmatched_name_terms(query: str, shown_text: str) -> list[str]:
 
     Issue athenaeum#3033. A name-like word is one that starts with a capital
     letter, is at least :data:`_MIN_NAME_LEN` characters long, and is not a
-    question or request word (:data:`_NON_NAME_WORDS`). A trailing
-    possessive (``'s``) is dropped. Matching is case-insensitive substring
+    question or request word (:data:`_NON_NAME_WORDS`). An all-capitals
+    acronym is never one, and neither is a sentence-initial capital followed
+    by a lowercase word. Both exclusions are deliberately conservative: a
+    false line tells the agent to stop, while a missed one only costs another
+    search. A trailing possessive (``'s``) is dropped. Matching is case-insensitive substring
     matching against *shown_text*, which must be the text the agent will
     actually read -- the rendered result blocks -- so the check can only
     ever say something true about what was shown.
@@ -204,7 +208,18 @@ def unmatched_name_terms(query: str, shown_text: str) -> list[str]:
     haystack = shown_text.casefold()
     out: list[str] = []
     seen: set[str] = set()
-    for word in _QUERY_WORD_RE.findall(query):
+    words = _QUERY_WORD_RE.findall(query)
+    for index, word in enumerate(words):
+        if word.isupper() and len(word) > 1:
+            # An acronym (``PTO``, ``HR``): pages often spell it out, so its
+            # absence is no evidence the store lacks the thing.
+            continue
+        if index == 0 and len(words) > 1 and not words[1][:1].isupper():
+            # A sentence-initial capital followed by lowercase prose
+            # ("Summarize the policy", "Bramfield retainer renewal") is not
+            # reliably a name. Skipping it can only miss a signal, never add
+            # a false one.
+            continue
         term = word.rstrip("'\u2019-")
         for suffix in ("'s", "\u2019s"):
             if term.casefold().endswith(suffix):

@@ -55,7 +55,7 @@ _SHOWN = (
         # Only the absent half of a partly matched name is reported.
         ("Amir Adeyemi", ["Adeyemi"]),
         # Matching is case-insensitive against the shown text.
-        ("BRAMFIELD terms", []),
+        ("who renews bramfield or Bramfield", []),
     ],
 )
 def test_unmatched_name_terms(query: str, expected: list[str]) -> None:
@@ -77,8 +77,38 @@ def test_question_words_and_short_words_are_not_names() -> None:
 
 def test_possessive_is_dropped_before_matching() -> None:
     assert unmatched_name_terms("What is Amir's role?", _SHOWN) == []
-    assert unmatched_name_terms("Adeyemi's manager", _SHOWN) == ["Adeyemi"]
-    assert unmatched_name_terms("Adeyemi’s manager", _SHOWN) == ["Adeyemi"]
+    assert unmatched_name_terms("who manages Adeyemi's team", _SHOWN) == ["Adeyemi"]
+    assert unmatched_name_terms("who manages Adeyemi’s team", _SHOWN) == ["Adeyemi"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Seer review on athenaeum#3033's PR: a capitalised imperative or an
+        # acronym a page spells out must not read as a missing name.
+        "Summarize the parental leave policy",
+        "Explain the PTO policy",
+        "Describe how invoices are approved",
+        "what does the API return",
+        "PTO",
+    ],
+)
+def test_imperatives_and_acronyms_are_not_names(query: str) -> None:
+    assert unmatched_name_terms(query, _SHOWN) == []
+
+
+def test_sentence_initial_capital_before_prose_is_skipped_conservatively() -> None:
+    """A capital at the start of lowercase prose is not reliably a name, so
+    it is skipped even when it IS one: a missed line costs another search,
+    while a false one tells the agent to stop."""
+    assert unmatched_name_terms("Harrowgate payment terms", _SHOWN) == []
+    # The same name mid-query, or in a capitalised run, still fires.
+    assert unmatched_name_terms("payment terms for Harrowgate", _SHOWN) == ["Harrowgate"]
+    assert unmatched_name_terms("Harrowgate Industrial terms", _SHOWN) == [
+        "Harrowgate",
+        "Industrial",
+    ]
+    assert unmatched_name_terms("Summarize the Harrowgate file", _SHOWN) == ["Harrowgate"]
 
 
 def test_names_are_deduplicated_in_query_order() -> None:
