@@ -41,7 +41,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from tests.evals.corpus import _normalize_marker_for_match, answer_bearing_uids
+from tests.evals.corpus import (
+    SCALES,
+    Scale,
+    _normalize_marker_for_match,
+    answer_bearing_uids,
+)
 from tests.evals.host_config_cli import (
     _assistant_tool_uses,
     _prepare_corpus,
@@ -62,9 +67,14 @@ from tests.evals.rollout import (
     run_push_breadcrumb_pull,
 )
 
-ARMS = ("N", "P", "PE", "PH", "PEH", "PI", "PW", "T")
+# A 3,000-page scale, registered here rather than in ``corpus.SCALES`` so the grid's
+# own scale list and its dry-run pricing stay as they are (athenaeum#3066).
+SCALES.setdefault("medium3k", Scale("medium3k", total_pages=3_000, distractors_per_probe=2))
+ARMS = ("N", "P", "PE", "PH", "PEH", "PI", "PW", "T", "PEI", "PL", "PLEI", "PLA", "PLAEI")
 #: Arms that run through ``push_breadcrumb_pull`` (athenaeum push plus pull).
-PUSH_ARMS = ("P", "PE", "PH", "PEH", "PI", "PW")
+PUSH_ARMS = ("P", "PE", "PH", "PEH", "PI", "PW", "PEI", "PL", "PLEI", "PLA", "PLAEI")
+#: Push arms that also write the recall instruction into ``CLAUDE.md``.
+INSTRUCTION_ARMS = ("PI", "PEI", "PLEI", "PLAEI")
 #: Arms that run as native auto memory with no athenaeum MCP server or hook.
 NATIVE_ARMS = ("N", "T")
 ARM_LABELS = {
@@ -76,7 +86,22 @@ ARM_LABELS = {
     "PI": "breadcrumb + CLAUDE.md recall line",
     "PW": "breadcrumb + coding plugin",
     "T": "takeover (athenaeum-rendered auto memory)",
+    "PEI": "breadcrumb + excerpt + CLAUDE.md recall line (the athenaeum#3032 build)",
+    "PL": "breadcrumb + the top hit's linked neighbours",
+    "PLEI": "breadcrumb + excerpt + linked neighbours + CLAUDE.md recall line",
+    "PLA": "breadcrumb + the linked neighbours of every hit",
+    "PLAEI": "breadcrumb + excerpt + neighbours of every hit + CLAUDE.md recall line",
 }
+#: Neighbour lines a ``PLA`` push may carry in total (every hit's links pooled).
+NEIGHBOUR_LIMIT_ALL = 6
+#: Neighbours carried by a ``PL`` push: at most this many of the top hit's
+#: ``related`` pages, each as one ``name — description`` line like a breadcrumb.
+NEIGHBOUR_LIMIT = 3
+#: Claude Code loads at most this many lines of ``MEMORY.md`` at session start.
+INDEX_LOAD_LINE_CAP = 200
+#: Index order is shuffled (seeded) when the index is longer than the load cap,
+#: so the pages a probe needs land anywhere in it rather than first.
+INDEX_SHUFFLE_SEED = 11
 EXCERPT_CHARS = 600
 HINT_TEXT = (
     "To read any of these in full, call the MCP tool `mcp__athenaeum__recall` with a "
@@ -127,7 +152,10 @@ def notes_from_corpus(corpus: Any, *, with_links: bool = False) -> list[MemoryNo
     """
     names = {pg.uid: pg.name for pg in corpus.pages}
     notes = []
-    for pg in corpus.pages:
+    pages = list(corpus.pages)
+    if len(pages) > INDEX_LOAD_LINE_CAP:
+        random.Random(INDEX_SHUFFLE_SEED).shuffle(pages)
+    for pg in pages:
         description = _native_index_description(pg.body)
         if with_links and pg.related:
             linked = "; ".join(names[e.uid] for e in pg.related if e.uid in names)
@@ -169,6 +197,13 @@ class RunRow:
     content_correct: bool | None = None
     #: Which topic extractor the push hook ran (``model`` or ``regex``); None for native.
     extractor: str | None = None
+    #: Corpus scale, and for native arms how many lines of ``MEMORY.md`` Claude Code
+    #: loaded and whether it said the index was truncated.
+    scale: str | None = None
+    index_lines_loaded: int | None = None
+    index_truncated: bool | None = None
+    #: Native arms: any tool call on the memory directory (broader than ``reached``).
+    memory_touched: bool | None = None
 
 
 def _init_event(events: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -228,6 +263,45 @@ def content_correct(record: RolloutRecord, probe: Any, corpus: Any) -> bool | No
     return True
 
 
+def index_load_facts(loaded_index: str) -> tuple[int, bool]:
+    """``(index lines Claude Code loaded, whether it flagged truncation)`` from the
+    ``MEMORY.md`` text of the session's memory attachment. Truncation is read off
+    Claude Code's own ``WARNING:`` marker, never recomputed from the cap."""
+    truncated = "WARNING:" in loaded_index
+    lines = [ln for ln in loaded_index.splitlines() if ln.startswith("- ")]
+    return len(lines), truncated
+
+
+def index_facts(record: RolloutRecord) -> tuple[int | None, bool | None]:
+    """The native record's recorded index load facts, ``(None, None)`` for push arms."""
+    entry = record.transcript[0] if record.transcript else {}
+    native = entry.get("native_memory") if isinstance(entry, dict) else None
+    if not isinstance(native, dict):
+        return None, None
+    return native.get("index_lines_loaded"), native.get("index_truncated")
+
+
+def memory_dir_touched(events: Sequence[Mapping[str, Any]], memory_dir: Path) -> bool:
+    """Did the model use any tool on the memory directory (``Read``, ``Grep``, a
+    ``Bash`` ``ls``/``grep``, ...)? Wider than :func:`topic_reads`: a native
+    session can search the topic files on disk without opening one with ``Read``."""
+    needles = {str(memory_dir), str(memory_dir.resolve()), memory_dir.parent.name}
+    for e in events:
+        if e.get("type") != "assistant":
+            continue
+        for block in (e.get("message") or {}).get("content") or []:
+            if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                if any(n in json.dumps(block.get("input") or {}) for n in needles):
+                    return True
+    return False
+
+
+def memory_touched_fact(record: RolloutRecord) -> bool | None:
+    entry = record.transcript[0] if record.transcript else {}
+    native = entry.get("native_memory") if isinstance(entry, dict) else None
+    return native.get("memory_touched") if isinstance(native, dict) else None
+
+
 def run_native(
     probe: Any,
     corpus: Any,
@@ -278,9 +352,13 @@ def run_native(
             memory_loaded = bool(auto) and Path(auto).resolve() == memory_dir.resolve()
             loaded: dict[str, str] = {p: "" for p in topic_reads(parsed.transcript, memory_dir)}
             session_id = init.get("session_id")
+            index_lines: int | None = None
+            index_truncated: bool | None = None
             if session_id:
                 for path, content in read_loaded_memory_files(config_dir, str(session_id)).items():
-                    if not path.endswith("MEMORY.md"):
+                    if path.endswith("MEMORY.md"):
+                        index_lines, index_truncated = index_load_facts(content)
+                    else:
                         loaded.setdefault(path, content)
             record = RolloutRecord(
                 arm=Arm.NATIVE_INDEX,
@@ -293,7 +371,17 @@ def run_native(
                 recall_called=False,
                 injected_context_tokens=None,
                 turn_count=parsed.turn_count,
-                transcript=[{"native_memory": {"loaded_memory_files": loaded}}, *parsed.transcript],
+                transcript=[
+                    {
+                        "native_memory": {
+                            "loaded_memory_files": loaded,
+                            "index_lines_loaded": index_lines,
+                            "index_truncated": index_truncated,
+                            "memory_touched": memory_dir_touched(parsed.transcript, memory_dir),
+                        }
+                    },
+                    *parsed.transcript,
+                ],
                 mode="cli",
                 config_isolated=True,
             )
@@ -388,16 +476,66 @@ def _first_bullet_page(push: str, corpus: Any) -> Any:
     return None
 
 
+def _bullet_pages(push: str, corpus: Any) -> list[Any]:
+    """Corpus pages named by the ``  - name`` bullets of *push*, in order."""
+    names = {pg.name: pg for pg in corpus.pages}
+    pages = []
+    for line in push.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("-"):
+            page = names.get(stripped.lstrip("-").strip().split("—")[0].strip())
+            if page is not None and page not in pages:
+                pages.append(page)
+    return pages
+
+
+def _neighbours_of_every_hit(push: str, corpus: Any) -> list[str]:
+    """One block listing the ``related`` pages of every hit, deduplicated, never a
+    page the breadcrumb already names, at most :data:`NEIGHBOUR_LIMIT_ALL` lines."""
+    by_uid = {pg.uid: pg for pg in corpus.pages}
+    hits = _bullet_pages(push, corpus)
+    seen = {pg.uid for pg in hits}
+    lines: list[str] = []
+    for page in hits:
+        for edge in page.related:
+            neighbour = by_uid.get(edge.uid)
+            if neighbour is None or neighbour.uid in seen:
+                continue
+            seen.add(neighbour.uid)
+            description = _native_index_description(neighbour.body)
+            lines.append(f"  - {neighbour.name} — {description}")
+    if not lines:
+        return []
+    return ["Linked from the matches above:\n" + "\n".join(lines[:NEIGHBOUR_LIMIT_ALL])]
+
+
 def shape_push(arm: str, push: str, corpus: Any) -> str:
     """The push text for *arm*: the breadcrumb, optionally with the top hit's
     excerpt and a tool-name hint appended."""
     if not push:
         return push
     extra: list[str] = []
-    if arm in ("PE", "PEH"):
+    if arm in ("PE", "PEH", "PEI", "PLEI", "PLAEI"):
         page = _first_bullet_page(push, corpus)
         if page is not None:
             extra.append(f'Top match, excerpt of "{page.name}":\n{page.body[:EXCERPT_CHARS]}')
+    if arm in ("PL", "PLEI"):
+        page = _first_bullet_page(push, corpus)
+        if page is not None:
+            by_uid = {pg.uid: pg for pg in corpus.pages}
+            lines = []
+            for edge in page.related:
+                neighbour = by_uid.get(edge.uid)
+                if neighbour is not None:
+                    description = _native_index_description(neighbour.body)
+                    lines.append(f"  - {neighbour.name} — {description}")
+            if lines:
+                extra.append(
+                    f'Linked from the top match "{page.name}":\n'
+                    + "\n".join(lines[:NEIGHBOUR_LIMIT])
+                )
+    if arm in ("PLA", "PLAEI"):
+        extra.extend(_neighbours_of_every_hit(push, corpus))
     if arm in ("PH", "PEH"):
         extra.append(HINT_TEXT)
     return "\n".join([push, *extra]) if extra else push
@@ -514,7 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     allowed_tools=tuple(f"mcp__{name}" for name in servers),
                     env=P_ENV,
                 )
-            elif arm == "PI":
+            elif arm in INSTRUCTION_ARMS:
                 hosts[arm] = HostConfig(name=arm, claude_md=INSTRUCTION_TEXT, env=P_ENV)
             else:
                 hosts[arm] = HostConfig(name=arm, env=P_ENV)
@@ -594,6 +732,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     str(resolved) if resolved else None,
                     content,
                     extractor[-1] if extractor else None,
+                    args.corpus_scale,
+                    *index_facts(record),
+                    memory_touched_fact(record),
                 )
             except subprocess.TimeoutExpired:
                 row = RunRow(

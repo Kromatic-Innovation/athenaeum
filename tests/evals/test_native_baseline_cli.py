@@ -167,3 +167,84 @@ def test_claude_md_is_written_into_the_scratch_cwd(monkeypatch, tmp_path) -> Non
         host_config=rollout.HostConfig(name="PI", claude_md="call recall"),
     )
     assert seen["md"] == "call recall"
+
+
+def test_index_load_facts_reads_claude_codes_own_warning_marker() -> None:
+    full = "- A — a\n- B — b\n"
+    assert nb.index_load_facts(full) == (2, False)
+    cut = "- A — a\n\n> WARNING: MEMORY.md is 300 lines (limit: 200). Only part of it was loaded.\n"
+    assert nb.index_load_facts(cut) == (1, True)
+
+
+def test_long_index_is_shuffled_but_a_short_one_keeps_corpus_order() -> None:
+    from types import SimpleNamespace as NS
+
+    def corpus(n: int) -> object:
+        pages = [
+            NS(
+                uid=f"u{i}",
+                name=f"P{i}",
+                body=f"b{i}",
+                related=[],
+                filename=f"u{i}.md",
+                to_markdown=lambda: "x",
+            )
+            for i in range(n)
+        ]
+        return NS(pages=pages)
+
+    short = [n.name for n in nb.notes_from_corpus(corpus(50))]
+    assert short == [f"P{i}" for i in range(50)]
+    long = [n.name for n in nb.notes_from_corpus(corpus(300))]
+    assert sorted(long) == sorted(f"P{i}" for i in range(300)) and long != sorted(long)
+    assert long == [n.name for n in nb.notes_from_corpus(corpus(300))]
+
+
+def test_neighbour_push_lists_related_pages_and_counts_as_delivered_bullets() -> None:
+    from types import SimpleNamespace as NS
+
+    decision = NS(
+        uid="d", name="Decision X", body="# Decision X\n\nNeeds updates fast.", related=[]
+    )
+    system = NS(uid="s", name="System", body="body", related=[NS(uid="d")])
+    corpus = NS(pages=[system, decision])
+    push = "[Knowledge context] pages:\n  - System — body"
+    out = nb.shape_push("PL", push, corpus)
+    assert 'Linked from the top match "System"' in out
+    assert "  - Decision X — Needs updates fast." in out
+    assert "excerpt" not in out
+    both = nb.shape_push("PLEI", push, corpus)
+    assert "excerpt of" in both and "Decision X" in both
+    assert nb.shape_push("PEI", push, corpus).count("Linked from") == 0
+    assert nb.shape_push("PL", "[k]\n  - Unknown — x", corpus) == "[k]\n  - Unknown — x"
+
+
+def test_memory_dir_touched_sees_bash_searches_not_just_reads(tmp_path) -> None:
+    mem = tmp_path / "proj" / "memory"
+    mem.mkdir(parents=True)
+
+    def use(name: str, **inp) -> dict:
+        return {
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]},
+        }
+
+    assert nb.memory_dir_touched([use("Bash", command=f'grep -ril relay "{mem}"')], mem)
+    assert nb.memory_dir_touched([use("Read", file_path=str(mem / "a.md"))], mem)
+    assert not nb.memory_dir_touched([use("Bash", command="ls -la && grep -r relay .")], mem)
+
+
+def test_every_hit_neighbour_push_pools_links_and_skips_named_pages() -> None:
+    from types import SimpleNamespace as NS
+
+    d1 = NS(uid="d1", name="Decision One", body="# D1\n\nfirst fact", related=[])
+    d2 = NS(uid="d2", name="Decision Two", body="# D2\n\nsecond fact", related=[])
+    a = NS(uid="a", name="Alpha", body="x", related=[NS(uid="d1"), NS(uid="b")])
+    b = NS(uid="b", name="Beta", body="y", related=[NS(uid="d2"), NS(uid="d1")])
+    corpus = NS(pages=[a, b, d1, d2])
+    push = "[k] pages:\n  - Beta — y\n  - Alpha — x"
+    out = nb.shape_push("PLA", push, corpus)
+    assert out.count("Decision One") == 1 and "Decision Two" in out
+    assert "  - Alpha —" not in out.split("Linked from the matches above:")[1]
+    assert nb.shape_push("PLAEI", push, corpus).count("excerpt of") == 1
+    assert nb.shape_push("PLA", "[k]\n  - Nobody — x", corpus) == "[k]\n  - Nobody — x"
