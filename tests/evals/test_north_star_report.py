@@ -34,6 +34,7 @@ from tests.evals.north_star_report import (
     SIZE_SCALE_ORDER,
     GroupStats,
     NorthStarReport,
+    OracleExclusion,
     RolloutRow,
     TurnCapCount,
     _all_answer_tokens,
@@ -47,12 +48,14 @@ from tests.evals.north_star_report import (
     append_rollout_row,
     build_report,
     compute_group_stats,
+    compute_oracle_exclusions,
     compute_verdicts,
     crossover_scales,
     deep_hop_delivered,
     delivered_text_for_utilization,
     delivered_uids_for_utilization,
     distinctive_ngram_overlap,
+    drop_oracle_exclusions,
     grade_correctness,
     grade_coverage,
     grade_harm,
@@ -2745,11 +2748,13 @@ def test_grader_revision_names_this_issue() -> None:
     matches; athenaeum#1935 changed WHAT it matches, by adding marker
     alternatives to eight probes; athenaeum#2918 strips markdown emphasis in
     the matcher and repairs four markers that named a fact the question did
-    not ask for. Either way two report tables over the same
+    not ask for; athenaeum#3029 adds the alternative marker
+    "requester explain" on ``spend_approver_named`` and tolerates one
+    delivered oracle miss per enrolled class and scale. Either way two report tables over the same
     stored rows -- one graded before, one after -- must be distinguishable
     from their headers alone, and ``corpus_digest`` cannot carry that for a
     ``probes.yaml``-only change because it digests pages only."""
-    assert GRADER_REVISION == "athenaeum#2918"
+    assert GRADER_REVISION == "athenaeum#3029"
 
 
 def _synthetic_marker_probe(marker: str) -> tuple[Probe, Corpus]:
@@ -2864,9 +2869,16 @@ def _oracle_row(probe_id: str, *, correct: bool) -> RolloutRow:
 
 
 def test_decision_block_is_void_when_an_enrolled_class_fails_the_oracle_control() -> None:
-    """A single_hop oracle cell that misses its marker voids the block: the
-    heading says so and no condition, cutoff or verdict table is printed."""
-    report = build_report([_oracle_row("pto_allowance", correct=False)])
+    """Two single_hop probes missing at oracle in one class and scale exceed
+    the tolerance cap (athenaeum#3029): the heading says so and no condition,
+    cutoff or verdict table is printed."""
+    report = build_report(
+        [
+            _oracle_row("pto_allowance", correct=False),
+            _oracle_row("confidentiality_rule", correct=False),
+        ]
+    )
+    assert report.oracle_exclusions == ()
     shortfalls = oracle_control_shortfalls(report)
     assert [(sf.probe_class, sf.corpus_scale, sf.rate) for sf in shortfalls] == [
         ("single_hop", CORPUS_SCALE, 0.0)
@@ -2879,6 +2891,98 @@ def test_decision_block_is_void_when_an_enrolled_class_fails_the_oracle_control(
     # ...and the full report carries the same void block, at the top.
     text = render_report(report)
     assert text.index("VOID: oracle control failed") < text.index("## Arms in this report")
+
+
+def test_single_delivered_oracle_miss_is_excluded_and_the_decision_is_printed() -> None:
+    """athenaeum#3029: ONE enrolled probe missing its marker at oracle, with
+    its pages delivered, is excluded; the control then reads 1.000 on what
+    remains, the block is not void, and the excluded pair is named."""
+    report = build_report(
+        [
+            _oracle_row("pto_allowance", correct=False),
+            _oracle_row("confidentiality_rule", correct=True),
+        ]
+    )
+    assert report.oracle_exclusions == (
+        OracleExclusion("pto_allowance", "single_hop", CORPUS_SCALE),
+    )
+    assert oracle_control_shortfalls(report) == ()
+    block = "\n".join(render_decision_block(report))
+    assert "VOID" not in block
+    assert "Excluded by the oracle tolerance" in block
+    assert f"| {CORPUS_SCALE} | single_hop | pto_allowance |" in block
+    assert "Three conditions" in block
+    assert "**Cutoff scale:**" in block
+
+
+def test_oracle_exclusion_removes_the_pair_from_every_arm_native_included() -> None:
+    """athenaeum#3029: the excluded (probe, scale) leaves native arms as well
+    as Athenaeum arms, and no other probe's rows move."""
+    probe = _probe("pto_allowance")
+    other = _probe("confidentiality_rule")
+    rows = [
+        _oracle_row("pto_allowance", correct=False),
+        _oracle_row("confidentiality_rule", correct=True),
+    ]
+    for arm in (Arm.NATIVE_GREP, Arm.NATIVE_INDEX, Arm.PUSH_BREADCRUMB_PULL, Arm.PULL, Arm.NONE):
+        for pr in (probe, other):
+            rows.append(
+                _row(_record(arm=arm, probe_id=pr.id, probe_class=pr.probe_class, answer="x"))
+            )
+    report = build_report(rows)
+    kept = drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions)
+    all_arms = (
+        Arm.ORACLE,
+        Arm.NATIVE_GREP,
+        Arm.NATIVE_INDEX,
+        Arm.PUSH_BREADCRUMB_PULL,
+        Arm.PULL,
+        Arm.NONE,
+    )
+    seen = {r.record.arm for r in report.graded_rows if r.record.probe_id == probe.id}
+    assert seen == set(all_arms)
+    assert not [r for r in kept if r.record.probe_id == probe.id]
+    assert len([r for r in kept if r.record.probe_id == other.id]) == 6
+
+
+def test_oracle_miss_without_delivery_still_voids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """athenaeum#3029: an oracle miss that is NOT a marker miss with delivery
+    voids even when it is the only failing probe in its class and scale."""
+    import tests.evals.north_star_report as nsr
+
+    rows = [_oracle_row("pto_allowance", correct=False)]
+    monkeypatch.setattr(nsr, "marker_miss_with_delivery", lambda *a, **k: False)
+    report = build_report(rows)
+    assert report.oracle_exclusions == ()
+    assert len(oracle_control_shortfalls(report)) == 1
+    assert "VOID: oracle control failed" in "\n".join(render_decision_block(report))
+
+
+def test_oracle_abstention_miss_voids_because_it_has_no_marker_to_miss() -> None:
+    """athenaeum#3029: an abstention probe's oracle miss is never a
+    ``marker_miss_with_delivery`` (it plants no marker), so it is not
+    tolerated."""
+    probe = next(p for p in _CORPUS.probes if p.probe_class == "abstention")
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class="abstention",
+        answer="The answer is Voltmere, definitely.",
+    )
+    rows = [_row(record)]
+    assert grade_correctness(record, probe, _CORPUS) is False
+    assert compute_oracle_exclusions(rows) == ()
+    assert len(oracle_control_shortfalls(build_report(rows))) == 1
+
+
+def test_oracle_tolerance_cap_is_per_class_and_scale_not_global() -> None:
+    """athenaeum#3029: one excluded probe in each of two DIFFERENT enrolled
+    classes is within the cap (the cap is per class and scale)."""
+    rows = [
+        _oracle_row("pto_allowance", correct=False),
+        _oracle_row("spend_approver_named", correct=False),
+    ]
+    assert {ex.probe_class for ex in compute_oracle_exclusions(rows)} == {"single_hop", "multi_hop"}
 
 
 def test_decision_block_is_readable_when_the_oracle_control_passes() -> None:
