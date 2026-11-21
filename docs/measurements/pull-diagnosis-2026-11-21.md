@@ -173,31 +173,36 @@ Command: `athenaeum push-metrics pull-diagnosis --before 2026-11-15T00:00:00Z
 deployment's push ledger and transcript root. Headless sessions contribute
 their first pushed window only (the default).
 
-These counts predate athenaeum#3056: the native topic column counts only the
-built-in `Read`, `Grep` and `Glob` tools, so it is an undercount where a
-plugin file tool was used. A re-run with the corrected reader is pending.
+The first run (2026-11-21) predated athenaeum#3056, so its native topic column
+counted only the built-in `Read`, `Grep` and `Glob` tools and showed 0 in both
+populations. This section now holds the re-run with the corrected reader, which
+counts a native topic read made through any non-writing tool and splits the
+column into a built-in and an other-tool part. The re-run read the same
+interactive windows (679 across 40 sessions). Only the headless count moved,
+because more transcripts had been pruned since the first run.
 
 **Positive control: passes.** The reader found 679 interactive windows across
-40 sessions, against the 2026-11-15 report's 701 across 39, and 1,846 headless
-windows against 2,150. The headless shortfall (86% coverage) fits transcripts
-pruned since. The ledger holds 5,989 sessions, and 4,103 of them have no
+40 sessions, against the 2026-11-15 report's 701 across 39, and 1,730 headless
+windows against 2,150. The headless shortfall (80% coverage) fits transcripts
+pruned since. The ledger holds 5,989 sessions, and 4,219 of them have no
 transcript left to read.
 
-| Population | Pushed windows | Windows with `recall` | Windows with any Athenaeum pull | Windows with a native topic read | Windows with a native index read | Windows with `ToolSearch` for `recall` | Sessions with `recall` deferred | Sessions with server failed |
+| Population | Pushed windows | Windows with `recall` | Windows with any Athenaeum pull | Windows with a native topic read (built-in / other tool) | Windows with a native index read | Windows with `ToolSearch` for `recall` | Sessions with `recall` deferred | Sessions with server failed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Interactive | 679 | 42 (6.2%) | 42 (6.2%) | 0 (0.0%) | 0 (0.0%) | 42 (6.2%) | 40 of 40 | 0 |
-| Headless | 1,846 | 0 | 0 | 0 | 0 | 1 (0.05%) | 950 of 1,846 | 7 |
+| Interactive | 679 | 42 (6.2%) | 42 (6.2%) | 14 (2.1%): 0 / 14 | 0 (0.0%) | 42 (6.2%) | 40 of 40 | 0 |
+| Headless | 1,730 | 0 | 0 | 0 (0.0%): 0 / 0 | 0 | 1 (0.06%) | 941 of 1,730 | 7 |
 
 Supporting counts:
 
 - **Interactive calls:** 53 `recall` calls, 1 `read_entity` call, 45
-  `ToolSearch` calls naming `recall`. 31 of 40 sessions called `recall` at
+  `ToolSearch` calls naming `recall`, and 18 native topic reads, all through a
+  non-built-in tool (the first run's reader counted none of them). 31 of 40 sessions called `recall` at
   least once.
 - **Weaker native signal:** a `Bash` command naming an auto-memory directory
   appears in 44 interactive windows (6.5%, 63 commands). A shell command that
   names the directory may list it, write to it or search it, so this is not a
   read of a topic file. It is reported apart, as section 4 specifies.
-- **Headless deferral:** for 889 of 1,846 headless sessions, the transcript did
+- **Headless deferral:** for 782 of 1,730 headless sessions, the transcript did
   not show whether `recall` was loaded.
 
 **Population caveat.** Outside the population above, the deployment's
@@ -213,9 +218,11 @@ population only.
 windows. The breadcrumb does not cause it.** By section 3's rule:
 
 - Native topic reads are not more frequent than Athenaeum pulls. They are
-  rarer: 0 of 679 interactive windows against 42. Even the weaker `Bash`
+  rarer: 14 of 679 interactive windows (2.1%, all through a non-built-in tool)
+  against 42 (6.2%), and 0 of 1,730 headless windows. Even the weaker `Bash`
   signal (6.5%) only matches the Athenaeum pull rate (6.2%); it does not
-  clearly exceed it.
+  clearly exceed it. The corrected rate is below the Athenaeum rate, so the
+  conclusion and the section 3 lever stand unchanged.
 - So the comparison comes down to the push channel, and section 3 points the
   lever at making the push carry the answer (section 6, push-carrying).
 - `recall` was deferred behind tool search in every interactive session, and
@@ -251,7 +258,7 @@ waits for section 5. These are proposals for the operator to rule on.
 ## Method
 
 Section 5 was added on 2026-11-21 from one read-only run of the reader on the
-deployment, plus a raw count of `Read` calls on auto-memory topic files across
+deployment (re-run the same day with the athenaeum#3056 reader; see section 5), plus a raw count of `Read` calls on auto-memory topic files across
 all retained transcripts, used for the population caveat. Neither step called a
 model.
 
