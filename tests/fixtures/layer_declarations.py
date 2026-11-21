@@ -424,6 +424,10 @@ MODULE_LAYER: dict[str, int] = {
     # "Layering: L4 domain/pipeline". Imports follow_through, push_used_scoring
     # (L4 siblings), push_metrics (L3), transcript_verify (L1).
     "recall_metrics": 4,
+    # issue athenaeum#3032: pull-diagnosis reader -- own docstring states
+    # "Layering: L4 domain/pipeline". Imports follow_through (L4 sibling),
+    # push_metrics (L3), transcript_verify (L1).
+    "pull_diagnosis": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_attribution": 5,  # issue athenaeum#2212
