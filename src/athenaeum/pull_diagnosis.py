@@ -27,7 +27,17 @@ Athenaeum and native columns comparable with each other:
 - ``recall`` and ``read_entity`` tool calls (any MCP server namespace);
 - a native auto-memory TOPIC read: a ``Read`` of a file under a
   ``projects/<scope>/memory/`` directory other than the ``MEMORY.md`` index,
-  or a ``Grep``/``Glob`` whose path or pattern is under one;
+  or a ``Grep``/``Glob`` whose path or pattern is under one (the BUILT-IN
+  file tools); or a call to any other tool whose input names such a path in
+  a string field or a list of strings, at any depth (issue athenaeum#3056:
+  plugins add their own file tools, and the reader should not depend on which
+  one the host agent uses). The two are also reported apart, as
+  ``native_topic_read_builtin`` and ``native_topic_read_other``. Two guards
+  keep the other-tool rule a READ count: a write-capable tool (its bare name
+  carries an edit/write/create/delete/... word, see
+  :func:`is_write_capable_tool`) is never counted, and a field counts only
+  when it starts as a path (no whitespace before the memory directory), so a
+  sub-agent prompt that mentions a memory path in prose is not a read;
 - a native INDEX read (``Read`` of ``MEMORY.md``), reported apart because
   Claude Code already loads the index at session start;
 - a ``Bash`` command naming a memory directory, reported apart because a shell
@@ -89,12 +99,46 @@ _TOOL_BASH = "Bash"
 _TOOL_TOOL_SEARCH = "ToolSearch"
 _TOOL_SEARCH_QUERY_RE = re.compile(r"recall|athenaeum", re.IGNORECASE)
 
+#: Words in a tool's bare name that mark it write-capable. Such a tool naming
+#: a memory path is writing (or moving) the file, not reading it, so it is
+#: never counted as a native read (issue athenaeum#3056).
+_WRITE_TOOL_WORDS: frozenset[str] = frozenset(
+    {
+        "append",
+        "copy",
+        "cp",
+        "create",
+        "delete",
+        "edit",
+        "insert",
+        "mkdir",
+        "move",
+        "multiedit",
+        "mv",
+        "patch",
+        "put",
+        "remove",
+        "rename",
+        "replace",
+        "rm",
+        "save",
+        "update",
+        "write",
+    }
+)
+_NAME_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
 #: Per-window boolean signals. Each is counted as "windows where it happened
 #: at least once"; :data:`CALL_SIGNALS` are also summed as call totals.
 SIGNAL_RECALL = "recall_call"
 SIGNAL_READ_ENTITY = "read_entity_call"
 SIGNAL_RECALL_OR_READ = "athenaeum_pull"
 SIGNAL_NATIVE_TOPIC = "native_topic_read"
+SIGNAL_NATIVE_TOPIC_BUILTIN = "native_topic_read_builtin"
+SIGNAL_NATIVE_TOPIC_OTHER = "native_topic_read_other"
+#: The breakdown of :data:`SIGNAL_NATIVE_TOPIC` by tool kind; a topic read is
+#: classified as exactly one of these, and counts toward the total as well.
+_NATIVE_TOPIC_PARTS = frozenset({SIGNAL_NATIVE_TOPIC_BUILTIN, SIGNAL_NATIVE_TOPIC_OTHER})
 SIGNAL_NATIVE_INDEX = "native_index_read"
 SIGNAL_NATIVE_BASH = "native_bash_read"
 SIGNAL_TOOL_SEARCH = "tool_search_for_recall"
@@ -103,6 +147,8 @@ WINDOW_SIGNALS: tuple[str, ...] = (
     SIGNAL_READ_ENTITY,
     SIGNAL_RECALL_OR_READ,
     SIGNAL_NATIVE_TOPIC,
+    SIGNAL_NATIVE_TOPIC_BUILTIN,
+    SIGNAL_NATIVE_TOPIC_OTHER,
     SIGNAL_NATIVE_INDEX,
     SIGNAL_NATIVE_BASH,
     SIGNAL_TOOL_SEARCH,
@@ -111,6 +157,8 @@ CALL_SIGNALS: tuple[str, ...] = (
     SIGNAL_RECALL,
     SIGNAL_READ_ENTITY,
     SIGNAL_NATIVE_TOPIC,
+    SIGNAL_NATIVE_TOPIC_BUILTIN,
+    SIGNAL_NATIVE_TOPIC_OTHER,
     SIGNAL_NATIVE_INDEX,
     SIGNAL_NATIVE_BASH,
     SIGNAL_TOOL_SEARCH,
@@ -135,6 +183,50 @@ def is_memory_dir_path(text: str) -> bool:
     return bool(_MEMORY_DIR_RE.search(text.replace("\\", "/")))
 
 
+def is_write_capable_tool(name: object) -> bool:
+    """True when the tool's bare name carries a write word (``Edit``,
+    ``Write``, ``MultiEdit``, ``NotebookEdit``, ``create_file``, ...).
+
+    The name is split on ``_``/``-``/camel case and each lower-cased word is
+    looked up in :data:`_WRITE_TOOL_WORDS`, so ``Read`` and ``Search`` are not
+    write-capable while ``mcp__plugin__Edit`` and ``write_file`` are.
+    """
+    bare = follow_through._bare_tool_name(name)
+    words = {
+        w.lower() for part in re.split(r"[_\-\s.]+", bare) for w in _NAME_WORD_RE.findall(part)
+    }
+    return bool(words & _WRITE_TOOL_WORDS)
+
+
+def _input_strings(value: object) -> Iterable[str]:
+    """Every string in a tool input, through nested dicts and lists."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for inner in value.values():
+            yield from _input_strings(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from _input_strings(inner)
+
+
+def _names_memory_topic_path(text: str) -> bool:
+    """True when *text* starts as a path into an auto-memory directory and is
+    not the ``MEMORY.md`` index.
+
+    "Starts as a path": no whitespace before the memory directory and no line
+    break at all, so a field holding a path or a glob counts while prose that
+    mentions one (a sub-agent prompt, a message) does not.
+    """
+    norm = text.strip().replace("\\", "/")
+    if "\n" in norm:
+        return False
+    match = _MEMORY_DIR_RE.search(norm)
+    if match is None or any(c.isspace() for c in norm[: match.start()]):
+        return False
+    return PurePosixPath(norm).name != NATIVE_INDEX_FILENAME
+
+
 def _content_blocks(rec: dict[str, Any]) -> list[Any]:
     message = rec.get("message")
     content = message.get("content") if isinstance(message, dict) else rec.get("content")
@@ -157,13 +249,13 @@ def _classify_tool_use(block: dict[str, Any]) -> str | None:
         if isinstance(path, str) and is_memory_dir_path(path):
             if PurePosixPath(path.replace("\\", "/")).name == NATIVE_INDEX_FILENAME:
                 return SIGNAL_NATIVE_INDEX
-            return SIGNAL_NATIVE_TOPIC
+            return SIGNAL_NATIVE_TOPIC_BUILTIN
         return None
     if name in _TOOL_SEARCH_NATIVE:
         for key in ("path", "pattern"):
             val = tool_input.get(key)
             if isinstance(val, str) and is_memory_dir_path(val):
-                return SIGNAL_NATIVE_TOPIC
+                return SIGNAL_NATIVE_TOPIC_BUILTIN
         return None
     if name == _TOOL_BASH:
         cmd = tool_input.get("command")
@@ -174,6 +266,11 @@ def _classify_tool_use(block: dict[str, Any]) -> str | None:
         query = tool_input.get("query")
         if isinstance(query, str) and _TOOL_SEARCH_QUERY_RE.search(query):
             return SIGNAL_TOOL_SEARCH
+        return None
+    if is_write_capable_tool(name):
+        return None
+    if any(_names_memory_topic_path(s) for s in _input_strings(raw_input)):
+        return SIGNAL_NATIVE_TOPIC_OTHER
     return None
 
 
@@ -336,7 +433,11 @@ class PullDiagnosisReport:
               }
             }
 
-        ``window_rates`` is ``null`` for a channel with no windows. Session
+        ``window_rates`` is ``null`` for a channel with no windows.
+        ``native_topic_read`` is the sum of ``native_topic_read_builtin``
+        (``Read``/``Grep``/``Glob``) and ``native_topic_read_other`` (any
+        other non-writing tool) in ``calls``; in ``windows_with`` it is the
+        windows with either, so it can be less than the two added. Session
         states may overlap (a session can defer ``recall`` and then call it),
         except ``not_observed``, which means none of the other three.
         """
@@ -347,9 +448,7 @@ class PullDiagnosisReport:
             "sessions_without_pushed_window": self.sessions_without_pushed_window,
             "before": self.before,
             "headless_first_window_only": self.headless_first_window_only,
-            "channels": {
-                ch: self.channels[ch].to_dict() for ch in follow_through.CHANNEL_BUCKETS
-            },
+            "channels": {ch: self.channels[ch].to_dict() for ch in follow_through.CHANNEL_BUCKETS},
         }
 
 
@@ -376,9 +475,7 @@ def build_pull_diagnosis_report(
 
     for session_id, push_times in pushes.items():
         located = push_metrics._find_session_transcript(session_id, root)
-        records = (
-            transcript_verify._iter_session_records(located[0], session_id) if located else []
-        )
+        records = transcript_verify._iter_session_records(located[0], session_id) if located else []
         if not records:
             skipped += 1
             continue
@@ -391,9 +488,7 @@ def build_pull_diagnosis_report(
             t_lo = _record_ts(records[lo])
             if t_lo is None:
                 continue
-            t_hi = next(
-                (t for t in (_record_ts(r) for r in records[hi:]) if t is not None), None
-            )
+            t_hi = next((t for t in (_record_ts(r) for r in records[hi:]) if t is not None), None)
             # Push ``ts`` is stamped at whole seconds; transcript timestamps
             # carry milliseconds, and the hook fires within the same second as
             # its prompt. Compare at second resolution (as follow_through does)
@@ -425,6 +520,9 @@ def build_pull_diagnosis_report(
                         if signal is not None:
                             tally.call_counts[signal] += 1
                             seen.add(signal)
+                            if signal in _NATIVE_TOPIC_PARTS:
+                                tally.call_counts[SIGNAL_NATIVE_TOPIC] += 1
+                                seen.add(SIGNAL_NATIVE_TOPIC)
             if seen & {SIGNAL_RECALL, SIGNAL_READ_ENTITY}:
                 seen.add(SIGNAL_RECALL_OR_READ)
             for signal in seen:

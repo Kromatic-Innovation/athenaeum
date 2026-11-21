@@ -201,11 +201,93 @@ class TestSignals:
             ],
         )
         assert ch["calls"]["native_topic_read"] == 2
+        assert ch["calls"]["native_topic_read_builtin"] == 2
+        assert ch["calls"]["native_topic_read_other"] == 0
         assert ch["calls"]["native_index_read"] == 1
         assert ch["calls"]["native_bash_read"] == 1
         assert ch["windows_with"]["native_topic_read"] == 1
         assert ch["windows_with"]["athenaeum_pull"] == 0
         assert ch["window_rates"]["native_topic_read"] == 1.0
+
+    def test_plugin_file_tool_path_in_a_string_field(self, tmp_path: Path) -> None:
+        # athenaeum#3056: a plugin's file tool reading a topic file is a native read.
+        ch = self._one_window(
+            tmp_path,
+            [_tool("2026-01-01T00:00:02Z", "mcp__plugin_x__Read", {"path": f"/r/{MEM}/t.md"})],
+        )
+        assert ch["calls"]["native_topic_read"] == 1
+        assert ch["calls"]["native_topic_read_other"] == 1
+        assert ch["calls"]["native_topic_read_builtin"] == 0
+        assert ch["windows_with"]["native_topic_read"] == 1
+        assert ch["windows_with"]["native_topic_read_other"] == 1
+
+    def test_plugin_search_tool_path_in_a_glob_list(self, tmp_path: Path) -> None:
+        ch = self._one_window(
+            tmp_path,
+            [
+                _tool(
+                    "2026-01-01T00:00:02Z",
+                    "mcp__plugin_x__Search",
+                    {"query": "x", "globs": ["src/**/*.py", "cfg/.claude/projects/*/memory/*.md"]},
+                ),
+                _tool(
+                    "2026-01-01T00:00:03Z",
+                    "mcp__plugin_x__Search",
+                    {"options": {"paths": [{"root": f"{MEM}/sub"}]}},
+                ),
+            ],
+        )
+        assert ch["calls"]["native_topic_read_other"] == 2
+        assert ch["calls"]["native_topic_read"] == 2
+
+    def test_builtin_and_other_split_and_window_total(self, tmp_path: Path) -> None:
+        ch = self._one_window(
+            tmp_path,
+            [
+                _tool("2026-01-01T00:00:02Z", "Read", {"file_path": f"{MEM}/a.md"}),
+                _tool("2026-01-01T00:00:03Z", "mcp__p__Search", {"path": f"{MEM}/b.md"}),
+            ],
+        )
+        assert ch["calls"]["native_topic_read"] == 2
+        assert ch["calls"]["native_topic_read_builtin"] == 1
+        assert ch["calls"]["native_topic_read_other"] == 1
+        # One window held both kinds: the total counts it once.
+        assert ch["windows_with"]["native_topic_read"] == 1
+        assert ch["windows_with"]["native_topic_read_builtin"] == 1
+        assert ch["windows_with"]["native_topic_read_other"] == 1
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Edit", "Write", "MultiEdit", "NotebookEdit", "mcp__plugin_x__Edit", "write_file"],
+    )
+    def test_write_capable_tool_naming_a_memory_path_is_not_a_read(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        ch = self._one_window(
+            tmp_path,
+            [_tool("2026-01-01T00:00:02Z", name, {"file_path": f"{MEM}/t.md", "content": "x"})],
+        )
+        assert ch["calls"]["native_topic_read"] == 0
+        assert ch["windows_with"]["native_topic_read"] == 0
+
+    def test_other_tool_naming_only_the_index_or_prose_is_not_a_topic_read(
+        self, tmp_path: Path
+    ) -> None:
+        ch = self._one_window(
+            tmp_path,
+            [
+                _tool("2026-01-01T00:00:02Z", "mcp__p__Read", {"path": f"{MEM}/MEMORY.md"}),
+                _tool(
+                    "2026-01-01T00:00:03Z",
+                    "Agent",
+                    {"prompt": f"Look at {MEM}/t.md and summarise it"},
+                ),
+                _tool("2026-01-01T00:00:04Z", "mcp__p__Read", {"path": "/repo/src/main.py"}),
+                _tool("2026-01-01T00:00:05Z", "SendNote", {"body": f"{MEM}/t.md\nsee above"}),
+            ],
+        )
+        assert ch["calls"]["native_topic_read"] == 0
+        assert ch["calls"]["native_index_read"] == 0
 
     def test_read_entity_counts_as_athenaeum_pull(self, tmp_path: Path) -> None:
         ch = self._one_window(
@@ -236,6 +318,25 @@ class TestSignals:
     def test_no_window_rate_without_windows(self, tmp_path: Path) -> None:
         report = _report(tmp_path)
         assert report["channels"]["headless"]["window_rates"]["recall_call"] is None
+
+
+class TestWriteCapableTool:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("Read", False),
+            ("Grep", False),
+            ("mcp__plugin_x__Search", False),
+            ("read_text_file", False),
+            ("Edit", True),
+            ("NotebookEdit", True),
+            ("mcp__fs__create_directory", True),
+            ("move-file", True),
+            (None, False),
+        ],
+    )
+    def test_names(self, name: object, expected: bool) -> None:
+        assert pull_diagnosis.is_write_capable_tool(name) is expected
 
 
 class TestSessionStates:

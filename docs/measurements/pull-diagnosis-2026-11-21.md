@@ -138,7 +138,12 @@ model calls and outputs counts only. Its module docstring
   2026-11-15 report's task definition.
 - **Athenaeum pull.** A `recall` or `read_entity` call in the window.
 - **Native pull.** A `Read` of a topic file under an auto-memory directory
-  (`projects/<scope>/memory/`), or a `Grep` or `Glob` under one. A read of the
+  (`projects/<scope>/memory/`), or a `Grep` or `Glob` under one. Since
+  athenaeum#3056 it also counts a call to any other tool (a plugin's file
+  tool, say) whose input names a path inside such a directory, in a string
+  field or a list such as a glob list; a write-capable tool (an edit or write
+  tool) is never counted. The JSON splits the total into
+  `native_topic_read_builtin` and `native_topic_read_other`. A read of the
   `MEMORY.md` index is counted apart, because Claude Code loads the index at
   session start anyway. A `Bash` command naming the directory is also counted
   apart, as a weaker signal.
@@ -167,6 +172,10 @@ Command: `athenaeum push-metrics pull-diagnosis --before 2026-11-15T00:00:00Z
 --json`, from `develop` after the athenaeum#3032 reader merged, against the
 deployment's push ledger and transcript root. Headless sessions contribute
 their first pushed window only (the default).
+
+These counts predate athenaeum#3056: the native topic column counts only the
+built-in `Read`, `Grep` and `Glob` tools, so it is an undercount where a
+plugin file tool was used. A re-run with the corrected reader is pending.
 
 **Positive control: passes.** The reader found 679 interactive windows across
 40 sessions, against the 2026-11-15 report's 701 across 39, and 1,846 headless
