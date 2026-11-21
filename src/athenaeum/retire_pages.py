@@ -191,6 +191,7 @@ def apply_retirement(
     *,
     reason: str,
     config: dict[str, Any] | None = None,
+    trailer: str | None = None,
 ) -> RetireReport:
     """Retire *candidates* via the shared two-commit git-archive mechanics.
 
@@ -203,6 +204,12 @@ def apply_retirement(
     (so :func:`athenaeum.librarian.rebuild_index`'s directory scan
     naturally excludes them) and stages its own changes before Commit B
     runs, so the whole retirement still lands in exactly two commits.
+
+    *trailer*, when given, is one extra line appended after a blank line to Commit
+    B's message (the removal commit), for a caller that records which message
+    caused the removal (``Athenaeum-Raise: <id> seq=<n> retract``, athenaeum#3003).
+    A knowledge root with no ``wiki/`` directory (a store's own root) has no
+    ``wiki/_index.md`` to rebuild, so none is created.
 
     A no-op (``report.committed is False``, no errors) when *candidates*
     is empty. Refuses (never mutates) when *knowledge_root* is not a git
@@ -252,6 +259,10 @@ def apply_retirement(
             if archive_path.exists():
                 extra.append(str(archive_path.resolve().relative_to(kr)))
 
+        if not wiki_root.is_dir():
+            report.index_lines_removed = [p.name for p in retired_paths]
+            return extra, None
+
         # Rebuild the wiki index now the retired pages are gone from disk
         # (`git rm` above already removed them) — mirrors the rebuild
         # `_cmd_decay._rebuild_recall_index` triggers, but for the entity
@@ -286,7 +297,7 @@ def apply_retirement(
         ),
         archive_message=(
             f"chore(retire-pages): retire {len(rel_paths)} page(s): {reason} "
-            f"(athenaeum#1625)"
+            f"(athenaeum#1625)" + (f"\n\n{trailer}\n" if trailer else "")
         ),
         after_remove=_after_remove,
     )

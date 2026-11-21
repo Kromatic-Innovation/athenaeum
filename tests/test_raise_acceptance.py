@@ -252,8 +252,8 @@ def test_ac1_rejected_raise_id_fails(env: Env) -> None:
         location="install_raw",
     )
     out = env.submit(env.msg())
-    assert out.reason == "already_rejected"
-    assert _kinds(env) == ["raise_held"]
+    assert (out.status, out.reason) == ("dropped", "already_rejected")
+    assert _kinds(env) == []  # dropped by rule: no decision is raised
 
 
 def test_ac1_duplicate_is_recorded_and_not_raised(env: Env) -> None:
@@ -625,3 +625,241 @@ def test_a_failed_commit_leaves_no_copy_and_nothing_staged(env: Env) -> None:
         capture_output=True, text=True, check=True,
     ).stdout
     assert staged == ""
+
+
+# -- S7b: rejection and holds (athenaeum#3002) ---------------------------------
+
+from athenaeum.raise_acceptance import (  # noqa: E402
+    REJECT_REASONS,
+    answer_decision,
+    consume_raw_file,
+    reject_raise,
+)
+from athenaeum.raise_acceptance_ledger import find_rejection, is_rejected  # noqa: E402
+from athenaeum.store_decisions import answers_for  # noqa: E402
+
+RID2_MID = "rm_cccccccccccccccccccc"
+MID3 = "rm_dddddddddddddddddddd"
+
+
+def _write_raw(env: Env, name: str, *records: dict[str, Any]) -> Path:
+    raw = env.root.parent / "raw" / "raise"
+    raw.mkdir(parents=True, exist_ok=True)
+    path = raw / name
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def _supersede(env: Env, mid: str, seq: int) -> dict[str, Any]:
+    from athenaeum.raise_messages import KIND_SUPERSEDE
+
+    page = {**PAGE, "name": "Changed name"}
+    h = payload_hash(render(Projection(meta=dict(page), body=BODY)))
+    return json.loads(
+        render_message(
+            RaiseMessage(
+                kind=KIND_SUPERSEDE, message_id=mid, origin=ORIGIN, target=TARGET,
+                proposer=PROPOSER, sent_at="2026-11-19T09:30:00Z", raise_id=RID, seq=seq,
+                via="proposer", page=page, body=BODY, content_hash=h,
+            )
+        )
+    )
+
+
+def _submit_src(env: Env, record: dict[str, Any], source: Path) -> ra.Outcome:
+    return submit_raise(
+        env.kr, record, target_store_id=TARGET, target_root=env.root,
+        cache_dir=env.cache, location="install_raw", source=source,
+    )
+
+
+def _reject(env: Env, decision_id: str, reason: str = "declined") -> ra.Outcome:
+    return reject_raise(
+        env.kr, target_store_id=TARGET, cache_dir=env.cache,
+        decision_id=decision_id, reason=reason,
+    )
+
+
+def test_s7b_ac1_reject_records_reason_and_removes_message_from_raw_intake(env: Env) -> None:
+    rec = env.msg()
+    src = _write_raw(env, "1.jsonl", rec)
+    out = _submit_src(env, rec, src)
+    assert src.exists()
+    done = _reject(env, out.decision["id"], "store_refuses")  # type: ignore[index]
+    assert done.status == "rejected"
+    row = find_rejection(env.cache, RID)
+    assert row is not None and row.reason == "store_refuses" and row.message_id == MID
+    assert is_rejected(env.cache, RID)
+    assert not src.exists()
+    assert load_queue(env.kr, TARGET)[0]["disposition"] == "rejected"
+    assert not list(env.root.glob(f"{derived_uid(TARGET, RID)}*.md"))
+
+
+def test_s7b_ac1_reason_must_come_from_the_fixed_list(env: Env) -> None:
+    out = env.submit(env.msg())
+    with pytest.raises(RaiseAcceptRefused) as exc:
+        _reject(env, out.decision["id"], "because I said so")  # type: ignore[index]
+    assert exc.value.reason == "bad_reason"
+    assert disposition_of(env.cache, MID).disposition == "held"  # type: ignore[union-attr]
+    assert "declined" in REJECT_REASONS
+
+
+def test_s7b_ac1_a_file_with_an_unsettled_message_stays(env: Env) -> None:
+    a = env.msg()
+    b = env.msg(message_id=MID3, raise_id="rs_eeeeeeeeeeeeeeeeeeee")
+    src = _write_raw(env, "2.jsonl", a, b)
+    out = _submit_src(env, a, src)
+    _reject(env, out.decision["id"])  # type: ignore[index]
+    assert src.exists()  # the second message has no final disposition yet
+    assert consume_raw_file(src, env.cache) is False
+
+
+def test_s7b_ac2_later_message_for_a_rejected_raise_is_dropped_and_recorded(env: Env) -> None:
+    out = env.submit(env.msg())
+    _reject(env, out.decision["id"])  # type: ignore[index]
+    before = len(load_queue(env.kr, TARGET))
+    later = _supersede(env, RID2_MID, 2)
+    src = _write_raw(env, "3.jsonl", later)
+    dropped = _submit_src(env, later, src)
+    assert (dropped.status, dropped.reason) == ("dropped", "already_rejected")
+    assert len(load_queue(env.kr, TARGET)) == before  # no decision raised
+    row = disposition_of(env.cache, RID2_MID)
+    assert row is not None and row.disposition == "rejected" and row.reason == "already_rejected"
+    assert not src.exists()
+
+
+def test_s7b_ac2_any_kind_is_dropped(env: Env) -> None:
+    out = env.submit(env.msg())
+    _reject(env, out.decision["id"])  # type: ignore[index]
+    from athenaeum.raise_messages import KIND_RETRACT
+
+    retract = json.loads(
+        render_message(
+            RaiseMessage(
+                kind=KIND_RETRACT, message_id=RID2_MID, origin=ORIGIN, target=TARGET,
+                proposer=PROPOSER, sent_at="2026-11-19T09:30:00Z", raise_id=RID, seq=2,
+                via="proposer",
+                reason="withdrawn",
+            )
+        )
+    )
+    dropped = env.submit(retract)
+    assert dropped.status == "dropped"
+    row = disposition_of(env.cache, RID2_MID)
+    assert row is not None and row.kind == "retract" and row.reason == "already_rejected"
+    assert len(load_queue(env.kr, TARGET)) == 1
+
+
+def test_s7b_ac3_taken_uid_hold_names_uid_reason_and_waiting_message(env: Env) -> None:
+    uid = derived_uid(TARGET, RID)
+    other = env.root / f"{uid}-mine.md"
+    original = "---\nuid: x\ntype: note\nname: Mine\n---\nKeep me.\n"
+    other.write_text(original, encoding="utf-8")
+    out = env.submit(env.msg())
+    rec = load_queue(env.kr, TARGET)[0]
+    assert rec["kind"] == "raise_held"
+    assert rec["detail"]["uid"] == uid and rec["detail"]["reason"] == "uid_taken"
+    assert rec["detail"]["message"]["message_id"] == MID
+    assert uid in rec["question"]
+    assert other.read_text(encoding="utf-8") == original
+    assert answers_for(rec) == ("accept", "reject")
+    assert out.status == "held"
+
+
+def test_s7b_ac3_taken_uid_answer_reject(env: Env) -> None:
+    env.root.joinpath(f"{derived_uid(TARGET, RID)}.md").write_text(
+        "---\nname: T\ntype: note\n---\nx\n", encoding="utf-8"
+    )
+    out = env.submit(env.msg())
+    done = answer_decision(
+        env.kr, target_store_id=TARGET, target_root=env.root, cache_dir=env.cache,
+        decision_id=out.decision["id"], answer="reject", reason="uid_taken",  # type: ignore[index]
+    )
+    assert done.status == "rejected" and is_rejected(env.cache, RID)
+
+
+def test_s7b_ac3_taken_uid_accept_only_once_the_uid_is_free(env: Env) -> None:
+    uid = derived_uid(TARGET, RID)
+    blocker = env.root / f"{uid}.md"
+    blocker.write_text("---\nname: T\ntype: note\n---\nx\n", encoding="utf-8")
+    out = env.submit(env.msg())
+    did = out.decision["id"]  # type: ignore[index]
+    kw: dict[str, Any] = dict(
+        target_store_id=TARGET, target_root=env.root, cache_dir=env.cache, decision_id=did
+    )
+    with pytest.raises(RaiseAcceptRefused) as exc:
+        answer_decision(env.kr, answer="accept", **kw)
+    assert exc.value.reason == "uid_taken"
+    assert blocker.read_text(encoding="utf-8").endswith("x\n")
+    assert len(load_queue(env.kr, TARGET)) == 1  # no second decision
+    blocker.unlink()
+    done = answer_decision(env.kr, answer="accept", **kw)
+    assert done.status == "accepted"
+    assert disposition_of(env.cache, MID).disposition == "accepted"  # type: ignore[union-attr]
+    assert load_queue(env.kr, TARGET)[0]["disposition"] == "accepted"
+
+
+def test_s7b_ac4_failed_check_is_held_with_reason_and_decision_answered_reject(env: Env) -> None:
+    out = env.submit(env.msg(content_hash="sha256:" + "0" * 64))
+    assert (out.status, out.reason) == ("held", "hash_mismatch")
+    rec = load_queue(env.kr, TARGET)[0]
+    assert rec["kind"] == "raise_held" and rec["detail"]["reason"] == "hash_mismatch"
+    assert answers_for(rec) == ("reject",)
+    with pytest.raises(RaiseAcceptRefused) as exc:
+        answer_decision(
+            env.kr, target_store_id=TARGET, target_root=env.root, cache_dir=env.cache,
+            decision_id=rec["id"], answer="accept",
+        )
+    assert exc.value.reason == "unknown_answer"
+    done = answer_decision(
+        env.kr, target_store_id=TARGET, target_root=env.root, cache_dir=env.cache,
+        decision_id=rec["id"], answer="reject", reason="hash_mismatch",
+    )
+    assert done.status == "rejected"
+    row = find_rejection(env.cache, RID)
+    assert row is not None and row.reason == "hash_mismatch"
+
+
+def test_s7b_ac4_duplicate_is_recorded_only(env: Env) -> None:
+    env.submit(env.msg())
+    again = env.submit(env.msg())
+    assert again.status == "duplicate" and again.decision is None
+    assert _kinds(env) == ["raise"]
+
+
+def test_s7b_ac5_held_not_rejected_raise_is_not_dropped(env: Env) -> None:
+    first = env.submit(env.msg(content_hash="sha256:" + "0" * 64))
+    assert first.status == "held" and not is_rejected(env.cache, RID)
+    later = env.msg(message_id=RID2_MID)  # a raise is always seq 1
+    out = env.submit(later)
+    assert out.status == "asked"  # processed, not dropped
+    assert disposition_of(env.cache, RID2_MID).disposition == "held"  # type: ignore[union-attr]
+
+
+def test_s7b_ac6_each_message_ends_in_exactly_one_disposition(env: Env) -> None:
+    a = env.submit(env.msg())
+    env.submit(env.msg(message_id=RID2_MID))
+    _reject(env, a.decision["id"])  # type: ignore[index]
+    env.submit(_supersede(env, MID3, 3))  # dropped
+    for mid in (MID, RID2_MID, MID3):
+        row = disposition_of(env.cache, mid)
+        assert row is not None and row.disposition == "rejected", mid
+    assert {r["disposition"] for r in load_queue(env.kr, TARGET)} == {"rejected"}
+
+
+def test_s7b_reject_refuses_an_accepted_message(env: Env) -> None:
+    out = env.submit(env.msg())
+    env.accept(out.decision["id"])  # type: ignore[index]
+    with pytest.raises(RaiseAcceptRefused):
+        _reject(env, out.decision["id"])  # type: ignore[index]
+
+
+def test_s7b_accepting_removes_the_raw_intake_file_once_settled(env: Env) -> None:
+    # Seer review on PR athenaeum#3027: §6.2 removes a file once every message in it
+    # has its final disposition, accepted included.
+    rec = env.msg()
+    src = _write_raw(env, "acc.jsonl", rec)
+    out = _submit_src(env, rec, src)
+    assert src.exists()
+    env.accept(out.decision["id"])  # type: ignore[index]
+    assert not src.exists()
