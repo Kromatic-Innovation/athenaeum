@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: `docs/measurements/combined-push-grid-2026-11-21.md` measures the shipped 0.29.0 push on the native-memory grid. Leaving native memory on beside the push costs 34% to 68% more per correct answer on `unprompted_push` at 1,000 and 3,000 pages for no gain in correctness, and the agent never reads it (0 of 330 runs). The push keeps the relationship win on the strict rule but not on content-correct, and abstention cost is under 2.0x of native at `core` and `medium` on that harness (athenaeum#3073, athenaeum#3068, athenaeum#3036).
+
 ## [0.29.0] - 2026-11-21
 
 **Summary.** 0.29.0 makes the per-turn push carry more of the answer: it now
