@@ -1050,10 +1050,14 @@ def _claude_cli_exit_error(returncode: int, stdout: str, stderr: str) -> Runtime
     stderr = (stderr or "").strip()
     out = " ".join((stdout or "").split())
     if looks_not_logged_in(stderr, out):
+        detail = (stderr or out)[:_CLI_STDOUT_ERROR_MAX_CHARS + 1]
+        if len(detail) > _CLI_STDOUT_ERROR_MAX_CHARS:
+            # Cut at a whitespace boundary so no token is split, and say so.
+            detail = detail[:_CLI_STDOUT_ERROR_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
         return ClaudeCliNotLoggedInError(
-            "claude CLI is not logged in (it said: "
-            f"{(stderr or out)[:_CLI_STDOUT_ERROR_MAX_CHARS]!r}). Run `claude`, "
-            "then `/login`; or set ANTHROPIC_API_KEY and use llm.provider: api."
+            "claude CLI is not logged in. Run `claude`, then `/login`; or set "
+            "ANTHROPIC_API_KEY and use llm.provider: api. "
+            f"(CLI output, for detail: {detail!r})"
         )
     if stderr:
         text = stderr
