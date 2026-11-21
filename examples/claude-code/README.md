@@ -195,6 +195,7 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0`                              | Set to `1` to log `pending-questions-surface.sh` diagnostics to stderr |
 | `SEARCH_BACKEND`         | from `athenaeum.yaml`, else `vector` | `fts5` or `vector`. **One rule everywhere:** `athenaeum.config.resolve_search_backend` — `athenaeum.yaml`'s `search_backend` over the shipped default `vector`. No entry point carries a default of its own; `athenaeum context --backend` / `codex-context --backend` override the configured value when passed and resolve it when omitted. See [`../../docs/reference/environment.md`](../../docs/reference/environment.md) |
 | `AUTO_RECALL`            | from `athenaeum.yaml` (`true`)    | Set to `false` to disable per-turn recall                      |
+| `ATHENAEUM_PUSH_EXCERPT_CHARS` | from `athenaeum.yaml` (`recall.push_excerpt_chars`), else `600` | Length of the top-match excerpt at the end of each per-turn push, at most `2000`; `0` turns it off. Also cut to fit the push-token budget and Claude Code's 10,000-character hook output cap |
 
 ## Hybrid recall: why both backends
 

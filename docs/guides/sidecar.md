@@ -44,7 +44,22 @@ config) own.
    replacing `/path/to/` with the directory from step 1.
 
 3. Add CLAUDE.md instructions for proactive memory — see
-   `$EXAMPLES/CLAUDE.md.example`.
+   `$EXAMPLES/CLAUDE.md.example`. Copy at least its "Per-turn push"
+   section; its last line tells the agent to follow a relevant pushed item
+   with a `recall` call of its own:
+
+   ```text
+   When a `[Knowledge context]` item pushed into your turn looks relevant, call `recall` yourself with its name or the task's key terms before you answer, and read what it returns.
+   ```
+
+   To add just that line to your user-level instruction file, copied from
+   the shipped example (re-running it adds nothing twice):
+
+   ```bash
+   KEY='pushed into your turn looks relevant'
+   grep -qF "$KEY" ~/.claude/CLAUDE.md 2>/dev/null \
+     || grep -F "$KEY" "$EXAMPLES/CLAUDE.md.example" >> ~/.claude/CLAUDE.md
+   ```
 
 4. Restart Claude Code. The session-start message should say
    `[Knowledge] FTS5 index: N wiki pages`.
@@ -53,7 +68,8 @@ This gives you:
 
 - **Auto-recall** — an FTS5 index is built at session start (~300ms); each
   user message triggers a search that injects relevant wiki pages into
-  context.
+  context, with an excerpt of the best match (see
+  [the per-turn push](claude-code.md#7-per-turn-push-and-the-recall-instruction-line)).
 - **Auto-remember** — Claude proactively saves important facts without
   being asked.
 - **Context checkpointing** — observations are saved before

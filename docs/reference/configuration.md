@@ -5148,6 +5148,28 @@ COULD-tier footprint/relevance knob. Default (unset) returns
 ``(None, None)`` — index everything — because the Apollo contact wikis
 are legitimate name-recall targets and must stay indexed by default.
 
+### `resolve_push_excerpt_chars`
+
+- **YAML path:** `recall.push_excerpt_chars`
+- **Environment variable:** `ATHENAEUM_PUSH_EXCERPT_CHARS`
+- **CLI flag:** —
+- **Default:** `600`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the per-turn push's top-hit excerpt length in characters
+
+Precedence: ``ATHENAEUM_PUSH_EXCERPT_CHARS`` env > ``recall.push_excerpt_chars``
+yaml > `PUSH_EXCERPT_CHARS_DEFAULT`. ``0`` turns the excerpt off
+(the push is then the bare breadcrumb it was before), and is honoured from
+either source. A negative or malformed env value WARNs or falls through
+(see `_env_number`); a non-int / negative yaml value falls through to
+the default. A value above `PUSH_EXCERPT_CHARS_MAX` is clamped to it.
+YAML shape:
+```
+recall:
+  push_excerpt_chars: 600
+```
+
 ### `resolve_recall_relevance_floor`
 
 - **YAML path:** `recall.relevance_floor.<backend>` (see docstring — the `unprompted` call path resolves a sibling, push-specific key)

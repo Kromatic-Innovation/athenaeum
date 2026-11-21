@@ -409,6 +409,38 @@ Run step 5 on whatever cadence suits you: manually between sessions, via
 cron/launchd, or as a post-session hook. The pipeline is idempotent — files
 already consolidated are skipped on re-runs.
 
+## 7. Per-turn push and the recall instruction line
+
+If you also run the per-turn recall hook (`athenaeum-claude-hook`, see
+[Passive recall via hooks](sidecar.md)), each message starts with a
+`[Knowledge context]` block. It lists the matching wiki pages as
+`name — description` bullets and ends with an excerpt of the top match: the
+passage of that page which matched the message, under a
+`Top match, excerpt of "<name>":` line. A message whose answer is in that
+passage needs no further lookup.
+
+The excerpt is bounded three ways:
+
+- its length, `ATHENAEUM_PUSH_EXCERPT_CHARS` or `recall.push_excerpt_chars`
+  in `athenaeum.yaml` (default `600`, at most `2000`; `0` turns it off);
+- the per-turn token budget, which the bullets fill first;
+- Claude Code's 10,000-character cap on a hook's injected context. Past that
+  cap Claude Code would show the agent only a file path and a preview, so the
+  excerpt is shortened, or left out, to stay under it.
+
+The push gives the agent a pointer; the agent still has to follow it when the
+excerpt is not enough. Add this line to your instruction file
+(`~/.claude/CLAUDE.md` for every project, or a project's own `CLAUDE.md`):
+
+```text
+When a `[Knowledge context]` item pushed into your turn looks relevant, call `recall` yourself with its name or the task's key terms before you answer, and read what it returns.
+```
+
+It is in `examples/claude-code/CLAUDE.md.example`, which the setup steps in
+[Passive recall via hooks](sidecar.md) have you copy. It costs one line of
+context per session. In testing it never lowered accuracy, and it helped most
+on tasks that never mention memory.
+
 ## See also
 
 - [`examples/claude-code/README.md`](../../examples/claude-code/README.md) — per-turn recall hooks (complementary to this guide)
