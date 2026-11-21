@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: `docs/measurements/first-recall-no-api-key-0.29.0-2026-11-21.md` re-verifies the no-API-key first recall on the published 0.29.0 in a throwaway container with a Claude Code login (athenaeum#2307). A fact told in one session is compiled and recalled in a new one through `athenaeum session-end`; `athenaeum run` alone leaves a stale index hit (athenaeum#3090), and the plan-usage figures need correcting (athenaeum#3092). The macOS clean-machine half (athenaeum#2319) stays with the operator.
+
 ## [0.29.0] - 2026-11-21
 
 **Summary.** 0.29.0 makes the per-turn push carry more of the answer: it now
