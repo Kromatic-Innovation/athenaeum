@@ -26,6 +26,19 @@ important eval in the repo and it is specified in
 use case (§2.1), do not lose the other three, and hold at the corpus scale a
 real deployment reaches.
 
+**When it must be re-run.** After any retrieval change, meaning a change to:
+
+- the search backend or its ranking;
+- the push hook or the breadcrumbs it delivers;
+- the relevance floor;
+- the `recall` or `read_entity` tools;
+- the eval grader or probe corpus (a new `GRADER_REVISION` or `corpus_digest`).
+
+A release that contains one cannot be read as passing the kill criterion until
+the grid has been re-run on it and the result recorded under
+[`measurements/`](measurements/). The last reading and the operator's ruling
+on it are the newest `native-memory-baseline-*` document there.
+
 ## 2. Current use cases
 
 These are the four questions from [`why-athenaeum.md`](why-athenaeum.md),
