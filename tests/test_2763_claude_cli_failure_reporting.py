@@ -73,6 +73,18 @@ def test_not_logged_in_names_login_and_api_key(fake_path: Path) -> None:
     assert "\n" not in msg
     assert "/login" in msg
     assert "ANTHROPIC_API_KEY" in msg
+    # The fix text leads; raw CLI output follows, marked as detail.
+    assert msg.startswith("claude CLI is not logged in. Run `claude`")
+    assert msg.index("/login") < msg.index("CLI output, for detail")
+
+
+def test_not_logged_in_long_detail_cut_at_token_boundary(fake_path: Path) -> None:
+    _fake_claude(fake_path, "Not logged in " + "word " * 200)
+    with pytest.raises(ClaudeCliNotLoggedInError) as ei:
+        _call()
+    msg = str(ei.value)
+    assert msg.index("ANTHROPIC_API_KEY") < msg.index("CLI output, for detail")
+    assert "word ...')" in msg
 
 
 def _seed_failing_run(tmp_path: Path) -> Path:
