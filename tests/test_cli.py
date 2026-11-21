@@ -623,6 +623,104 @@ class TestRecall:
         assert filename == "lean-startup.md"
         assert "Lean Startup" in preview
 
+    def test_empty_result_prints_one_line_on_stderr(
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Issue athenaeum#3043: no match is distinguishable from broken; stdout
+        # stays empty (parsed contract) and the exit code stays 0.
+        rc = main(
+            [
+                "recall",
+                "zzzzqqqq",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.out == ""
+        err_lines = [ln for ln in captured.err.splitlines() if ln.strip()]
+        assert len(err_lines) == 1
+        assert "nothing matched" in err_lines[0]
+        assert "doctor" not in err_lines[0]
+
+    def test_empty_result_missing_index_points_to_doctor(
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "never-built-cache"),
+                "--backend",
+                "fts5",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.out == ""
+        assert "athenaeum doctor" in captured.err
+
+    def test_raw_intake_hit_is_marked_uncompiled(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "compiled.md").write_text(
+            "---\nuid: c1\ntype: reference\nname: Compiled\n---\n\n"
+            "Zebrafish husbandry notes.\n"
+        )
+        raw = knowledge / "raw" / "auto-memory"
+        raw.mkdir(parents=True)
+        (raw / "note.md").write_text(
+            "---\nuid: r1\ntype: auto-memory\nname: Note\n---\n\n"
+            "Zebrafish raw note.\n"
+        )
+        (knowledge / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
+        )
+        cache = str(tmp_path / "cache")
+        assert main(
+            ["reindex", "--path", str(knowledge), "--cache-dir", cache, "--backend", "fts5"]
+        ) == 0
+        capsys.readouterr()
+        rc = main(
+            [
+                "recall",
+                "zebrafish",
+                "--path",
+                str(knowledge),
+                "--cache-dir",
+                cache,
+                "--backend",
+                "fts5",
+            ]
+        )
+        assert rc == 0
+        rows = [ln.split("\t") for ln in capsys.readouterr().out.splitlines() if ln]
+        by_name = {r[1]: r for r in rows}
+        raw_rows = [r for n, r in by_name.items() if n.endswith("note.md")]
+        assert raw_rows, rows
+        assert all(len(r) == 3 for r in rows)
+        assert raw_rows[0][2].startswith("[uncompiled] ")
+        assert not by_name["compiled.md"][2].startswith("[uncompiled]")
+
     def test_top_k_limits_output(
         self,
         knowledge_with_wiki: Path,
