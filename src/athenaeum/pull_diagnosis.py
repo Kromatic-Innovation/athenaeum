@@ -217,7 +217,7 @@ def _names_memory_topic_path(text: str) -> bool:
 
     "Starts as a path": no line break at all, and either no whitespace before
     the memory directory or a field that opens as an absolute path (``/``,
-    ``~`` or a drive letter), so ``/Users/Ann Lee/.claude/...`` counts. A field
+    ``~`` or a drive letter), so ``/opt/Shared Docs/.claude/...`` counts. A field
     holding a path or a glob counts while prose that mentions one (a sub-agent
     prompt, a message) does not.
     """
