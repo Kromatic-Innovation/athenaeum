@@ -112,6 +112,8 @@ from athenaeum.provenance import resolve_remember_extras, resolve_remember_sourc
 from athenaeum.recall_overflow import (
     render_access_withheld_line,
     render_overflow_line,
+    render_unmatched_names_line,
+    unmatched_name_terms,
 )
 from athenaeum.remote_policy import REMOTE_PROFILE, RemotePolicy
 from athenaeum.search import tokenize_keyword_query
@@ -2817,6 +2819,18 @@ def _recall_via_backend(
     _access_line = _render_recall_access_withheld_line(_withheld_access_count)
     if _access_line:
         result = f"{result}\n\n{_access_line}"
+    # Issue athenaeum#3033: say so, once, when the query names something no
+    # shown page mentions -- the abstention case, where the agent otherwise
+    # re-searches the full name, the surname and the given name before it
+    # gives up. Checked against the rendered blocks (exactly what the agent
+    # reads) and only on an explicit call: the unprompted push path has no
+    # agent question to answer.
+    if not unprompted:
+        _unmatched_line = render_unmatched_names_line(
+            unmatched_name_terms(query, "\n".join(parts))
+        )
+        if _unmatched_line:
+            result = f"{result}\n\n{_unmatched_line}"
     return result
 
 

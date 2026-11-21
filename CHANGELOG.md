@@ -46,6 +46,8 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- `recall` now says so when the query names something no returned page mentions. A capitalised query word that appears on none of the pages shown (`Yusuf Adeyemi` when no page names him) adds one line after the results, telling the agent that the store most likely has no page on that name, so searching again for part of the name or another spelling will not help. It targets the abstention cost on the native-memory grid, where the verdict arm spent four `recall` calls per unknown name before saying it did not know. Over every `recall` call stored from run 44783114473, the line would have appeared on 49 of 71 abstention calls and on none of 451 others. The per-row counts and projection are in `docs/measurements/abstention-cost-2026-11-21.md` (athenaeum#3033).
+
 - North-star grid: the oracle control now tolerates one delivered-page omission. When an enrolled class and scale has failing `oracle` rows that are all marker misses with delivery, and at most one probe is involved, that (probe, scale) pair is excluded from every arm, native arms included, for conditions 1, 2 and 3, and the report names it in an "Excluded by the oracle tolerance" table; a second failing probe, or a miss without delivery, still voids. `spend_approver_named` gains the alternative marker `requester explain` on its second page. `grader_revision` moves to `athenaeum#3029`; `corpus_digest` does not (pages are untouched). Run 44783114473's stored rows are re-read offline in `docs/measurements/native-memory-baseline-2026-11-20-regrade.md` (athenaeum#3029).
 
 ### Fixed
