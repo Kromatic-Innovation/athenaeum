@@ -385,6 +385,202 @@ def test_hook_registered_but_target_missing_fails(
     assert "UserPromptSubmit" in hooks.detail
 
 
+def _settings_with_command(event: str, command: str) -> dict:
+    return {
+        "hooks": {
+            event: [{"hooks": [{"type": "command", "command": command}]}]
+        }
+    }
+
+
+def _session_id_capture_command(script: Path) -> str:
+    """The shape athenaeum#3021 was found on: an env assignment holding a
+    command substitution (whose words include the flag ``-r``), then a
+    ``;``-joined, env-prefixed ``nohup bash <script>``."""
+    return (
+        "SID=$(jq -r '.session_id // empty'); "
+        f"FOO=bar nohup bash {script}"
+    )
+
+
+def test_env_prefix_command_substitution_hook_passes(
+    healthy_install: dict, tmp_path: Path
+) -> None:
+    """athenaeum#3021 AC1: the command-substitution shape, script present,
+    passes. Before the fix the ``-r`` inside ``$(jq -r ...)`` was read as
+    the hook path and the check falsely failed."""
+    script = tmp_path / "hooks" / "athenaeum" / "session-end.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        _settings_with_command("SessionEnd", _session_id_capture_command(script)),
+    )
+    results = _run_healthy(healthy_install)
+    hooks = next(r for r in results if r.name == "hooks")
+    assert hooks.status == "ok", hooks.detail
+
+
+def test_env_prefix_command_substitution_hook_missing_names_script(
+    healthy_install: dict, tmp_path: Path
+) -> None:
+    """athenaeum#3021 AC2/AC3: the same command with the script removed
+    still fails, and names the script path -- never the flag ``-r``."""
+    script = tmp_path / "hooks" / "athenaeum" / "session-end.sh"
+    assert not script.exists()
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        _settings_with_command("SessionEnd", _session_id_capture_command(script)),
+    )
+    results = _run_healthy(healthy_install)
+    assert doctor.exit_code(results) == 1
+    hooks = next(r for r in results if r.name == "hooks")
+    assert hooks.status == "fail"
+    assert f"SessionEnd -> {script}" in hooks.detail
+    assert "-> -" not in hooks.detail
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{script}; echo done",
+        "true && {script}",
+        "nohup bash {script} & disown",
+        "nohup bash {script} >/dev/null 2>&1 & disown",
+        "SID=`jq -r .session_id`; nohup bash {script} &",
+        "bash -c '{script} --flag'",
+    ],
+)
+def test_compound_hook_commands_resolve_to_the_script(
+    template: str, healthy_install: dict, tmp_path: Path
+) -> None:
+    """athenaeum#3021: each simple command of a ``;``/``&&``/``&``-joined
+    hook command is resolved separately; the target is the athenaeum
+    script, and its absence is reported by path."""
+    script = tmp_path / "hooks" / "athenaeum" / "pre-compact-save.sh"
+    command = template.format(script=script)
+    assert doctor._resolve_hook_target(command) == str(script)
+
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        _settings_with_command("PreCompact", command),
+    )
+    hooks = next(r for r in _run_healthy(healthy_install) if r.name == "hooks")
+    assert hooks.status == "fail"
+    assert f"PreCompact -> {script}" in hooks.detail
+
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    hooks = next(r for r in _run_healthy(healthy_install) if r.name == "hooks")
+    assert hooks.status == "ok", hooks.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # Combined short flags carrying ``-c``: the operand is a command string.
+        ("bash -lc 'athenaeum-claude-hook --event Stop'", "athenaeum-claude-hook"),
+        ("sh -ec 'athenaeum-claude-hook'", "athenaeum-claude-hook"),
+        # An option that takes a value never has that value read as the script.
+        ("bash -o pipefail {script}", "{script}"),
+        ("python3 -W ignore {script}", "{script}"),
+        ("node -r ./setup.js {script}", "{script}"),
+        # Inline code / a module: the interpreter is the only on-disk target.
+        ("python3 -c 'import athenaeum'", "python3"),
+        ("python3 -m athenaeum.claude_code_adapter", "python3"),
+        # ``exec`` wraps the command rather than interpreting a script.
+        ("exec {script}", "{script}"),
+        # A ``#`` inside a word is not a comment (``shlex.split`` semantics).
+        ("{script} --tag=#nightly", "{script}"),
+    ],
+)
+def test_interpreter_options_resolve_to_the_real_target(
+    command: str, expected: str, tmp_path: Path
+) -> None:
+    """Seer review on athenaeum#3021's PR: combined ``-lc`` flags, option
+    values, and ``#`` inside a word must not be read as the hook target."""
+    script = str(tmp_path / "hooks" / "athenaeum" / "session-start-recall.sh")
+    assert doctor._resolve_hook_target(command.format(script=script)) == expected.format(
+        script=script
+    )
+
+
+def test_interpreter_with_missing_script_is_not_masked_by_the_interpreter(
+    healthy_install: dict, tmp_path: Path
+) -> None:
+    """``bash <script>`` resolves to the script, not to ``bash`` -- which
+    always exists and would hide a missing script."""
+    script = tmp_path / "hooks" / "athenaeum" / "stop-hook-validate.sh"
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        _settings_with_command("Stop", f"bash {script}"),
+    )
+    hooks = next(r for r in _run_healthy(healthy_install) if r.name == "hooks")
+    assert hooks.status == "fail"
+    assert str(script) in hooks.detail
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "SID=$(jq -r '.session_id // empty'); FOO=bar nohup bash -x",
+        "-r",
+        "nohup -- athenaeum",
+        "bash -e -u",
+        "jq -r .x | athenaeum-claude-hook --event SessionEnd",
+        "env -i FOO=bar -r",
+        "$(command -v athenaeum-claude-hook) --quiet",
+    ],
+)
+def test_no_flag_is_ever_reported_as_a_hook_target(command: str) -> None:
+    """athenaeum#3021 AC3: a word starting with ``-`` is never a target."""
+    target = doctor._resolve_hook_target(command)
+    assert target is None or not target.startswith("-")
+
+
+def test_undeterminable_compound_command_warns_rather_than_fails(
+    healthy_install: dict,
+) -> None:
+    """athenaeum#3021: when no simple command identifies the hook with
+    confidence, the check warns ("could not determine ...") instead of
+    reporting a false FAIL -- and the doctor's exit code stays zero."""
+    command = "cd athenaeum-work && ./run hook; ./run other"
+    assert doctor._resolve_hook_target(command) is None
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        _settings_with_command("SessionEnd", command),
+    )
+    results = _run_healthy(healthy_install)
+    hooks = next(r for r in results if r.name == "hooks")
+    assert hooks.status == "warn"
+    assert "could not determine hook target from a compound shell command" in hooks.detail
+    assert doctor.exit_code(results) == 0
+
+
+def test_missing_target_still_fails_alongside_an_undeterminable_one(
+    healthy_install: dict, tmp_path: Path
+) -> None:
+    """A real missing script is never downgraded to a warning because a
+    different command was undeterminable."""
+    missing = tmp_path / "hooks" / "athenaeum" / "rebuild-index.sh"
+    _write_json(
+        healthy_install["claude_dir"] / "settings.json",
+        {
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "cd athenaeum-work && ./run a; ./run b"}
+                        ]
+                    }
+                ],
+                "Stop": [{"hooks": [{"type": "command", "command": str(missing)}]}],
+            }
+        },
+    )
+    hooks = next(r for r in _run_healthy(healthy_install) if r.name == "hooks")
+    assert hooks.status == "fail"
+    assert f"Stop -> {missing}" in hooks.detail
+
+
 def test_settings_json_present_but_unparseable_fails_hooks(
     healthy_install: dict,
 ) -> None:

@@ -89,6 +89,21 @@ withheld tally run entirely in SQL/awk — no Python interpreter is spawned
 to do it, exactly as the relevance floor above already does not apply
 there.
 
+**An unmatched-names line on the explicit `recall` tool (issue athenaeum#3033).**
+A vector backend always returns its nearest neighbours, so a query about a
+person or client the store has never heard of still gets five pages back, and
+nothing in them says the name is absent. On the 2026-11-20 native-memory grid
+the agent searched the full name, the surname and the given name before it
+said it did not know. When a capitalised query word appears on none of the
+pages shown, the MCP `recall` tool now appends one line saying so
+(`athenaeum.recall_overflow.unmatched_name_terms` decides, the wording lives in
+`src/athenaeum/prompts/recall_unmatched_names_breadcrumb.md`). The check is over
+the rendered result text, so it only states a fact about what was shown. It is
+not added on the unprompted push path. It does not catch a topic query
+("parental leave policy") whose words do appear on distractor pages. The
+replay and projection are in
+`docs/measurements/abstention-cost-2026-11-21.md`.
+
 **One resolver per setting, no per-surface defaults (issue athenaeum#2458).**
 Both of this section's configured values resolve in exactly one place, and
 every read surface calls it rather than carrying a default of its own:

@@ -114,6 +114,7 @@ does not answer.
 - [Memory taxonomy](design/memory-taxonomy.md)
 - [Provenance shape](design/provenance-shape.md)
 - [One way in, one way out](design/one-way-in-one-way-out.md) — the two-path invariant.
+- [Method rejections](design/method-rejections.md) — approaches considered and declined, moved out of the north star.
 - [Field corrections](design/field-corrections.md)
 - [Note corrections](design/note-corrections.md) — why a CLI pass, not a fast-path record
   or a `decompose-page` extension.
@@ -236,6 +237,7 @@ Evidence, kept out of the reading path.
 - [Recall hybrid RRF fusion — real-embedder sweep](measurements/recall-hybrid-fusion-sweep.md)
 - [Follow-through on real sessions](measurements/follow-through-real-sessions-2026-11-14.md) — whether pushed pages were opened afterward, by interactive and headless population and session length; rates and counts only.
 - [Recall metrics on a real-session gold set](measurements/recall-metrics-real-sessions-2026-11-15.md) — push coverage, recall-through, use precision and session use rate per population against LLM relevance labels, plus the `used` heuristic's precision and recall; operator spot-check pending.
+- [Why real sessions do not pull](measurements/pull-diagnosis-2026-11-21.md) — what the published counts settle about the low recall-through, the reader that counts Athenaeum and native-memory pulls per pushed turn, and lever targets set before those counts; host counts pending.
 - [Why pushed pages are irrelevant](measurements/irrelevant-push-causes-2026-11-19.md) — attributes every irrelevant pushed page from the 2026-11-15 sample to one cause (missed ranking, missing page, harness-text query, non-descriptive prompt, no memory needed, filler), interactive and headless apart, with a second-pass agreement check.
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
@@ -253,6 +255,7 @@ Evidence, kept out of the reading path.
 - [Native-memory baseline re-run, 2026-11-20: the oracle control failed again, on fewer cells](measurements/native-memory-baseline-2026-11-20.md) — the second re-run for the kill criterion, on the repaired grader: `single_hop` and `redundancy` now clear, but `multi_hop` and `follow_through` fall below 1.000 at oracle, so the decision rows are void; records provenance, derived spend, the failing cells, and the open rulings.
 - [North-star grid — rendered report, run 44783114473](measurements/north-star-grid-2026-11-20-run-44783114473.md) — the full rendered report from that run, recorded in-tree because the Actions artifact expires; its decision block is void.
 - [Native-memory baseline, 2026-11-20 regrade: the decision block read under the oracle-tolerance rule](measurements/native-memory-baseline-2026-11-20-regrade.md) — run 44783114473 re-read offline under the oracle-tolerance rule: one excluded pair, per-scale reading of the three conditions, set beside the real-session numbers; states no go or no-go.
+- [Abstention cost, 2026-11-21: why a correct "I don't know" costs the verdict arm so much](measurements/abstention-cost-2026-11-21.md) — per-row tool-call and turn counts for the abstention probes of run 44783114473, verdict arm against native; the unmatched-names `recall` signal shipped against the narrowing-search loop, replayed over every stored `recall` call, and its projected cost on the same rows.
 - [North-star grid — re-rendered report, run 44783114473, oracle-tolerance grader](measurements/north-star-grid-2026-11-20-run-44783114473-regrade-3029.md) — the verbatim offline re-render of that run's stored rows; does not pool with the earlier render of the same run.
 - [Rollout eval layer — packaged adapter vs. the shell hook](measurements/rollout-eval-adapter-cutover-2026-09-26.md) — the score against the packaged `athenaeum-claude-hook` adapter, next to the last shell-hook run; `push_breadcrumb_pull` reads below the recorded floor.
 - [Rollout eval layer — packaged adapter re-measurement](measurements/rollout-eval-adapter-cutover-2026-09-29.md) — re-run against the packaged adapter after an overflow-notice fix; `push_breadcrumb_pull` recovers partway toward the shell-hook floor but does not reach it.
