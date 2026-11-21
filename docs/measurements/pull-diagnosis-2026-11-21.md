@@ -7,14 +7,10 @@ note covers the issue's first step: diagnose why real sessions rarely call
 `recall`. It also adds the native-memory comparison the operator asked for on
 2026-11-21.
 
-**Status: partial.** Everything that can be settled from the repository and the
-published measurements is settled below. The counts that decide between the
-candidate reasons need the deployment's push ledger and session transcripts.
-Those are host data, and they are not readable from where this note was written.
-This change adds the reader that produces those counts
-(`athenaeum push-metrics pull-diagnosis`, section 4). The table in section 5 is
-left for that run to fill in, and the dominant reason stays unnamed until it
-does. Naming it now would mean guessing.
+**Status: complete.** Sections 1 to 4 and 6 were written from the repository
+and the published measurements. Section 5 holds the counts from the reader
+(`athenaeum push-metrics pull-diagnosis`, section 4), run on the deployment on
+2026-11-21 (athenaeum#3038), and names the dominant reason.
 
 This note holds counts, rates and method only. It contains no session
 identifiers, page names, paths, prompts or transcript text.
@@ -165,16 +161,62 @@ and sample manifest live outside the repository. That means:
   window rule differs from the report's, and the comparison should not be read
   until that is settled.
 
-## 5. Counts — pending the host run
+## 5. Counts (host run, 2026-11-21)
+
+Command: `athenaeum push-metrics pull-diagnosis --before 2026-11-15T00:00:00Z
+--json`, from `develop` after the athenaeum#3032 reader merged, against the
+deployment's push ledger and transcript root. Headless sessions contribute
+their first pushed window only (the default).
+
+**Positive control: passes.** The reader found 679 interactive windows across
+40 sessions, against the 2026-11-15 report's 701 across 39, and 1,846 headless
+windows against 2,150. The headless shortfall (86% coverage) fits transcripts
+pruned since. The ledger holds 5,989 sessions, and 4,103 of them have no
+transcript left to read.
 
 | Population | Pushed windows | Windows with `recall` | Windows with any Athenaeum pull | Windows with a native topic read | Windows with a native index read | Windows with `ToolSearch` for `recall` | Sessions with `recall` deferred | Sessions with server failed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Interactive | pending | pending | pending | pending | pending | pending | pending | pending |
-| Headless | pending | pending | pending | pending | pending | pending | pending | pending |
+| Interactive | 679 | 42 (6.2%) | 42 (6.2%) | 0 (0.0%) | 0 (0.0%) | 42 (6.2%) | 40 of 40 | 0 |
+| Headless | 1,846 | 0 | 0 | 0 | 0 | 1 (0.05%) | 950 of 1,846 | 7 |
 
-**Dominant reason: not yet named.** Section 2 narrows it to low relevance (2.4)
-plus either tool exposure (2.2) or a pull rate that is low for native memory
-too. This table decides between the last two.
+Supporting counts:
+
+- **Interactive calls:** 53 `recall` calls, 1 `read_entity` call, 45
+  `ToolSearch` calls naming `recall`. 31 of 40 sessions called `recall` at
+  least once.
+- **Weaker native signal:** a `Bash` command naming an auto-memory directory
+  appears in 44 interactive windows (6.5%, 63 commands). A shell command that
+  names the directory may list it, write to it or search it, so this is not a
+  read of a topic file. It is reported apart, as section 4 specifies.
+- **Headless deferral:** for 889 of 1,846 headless sessions, the transcript did
+  not show whether `recall` was loaded.
+
+**Population caveat.** Outside the population above, the deployment's
+transcripts do hold native topic reads: 227 `Read` calls on auto-memory
+topic files, across 74 sessions between 2026-10-22 and 2026-11-14. None of those
+74 sessions has a row in this deployment's push ledger, so none had a pushed
+window to count. They ran in a separate container environment whose pushes, if
+any, were not recorded here. Native topic reads therefore do happen, but not in
+the sessions where Athenaeum pushed. The comparison below covers the pushed
+population only.
+
+**Dominant reason: the host agent rarely pulls from any memory store in pushed
+windows. The breadcrumb does not cause it.** By section 3's rule:
+
+- Native topic reads are not more frequent than Athenaeum pulls. They are
+  rarer: 0 of 679 interactive windows against 42. Even the weaker `Bash`
+  signal (6.5%) only matches the Athenaeum pull rate (6.2%); it does not
+  clearly exceed it.
+- So the comparison comes down to the push channel, and section 3 points the
+  lever at making the push carry the answer (section 6, push-carrying).
+- `recall` was deferred behind tool search in every interactive session, and
+  every interactive window with a `recall` call also held a `ToolSearch` for
+  it (42 of 42). Deferral is universal, so these counts cannot separate its
+  effect from low relevance (2.4). The grid, where `recall` is loaded and
+  pulled every time, is the only contrast, and relevance confounds it. Under
+  section 3, deferral is not the first fix, because native reads are not more
+  frequent. It remains a cheap secondary lever: name the callable tool in the
+  preamble and say it may need loading.
 
 ## 6. Lever targets, set before the counts are seen
 
@@ -199,8 +241,13 @@ waits for section 5. These are proposals for the operator to rule on.
 
 ## Method
 
+Section 5 was added on 2026-11-21 from one read-only run of the reader on the
+deployment, plus a raw count of `Read` calls on auto-memory topic files across
+all retained transcripts, used for the population caveat. Neither step called a
+model.
+
 The repository was read at the tip of `develop` on 2026-11-21. Sections 1 and
 2.4 quote only figures already published in the three reports cited. Section 2
 reads the shipped breadcrumb renderer (`athenaeum.context`) and the grid harness
-(`tests/evals/rollout.py`). No deployment data was read, and no model was
-called.
+(`tests/evals/rollout.py`). For those sections no deployment data was read,
+and no model was called.
