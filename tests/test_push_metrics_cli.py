@@ -1156,6 +1156,7 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         "record",
         "tail",
         "follow-through",
+        "pull-diagnosis",
         "sample-for-labelling",
         "score-used",
     }

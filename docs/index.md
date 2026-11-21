@@ -114,6 +114,7 @@ does not answer.
 - [Memory taxonomy](design/memory-taxonomy.md)
 - [Provenance shape](design/provenance-shape.md)
 - [One way in, one way out](design/one-way-in-one-way-out.md) — the two-path invariant.
+- [Method rejections](design/method-rejections.md) — approaches considered and declined, moved out of the north star.
 - [Field corrections](design/field-corrections.md)
 - [Note corrections](design/note-corrections.md) — why a CLI pass, not a fast-path record
   or a `decompose-page` extension.
@@ -236,6 +237,7 @@ Evidence, kept out of the reading path.
 - [Recall hybrid RRF fusion — real-embedder sweep](measurements/recall-hybrid-fusion-sweep.md)
 - [Follow-through on real sessions](measurements/follow-through-real-sessions-2026-11-14.md) — whether pushed pages were opened afterward, by interactive and headless population and session length; rates and counts only.
 - [Recall metrics on a real-session gold set](measurements/recall-metrics-real-sessions-2026-11-15.md) — push coverage, recall-through, use precision and session use rate per population against LLM relevance labels, plus the `used` heuristic's precision and recall; operator spot-check pending.
+- [Why real sessions do not pull](measurements/pull-diagnosis-2026-11-21.md) — what the published counts settle about the low recall-through, the reader that counts Athenaeum and native-memory pulls per pushed turn, and lever targets set before those counts; host counts pending.
 - [Why pushed pages are irrelevant](measurements/irrelevant-push-causes-2026-11-19.md) — attributes every irrelevant pushed page from the 2026-11-15 sample to one cause (missed ranking, missing page, harness-text query, non-descriptive prompt, no memory needed, filler), interactive and headless apart, with a second-pass agreement check.
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)

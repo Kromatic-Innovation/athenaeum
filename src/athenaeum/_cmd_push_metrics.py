@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum push-metrics {baseline,coverage-audit,liveness,record,tail,
-follow-through,sample-for-labelling,score-used}`` — v6 MVP (a), issue
-athenaeum#711; ``liveness`` added by issue athenaeum#1422, ``record`` by
-issue athenaeum#1478, ``tail`` by issue athenaeum#1479, ``follow-through``
-by issue athenaeum#2301, and ``sample-for-labelling``/``score-used`` by
-issue athenaeum#2302.
+follow-through,pull-diagnosis,sample-for-labelling,score-used}`` — v6 MVP
+(a), issue athenaeum#711; ``liveness`` added by issue athenaeum#1422,
+``record`` by issue athenaeum#1478, ``tail`` by issue athenaeum#1479,
+``follow-through`` by issue athenaeum#2301, ``sample-for-labelling``/
+``score-used`` by issue athenaeum#2302, and ``pull-diagnosis`` by issue
+athenaeum#3032.
 
-Eight subcommands: the first five over :mod:`athenaeum.push_metrics`,
-``follow-through`` over :mod:`athenaeum.follow_through`, and the last two
+Nine subcommands: the first five over :mod:`athenaeum.push_metrics`,
+``follow-through`` over :mod:`athenaeum.follow_through`,
+``pull-diagnosis`` over :mod:`athenaeum.pull_diagnosis`, and the last two
 over :mod:`athenaeum.push_used_scoring`:
 
 - ``baseline``       compute precision + coverage over a stated window and
@@ -68,6 +70,14 @@ over :mod:`athenaeum.push_used_scoring`:
                        calls. Thin argv parsing + output shaping over
                        :func:`athenaeum.follow_through.build_follow_through_report`
                        — all the ledger/transcript join logic lives there.
+- ``pull-diagnosis``   per turn window that got a proactive push (issue
+                       athenaeum#3032): how often the agent called
+                       ``recall``/``read_entity``, read a native
+                       auto-memory topic file, or searched for the deferred
+                       ``recall`` tool, plus per-session recall-tool state
+                       (deferred / server failed / called). Counts only, no
+                       model calls. Logic lives in
+                       :func:`athenaeum.pull_diagnosis.build_pull_diagnosis_report`.
 - ``sample-for-labelling``  stratified sample of pushed pages, by session-
                        length bucket and population, written as a
                        labelling-ready JSONL worksheet (issue athenaeum#2302,
@@ -115,6 +125,7 @@ _SUBCOMMANDS = (
     "record",
     "tail",
     "follow-through",
+    "pull-diagnosis",
     "sample-for-labelling",
     "score-used",
 )
@@ -122,7 +133,7 @@ _SUBCOMMANDS = (
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,liveness,
-    record,tail,follow-through,sample-for-labelling,score-used}``."""
+    record,tail,follow-through,pull-diagnosis,sample-for-labelling,score-used}``."""
     sub = getattr(args, "push_metrics_target", None)
     if sub not in _SUBCOMMANDS:
         print(
@@ -139,6 +150,9 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
 
     if sub == "follow-through":
         return _cmd_push_metrics_follow_through(args)
+
+    if sub == "pull-diagnosis":
+        return _cmd_push_metrics_pull_diagnosis(args)
 
     if sub == "sample-for-labelling":
         return _cmd_push_metrics_sample_for_labelling(args)
@@ -612,6 +626,59 @@ def _cmd_push_metrics_follow_through(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_pull_diagnosis_report(report: Any) -> None:
+    """Plain-text rendering of :meth:`athenaeum.pull_diagnosis.PullDiagnosisReport.to_dict`
+    — ``--json`` is the documented, stable machine-readable shape."""
+    print(
+        f"sessions_in_ledger: {report['sessions_in_ledger']}\n"
+        f"sessions_skipped_no_transcript: {report['sessions_skipped_no_transcript']}\n"
+        f"sessions_without_pushed_window: {report['sessions_without_pushed_window']}\n"
+        f"before: {report['before']}\n"
+        f"headless_first_window_only: {report['headless_first_window_only']}"
+    )
+    for channel, tally in report["channels"].items():
+        print(f"channel {channel}: sessions={tally['sessions']} windows={tally['windows']}")
+        for signal, count in tally["windows_with"].items():
+            rate = tally["window_rates"].get(signal)
+            rate_str = f"{rate:.4f}" if rate is not None else "n/a"
+            print(f"  windows_with {signal}: {count} (rate {rate_str})")
+        for state, count in tally["session_states"].items():
+            print(f"  sessions {state}: {count}")
+
+
+def _cmd_push_metrics_pull_diagnosis(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics pull-diagnosis`` (issue athenaeum#3032).
+
+    Read-only, thin argv parsing + output shaping over
+    :func:`athenaeum.pull_diagnosis.build_pull_diagnosis_report`. Takes no
+    run lock: it never writes.
+    """
+    from athenaeum import pull_diagnosis, push_metrics
+
+    before = None
+    if args.before:
+        before = push_metrics._parse_ts(args.before)
+        if before is None:
+            print(
+                f"athenaeum push-metrics pull-diagnosis: --before {args.before!r} "
+                "is not an ISO-8601 timestamp",
+                file=sys.stderr,
+            )
+            return 2
+    report = pull_diagnosis.build_pull_diagnosis_report(
+        cache_dir=args.cache_dir,
+        projects_root=args.projects_root,
+        before=before,
+        headless_first_window_only=not args.all_headless_windows,
+    )
+    payload = report.to_dict()
+    if args.json:
+        sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    else:
+        _print_pull_diagnosis_report(payload)
+    return 0
+
+
 def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``athenaeum push-metrics`` and its three modes on ``subparsers``."""
     p_parser = subparsers.add_parser(
@@ -966,6 +1033,49 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "(default: 25).",
     )
     follow_through_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+
+    pull_diag_p = p_sub.add_parser(
+        "pull-diagnosis",
+        help="Per turn window that received a proactive push (issue "
+        "athenaeum#3032): how often the agent pulled, from athenaeum "
+        "(recall/read_entity calls) or from native auto-memory (a read of a "
+        "topic file under projects/<scope>/memory/), and whether the recall "
+        "tool was deferred behind tool search or its server failed. Counts "
+        "and rates only (no session ids, page ids, paths or text); no model "
+        "calls; read-only.",
+    )
+    pull_diag_p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the push-metrics ledger "
+        "(default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum).",
+    )
+    pull_diag_p.add_argument(
+        "--projects-root",
+        type=Path,
+        default=None,
+        help="Claude Code transcript root, holding "
+        "<root>/<scope>/<session_id>.jsonl (default: CLAUDE_CONFIG_DIR "
+        "env's `projects` dir, else ~/.claude/projects).",
+    )
+    pull_diag_p.add_argument(
+        "--before",
+        default=None,
+        help="Ignore proactive pushes at or after this ISO-8601 instant "
+        "(the 2026-11-15 report used 2026-11-15T00:00:00Z).",
+    )
+    pull_diag_p.add_argument(
+        "--all-headless-windows",
+        action="store_true",
+        help="Count every pushed window of a headless session, not only "
+        "its first (the default matches the 2026-11-15 report).",
+    )
+    pull_diag_p.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON instead of plain text.",

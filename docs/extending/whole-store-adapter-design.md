@@ -594,9 +594,11 @@ git-based)"* (`docs/reference/configuration.md:56`). The FTS5 database, the chro
 collection, both manifests, and the vector `.generation` stamp
 (`search.py:990-1037`) are all reconstructible from raw + wiki by definition.
 
-Nothing in this design changes that, and three adjacent rejections in
-north-star §3 stay rejected: raw is still not indexed directly, duration is
-still frontmatter rather than a second store, and there is still one read seam.
+Nothing in this design changes that. The derived indexes stay derived. Raw
+intake is searched by recall only as `[uncompiled]` hits ranked below compiled
+pages (north-star §3). Duration is still frontmatter rather than a second
+store, and there is still one read seam (north-star §2.1, and
+[`docs/design/method-rejections.md`](../design/method-rejections.md)).
 
 ### 5.2 The addition: the two classes the model is silent about
 
