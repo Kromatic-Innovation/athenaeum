@@ -72,9 +72,9 @@ path resolution, so a PR there must be green to merge.
 `command` path both assume `hooks/launcher.sh` sits at the same relative
 location in the thin repo (`hooks/launcher.sh` under the repo root).
 
-Open items on the thin repo (tracked in athenaeum#2308):
-`userConfig.knowledgePath` is not yet wired (see below), the plugin has no
-icon, and `plugin.json` keeps a `_versionPinNote` field that Claude Code
+Open items on the thin repo (tracked in athenaeum#2308): the thin repo
+must be re-synced from this tree (the launcher, `.mcp.json` and `hooks.json`
+changed in athenaeum#3046), the plugin has no icon, and `plugin.json` keeps a `_versionPinNote` field that Claude Code
 ignores but `claude plugin validate --strict` warns about.
 
 ## Version-bump rule
@@ -118,14 +118,24 @@ LLM key mode, search index and schedule, never the presence of `uv` itself.
 So the launcher's message is new wording, written to stay consistent with
 `docs/guides/install.md`'s own "What happens when a prerequisite is
 missing" section (the only existing athenaeum prose on this exact failure),
-rather than a quote lifted from doctor.py. `tests/test_claude_code_plugin.py`
+rather than a quote lifted from doctor.py.
+
+The message must reach the person and the model, not just a debug log. In
+`--ensure-ready` (the SessionStart hook) the launcher prints it to **stdout**
+as hook JSON: `systemMessage` shows it to the user and
+`hookSpecificOutput.additionalContext` hands it to the model. `hooks.json`
+no longer discards that command's stderr or stdout (it keeps `|| true`, so
+the session is never blocked). In the MCP passthrough mode stdout is the
+protocol channel, so the same text goes to stderr there.
+`tests/test_claude_code_plugin.py`
 proves the exit-0-and-names-uv contract with a from-scratch minimal `PATH`
 directory that genuinely lacks `uv` — never the real `PATH`.
 
 ## First run while the dependency build is pending (AC4)
 
 The pinned athenaeum release is resolved through `uv run --with
-athenaeum==<pin>`, which can take real time on a cold cache — longer than a
+'athenaeum[mcp]==<pin>'` (the `[mcp]` extra supplies `fastmcp`, which
+`athenaeum serve` imports), which can take real time on a cold cache — longer than a
 hook's timeout should ever have to wait. `hooks.json`'s `SessionStart` entry
 therefore runs `launcher.sh --ensure-ready` first: it checks a ready marker
 under `$ATHENAEUM_CACHE_DIR/claude-code-plugin/` (default
@@ -137,7 +147,11 @@ present) or takes the lock itself, forks the real `uv run` as a detached
 background job, and returns immediately either way — the pattern
 `examples/claude-code/session-start-recall.sh` already uses for its own
 background vector-index rebuild (issue athenaeum#2204), reused here rather
-than reinvented. The session is told it is still preparing (recall running
+than reinvented. The MCP start itself (`launcher.sh serve ...`) installs the pinned release and
+creates a missing knowledge directory synchronously, so it never depends on
+this warm-up having finished: Claude Code caches a failed first MCP connect
+for about 15 minutes, and a first-session race must not turn into a dead
+server. The session is told it is still preparing (recall running
 in reduced/FTS5-only mode) until a later session finds the marker.
 `tests/test_claude_code_plugin.py` drives this by creating the pending lock
 directly, with no real `uv` invocation needed to prove the fast return.
@@ -181,21 +195,21 @@ pins down the FORM of `userConfig` but not its security properties, and
 this repo has no network access to Claude Code's own documentation to
 confirm the latter from the primary source. Specifically:
 
-**`knowledgePath` IS NOT WIRED YET — setting it currently does nothing.**
-Declaring a `userConfig` field only lets an operator SET a value; it does
-not, by itself, make anything read that value. `.mcp.json`'s `athenaeum`
-server entry does not reference `knowledgePath` at all, so `athenaeum
-serve` always falls back to its own `--path` default (`~/knowledge`)
-regardless of what an operator enters here. The blocker is the same
-network/login gap as above: whatever substitution syntax Claude Code uses
-to thread a `userConfig` value into a `.mcp.json` command/arg/env
-(something like `${CLAUDE_PLUGIN_USER_CONFIG_...}`, by analogy with the
-confirmed-real `${CLAUDE_PLUGIN_ROOT}`) could not be verified here, so
-nothing was guessed into `.mcp.json` rather than risk shipping an unverified
-token that silently fails to substitute. Wiring this is part of
-athenaeum#2308's clean-machine pass, which does have a live Claude Code
-session to confirm the real syntax against. Until that lands, treat this
-field as documentation of intent, not a working control.
+**`knowledgePath` is wired through `.mcp.json`.** The server entry's args
+are `["serve", "--path", "${user_config.knowledgePath}"]`, so a configured
+value reaches `athenaeum serve --path`. The launcher reads that `--path`
+too: when the directory is missing, the first MCP start runs `athenaeum
+init --path <dir>` (non-interactive, output sent to stderr) before `serve`,
+and an empty or unsubstituted value falls back to `~/knowledge`. The
+`${user_config.<key>}` substitution syntax follows Claude Code's plugin
+documentation as recalled when this was written; it was not re-verified
+against a live Claude Code in this repo's CI. If a Claude Code version does
+not substitute it, the launcher sees the literal token and uses the default
+path, so the failure mode is the old behaviour, not a dead server. The
+default (`~/knowledge`) stays declared in `plugin.json`. Claude Code's
+install screen was seen reporting the option as "not set" despite that
+default; whether a manifest key changes that is unverified, and the launcher
+does not depend on it.
 
 - **Established:** `userConfig` values of `type: "string"`/`"boolean"` are
   the mechanism Claude Code plugins use to collect a user-supplied setting,

@@ -563,7 +563,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 rescue_score = hits[0][2] if hits else 0.0
                 hits = [(rescue_filename, rescue_name, rescue_score), *hits]
 
-    from athenaeum.mcp_server import _resolve_hit_path
+    from athenaeum.mcp_server import _is_uncompiled_display_prefix, _resolve_hit_path
 
     # Issues athenaeum#885/#886: ONE index per surface class for the whole
     # command, shared across every hit — never one scan per hit. Each loads
@@ -575,8 +575,9 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # from the ACTUAL per-hit drop (never a second guess at the filter) and
     # stays 0 for the owner, who never reaches that branch.
     withheld_access_count = 0
+    printed_hits = 0
     for filename, _name, score in hits:
-        page_path, _display = _resolve_hit_path(filename, wiki_root, extra_roots)
+        page_path, display_prefix = _resolve_hit_path(filename, wiki_root, extra_roots)
         preview = ""
         fm: dict[str, object] = {}
         readable = False
@@ -624,7 +625,13 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 indexes=excluded_indexes,
                 usage_classes=getattr(args, "usage_class", None) or None,
             )
+        # Issue athenaeum#3043: mark a raw-intake hit exactly as the MCP tool
+        # does, via the SAME predicate. Prefixed onto the preview column so the
+        # tab-separated column count and the filename column are unchanged.
+        if _is_uncompiled_display_prefix(display_prefix, extra_roots):
+            preview = f"[uncompiled] {preview}".rstrip()
         print(f"{score:.2f}\t{filename}\t{preview}{excluded_suffix}")
+        printed_hits += 1
 
     # Issue athenaeum#1967 (AC2): the access-withheld breadcrumb, printed to
     # stderr (like the --type unrecognized-value note above) so it never
@@ -637,7 +644,47 @@ def cmd_recall(args: argparse.Namespace) -> int:
     if access_line:
         print(f"Note: {access_line}", file=sys.stderr)
 
+    # Issue athenaeum#3043: an empty result must not look like a broken
+    # command. One line on stderr (stdout stays the pure tab-separated
+    # contract that hooks and harnesses parse; empty stdout is unchanged).
+    # Exit code stays 0.
+    if printed_hits == 0:
+        if _recall_index_unusable(backend_name, query_cache, wiki_root):
+            print(
+                "No results: the search index is missing or empty. "
+                "Run `athenaeum doctor` to diagnose.",
+                file=sys.stderr,
+            )
+        else:
+            print("No results: nothing matched that query.", file=sys.stderr)
+
     return 0
+
+
+def _recall_index_unusable(backend_name: str, cache_dir: Path, wiki_root: Path) -> bool:
+    """True when the recall index for *backend_name* is missing or empty.
+
+    ``fts5`` needs its DB file, ``vector`` its vector directory; ``keyword``
+    scans the wiki on query, so it is "empty" only when the wiki holds no
+    pages. An existing-but-empty fts5/vector index is also reported.
+    """
+    from athenaeum import search
+
+    if backend_name == "keyword":
+        return not any(wiki_root.rglob("*.md"))
+    if backend_name == "fts5":
+        db = cache_dir / search._DB_NAME
+        if not db.is_file():
+            return True
+        import sqlite3
+
+        try:
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                return conn.execute("SELECT count(*) FROM wiki").fetchone()[0] == 0
+        except sqlite3.Error:
+            return True
+    vec = cache_dir / search._VECTOR_DIR
+    return not vec.is_dir() or not any(vec.iterdir())
 
 
 def _excluded_suffix_for_hit(

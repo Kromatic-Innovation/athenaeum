@@ -2926,6 +2926,14 @@ def _refresh_extra_root_index(
     """
     if search_backend not in ("fts5", "vector"):
         return
+    # A `vector` backend without chromadb answers queries from the fts5 index
+    # (`VectorBackend.query` degrades, as does `reindex`). Refresh THAT index:
+    # building the vector one raises ImportError, swallowed below, which left a
+    # `remember`'d note invisible to `recall` until a manual reindex.
+    import importlib.util
+
+    if search_backend == "vector" and importlib.util.find_spec("chromadb") is None:
+        search_backend = "fts5"
     try:
         import math
 

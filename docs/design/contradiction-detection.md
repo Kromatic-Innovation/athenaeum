@@ -510,6 +510,7 @@ Wire it into `~/.claude/settings.json`:
 {
   "hooks": {
     "SessionStart": [{
+      "matcher": "",
       "hooks": [{
         "type": "command",
         "command": "/path/to/pending-questions-surface.sh 2>/dev/null || true",

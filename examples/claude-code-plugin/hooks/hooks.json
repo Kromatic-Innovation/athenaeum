@@ -3,10 +3,11 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/launcher.sh\" --ensure-ready 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/launcher.sh\" --ensure-ready || true",
             "timeout": 5,
             "statusMessage": "Preparing athenaeum (uv)..."
           },
@@ -31,6 +32,7 @@
     ],
     "UserPromptSubmit": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -42,6 +44,7 @@
     ],
     "PreCompact": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
