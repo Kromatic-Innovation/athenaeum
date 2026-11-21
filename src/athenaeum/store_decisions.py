@@ -57,6 +57,9 @@ __all__ = [
     "PERSONAL_STORE_ID",
     "QUEUE_DIRNAME",
     "ITEM_TYPE",
+    "ANSWER_ACCEPT",
+    "ANSWER_REJECT",
+    "answers_for",
     "PageQuote",
     "PageRef",
     "StoreDecisionRefused",
@@ -87,6 +90,34 @@ ITEM_TYPE = "store-decision"
 _UID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_.\-]*$")
 
 _GIST_LIMIT = 160
+
+#: The answers a person can give a decision of a kind that is settled by
+#: accepting or rejecting a waiting message (athenaeum#3002).
+ANSWER_ACCEPT = "accept"
+ANSWER_REJECT = "reject"
+
+#: ``held`` reason of a ``raise_held`` decision that may also be answered accept
+#: (once the derived uid is free). Every other held reason can only be rejected.
+_ACCEPTABLE_HELD_REASON = "uid_taken"
+
+
+def answers_for(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """The answers a person may give *record*, or ``()`` for a kind with none here.
+
+    A ``raise`` decision is answered accept or reject. A ``raise_held`` decision
+    is answered reject, or accept when its reason is ``uid_taken`` (the accept
+    goes through only once the uid is free). The kind names are those of
+    :mod:`athenaeum.raise_acceptance`, which does the answering.
+    """
+    kind = record.get("kind")
+    if kind == "raise":
+        return (ANSWER_ACCEPT, ANSWER_REJECT)
+    if kind == "raise_held":
+        detail = record.get("detail") or {}
+        if detail.get("reason") == _ACCEPTABLE_HELD_REASON:
+            return (ANSWER_ACCEPT, ANSWER_REJECT)
+        return (ANSWER_REJECT,)
+    return ()
 
 
 class StoreDecisionRefused(ValueError):
@@ -361,6 +392,9 @@ def render_item(
     }
     if "detail" in record:
         payload["detail"] = record["detail"]
+    answers = answers_for(record)
+    if answers:
+        payload["answers"] = list(answers)
     return {
         "type": ITEM_TYPE,
         "id": record["id"],
