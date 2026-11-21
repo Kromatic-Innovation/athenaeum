@@ -1001,6 +1001,39 @@ def resolve_user_prompt_hook() -> Path:
 USER_PROMPT_HOOK = resolve_user_prompt_hook()
 
 
+#: Opt-in (issue athenaeum#3061): ``ATHENAEUM_EVAL_HOOK_KEY_FILE`` names a
+#: ``config.env``-style file whose ``ANTHROPIC_API_KEY`` line lets the breadcrumb
+#: hook's topic extractor use the model, as an install with a key does. The key
+#: is read here, at spawn time, into the hook subprocess's environment only: it
+#: is never put in this process's own environment (so it is not inherited by
+#: ``claude -p``), never logged and never stored.
+HOOK_KEY_FILE_ENV_VAR = "ATHENAEUM_EVAL_HOOK_KEY_FILE"
+
+
+def _read_env_file_key(path: Path, name: str) -> str:
+    """The value of *name* in a ``KEY=value`` / ``export KEY=value`` file, or ``""``."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == name:
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _hook_extractor_env() -> dict[str, str]:
+    """The hook-env pins that decide which topic extractor the hook runs: the
+    regex fallback by default (a key pinned empty), the model with a key file."""
+    key_file = os.environ.get(HOOK_KEY_FILE_ENV_VAR)
+    key = _read_env_file_key(Path(key_file), "ANTHROPIC_API_KEY") if key_file else ""
+    return {"ANTHROPIC_API_KEY": key, "ATHENAEUM_LLM_PROVIDER": "api"}
+
+
 def build_breadcrumb_hook_env(
     knowledge_root: Path, hook_home: Path, *, athenaeum_src: Path | None = None
 ) -> dict[str, str]:
@@ -1069,8 +1102,7 @@ def build_breadcrumb_hook_env(
         # issuing a request. Pinning the provider alongside it stops a
         # `claude-cli`-flavoured config.env routing the same call at a
         # `claude` subprocess instead.
-        "ANTHROPIC_API_KEY": "",
-        "ATHENAEUM_LLM_PROVIDER": "api",
+        **_hook_extractor_env(),
         # Issue athenaeum#2204: session-start-recall.sh now backgrounds the
         # vector rebuild + credential refresh behind a detached, unawaited
         # fork -- `build_hook_index` below drives that step SYNCHRONOUSLY
@@ -1612,6 +1644,8 @@ class HostConfig:
     tool_search: bool | None = None
     plugin_dir: Path | None = None
     allowed_tools: tuple[str, ...] = ()
+    #: Text written to ``CLAUDE.md`` in the session's scratch working directory.
+    claude_md: str | None = None
     #: Extra environment variables for the spawned session.
     env: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
@@ -2036,6 +2070,9 @@ def run_push_breadcrumb_pull(
         config_path = Path(tmp_dir) / "mcp-config.json"
         config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
         argv = build_pull_argv(claude_binary, config_path, model, host_config=host_config)
+        scratch_cwd = _scratch_cwd(tmp_dir)
+        if host_config is not None and host_config.claude_md:
+            (scratch_cwd / "CLAUDE.md").write_text(host_config.claude_md, encoding="utf-8")
         spawn_env = None
         if host_config is not None and (host_config.tool_search is not None or host_config.env):
             spawn_env = {**os.environ, **host_config.env}
@@ -2048,7 +2085,7 @@ def run_push_breadcrumb_pull(
             text=True,
             timeout=timeout,
             check=False,
-            cwd=_scratch_cwd(tmp_dir),
+            cwd=scratch_cwd,
             env=spawn_env,
         )
 
