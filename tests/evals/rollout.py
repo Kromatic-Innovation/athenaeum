@@ -1578,6 +1578,18 @@ def run_oracle(
 # ---------------------------------------------------------------------------
 
 
+def _scratch_cwd(tmp_dir: str | Path) -> Path:
+    """A fresh, empty working directory for one ``claude -p`` probe session.
+
+    A probe session has file tools (and, under a host plugin, more), so it must
+    never run with the repository as its working directory: an agent acting on
+    a coding-style probe task edited tracked files there (issue athenaeum#3057).
+    """
+    cwd = Path(tmp_dir) / "cwd"
+    cwd.mkdir(parents=True, exist_ok=True)
+    return cwd
+
+
 @dataclasses.dataclass(frozen=True)
 class HostConfig:
     """Host-side knobs for a PULL-family ``claude -p`` spawn (issue
@@ -1956,6 +1968,7 @@ def run_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
         )
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())
@@ -2033,6 +2046,7 @@ def run_push_breadcrumb_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
             env=spawn_env,
         )
 
@@ -2326,6 +2340,7 @@ def run_push_sections_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
         )
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())

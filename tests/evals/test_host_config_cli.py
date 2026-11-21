@@ -168,3 +168,44 @@ def test_stub_server_speaks_minimal_mcp() -> None:
     listed = stub_mcp_server.handle({"id": 2, "method": "tools/list"}, tools, "harbor")
     assert len(listed["result"]["tools"]) == 3
     assert stub_mcp_server.handle({"method": "notifications/initialized"}, tools, "harbor") is None
+
+
+def test_count_other_tools_separates_plugin_and_write_calls() -> None:
+    names = [
+        "ToolSearch",
+        RECALL_TOOL_NAME,
+        "Read",
+        "Edit",
+        "mcp__plugin_woz_code__Edit",
+        "mcp__plugin_woz_code__Search",
+    ]
+    assert hc.count_other_tools(names) == (4, 2, 2)
+
+
+def test_probe_session_runs_in_a_fresh_cwd_never_the_repo(monkeypatch, tmp_path) -> None:
+    """A probe session has file tools; it must not run in the repository."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from tests.evals import rollout
+
+    seen: list[Path] = []
+
+    def fake_run(argv, **kwargs):
+        cwd = Path(kwargs["cwd"])
+        assert cwd.is_dir()
+        seen.append(cwd)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(rollout.shutil, "which", lambda _b: "/bin/claude")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    probe = SimpleNamespace(id="p", probe_class="single_hop", query="q", expected_uids=())
+    for _ in range(2):
+        rollout.run_push_breadcrumb_pull(
+            probe, tmp_path, tmp_path, tmp_path, "core", context_fn=lambda *a, **k: ""
+        )
+    repo = Path(rollout.__file__).resolve().parents[2]
+    assert len(set(seen)) == 2
+    for cwd in seen:
+        assert repo not in cwd.resolve().parents and cwd.resolve() != repo

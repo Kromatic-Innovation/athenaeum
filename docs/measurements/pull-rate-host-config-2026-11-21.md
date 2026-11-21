@@ -4,12 +4,18 @@
 
 Issue athenaeum#3057, a blocker of athenaeum#3032.
 
-**Result in one line.** Neither tool deferral nor a coding plugin lowers the
-pull rate on task-shaped probes. On those, `recall` is called in about 99% of
-runs in all three configurations. The only place the pull rate drops is the
-`unprompted_push` class, where the task never mentions memory; that drop is
-about the same in all three configurations, so it comes from the class, not
-the host configuration.
+**Result in one line.** On task-shaped probes `recall` is called in about 99% of
+runs in all three configurations, so neither tool deferral nor a coding plugin
+lowers the pull rate there. On the `unprompted_push` class, where the task never
+mentions memory, the pull rate is low everywhere (0.33 clean, 0.42 deferred) and
+lowest with the plugin (0.14); nothing in this class was answered correctly in
+any configuration, for a reason that is not the host (section 4).
+
+**Correction, same day.** The first version of this page was wrong for
+`unprompted_push`. The probe sessions ran with the repository as their working
+directory, and on those coding-style tasks the agents explored and edited it
+(section 2, "Working directory"). The first `unprompted_push` row is superseded
+by a clean re-run below.
 
 ## 1. The question
 
@@ -73,6 +79,17 @@ the plugin's `PreToolUse` hook fired, or whether its tools work without a
 plugin account. In the one raw stream inspected, the model used `ToolSearch`
 only to load `recall`; plugin tool use was not counted across the run.
 
+**Working directory.** The first run spawned `claude -p` with no `cwd`, so every
+probe session ran inside the repository checkout. On `unprompted_push` tasks
+("make X synchronous ... adjust the implementation now") the agents went to work
+on the repo: reproduced in a disposable clone, they edited the same corpus,
+source and requirements files that showed up in the checkout, with 3, 3 and 27
+write-tool calls in A, B and C (24 of C's from the plugin's Edit tool). They cost
+about three times as much per run as in an empty directory. Every pull-family
+probe session now runs in a fresh, empty directory (`_scratch_cwd`, with a
+test). The native-arm spawns in `rollout.py` have the same gap and were left
+alone, because changing them changes what the grid measures.
+
 **Metrics.** Recall rate is the share of runs with at least one `recall` call.
 `ToolSearch` before first recall is averaged over runs that called `recall`.
 Cost is the stream's `total_cost_usd`; cost per correct is summed cost over kept
@@ -80,71 +97,76 @@ runs divided by the number of correct runs.
 
 ## 3. Results
 
-All 57 probes, 3 replicates each (6 of 513 runs excluded: five answers that
-ended on a permission request, one timeout).
+**Task-shaped probes** (45 probes, 3 replicates each; 4 runs excluded: permission
+requests). These ran with the repository as working directory (see above). Recall
+is saturated, so it cannot have been inflated, and correctness needs the answer
+page delivered through `recall`, but cost may include some wandering and these
+rows were not re-run.
 
-| config | runs (excluded) | recall rate | ToolSearch before first recall | correct rate | cost | cost per correct |
+| config | runs | recall rate | ToolSearch before first recall | correct rate | cost per correct |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A. clean | 134 | 0.993 | 0.00 | 0.522 | $0.050 |
+| B. deferred | 133 | 0.985 | 1.00 | 0.526 | $0.054 |
+| C. deferred + plugin | 134 | 0.993 | 1.00 | 0.537 | $0.056 |
+
+**`unprompted_push`** (12 probes, 3 replicates each, fresh empty working
+directory, corpus checked identical to `origin/develop` before the run; no
+exclusions). Supersedes the earlier row of 0.457 / 0.333 / 0.353.
+
+| config | runs | recall rate | ToolSearch before first recall | correct rate | tool calls besides `recall`/`ToolSearch` (plugin tools) | cost |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A. clean | 169 (2) | 0.882 | 0.00 | 0.414 | $8.45 | $0.121 |
-| B. deferred | 169 (2) | 0.846 | 1.00 | 0.414 | $8.39 | $0.120 |
-| C. deferred + plugin | 168 (2) | 0.863 | 1.01 | 0.429 | $8.82 | $0.123 |
+| A. clean | 36 | 0.333 (12/36) | 0.00 | 0.000 | 64 (0) | $1.46 |
+| B. deferred | 36 | 0.417 (15/36) | 1.07 | 0.000 | 55 (0) | $1.33 |
+| C. deferred + plugin | 36 | 0.139 (5/36) | 1.00 | 0.000 | 60 (29) | $1.25 |
 
-The all-probe rate mixes two populations. Split by whether the task is shaped
-like a question the memory answers:
-
-| subset | config | runs | recall rate | correct rate | cost per correct |
-| --- | --- | ---: | ---: | ---: | ---: |
-| task-shaped (45 probes) | A | 134 | 0.993 | 0.522 | $0.050 |
-| | B | 133 | 0.985 | 0.526 | $0.054 |
-| | C | 134 | 0.993 | 0.537 | $0.056 |
-| `unprompted_push` (12 probes) | A | 35 | 0.457 (16/35) | 0.000 | n/a |
-| | B | 36 | 0.333 (12/36) | 0.000 | n/a |
-| | C | 34 | 0.353 (12/34) | 0.000 | n/a |
-
-`unprompted_push` probes are coding-style tasks whose answer lives in a memory
-page the task text never asks about. Correctness there is 0 in every
-configuration, so cost per correct is undefined; the grader needs the decision
-page to be delivered and cited.
+No file-writing tool was called in any clean run. Tool calls other than `recall`
+were made in every configuration (mostly `Bash` and `Read` looking for code that
+is not there); 29 of C's 60 came from the plugin's tools.
 
 ## 4. Verdict
 
-**Neither deferral nor the plugin explains the drop.** On task-shaped probes the
-pull rate is 0.985 to 0.993 in all three configurations, and correctness and
-cost per correct move by no more than the noise of three replicates. Deferral
-costs exactly one `ToolSearch` call before the first `recall` (mean 1.00) and
-nothing measurable in pulls or correctness. The plugin adds nothing on top of
-that.
+**Deferral does not explain the drop.** On task-shaped probes the pull rate is
+0.985 to 0.993 with or without it, at a cost of one `ToolSearch` call. On
+`unprompted_push`, B (0.417) is not below A (0.333).
 
-**The drop sits with the task, not the host.** Where the pull rate falls, on
-`unprompted_push`, it falls in the clean configuration too (0.457). B and C are
-lower (0.333, 0.353), the direction deferral would predict, but 16/35 against
-12/36 is not distinguishable at this sample size; treat it as a lead, not a
-finding. It does not close the gap to the real-session figure of about 6%
-either, so most of that gap is still unexplained by anything tested here.
+**The plugin may.** On `unprompted_push` the plugin configuration pulls least:
+5/36 against 12/36 clean (Fisher exact p = 0.09) and 15/36 deferred (p = 0.017).
+That is suggestive, on one small model and 12 probes, and the plugin's hook and
+account behavior were not confirmed, so treat it as a lead worth a larger sample,
+not a finding. It is also a large part of the effect: in C the model reached for
+the plugin's search tools (29 calls) instead of `recall`.
 
-Limits: one small model, fts5 retrieval, an invented corpus, and a plugin whose
-hook and account behavior was not confirmed. The real-session gap may still
-involve the plugin's live nudges or relevance of the pushed pages, which this
-harness does not reproduce.
+**Why nothing in `unprompted_push` was correct, in any configuration.** Read from
+graded rows: the task asks for a code change, and the answer is a buried decision
+page that conflicts with it, reachable only by following a link from the system
+page. The push shows the system page plus decoy "safe to change" notes, never the
+decision; the agent recalls the system page or the decoy and never reaches the
+decision, so the grader (which requires the decision page delivered and its fact
+in the answer) correctly returns false. The empty working directory adds a second
+effect: with no code present the agent asks the user for the code. The cause is
+the push and follow-through design of the class, not the grader, the corpus, or
+the host configuration. The scratch environment's hook also ran without a cached
+API key and fell back to regex topic extraction, which may weaken the push; the
+CI grid's hook setup was not checked.
+
+Limits: one small model, fts5 retrieval, an invented corpus. The real-session gap
+of about 6% is still mostly unexplained.
 
 **What it means for athenaeum#3032.**
 
-- The hint that names `recall` can be written for a deferred tool without
-  expecting a pull penalty from deferral: say the callable name and that it may
-  need loading. The cost is one extra turn, not a lost pull.
-- Deferral is not a cheap secondary fix. Forcing tools upfront (A) did not raise
-  the pull rate over B or C on task-shaped probes, and it raised nothing on
-  `unprompted_push` beyond noise.
-- The grid's 1.0 pull rate is an upper bound for questions that name their
-  subject, not a prediction for real sessions. A target for the lever should be
-  set on tasks like `unprompted_push`, where the baseline is 0.33 to 0.46 here,
-  not against 1.0.
+- A hint that names `recall` can assume deferral costs one turn, not a pull.
+- Forcing tools upfront is not a useful secondary fix.
+- The grid's 1.0 is an upper bound for questions that name their subject. A lever
+  target should be set on tasks like `unprompted_push`, where the clean baseline
+  here is 0.33 to 0.42, and where correctness is 0 until the push or the agent
+  reaches the linked decision page.
+- A competing plugin is the one host difference worth a bigger sample.
 
 ## 5. Reproducing
 
 Needs a logged-in `claude` under an isolated `CLAUDE_CONFIG_DIR`
 (`tests/evals/README.md`, "Running the cli-mode spot-check") and, for C, a
-coding plugin installed locally. Costs about $26 for the full run. Output is
+coding plugin installed locally. Costs about $26 for the task-shaped probes plus $4 for `unprompted_push`. Output is
 resumable: a rerun with the same `--out` skips rows already recorded.
 
 ```sh
@@ -163,4 +185,4 @@ and `--max-spend 5`.
 Offline tests (`tests/evals/test_host_config_cli.py`) pin the argv and
 MCP-config shape, that the default (no host config) is unchanged, the
 `ToolSearch` counting, the stream-based wiring check and the aggregation. The
-measurement above is from one run on 2026-11-21; per-run rows are not committed.
+measurement above is from runs on 2026-11-21; per-run rows are not committed.

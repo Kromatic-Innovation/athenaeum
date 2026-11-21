@@ -76,6 +76,11 @@ class RunMetrics:
     wiring_ok: bool
     wiring_note: str
     harness_failure: str | None
+    #: Tool calls other than ``recall`` and ``ToolSearch``, how many of them
+    #: were a host plugin's tools, and how many were file-writing tools.
+    other_tool_calls: int = 0
+    plugin_tool_calls: int = 0
+    write_tool_calls: int = 0
 
 
 def stub_server_entries(python: str, stub_script: Path) -> dict[str, Any]:
@@ -227,11 +232,23 @@ def result_cost_usd(transcript: Iterable[Mapping[str, Any]]) -> float | None:
     return None
 
 
+_WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
+
+
+def count_other_tools(tool_names: Sequence[str]) -> tuple[int, int, int]:
+    """``(other, plugin, write)`` call counts, ``recall`` and ``ToolSearch`` excluded."""
+    other = [n for n in tool_names if n not in (RECALL_TOOL_NAME, TOOL_SEARCH_NAME)]
+    plugin = sum(1 for n in other if n.startswith("mcp__plugin_"))
+    write = sum(1 for n in other if n in _WRITE_TOOLS or n.endswith(("__Edit", "__Write")))
+    return len(other), plugin, write
+
+
 def reduce_record(config: str, record: RolloutRecord, correct: bool | None) -> RunMetrics:
     """Reduce one rollout record to :class:`RunMetrics`."""
     tool_names = _assistant_tool_uses(record.transcript)
     before, searches, recalls = count_tool_search_before_recall(tool_names)
     ok, note = check_wiring(config, record.transcript)
+    other, plugin, write = count_other_tools(tool_names)
     return RunMetrics(
         config=config,
         probe_id=record.probe_id,
@@ -243,6 +260,9 @@ def reduce_record(config: str, record: RolloutRecord, correct: bool | None) -> R
         wiring_ok=ok,
         wiring_note=note,
         harness_failure=record.harness_failure,
+        other_tool_calls=other,
+        plugin_tool_calls=plugin,
+        write_tool_calls=write,
     )
 
 
