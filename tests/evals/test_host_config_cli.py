@@ -64,18 +64,42 @@ def test_assistant_tool_uses_keeps_order() -> None:
     assert hc._assistant_tool_uses(events) == ["ToolSearch", RECALL_TOOL_NAME, "Read"]
 
 
-@pytest.mark.parametrize(
-    ("config", "tools", "ok"),
-    [
-        ("A", [RECALL_TOOL_NAME], True),
-        ("A", ["Read"], False),
-        ("B", ["ToolSearch", "Read"], True),
-        ("B", ["ToolSearch", RECALL_TOOL_NAME], False),
-        ("C", ["Read"], False),
-    ],
-)
-def test_wiring_check(config: str, tools: list[str], ok: bool) -> None:
-    assert hc.check_wiring(config, [_init(*tools)])[0] is ok
+def _ref_result(*names: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": [{"type": "tool_reference", "tool_name": n} for n in names],
+                }
+            ]
+        },
+    }
+
+
+def test_wiring_a_is_upfront_only_without_tool_search() -> None:
+    assert hc.check_wiring("A", [_init("Read", RECALL_TOOL_NAME)])[0] is True
+    assert hc.check_wiring("A", [_init("ToolSearch", RECALL_TOOL_NAME)])[0] is False
+    deferred = [_init("Read"), _assistant("ToolSearch"), _ref_result(RECALL_TOOL_NAME)]
+    assert hc.check_wiring("A", deferred)[0] is False
+
+
+@pytest.mark.parametrize("config", ["B", "C"])
+def test_wiring_deferred_needs_tool_search_reference_for_recall(config: str) -> None:
+    init = _init("ToolSearch", RECALL_TOOL_NAME)  # init lists deferred tools too
+    proven = [
+        init,
+        _assistant("ToolSearch"),
+        _ref_result(RECALL_TOOL_NAME),
+        _assistant(RECALL_TOOL_NAME),
+    ]
+    ok, note = hc.check_wiring(config, proven)
+    assert ok and "deferred and loaded" in note
+    assert hc.check_wiring(config, [init, _assistant(RECALL_TOOL_NAME)])[0] is False
+    assert hc.check_wiring(config, [_init(RECALL_TOOL_NAME)])[0] is False
+    ok, note = hc.check_wiring(config, [init])
+    assert ok and "unproven" in note
 
 
 def test_wiring_check_fails_without_init() -> None:
@@ -105,9 +129,9 @@ def test_aggregate_excludes_wiring_failures_and_divides_cost_by_correct() -> Non
 def test_build_host_config_b_forces_deferral_and_c_requires_plugin(tmp_path: Path) -> None:
     stub = tmp_path / "s.py"
     a = hc.build_host_config("A", python="py", stub_script=stub, plugin_copy=None)
-    assert not a.extra_servers and not a.force_tool_search
+    assert not a.extra_servers and a.tool_search is False
     b = hc.build_host_config("B", python="py", stub_script=stub, plugin_copy=None)
-    assert set(b.extra_servers) == {p for p, _ in hc.STUB_SERVERS} and b.force_tool_search
+    assert set(b.extra_servers) == {p for p, _ in hc.STUB_SERVERS} and b.tool_search is True
     with pytest.raises(ValueError):
         hc.build_host_config("C", python="py", stub_script=stub, plugin_copy=None)
 
@@ -131,7 +155,7 @@ def test_plugin_servers_resolved_and_analytics_env_dropped(tmp_path: Path) -> No
     spec = entries["plugin_woz_code"]
     assert spec["args"] == [f"{tmp_path}/s.js"]
     assert spec["env"] == {"KEEP": "1"}
-    assert "alwaysLoad" not in spec
+    assert spec["alwaysLoad"] is True
     c = hc.build_host_config("C", python="py", stub_script=tmp_path / "s", plugin_copy=tmp_path)
     assert c.plugin_dir == tmp_path and c.allowed_tools == ("mcp__plugin_woz_code",)
 

@@ -30,9 +30,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -95,13 +98,13 @@ def plugin_server_entries(plugin_copy: Path) -> dict[str, Any]:
     is read from the scratch copy, ``${CLAUDE_PLUGIN_ROOT}`` is resolved, and
     each server is added to the generated config under the name Claude Code
     would namespace it by (``plugin_<plugin>_<server>``), keeping tool names
-    identical to a real install. Analytics env keys are dropped.
+    identical to a real install. ``alwaysLoad`` is kept, so the plugin's tools stay
+    upfront as in a real install. Analytics env keys are dropped.
     """
     raw = json.loads((plugin_copy / ".mcp.json").read_text(encoding="utf-8"))
     entries: dict[str, Any] = {}
     for name, spec in (raw.get("mcpServers") or {}).items():
         resolved = json.loads(json.dumps(spec).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_copy)))
-        resolved.pop("alwaysLoad", None)
         resolved["env"] = {
             k: v
             for k, v in (resolved.get("env") or {}).items()
@@ -117,10 +120,10 @@ def build_host_config(
 ) -> HostConfig:
     """The :class:`HostConfig` for configuration *name* (``A``, ``B`` or ``C``)."""
     if name == "A":
-        return HostConfig(name="A")
+        return HostConfig(name="A", tool_search=False)
     stubs = stub_server_entries(python, stub_script)
     if name == "B":
-        return HostConfig(name="B", extra_servers=stubs, force_tool_search=True)
+        return HostConfig(name="B", extra_servers=stubs, tool_search=True)
     if name == "C":
         if plugin_copy is None:
             raise ValueError("configuration C needs --plugin-path")
@@ -128,7 +131,7 @@ def build_host_config(
         return HostConfig(
             name="C",
             extra_servers={**stubs, **plugin_servers},
-            force_tool_search=True,
+            tool_search=True,
             plugin_dir=plugin_copy,
             allowed_tools=tuple(f"mcp__{server}" for server in plugin_servers),
         )
@@ -162,31 +165,56 @@ def count_tool_search_before_recall(tool_names: Sequence[str]) -> tuple[int | No
     return before, searches, recalls
 
 
-def check_wiring(config: str, transcript: Iterable[Mapping[str, Any]]) -> tuple[bool, str]:
-    """Did the ``init`` event show the tool surface *config* is meant to have?"""
-    init_tools: list[str] | None = None
+def _tool_references(transcript: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Tool names ``ToolSearch`` loaded, from ``tool_reference`` result blocks."""
+    refs: list[str] = []
     for event in transcript:
-        if (
-            isinstance(event, Mapping)
-            and event.get("type") == "system"
-            and event.get("subtype") == "init"
-        ):
+        if not isinstance(event, Mapping) or event.get("type") != "user":
+            continue
+        content = (event.get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            inner = block.get("content") if isinstance(block, Mapping) else None
+            for item in inner if isinstance(inner, list) else []:
+                if isinstance(item, Mapping) and item.get("type") == "tool_reference":
+                    refs.append(str(item.get("tool_name") or ""))
+    return refs
+
+
+def check_wiring(config: str, transcript: Iterable[Mapping[str, Any]]) -> tuple[bool, str]:
+    """Does the stream show the deferral state *config* is meant to have?
+
+    The ``init`` event's ``tools`` list names deferred tools too, so it cannot
+    tell upfront from deferred (found in athenaeum#3057's first probe: ``recall``
+    was listed while a ``ToolSearch`` call was still needed to load it). The
+    evidence used instead is behavioural: a ``tool_reference`` result for
+    ``recall`` from ``ToolSearch`` means it was deferred; ``ToolSearch`` absent
+    from ``init`` (``ENABLE_TOOL_SEARCH=false``) with no such reference means it
+    was upfront. A deferred config whose run never called ``recall`` shows only
+    that ``ToolSearch`` is offered, which is necessary but not proof.
+    """
+    events = list(transcript)
+    init_tools: list[str] | None = None
+    for event in events:
+        if event.get("type") == "system" and event.get("subtype") == "init":
             init_tools = [str(t) for t in event.get("tools") or []]
             break
     if init_tools is None:
         return False, "no init event in the stream"
-    recall_upfront = RECALL_TOOL_NAME in init_tools
     has_tool_search = TOOL_SEARCH_NAME in init_tools
+    refs = _tool_references(events)
+    recall_loaded_by_search = RECALL_TOOL_NAME in refs
+    recalled = RECALL_TOOL_NAME in _assistant_tool_uses(events)
     if config == "A":
-        return (
-            recall_upfront,
-            "recall loaded upfront" if recall_upfront else "A: recall not loaded upfront",
-        )
-    if recall_upfront:
-        return False, f"{config}: recall is loaded upfront, deferral did not happen"
+        if has_tool_search or refs:
+            return False, "A: tools were deferred (ToolSearch offered or used)"
+        return True, "A: recall upfront (no ToolSearch)"
     if not has_tool_search:
         return False, f"{config}: ToolSearch is not offered"
-    return True, f"{config}: ToolSearch offered, recall deferred"
+    if recalled and not recall_loaded_by_search:
+        return False, f"{config}: recall called without being loaded by ToolSearch"
+    if recalled:
+        return True, f"{config}: recall deferred and loaded via ToolSearch"
+    return True, f"{config}: ToolSearch offered; recall not called, deferral unproven"
 
 
 def result_cost_usd(transcript: Iterable[Mapping[str, Any]]) -> float | None:
@@ -310,6 +338,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-spend", type=float, default=DEFAULT_MAX_SPEND_USD)
     p.add_argument("--out", type=Path, default=None, help="JSONL path for per-run metrics")
     p.add_argument("--timeout", type=float, default=240.0)
+    p.add_argument("--workers", type=int, default=4, help="concurrent claude -p runs")
     return p
 
 
@@ -341,38 +370,73 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.probes
             else [p.id for p in corpus.probes]
         )
-        knowledge_root = root / "corpus"
-        for config in configs:
-            host = build_host_config(
-                config, python=sys.executable, stub_script=stub_script, plugin_copy=plugin_copy
+        hosts = {
+            c: build_host_config(
+                c, python=sys.executable, stub_script=stub_script, plugin_copy=plugin_copy
             )
-            for probe_id in probe_ids:
-                probe = _find_probe(corpus, probe_id)
-                for _ in range(args.replicates):
-                    if spent > args.max_spend:
-                        print(
-                            f"--max-spend ${args.max_spend:.2f} reached; stopping", file=sys.stderr
-                        )
-                        break
-                    record = run_push_breadcrumb_pull(
-                        probe,
-                        knowledge_root,
-                        hook_home,
-                        cache_dir,
-                        args.corpus_scale,
-                        claude_binary=args.claude_binary,
-                        timeout=args.timeout,
-                        host_config=host,
-                        **model_kwargs,
-                    )
-                    metrics = reduce_record(
-                        config, record, grade_correctness(record, probe, corpus)
-                    )
-                    spent += metrics.cost_usd or 0.0
-                    all_runs[config].append(metrics)
-                    if args.out is not None:
-                        with args.out.open("a", encoding="utf-8") as fh:
-                            fh.write(json.dumps(asdict(metrics)) + "\n")
+            for c in configs
+        }
+        lock = threading.Lock()
+        stopped = threading.Event()
+
+        def one_run(config: str, probe_id: str) -> None:
+            nonlocal spent
+            with lock:
+                if spent > args.max_spend:
+                    stopped.set()
+            if stopped.is_set():
+                return
+            probe = _find_probe(corpus, probe_id)
+            try:
+                record = run_push_breadcrumb_pull(
+                    probe,
+                    root / "corpus",
+                    hook_home,
+                    cache_dir,
+                    args.corpus_scale,
+                    claude_binary=args.claude_binary,
+                    timeout=args.timeout,
+                    host_config=hosts[config],
+                    **model_kwargs,
+                )
+                metrics = reduce_record(config, record, grade_correctness(record, probe, corpus))
+            except subprocess.TimeoutExpired:
+                # A timed-out run is excluded, not fatal: its cost is unknown.
+                metrics = RunMetrics(
+                    config, probe_id, 0, None, 0, None, None, True, "", f"timeout {args.timeout}s"
+                )
+            with lock:
+                spent += metrics.cost_usd or 0.0
+                all_runs[config].append(metrics)
+                if args.out is not None:
+                    with args.out.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(asdict(metrics)) + "\n")
+
+        # Resume: rows already in --out count as done (per config and probe).
+        done: dict[tuple[str, str], int] = {}
+        if args.out is not None and args.out.exists():
+            for line in args.out.read_text(encoding="utf-8").splitlines():
+                row = RunMetrics(**json.loads(line))
+                all_runs.setdefault(row.config, []).append(row)
+                spent += row.cost_usd or 0.0
+                done[(row.config, row.probe_id)] = done.get((row.config, row.probe_id), 0) + 1
+
+        # Interleaved (probe, replicate, config) so a --max-spend stop leaves the
+        # configurations with near-equal run counts.
+        tasks = [
+            (c, probe_id) for probe_id in probe_ids for _ in range(args.replicates) for c in configs
+        ]
+        pending: list[tuple[str, str]] = []
+        for task in tasks:
+            if done.get(task, 0) > 0:
+                done[task] -= 1
+            else:
+                pending.append(task)
+        tasks = pending
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            list(pool.map(lambda t: one_run(*t), tasks))
+        if stopped.is_set():
+            print(f"--max-spend ${args.max_spend:.2f} reached; stopped early", file=sys.stderr)
     rows = [aggregate(c, all_runs[c]) for c in configs]
     print(render_table(rows))
     print(f"\nmeasured spend: ${spent:.2f}")

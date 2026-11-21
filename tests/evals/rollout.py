@@ -1586,16 +1586,18 @@ class HostConfig:
 
     *extra_servers* are unrelated MCP servers added next to athenaeum's, so
     the host has many tools and Claude Code defers them behind ``ToolSearch``.
-    *force_tool_search* sets ``ENABLE_TOOL_SEARCH=true`` in the spawn's
-    environment, because a few small stubs may not cross the automatic
-    deferral threshold. *plugin_dir* is passed as ``--plugin-dir`` (hooks and
+    *tool_search* sets ``ENABLE_TOOL_SEARCH`` in the spawn's environment:
+    ``True`` forces MCP tools to be deferred behind ``ToolSearch``,
+    ``False`` forces them loaded upfront, and ``None`` leaves the host's own
+    default (current Claude Code defers by default, so ``None`` is NOT
+    "upfront"). *plugin_dir* is passed as ``--plugin-dir`` (hooks and
     skills). *allowed_tools* are extra pre-approvals, since a non-interactive
     session cannot answer a permission prompt.
     """
 
     name: str
     extra_servers: Mapping[str, Any] = dataclasses.field(default_factory=dict)
-    force_tool_search: bool = False
+    tool_search: bool | None = None
     plugin_dir: Path | None = None
     allowed_tools: tuple[str, ...] = ()
 
@@ -2020,8 +2022,8 @@ def run_push_breadcrumb_pull(
         config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
         argv = build_pull_argv(claude_binary, config_path, model, host_config=host_config)
         spawn_env = (
-            {**os.environ, "ENABLE_TOOL_SEARCH": "true"}
-            if host_config is not None and host_config.force_tool_search
+            {**os.environ, "ENABLE_TOOL_SEARCH": "true" if host_config.tool_search else "false"}
+            if host_config is not None and host_config.tool_search is not None
             else None
         )
         proc = subprocess.run(

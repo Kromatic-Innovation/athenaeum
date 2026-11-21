@@ -4,13 +4,12 @@
 
 Issue athenaeum#3057, a blocker of athenaeum#3032.
 
-**Status: the harness is built and tested offline; the measurement has not been
-run, and there is no verdict.** The run needs a logged-in `claude` under an
-isolated config directory, and the session that built this change had none: a
-fresh config directory answers `Not logged in`, and no API key or OAuth token
-was available to it. Copying a login out of an operator's own configuration
-into a scratch one was ruled out. So the three rows below say `pending`, and
-this page does not guess at them.
+**Result in one line.** Neither tool deferral nor a coding plugin lowers the
+pull rate on task-shaped probes. On those, `recall` is called in about 99% of
+runs in all three configurations. The only place the pull rate drops is the
+`unprompted_push` class, where the task never mentions memory; that drop is
+about the same in all three configurations, so it comes from the class, not
+the host configuration.
 
 ## 1. The question
 
@@ -21,114 +20,147 @@ from any memory store in about 6% of pushed windows
 (`pull-diagnosis-2026-11-21.md`). Two host differences could explain the gap:
 
 1. **Tool deferral.** In a real session `recall` sits behind `ToolSearch` with
-   every other MCP tool. In the grid it is loaded upfront.
+   every other MCP tool.
 2. **A competing coding plugin.** Such a plugin loads its own search tools
    upfront, nudges the model toward them before each tool call, and ships a
    skill with a similar name.
 
-## 2. What is run
+## 2. What was run
 
-Same arm (`push_breadcrumb_pull`), same probes and same grading
-(`grade_correctness`) as the grid, through a real `claude -p`, in three host
-configurations:
+Same arm (`push_breadcrumb_pull`), same `core` probes (57) and same grading
+(`grade_correctness`) as the grid, through a real `claude -p`, three replicates
+per probe and configuration, model `claude-haiku-4-5` (the harness default), fts5
+retrieval backend. Harness: `tests/evals/host_config_cli.py`.
 
-| config | MCP tools | coding plugin |
-| --- | --- | --- |
-| A. clean | athenaeum only, loaded upfront | off |
-| B. deferred | athenaeum plus 36 invented stub tools over three servers, deferred behind `ToolSearch` | off |
-| C. deferred + plugin | as B | on |
+| config | MCP tools | `ToolSearch` | coding plugin |
+| --- | --- | --- | --- |
+| A. clean | athenaeum only | forced off (`ENABLE_TOOL_SEARCH=false`), tools upfront | off |
+| B. deferred | athenaeum plus 36 invented stub tools over three servers | forced on, tools deferred | off |
+| C. deferred + plugin | as B, plus the plugin's MCP server | forced on | on (`--plugin-dir` at a scratch copy) |
 
-How each is wired (`tests/evals/host_config_cli.py`, with the small
-`HostConfig` option on `run_push_breadcrumb_pull` in `tests/evals/rollout.py`):
+**What the grid itself ran with.** The CI grid dispatches `north_star_cli.py
+--mode api` (`.github/workflows/evals.yml`): a Messages API tool-use loop in
+which `recall` is simply one of the supplied tools. There is no `claude -p`,
+no `ToolSearch` and no deferral in that path, so the grid's 0.000 no-call rate
+was measured with `recall` upfront. Row A reproduces that condition in the real
+CLI; it is a fresh run beside B and C, not the regrade's number.
 
-- **A** is the grid's argv and MCP config unchanged. Row A is a fresh run
-  beside B and C, not the regrade's number, so the three rows share a model,
-  date and transport. The regrade is context only.
-- **B** adds the stub servers (`tests/evals/stub_mcp_server.py`, invented
-  names, every call returns a fixed string) to the generated `--mcp-config`,
-  and sets `ENABLE_TOOL_SEARCH=true` in the spawn's environment. A few small
-  stubs may not cross Claude Code's automatic deferral threshold, so the
-  setting is forced.
-- **C** is B plus `--plugin-dir` pointing at a scratch copy of the plugin
-  (the original install is never written to). `--strict-mcp-config` ignores
-  servers a plugin declares, so the plugin's server is also added to the
-  generated config, under the name Claude Code would give it, and
-  pre-approved so a non-interactive session does not stall on a permission
-  prompt. Analytics identifiers in the plugin's config are not forwarded.
+**Finding that changed the design.** A first probe run left the host's own
+`ToolSearch` default in A, and every run reported `ToolSearch` before `recall`.
+The raw stream shows why. Current Claude Code defers MCP tools by default, even
+with athenaeum as the only server (a `ToolSearch` result reported 38 deferred
+tools). The `init` event's `tools` list names deferred tools too, so it cannot
+tell upfront from deferred. A (`ENABLE_TOOL_SEARCH=false`) is therefore a
+deliberate setting here, and "default host" is closer to B than to A. An
+earlier wiring check that read the `init` list wrongly excluded every B and C
+run; it was replaced as follows.
 
-**Wiring check.** Every run is checked against the configuration it is meant to
-represent, using the stream's `init` event. In B and C, `ToolSearch` must be
-offered and `mcp__athenaeum__recall` must not be loaded upfront. In A, `recall`
-must be loaded upfront. A run that fails is recorded as a wiring failure and
-left out of the rows, so a B that silently equals A cannot produce a row.
+**Wiring check.** Per run, from the stream:
 
-**Metrics, per configuration.**
+- A passes only if `ToolSearch` is absent and no `tool_reference` result
+  appears.
+- B and C pass only if `ToolSearch` is offered and, when `recall` was called, a
+  `ToolSearch` result referencing `recall` came first. A B or C run that never
+  called `recall` shows only that `ToolSearch` is offered, which is necessary
+  but not proof; 49 of 337 B and C runs are in that state, all recall-free.
 
-- Recall call rate: share of runs with at least one `recall` call.
-- `ToolSearch` calls before the first `recall`, averaged over runs that called
-  it. Counted in call order from the stream.
-- Correct-answer rate (`grade_correctness`).
-- Cost per correct answer: summed `total_cost_usd` over kept runs, divided by
-  the number of correct runs.
+**Config C.** `--strict-mcp-config` ignores servers a plugin declares, so the
+plugin's server is added to the generated config under the name Claude Code
+gives it, with `alwaysLoad` kept so its tools stay upfront (a check: 4 fewer
+deferred tools with it than without). The stream's `init` event confirmed the
+plugin and its skills loaded and its server connected. Not verified: whether
+the plugin's `PreToolUse` hook fired, or whether its tools work without a
+plugin account. In the one raw stream inspected, the model used `ToolSearch`
+only to load `recall`; plugin tool use was not counted across the run.
+
+**Metrics.** Recall rate is the share of runs with at least one `recall` call.
+`ToolSearch` before first recall is averaged over runs that called `recall`.
+Cost is the stream's `total_cost_usd`; cost per correct is summed cost over kept
+runs divided by the number of correct runs.
 
 ## 3. Results
 
+All 57 probes, 3 replicates each (6 of 513 runs excluded: five answers that
+ended on a permission request, one timeout).
+
 | config | runs (excluded) | recall rate | ToolSearch before first recall | correct rate | cost | cost per correct |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A. clean | pending | pending | pending | pending | pending | pending |
-| B. deferred | pending | pending | pending | pending | pending | pending |
-| C. deferred + plugin | pending | pending | pending | pending | pending | pending |
+| A. clean | 169 (2) | 0.882 | 0.00 | 0.414 | $8.45 | $0.121 |
+| B. deferred | 169 (2) | 0.846 | 1.00 | 0.414 | $8.39 | $0.120 |
+| C. deferred + plugin | 168 (2) | 0.863 | 1.01 | 0.429 | $8.82 | $0.123 |
+
+The all-probe rate mixes two populations. Split by whether the task is shaped
+like a question the memory answers:
+
+| subset | config | runs | recall rate | correct rate | cost per correct |
+| --- | --- | ---: | ---: | ---: | ---: |
+| task-shaped (45 probes) | A | 134 | 0.993 | 0.522 | $0.050 |
+| | B | 133 | 0.985 | 0.526 | $0.054 |
+| | C | 134 | 0.993 | 0.537 | $0.056 |
+| `unprompted_push` (12 probes) | A | 35 | 0.457 (16/35) | 0.000 | n/a |
+| | B | 36 | 0.333 (12/36) | 0.000 | n/a |
+| | C | 34 | 0.353 (12/34) | 0.000 | n/a |
+
+`unprompted_push` probes are coding-style tasks whose answer lives in a memory
+page the task text never asks about. Correctness there is 0 in every
+configuration, so cost per correct is undefined; the grader needs the decision
+page to be delivered and cited.
 
 ## 4. Verdict
 
-**None yet.** Reading the rows once they exist:
+**Neither deferral nor the plugin explains the drop.** On task-shaped probes the
+pull rate is 0.985 to 0.993 in all three configurations, and correctness and
+cost per correct move by no more than the noise of three replicates. Deferral
+costs exactly one `ToolSearch` call before the first `recall` (mean 1.00) and
+nothing measurable in pulls or correctness. The plugin adds nothing on top of
+that.
 
-- B close to A, C close to B: neither difference explains the drop. The gap sits
-  elsewhere (relevance of the pushed pages, or how real prompts differ from
-  probes).
-- B well below A, C close to B: deferral explains it.
-- B close to A, C well below B: the plugin explains it.
-- B below A and C below B: both contribute; the step sizes say how much each.
+**The drop sits with the task, not the host.** Where the pull rate falls, on
+`unprompted_push`, it falls in the clean configuration too (0.457). B and C are
+lower (0.333, 0.353), the direction deferral would predict, but 16/35 against
+12/36 is not distinguishable at this sample size; treat it as a lead, not a
+finding. It does not close the gap to the real-session figure of about 6%
+either, so most of that gap is still unexplained by anything tested here.
 
-What the result means for athenaeum#3032 (push carries the answer plus a
-tool-name hint) is written once the rows exist. The expected shape: if
-deferral is the cause, the hint should name the callable tool and say it may
-need loading, and deferral itself is a cheap secondary fix; if neither is,
-the hint cannot be expected to close the whole gap.
+Limits: one small model, fts5 retrieval, an invented corpus, and a plugin whose
+hook and account behavior was not confirmed. The real-session gap may still
+involve the plugin's live nudges or relevance of the pushed pages, which this
+harness does not reproduce.
 
-## 5. How to run it
+**What it means for athenaeum#3032.**
 
-Prerequisites: a logged-in `claude` under an isolated `CLAUDE_CONFIG_DIR`
-(`tests/evals/README.md`, "Running the cli-mode spot-check"). Configuration C
-also needs a coding plugin installed and, if the plugin refuses to run
-logged out, its own account in that config directory. Whether the plugin's
-tools and hooks work logged out is not known; it is an open item.
+- The hint that names `recall` can be written for a deferred tool without
+  expecting a pull penalty from deferral: say the callable name and that it may
+  need loading. The cost is one extra turn, not a lost pull.
+- Deferral is not a cheap secondary fix. Forcing tools upfront (A) did not raise
+  the pull rate over B or C on task-shaped probes, and it raised nothing on
+  `unprompted_push` beyond noise.
+- The grid's 1.0 pull rate is an upper bound for questions that name their
+  subject, not a prediction for real sessions. A target for the lever should be
+  set on tasks like `unprompted_push`, where the baseline is 0.33 to 0.46 here,
+  not against 1.0.
 
-Probe subset first, to check the wiring (costs a few dollars):
+## 5. Reproducing
+
+Needs a logged-in `claude` under an isolated `CLAUDE_CONFIG_DIR`
+(`tests/evals/README.md`, "Running the cli-mode spot-check") and, for C, a
+coding plugin installed locally. Costs about $26 for the full run. Output is
+resumable: a rerun with the same `--out` skips rows already recorded.
 
 ```sh
 CLAUDE_CONFIG_DIR=/path/to/isolated-claude-config \
   python -m tests.evals.host_config_cli \
   --configs A,B,C --plugin-path /path/to/installed/plugin \
-  --probes pto_allowance,bluewater_terms,spend_approver_named,office_address_current \
-  --max-spend 5 --out /tmp/host-config-probe.jsonl
+  --replicates 3 --max-spend 25 --search-backend fts5 --out host-config.jsonl
 ```
 
-Confirm the printed table has no excluded runs (`runs (excluded)`), then the
-core scale (every core probe, three replicates per cell):
-
-```sh
-CLAUDE_CONFIG_DIR=/path/to/isolated-claude-config \
-  python -m tests.evals.host_config_cli \
-  --configs A,B,C --plugin-path /path/to/installed/plugin \
-  --replicates 3 --max-spend 25 --out /tmp/host-config-core.jsonl
-```
-
-Paste the printed table into section 3 and write section 4.
+For a quick wiring check first, add
+`--probes pto_allowance,bluewater_terms,spend_approver_named,office_address_current`
+and `--max-spend 5`.
 
 ## Method
 
-Offline checks (no model calls) pin the argv and MCP-config shape, the
-default-is-unchanged guarantee, the `ToolSearch` counting, the wiring check
-and the aggregation (`tests/evals/test_host_config_cli.py`). No measurement was
-taken, so no cost was spent.
+Offline tests (`tests/evals/test_host_config_cli.py`) pin the argv and
+MCP-config shape, that the default (no host config) is unchanged, the
+`ToolSearch` counting, the stream-based wiring check and the aggregation. The
+measurement above is from one run on 2026-11-21; per-run rows are not committed.
