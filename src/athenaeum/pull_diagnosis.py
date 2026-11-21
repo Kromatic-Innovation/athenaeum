@@ -394,7 +394,13 @@ def build_pull_diagnosis_report(
             t_hi = next(
                 (t for t in (_record_ts(r) for r in records[hi:]) if t is not None), None
             )
-            if any(t >= t_lo and (t_hi is None or t < t_hi) for t in push_times):
+            # Push ``ts`` is stamped at whole seconds; transcript timestamps
+            # carry milliseconds, and the hook fires within the same second as
+            # its prompt. Compare at second resolution (as follow_through does)
+            # so a push is never placed before the prompt that triggered it.
+            lo_s = t_lo.replace(microsecond=0)
+            hi_s = t_hi.replace(microsecond=0) if t_hi is not None else None
+            if any(t >= lo_s and (hi_s is None or t < hi_s) for t in push_times):
                 pushed_windows.append((lo, hi))
         if channel == follow_through.CHANNEL_HEADLESS and headless_first_window_only:
             pushed_windows = pushed_windows[:1]

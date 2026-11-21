@@ -100,6 +100,24 @@ class TestWindows:
         assert ch["windows_with"]["recall_call"] == 1
         assert ch["calls"]["recall_call"] == 1  # the second window's call is out of scope
 
+    def test_same_second_push_belongs_to_its_own_prompt(self, tmp_path: Path) -> None:
+        # The ledger stamps whole seconds; the prompt record carries milliseconds.
+        _seed(tmp_path / "cache", [_push("s1", "2026-01-01T00:00:00Z")])
+        _transcript(
+            tmp_path / "projects",
+            "s1",
+            [
+                _prompt("2026-01-01T00:00:00.700Z"),
+                _tool("2026-01-01T00:00:05Z", "mcp__athenaeum__recall", {"query": "x"}),
+                _prompt("2026-01-01T00:01:00.300Z"),
+            ],
+        )
+        report = _report(tmp_path)
+        assert report["sessions_without_pushed_window"] == 0
+        ch = report["channels"]["interactive"]
+        assert ch["windows"] == 1
+        assert ch["windows_with"]["recall_call"] == 1
+
     def test_mcp_recall_rows_are_not_pushes(self, tmp_path: Path) -> None:
         _seed(tmp_path / "cache", [_push("s1", "2026-01-01T00:00:05Z", source=None)])
         _transcript(tmp_path / "projects", "s1", [_prompt("2026-01-01T00:00:00Z")])
