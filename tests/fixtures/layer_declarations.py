@@ -113,9 +113,12 @@ MODULE_LAYER: dict[str, int] = {
     "raise_provenance": 2,  # issue athenaeum#2799: raised_from block parse + lint
     "raise_projection": 2,  # issue athenaeum#2798: pure raise projection, payload hash, ids
     "raise_messages": 2,  # issue athenaeum#2937: raise message codec (parse/validate/render)
+    "raise_ledger": 3,  # issue athenaeum#3001: the raiser's raise ledger
     "raise_acceptance_ledger": 3,  # issue athenaeum#2938: raise acceptance ledger
     "raise_acceptance": 3,  # issue athenaeum#2939: accept a raised page, asking every time
+    "store_intake_dispatch": 3,  # issue athenaeum#3000: per-store raw intake dispatcher; imports L3
     "raise_supersede": 3,  # issue athenaeum#2940: apply a supersede to a raised copy
+    "raise_retract": 4,  # issue athenaeum#3003: apply a retract; imports L4 retire_pages
     "raise_filing_checks": 3,  # issue athenaeum#2927: filing checks after a raise is accepted
     "filing_checks": 3,  # issue athenaeum#2927: the filing checks shared with sync S17
     "store_links": 2,  # issue athenaeum#2619: link guard + lint

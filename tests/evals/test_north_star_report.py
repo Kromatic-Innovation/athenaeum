@@ -34,6 +34,7 @@ from tests.evals.north_star_report import (
     SIZE_SCALE_ORDER,
     GroupStats,
     NorthStarReport,
+    OracleExclusion,
     RolloutRow,
     TurnCapCount,
     _all_answer_tokens,
@@ -61,7 +62,6 @@ from tests.evals.north_star_report import (
     lexical_overlap,
     load_rollout_rows,
     marker_miss_with_delivery,
-    OracleExclusion,
     oracle_control_shortfalls,
     render_decision_block,
     render_report,
@@ -2920,7 +2920,10 @@ def test_oracle_exclusion_removes_the_pair_from_every_arm_native_included() -> N
     as Athenaeum arms, and no other probe's rows move."""
     probe = _probe("pto_allowance")
     other = _probe("confidentiality_rule")
-    rows = [_oracle_row("pto_allowance", correct=False), _oracle_row("confidentiality_rule", correct=True)]
+    rows = [
+        _oracle_row("pto_allowance", correct=False),
+        _oracle_row("confidentiality_rule", correct=True),
+    ]
     for arm in (Arm.NATIVE_GREP, Arm.NATIVE_INDEX, Arm.PUSH_BREADCRUMB_PULL, Arm.PULL, Arm.NONE):
         for pr in (probe, other):
             rows.append(
@@ -2928,10 +2931,16 @@ def test_oracle_exclusion_removes_the_pair_from_every_arm_native_included() -> N
             )
     report = build_report(rows)
     kept = drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions)
-    assert {(r.record.probe_id, r.record.arm) for r in report.graded_rows if r.record.probe_id == probe.id} == {
-        (probe.id, arm)
-        for arm in (Arm.ORACLE, Arm.NATIVE_GREP, Arm.NATIVE_INDEX, Arm.PUSH_BREADCRUMB_PULL, Arm.PULL, Arm.NONE)
-    }
+    all_arms = (
+        Arm.ORACLE,
+        Arm.NATIVE_GREP,
+        Arm.NATIVE_INDEX,
+        Arm.PUSH_BREADCRUMB_PULL,
+        Arm.PULL,
+        Arm.NONE,
+    )
+    seen = {r.record.arm for r in report.graded_rows if r.record.probe_id == probe.id}
+    assert seen == set(all_arms)
     assert not [r for r in kept if r.record.probe_id == probe.id]
     assert len([r for r in kept if r.record.probe_id == other.id]) == 6
 
@@ -2955,7 +2964,9 @@ def test_oracle_abstention_miss_voids_because_it_has_no_marker_to_miss() -> None
     tolerated."""
     probe = next(p for p in _CORPUS.probes if p.probe_class == "abstention")
     record = _record(
-        arm=Arm.ORACLE, probe_id=probe.id, probe_class="abstention",
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class="abstention",
         answer="The answer is Voltmere, definitely.",
     )
     rows = [_row(record)]

@@ -4,7 +4,7 @@
 
 Issue athenaeum#3029, applying the operator ruling recorded on athenaeum#2805 on
 2026-11-20. This document re-reads the stored rows of the grid reported in
-`native-memory-baseline-2026-11-20.md`,
+[`native-memory-baseline-2026-11-20.md`](native-memory-baseline-2026-11-20.md),
 which printed its decision block as void because the `oracle` positive control
 fell below 1.000 on three enrolled groups. Nothing was run and nothing was
 spent: the renderer was pointed at that run's own stored rows. The full render
@@ -18,7 +18,7 @@ it beside the real-session numbers. The ruling is the operator's.
 
 **The rule was set after the run was seen.** The grid of 2026-11-20 ran, voided
 and was written up first
-(`native-memory-baseline-2026-11-20.md`),
+([`native-memory-baseline-2026-11-20.md`](native-memory-baseline-2026-11-20.md)),
 with its three failing cells described. The operator's ruling was recorded on
 athenaeum#2805 on 2026-11-20, after that, and before any re-grade was run or any
 decision row was read. So the rule was not blind to the run: its authors knew

@@ -3168,9 +3168,8 @@ def oracle_control_shortfalls(
     if report.oracle_exclusions:
         # Issue athenaeum#3029: the control is read with the excluded pairs
         # removed from every arm, so the floor is judged on what remains.
-        stats = tuple(
-            compute_group_stats(drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions))
-        )
+        kept = drop_oracle_exclusions(report.graded_rows, report.oracle_exclusions)
+        stats = tuple(compute_group_stats(kept))
     shortfalls = [
         OracleControlShortfall(stat.probe_class, stat.corpus_scale, stat.correctness_rate)
         for stat in stats
@@ -3243,9 +3242,7 @@ def drop_oracle_exclusions(
     """*rows* minus every row of an excluded (probe, scale) pair, on EVERY
     arm, native arms included (issue athenaeum#3029)."""
     excluded = {(ex.probe_id, ex.corpus_scale) for ex in exclusions}
-    return [
-        row for row in rows if (row.record.probe_id, row.record.corpus_scale) not in excluded
-    ]
+    return [row for row in rows if (row.record.probe_id, row.record.corpus_scale) not in excluded]
 
 
 def _oracle_exclusion_lines(report: NorthStarReport) -> list[str]:
