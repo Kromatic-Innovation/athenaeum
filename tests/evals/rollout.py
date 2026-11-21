@@ -1578,8 +1578,48 @@ def run_oracle(
 # ---------------------------------------------------------------------------
 
 
+def _scratch_cwd(tmp_dir: str | Path) -> Path:
+    """A fresh, empty working directory for one ``claude -p`` probe session.
+
+    A probe session has file tools (and, under a host plugin, more), so it must
+    never run with the repository as its working directory: an agent acting on
+    a coding-style probe task edited tracked files there (issue athenaeum#3057).
+    """
+    cwd = Path(tmp_dir) / "cwd"
+    cwd.mkdir(parents=True, exist_ok=True)
+    return cwd
+
+
+@dataclasses.dataclass(frozen=True)
+class HostConfig:
+    """Host-side knobs for a PULL-family ``claude -p`` spawn (issue
+    athenaeum#3057). ``None`` everywhere else in this module means the
+    clean grid configuration, byte-identical to before this class existed.
+
+    *extra_servers* are unrelated MCP servers added next to athenaeum's, so
+    the host has many tools and Claude Code defers them behind ``ToolSearch``.
+    *tool_search* sets ``ENABLE_TOOL_SEARCH`` in the spawn's environment:
+    ``True`` forces MCP tools to be deferred behind ``ToolSearch``,
+    ``False`` forces them loaded upfront, and ``None`` leaves the host's own
+    default (current Claude Code defers by default, so ``None`` is NOT
+    "upfront"). *plugin_dir* is passed as ``--plugin-dir`` (hooks and
+    skills). *allowed_tools* are extra pre-approvals, since a non-interactive
+    session cannot answer a permission prompt.
+    """
+
+    name: str
+    extra_servers: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    tool_search: bool | None = None
+    plugin_dir: Path | None = None
+    allowed_tools: tuple[str, ...] = ()
+
+
 def build_pull_mcp_config(
-    knowledge_root: Path, cache_dir: Path, *, athenaeum_bin: str | None = None
+    knowledge_root: Path,
+    cache_dir: Path,
+    *,
+    athenaeum_bin: str | None = None,
+    host_config: HostConfig | None = None,
 ) -> dict[str, Any]:
     """The scoped ``--mcp-config`` payload: ONE server, athenaeum's own,
     pointed at the materialized rollout corpus. Matches the proven spike
@@ -1598,19 +1638,26 @@ def build_pull_mcp_config(
     venv_sibling = Path(sys.executable).with_name("athenaeum")
     fallback = str(venv_sibling) if venv_sibling.exists() else shutil.which("athenaeum")
     binary = athenaeum_bin or fallback or "athenaeum"
-    return {
-        "mcpServers": {
-            "athenaeum": {
-                "type": "stdio",
-                "command": binary,
-                "args": ["serve", "--path", str(knowledge_root), "--cache-dir", str(cache_dir)],
-                "env": {},
-            }
+    servers: dict[str, Any] = {
+        "athenaeum": {
+            "type": "stdio",
+            "command": binary,
+            "args": ["serve", "--path", str(knowledge_root), "--cache-dir", str(cache_dir)],
+            "env": {},
         }
     }
+    if host_config is not None:
+        servers.update(host_config.extra_servers)
+    return {"mcpServers": servers}
 
 
-def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> list[str]:
+def build_pull_argv(
+    claude_binary: str,
+    mcp_config_path: Path,
+    model: str,
+    *,
+    host_config: HostConfig | None = None,
+) -> list[str]:
     """The PULL argv: inverts exactly the two flags
     ``athenaeum.provider.ClaudeCliClient._build_argv`` pins the production
     subprocess with (``--tools ""`` / unscoped ``--strict-mcp-config``) —
@@ -1642,14 +1689,22 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
     servers are even VISIBLE; ``--allowedTools`` governs whether the tools
     those servers expose may be invoked without stopping for approval.
     """
+    extra_tools = host_config.allowed_tools if host_config is not None else ()
+    plugin_args = (
+        ["--plugin-dir", str(host_config.plugin_dir)]
+        if host_config is not None and host_config.plugin_dir is not None
+        else []
+    )
     return [
         claude_binary,
         "-p",
         "--mcp-config",
         str(mcp_config_path),
         "--strict-mcp-config",
+        *plugin_args,
         "--allowedTools",
         *PULL_ALLOWED_TOOLS,
+        *extra_tools,
         "--append-system-prompt",
         REFERENCE_TAG_INSTRUCTION,
         "--output-format",
@@ -1913,6 +1968,7 @@ def run_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
         )
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())
@@ -1946,6 +2002,7 @@ def run_push_breadcrumb_pull(
     timeout: float = 120.0,
     athenaeum_bin: str | None = None,
     context_fn: Callable[..., str] | None = None,
+    host_config: HostConfig | None = None,
 ) -> RolloutRecord:
     """PUSH_BREADCRUMB_PULL arm: the breadcrumb context IS injected AND the
     ``recall`` tool remains available — matching the shipped hook's own
@@ -1969,12 +2026,19 @@ def run_push_breadcrumb_pull(
         raise RuntimeError(f"{claude_binary!r} not found on PATH")
     _require_isolated_cli_config()
 
-    mcp_config = build_pull_mcp_config(knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin)
+    mcp_config = build_pull_mcp_config(
+        knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin, host_config=host_config
+    )
     prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
     with tempfile.TemporaryDirectory() as tmp_dir:
         config_path = Path(tmp_dir) / "mcp-config.json"
         config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
-        argv = build_pull_argv(claude_binary, config_path, model)
+        argv = build_pull_argv(claude_binary, config_path, model, host_config=host_config)
+        spawn_env = (
+            {**os.environ, "ENABLE_TOOL_SEARCH": "true" if host_config.tool_search else "false"}
+            if host_config is not None and host_config.tool_search is not None
+            else None
+        )
         proc = subprocess.run(
             argv,
             input=prompt_text,
@@ -1982,6 +2046,8 @@ def run_push_breadcrumb_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
+            env=spawn_env,
         )
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())
@@ -2274,6 +2340,7 @@ def run_push_sections_pull(
             text=True,
             timeout=timeout,
             check=False,
+            cwd=_scratch_cwd(tmp_dir),
         )
 
     parsed = parse_pull_stream((proc.stdout or "").splitlines())
