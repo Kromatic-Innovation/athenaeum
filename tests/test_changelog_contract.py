@@ -31,6 +31,13 @@ CONTRACT_FIRST_RELEASE = (0, 25, 0)
 # Allowed ``###`` headings, in the order the preamble requires.
 ALLOWED_HEADINGS = ("Removed", "Changed", "Added", "Fixed", "Security")
 
+# The first release whose summary's "security-relevant" wording requires a
+# matching ``### Security`` entry (athenaeum#3081). 0.29.0 was cut before the
+# rule and is left as it is, so the rule starts with the release after it.
+SECURITY_RULE_AFTER_RELEASE = (0, 29, 0)
+
+_SECURITY_RELEVANT_RE = re.compile(r"security[- ]relevant", re.IGNORECASE)
+
 # Bold paragraph openers the contract keeps: the summary and the upgrade steps.
 ALLOWED_BOLD_OPENERS = ("**Summary.**", "**Upgrading from ")
 
@@ -117,6 +124,31 @@ def heading_violations(text: str) -> list[str]:
             bold_opener = line.startswith("**") and not line.startswith(ALLOWED_BOLD_OPENERS)
             if paragraph_start and bold_opener:
                 problems.append(f"[{name}] bold pseudo-heading instead of a ### heading: {line!r}")
+    return problems
+
+
+def security_section_violations(text: str) -> list[str]:
+    """Return one message per release whose summary calls a change
+    security-relevant but which has no ``### Security`` heading.
+
+    Only the text before the release's first ``###`` heading (the summary and
+    upgrade steps) is read for the wording, so a bullet that merely mentions
+    the phrase does not trigger the rule. Releases up to and including
+    ``SECURITY_RULE_AFTER_RELEASE`` are not checked.
+    """
+    problems: list[str] = []
+    for version, body in _releases(text):
+        if version <= SECURITY_RULE_AFTER_RELEASE:
+            continue
+        lines = _strip_fences(body)
+        headings = [line for line in lines if re.match(r"^###\s", line)]
+        first = next((i for i, line in enumerate(lines) if re.match(r"^###\s", line)), len(lines))
+        summary = "\n".join(lines[:first])
+        if _SECURITY_RELEVANT_RE.search(summary) and "### Security" not in headings:
+            problems.append(
+                f"[{_version_str(version)}] the summary calls a change security-relevant "
+                "but the release has no ### Security entry"
+            )
     return problems
 
 
@@ -214,6 +246,27 @@ def test_contract_releases_exist(changelog_text: str) -> None:
 
 def test_changelog_follows_heading_contract(changelog_text: str) -> None:
     assert heading_violations(changelog_text) == []
+
+
+def test_security_relevant_summary_has_a_security_entry(changelog_text: str) -> None:
+    assert security_section_violations(changelog_text) == []
+
+
+def test_preamble_states_the_security_entry_rule(changelog_text: str) -> None:
+    """The preamble promises the rule the check above enforces, and names the
+    release it starts after, so the two cannot drift apart."""
+    preamble = changelog_text.split("## [Unreleased]", 1)[0]
+    assert f"From the release after {_version_str(SECURITY_RULE_AFTER_RELEASE)} on" in preamble
+    assert "### Security" in preamble
+
+
+def test_security_rule_leaves_0_29_0_as_cut(changelog_text: str) -> None:
+    """0.29.0 calls a change security-relevant and has no ### Security
+    heading; it predates the rule and must stay exempt rather than be
+    rewritten."""
+    body = dict(_releases(changelog_text))[SECURITY_RULE_AFTER_RELEASE]
+    assert _SECURITY_RELEVANT_RE.search(body)
+    assert "### Security" not in body
 
 
 def test_changelog_footer_links_are_current(changelog_text: str) -> None:
@@ -388,3 +441,28 @@ def test_fails_when_build_notes_cite_a_different_set(tmp_path: Path) -> None:
 def test_build_notes_check_skips_a_release_with_no_notes(tmp_path: Path) -> None:
     text = _changelog("\n### Added\n\n- A feature (athenaeum#101).\n")
     assert build_notes_violations(text, tmp_path) == []
+
+
+def test_fails_on_security_relevant_summary_without_security_entry() -> None:
+    text = _changelog(
+        "\nSecurity-relevant: an install now refuses a store it cannot read.\n"
+        "\n### Changed\n\n- A change.\n"
+    )
+    assert security_section_violations(text) == [
+        "[1.1.0] the summary calls a change security-relevant "
+        "but the release has no ### Security entry"
+    ]
+
+
+def test_security_relevant_summary_with_security_entry_passes() -> None:
+    text = _changelog(
+        "\nSecurity-relevant: an install now refuses a store it cannot read.\n"
+        "\n### Changed\n\n- A change.\n\n### Security\n\n- The refusal.\n"
+    )
+    assert security_section_violations(text) == []
+    assert heading_violations(text) == []
+
+
+def test_security_wording_inside_a_bullet_does_not_trigger_the_rule() -> None:
+    text = _changelog("\n### Changed\n\n- Not security-relevant on its own.\n")
+    assert security_section_violations(text) == []
