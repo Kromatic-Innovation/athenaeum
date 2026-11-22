@@ -12,7 +12,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
-# module file -> {call count: (has path argument, reason)}
+# module file -> (number of read_blob calls, whether every call passes path)
 ALLOWED: dict[str, tuple[int, bool]] = {
     # Raw: re-reads the ancestor blob it wrote itself with write_blob (never cleaned).
     "raise_supersede.py": (1, False),
