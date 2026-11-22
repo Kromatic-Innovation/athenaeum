@@ -1825,9 +1825,11 @@ def read_blob(repo: Path, blob: str, path: str | None = None) -> bytes | None:
     MUST pass *path*; otherwise a repo with clean/smudge filters yields the
     clean-form bytes and the comparison is silently wrong. Omit *path* only when
     the blob was written by :func:`write_blob` (never cleaned), so its stored
-    bytes are exactly what was put in. Every call site carries a comment naming
-    which case it is, and ``tests/test_read_blob_callers.py`` fails when a new
-    caller is added unclassified.
+    bytes are exactly what was put in. A blob id from :func:`blob_id` (``git
+    hash-object -- <path>``) names the clean-filtered form, like a committed blob,
+    so it needs *path* too. Every call site carries a comment naming which case
+    it is, and ``tests/test_read_blob_callers.py`` fails when a new caller is
+    added unclassified.
 
     Reads the object database only (athenaeum#2940: the last accepted version of
     a raised copy is read back by the blob id the acceptance ledger holds).

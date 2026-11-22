@@ -14,7 +14,9 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
 # module file -> (number of read_blob calls, whether every call passes path)
 ALLOWED: dict[str, tuple[int, bool]] = {
-    # Raw: re-reads the ancestor blob it wrote itself with write_blob (never cleaned).
+    # Raw: right for an ancestor written by write_blob (never cleaned). Wrong under a
+    # clean/smudge filter for an ancestor recorded at raise acceptance (a clean-form
+    # hash-object id); the call-site comment names the gap.
     "raise_supersede.py": (1, False),
     # Filtered: committed page blob, compared with and written over the checkout.
     "sync_integrate.py": (1, True),
