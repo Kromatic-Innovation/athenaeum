@@ -71,8 +71,8 @@ are seen by strangers who have no internal context.
 
 **Which releases get Zenodotus.** A MINOR or MAJOR release (`0.x` → `0.x+1.0`,
 or a major bump) runs the Zenodotus gate below. A PATCH release does not: it
-needs only an accurate CHANGELOG section for that version, and the operator
-tags on that. A release is MINOR when its `[Unreleased]` block has an
+needs only an accurate CHANGELOG section for that version, and the tag is
+pushed on that (see "Who pushes the tag" below). A release is MINOR when its `[Unreleased]` block has an
 `### Added` heading, a `### Removed` heading or a `BREAKING` marker, meaning
 a significant consumer-visible addition or a removal; otherwise (only Changed,
 Fixed, Security or docs entries) it is a PATCH.
@@ -90,15 +90,25 @@ Before any MINOR or MAJOR release tag (`vX.Y.0`):
    (README, CHANGELOG, LICENSE, CONTRIBUTING, public API, tests, release
    diff) and **nothing else**. The verdict lands in
    `.zenodotus/<version>/verdict.md`.
-4. Verdict gates the tag:
-   - **Pass** → promote `develop → main` (fast-forward), then create
-     `git tag vX.Y.Z` from `main` using the drafted
-     `.zenodotus/<version>/tag-message.md` as the tag body. PyPI publish
-     fires automatically on the tag push.
-   - **Conditional** / **Fail** → fix the must-fix items on `develop`,
-     re-run `/zenodotus`, retry.
-5. Tagging stays human-triggered for every release, PATCH included.
-   Zenodotus does not run `git tag`.
+4. Verdict gates the tag. The gate passes on **Pass**, or on
+   **Conditional** with an empty blocking set:
+   - **Gate passed** → promote `develop → main` (fast-forward), then push
+     the tag as described in step 5. PyPI publish fires automatically on
+     the tag push.
+   - **Conditional with blockers** / **Fail** → fix the must-fix items on
+     `develop`, re-run `/zenodotus`, retry.
+5. **Who pushes the tag.** Once the gate has passed (or, for a PATCH, once
+   the CHANGELOG section is accurate), hestia or the orchestrator pushes the
+   tag; the operator does not have to tag by hand. Before pushing, it
+   verifies that:
+   - the release tip is on `main`;
+   - the version in `pyproject.toml` at that commit matches `X.Y.Z`;
+   - the tag `vX.Y.Z` does not already exist, locally or on the remote.
+
+   It then creates an annotated `git tag vX.Y.Z` on that commit with the
+   drafted `.zenodotus/<version>/tag-message.md` as the tag body (for a
+   PATCH, the CHANGELOG section), and pushes it. Zenodotus itself still
+   does not run `git tag`.
 
 The `.zenodotus/` directory is gitignored — verdict artifacts are local
 record, not durable repo state.
