@@ -41,6 +41,12 @@ _SECURITY_RELEVANT_RE = re.compile(r"security[- ]relevant", re.IGNORECASE)
 # Bold paragraph openers the contract keeps: the summary and the upgrade steps.
 ALLOWED_BOLD_OPENERS = ("**Summary.**", "**Upgrading from ")
 
+# The first release whose measurement entries are short: one or two sentences
+# plus a link to the report (athenaeum#3122). The preamble names it.
+MEASUREMENT_RULE_FROM_RELEASE = (0, 30, 0)
+MEASUREMENT_ENTRY_MAX_WORDS = 70
+_MEASUREMENT_ENTRY_RE = re.compile(r"^- Docs: (`docs/measurements/|\[[^\]]*\]\(docs/measurements/)")
+
 # A build-notes link through the moving ``main`` branch drifts from the release
 # it describes; tagged releases pin the tag instead (athenaeum#2727).
 _BUILD_NOTES_MAIN_RE = re.compile(r"blob/main/docs/changelog/[^\s)]*-build-notes\.md")
@@ -149,6 +155,57 @@ def security_section_violations(text: str) -> list[str]:
                 f"[{_version_str(version)}] the summary calls a change security-relevant "
                 "but the release has no ### Security entry"
             )
+    return problems
+
+
+def _bullets(lines: list[str]) -> list[str]:
+    """Join each top-level ``- `` bullet with its indented continuation lines."""
+    bullets: list[str] = []
+    open_bullet = False
+    for line in lines:
+        if line.startswith("- "):
+            bullets.append(line)
+            open_bullet = True
+        elif open_bullet and line.startswith("  ") and line.strip():
+            bullets[-1] += " " + line.strip()
+        else:
+            open_bullet = False
+    return bullets
+
+
+def measurement_entry_violations(text: str) -> list[str]:
+    """Return one message per measurement entry that is not short and linked.
+
+    A measurement entry is a ``Docs:`` bullet that opens with a
+    ``docs/measurements/`` report. From ``MEASUREMENT_RULE_FROM_RELEASE`` on,
+    and under ``[Unreleased]``, it must link its report and stay within
+    ``MEASUREMENT_ENTRY_MAX_WORDS`` words; the numbers live in the report.
+    """
+    sections: list[tuple[str, str]] = []
+    unreleased = re.search(r"^## \[Unreleased\]\s*$(.*?)(?=^## \[)", text, re.MULTILINE | re.DOTALL)
+    if unreleased:
+        sections.append(("Unreleased", unreleased.group(1)))
+    sections += [
+        (_version_str(version), body)
+        for version, body in _releases(text)
+        if version >= MEASUREMENT_RULE_FROM_RELEASE
+    ]
+    problems: list[str] = []
+    for name, body in sections:
+        for bullet in _bullets(_strip_fences(body)):
+            match = _MEASUREMENT_ENTRY_RE.match(bullet)
+            if not match:
+                continue
+            if match.group(1).startswith("`"):
+                problems.append(
+                    f"[{name}] measurement entry does not link its report: {bullet[:80]!r}"
+                )
+            words = len(bullet.split()) - 1
+            if words > MEASUREMENT_ENTRY_MAX_WORDS:
+                problems.append(
+                    f"[{name}] measurement entry has {words} words, "
+                    f"more than {MEASUREMENT_ENTRY_MAX_WORDS}: {bullet[:80]!r}"
+                )
     return problems
 
 
@@ -267,6 +324,19 @@ def test_security_rule_leaves_0_29_0_as_cut(changelog_text: str) -> None:
     body = dict(_releases(changelog_text))[SECURITY_RULE_AFTER_RELEASE]
     assert _SECURITY_RELEVANT_RE.search(body)
     assert "### Security" not in body
+
+
+def test_measurement_entries_are_short_and_linked(changelog_text: str) -> None:
+    assert measurement_entry_violations(changelog_text) == []
+
+
+def test_preamble_states_the_behaviour_change_and_measurement_rules(changelog_text: str) -> None:
+    """The preamble promises both conventions athenaeum#3122 added, so the
+    check above and the promise readers see cannot drift apart."""
+    preamble = " ".join(changelog_text.split("## [Unreleased]", 1)[0].split())
+    assert "goes at the head of `### Changed`, even when it also fixes a bug" in preamble
+    assert "A measurement entry is one or two sentences plus a link to its report" in preamble
+    assert f"The {_version_str(MEASUREMENT_RULE_FROM_RELEASE)} section was revised" in preamble
 
 
 def test_changelog_footer_links_are_current(changelog_text: str) -> None:
@@ -466,3 +536,33 @@ def test_security_relevant_summary_with_security_entry_passes() -> None:
 def test_security_wording_inside_a_bullet_does_not_trigger_the_rule() -> None:
     text = _changelog("\n### Changed\n\n- Not security-relevant on its own.\n")
     assert security_section_violations(text) == []
+
+
+def test_fails_on_long_measurement_entry() -> None:
+    long_entry = "- Docs: [a report](docs/measurements/r.md): " + "word " * 80
+    text = _changelog(f"\n### Changed\n\n{long_entry.strip()}\n")
+    problems = measurement_entry_violations(text)
+    assert len(problems) == 1 and "more than 70" in problems[0]
+
+
+def test_fails_on_unlinked_measurement_entry() -> None:
+    text = _changelog("\n### Changed\n\n- Docs: `docs/measurements/r.md` records a run.\n")
+    assert measurement_entry_violations(text) == [
+        "[1.1.0] measurement entry does not link its report: "
+        "'- Docs: `docs/measurements/r.md` records a run.'"
+    ]
+
+
+def test_measurement_rule_reads_continuation_lines_and_skips_older_releases() -> None:
+    wrapped = "- Docs: [a report](docs/measurements/r.md):\n" + "  word word word\n" * 30
+    text = _changelog(f"\n### Changed\n\n{wrapped}")
+    assert len(measurement_entry_violations(text)) == 1
+    old = "- Docs: `docs/measurements/r.md` " + "word " * 80
+    assert (
+        measurement_entry_violations(
+            _changelog("\n### Changed\n\n- Short.\n").replace(
+                "- Older releases are not checked.", old
+            )
+        )
+        == []
+    )

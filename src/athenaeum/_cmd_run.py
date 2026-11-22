@@ -256,6 +256,15 @@ def _refresh_index_after_run(
             config=config,
             incremental=True,
         )
+    # Deliberately broad (athenaeum#3124). The refresh reaches the config
+    # loader, the manifest diff, the embedding backend and its on-disk index,
+    # each of which can raise its own error types (a corrupt index file, a
+    # missing optional backend, a full disk). The index is a cache that the
+    # next ``run``, ``session-end`` or ``reindex`` rebuilds, while the compile
+    # it follows has already committed its pages. So no refresh failure may
+    # turn a finished compile into a failed ``run``: report it and keep the
+    # compile's exit code. ``BaseException`` (Ctrl-C, ``SystemExit``) is not
+    # caught.
     except Exception as exc:  # noqa: BLE001 - never mask the compile's result
         print(
             f"WARNING: run finished but the search index refresh failed "

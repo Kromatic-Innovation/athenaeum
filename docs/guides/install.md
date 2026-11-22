@@ -30,10 +30,12 @@ pip install athenaeum
 athenaeum --version                                    # compare with the PyPI badge above
 ```
 
-**Check what you actually got.** `pip` will not fail on an older interpreter.
-Because releases before 0.17.1 declared `>=3.11`, pip silently resolves
-*backwards* past a dozen releases and installs a year-old version instead of
-erroring. Nothing in the output tells you this happened, and the CLI will
+**Check what you actually got.** On an interpreter older than 3.13, `pip`
+either stops with `No matching distribution found for athenaeum` (listing only
+old versions such as 0.15.0, when none of them fits the request) or, more
+often, does not fail at all. Because releases before 0.17.1 declared `>=3.11`,
+pip silently resolves *backwards* past a dozen releases and installs a
+year-old version instead of erroring. Nothing in the output tells you this happened, and the CLI will
 appear to work. Older releases are **not** yanked (see the CHANGELOG for
 why), so they stay installable. Compare what `--version` prints against the
 live [PyPI version badge](https://pypi.org/project/athenaeum/) rather than a
@@ -85,6 +87,36 @@ written `athenaeum.yaml` selected and what it draws on:
 
 An *existing* `athenaeum.yaml` is never rewritten by `init` — this selection
 only happens once, the moment the file is first created.
+
+## I want to check what is set up
+
+```bash
+athenaeum doctor
+```
+
+`doctor` is read-only. On a fresh install, steps you have not done yet show
+as `WARN` with `setup pending` and the command that finishes each one; `doctor`
+still exits `0`. Only something present but broken (an unparseable
+`settings.json`, a hook whose script is missing, an unreadable index) is a
+`FAIL` and exits non-zero. Abridged output right after `athenaeum init`, before
+`claude mcp add` (paths shortened):
+
+```text
+Athenaeum Doctor
+========================================
+[OK] package_version: running X.Y.Z; latest release is X.Y.Z
+[OK] interpreter: Python 3.13.1
+[WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
+    fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+[WARN] hooks: setup pending: no Claude Code settings file found at ~/.claude/settings.json
+    fix: merge examples/claude-code/settings-snippet.json into ~/.claude/settings.json ...
+[WARN] key_mode: setup pending: llm.provider=claude-cli but Claude Code is not logged in ...
+    fix: run `claude` and `/login`, or set ANTHROPIC_API_KEY
+[WARN] search_index: setup pending: no vector index found under ~/.cache/athenaeum/wiki-vectors
+    fix: run `athenaeum reindex --path <knowledge-root>` to build it, ...
+...
+All checks passed, with 4 warning(s).
+```
 
 ## I want first-person facts ("I prefer...") to land on my own page
 
@@ -297,7 +329,7 @@ schedule yourself — and they write and spend very differently.
 | UserPromptSubmit hook (`user-prompt-recall.sh`, via the packaged Claude Code adapter) | Every user turn, only if wired | One row per rendered recall hit, appended to a push-record ledger under the cache dir | Up to one small-model LLM call per turn for topic extraction, bounded by a short timeout — skipped entirely (falls back to a regex extractor, $0) with no cached API key, and never metered at all under the Claude-subscription provider |
 | PreCompact hook (`pre-compact-save.sh`) | Before Claude Code compacts context, only if wired | Nothing on disk — emits one reminder for the model to call `remember` | None |
 | `remember` (MCP tool) | Whenever an agent calls it, in any session | One markdown file per observation under `<knowledge_root>/raw/claude-session/` | None — a plain file write |
-| The librarian compile (`athenaeum run`) | **Only if you schedule it.** Neither `athenaeum init` nor the hook install above puts this on a timer — see "Nothing compiles itself" below | Compiled entity pages under `<knowledge_root>/wiki/`, one git commit per run (the knowledge root is a git repository), and a lockfile held for the run's duration | Up to the run's API-call budget (800 calls by default, `--max-api-calls` to override) under the metered API provider; $0 under the Claude-subscription provider; always bounded by a wall-clock deadline regardless of provider |
+| The librarian compile (`athenaeum run`) | **Only if you schedule it.** Neither `athenaeum init` nor the hook install above puts this on a timer — see "Nothing compiles itself" below | Compiled entity pages under `<knowledge_root>/wiki/`, one git commit per run (the knowledge root is a git repository), a lockfile held for the run's duration, and, after the compile, the search index under the cache dir for the pages it changed | Up to the run's API-call budget (800 calls by default, `--max-api-calls` to override) under the metered API provider; $0 under the Claude-subscription provider; always bounded by a wall-clock deadline regardless of provider. The index refresh after the compile is local CPU work with no API spend; see "`run` refreshes the search index" below |
 | SessionEnd index rebuild (`rebuild-index.sh`) | Every session end — **this is wired by the example `settings-snippet.json` itself** (a live `"SessionEnd"` block, detached with `nohup`), not an opt-in the operator adds | The same index files as the SessionStart background job, plus its own rebuild log | Same as that background job: local embedding compute only, no API spend |
 | Stop-hook validator (`stop-hook-validate.sh`) | Session stop — **opt-in**; there is no `"Stop"` entry in the example settings snippet, so this one the operator must wire themselves | Nothing — prints warnings to stderr only | None; exits `2` only under `VALIDATE_MODE=block` |
 
@@ -309,6 +341,21 @@ do that (manual, cron, launchd) are in
 A `remember` call with no scheduled (or manual) `run` afterward looks like
 it worked and produces no `recall` hit; `athenaeum status` reports the
 growing raw backlog either way.
+
+**`run` refreshes the search index.** After its compile, `athenaeum run`
+brings the search index up to date with the pages it wrote and the raw notes
+it deleted, so `recall` right after a scheduled run returns the compiled
+pages. The refresh embeds only the pages that changed, on the CPU, and makes
+no model calls. Measured on a 12-vCPU Linux container, it adds about 4 s to a
+run that changes 5 pages on the default `vector` backend, and under 0.2 s on
+`fts5`. When nothing changed it is a file-list comparison: about 0.02 s at
+1,000 pages and 0.6 s at 10,000. A run that changes many pages adds roughly
+a third of a second per page on `vector`. See
+[the measurement](../measurements/run-index-refresh-cost-2026-11-22.md). If
+the refresh fails, `run` keeps the compile's exit code and prints a warning
+on stderr naming `athenaeum reindex`. The next `run`, `session-end` or
+`reindex` catches the index up, so a cron job does not need its own
+`reindex` step.
 
 ## What happens when a prerequisite is missing
 
@@ -347,6 +394,9 @@ on the knowledge repo only (never your global config), prints a notice saying
 so, and shows the two `git config` commands to change it. If `init` fails for
 any other reason it removes what it created, so retrying `athenaeum init`
 starts clean; a directory that already existed keeps its own content.
+`init` makes its seed commit with git hooks disabled, so a global
+`core.hooksPath` commit hook (for example a protected-branch guard) does not
+block it.
 
 **Scheduler.** Nothing is scheduled by default. If you never set up cron,
 launchd, or a recurring manual run, `remember` keeps appending to
