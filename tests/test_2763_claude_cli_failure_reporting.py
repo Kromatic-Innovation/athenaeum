@@ -73,18 +73,26 @@ def test_not_logged_in_names_login_and_api_key(fake_path: Path) -> None:
     assert "\n" not in msg
     assert "/login" in msg
     assert "ANTHROPIC_API_KEY" in msg
-    # The fix text leads; raw CLI output follows, marked as detail.
+    # The reason ends after the fix text; raw CLI output is not embedded.
     assert msg.startswith("claude CLI is not logged in. Run `claude`")
-    assert msg.index("/login") < msg.index("CLI output, for detail")
+    assert msg.endswith("llm.provider: api.")
+    assert "CLI output" not in msg
+    assert NOT_LOGGED_IN not in msg
 
 
-def test_not_logged_in_long_detail_cut_at_token_boundary(fake_path: Path) -> None:
+def test_not_logged_in_raw_output_goes_to_debug_log(
+    fake_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The raw CLI output stays available for debugging, bounded and cut at a
+    token boundary, but never reaches the error text (athenaeum#3091)."""
     _fake_claude(fake_path, "Not logged in " + "word " * 200)
-    with pytest.raises(ClaudeCliNotLoggedInError) as ei:
-        _call()
+    with caplog.at_level(logging.DEBUG, logger="athenaeum.provider"):
+        with pytest.raises(ClaudeCliNotLoggedInError) as ei:
+            _call()
     msg = str(ei.value)
-    assert msg.index("ANTHROPIC_API_KEY") < msg.index("CLI output, for detail")
-    assert "word ...')" in msg
+    assert "word" not in msg
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("Not logged in" in m and "word ...'" in m for m in debug)
 
 
 def _seed_failing_run(tmp_path: Path) -> Path:
@@ -128,6 +136,8 @@ def test_run_logs_no_traceback_and_status_shows_why(
     out = capsys.readouterr().out
     assert "Last compile:         FAILED" in out
     assert "/login" in out
+    assert "CLI output" not in out
+    assert "{" not in out.split("why:", 1)[1].splitlines()[0]
 
 
 def test_run_keeps_traceback_for_other_failures(
