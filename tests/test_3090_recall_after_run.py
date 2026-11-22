@@ -102,6 +102,51 @@ class TestRunRefreshesIndex:
         assert cmd_run(_build_args(["run", "--knowledge-root", str(knowledge)])) == 0
         assert "athenaeum reindex" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("compile_rc", [0, 1, 2])
+    @pytest.mark.parametrize("failing", ["_reindex_would_change", "reindex"])
+    def test_refresh_failure_never_changes_run_exit_code(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        compile_rc: int,
+        failing: str,
+    ) -> None:
+        # athenaeum#3124: a refresh that fails at either step, after a compile
+        # that succeeded or failed, leaves run's exit code to the compile.
+        from athenaeum._cmd_run import cmd_run
+
+        knowledge, cache, _ = _seed(tmp_path, "fts5")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        monkeypatch.setattr("athenaeum.librarian.run", lambda **k: compile_rc)
+        monkeypatch.setattr("athenaeum.librarian._reindex_would_change", lambda *a, **k: True)
+
+        def _boom(*a: object, **k: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(f"athenaeum.librarian.{failing}", _boom)
+        rc = cmd_run(_build_args(["run", "--knowledge-root", str(knowledge)]))
+        assert rc == compile_rc
+        err = capsys.readouterr().err
+        assert "search index refresh failed (OSError: disk full)" in err
+        assert "athenaeum reindex" in err
+
+    def test_refresh_does_not_swallow_keyboard_interrupt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum._cmd_run import cmd_run
+
+        knowledge, cache, _ = _seed(tmp_path, "fts5")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+        monkeypatch.setattr("athenaeum.librarian.run", lambda **k: 0)
+
+        def _interrupt(*a: object, **k: object) -> bool:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("athenaeum.librarian._reindex_would_change", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            cmd_run(_build_args(["run", "--knowledge-root", str(knowledge)]))
+
 
 class TestStaleHitFilter:
     def test_drop_vanished_hits_unit(self, tmp_path: Path) -> None:
