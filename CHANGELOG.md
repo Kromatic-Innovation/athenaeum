@@ -70,6 +70,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` to turn it off. This builds the arm the
   athenaeum#3104 measurement recommended (pooled strict push coverage +.043,
   95% CI [.016, .074], over 202 tasks). athenaeum#3105
+- Every compile write path that creates a page now decides its file name
+  style where it resolves the page's destination, through one helper,
+  `destination_for_new_entity`. A store's `opaque_filenames` choice can no
+  longer be skipped by a path that resolves the destination and forgets to
+  apply it. A new test fails if any module resolves a destination or sets the
+  flag any other way. File names are unchanged (athenaeum#3126).
 - Docs: the CHANGELOG preamble adds two conventions: a change the summary
   lists as a behaviour change goes at the head of `### Changed` even when it
   also fixes a bug, and a measurement entry is one or two sentences plus a
