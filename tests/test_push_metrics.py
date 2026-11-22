@@ -225,10 +225,19 @@ class TestOpaquePushIdFromFilename:
     def test_non_matching_filename_returned_whole(self) -> None:
         assert push_metrics.opaque_push_id_from_filename("raw/foo.md") == "raw/foo.md"
 
-    def test_short_hex_like_prefix_without_dash_is_not_truncated(self) -> None:
-        # Exactly 8 hex chars but no trailing dash: not the entity shape,
-        # must not be mistaken for one.
-        assert push_metrics.opaque_push_id_from_filename("deadbeef.md") == "deadbeef.md"
+    def test_opaque_entity_filename_yields_the_bare_uid(self) -> None:
+        # A store with `opaque_filenames: true` names pages `<uid>.md`
+        # (athenaeum#3077); the push id must equal the frontmatter uid the MCP
+        # recall path records, not the file name with its extension.
+        assert push_metrics.opaque_push_id_from_filename("deadbeef.md") == "deadbeef"
+        assert (
+            push_metrics.opaque_push_id_from_filename("7b2e9a04c1d85f36.md") == "7b2e9a04c1d85f36"
+        )
+
+    def test_hex_name_without_dash_or_md_extension_is_not_truncated(self) -> None:
+        # Hex-looking, but neither entity shape: recorded whole.
+        for fname in ("deadbeef.txt", "deadbeefcafe.md", "deadbeef.md.bak"):
+            assert push_metrics.opaque_push_id_from_filename(fname) == fname
 
 
 class TestBuildPushRecordRedaction:

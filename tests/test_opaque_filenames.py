@@ -187,8 +187,8 @@ class TestRoundTrip:
         assert got.uid == UID
 
     def test_push_id_from_opaque_filename_carries_no_name(self) -> None:
-        # Recorded whole: a uid-only name is already name-free.
-        assert opaque_push_id_from_filename(f"{UID}.md") == f"{UID}.md"
+        # The bare uid, the same id the MCP recall path records from frontmatter.
+        assert opaque_push_id_from_filename(f"{UID}.md") == UID
 
 
 class TestUidCollisionLint:
