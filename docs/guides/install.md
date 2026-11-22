@@ -329,7 +329,7 @@ schedule yourself — and they write and spend very differently.
 | UserPromptSubmit hook (`user-prompt-recall.sh`, via the packaged Claude Code adapter) | Every user turn, only if wired | One row per rendered recall hit, appended to a push-record ledger under the cache dir | Up to one small-model LLM call per turn for topic extraction, bounded by a short timeout — skipped entirely (falls back to a regex extractor, $0) with no cached API key, and never metered at all under the Claude-subscription provider |
 | PreCompact hook (`pre-compact-save.sh`) | Before Claude Code compacts context, only if wired | Nothing on disk — emits one reminder for the model to call `remember` | None |
 | `remember` (MCP tool) | Whenever an agent calls it, in any session | One markdown file per observation under `<knowledge_root>/raw/claude-session/` | None — a plain file write |
-| The librarian compile (`athenaeum run`) | **Only if you schedule it.** Neither `athenaeum init` nor the hook install above puts this on a timer — see "Nothing compiles itself" below | Compiled entity pages under `<knowledge_root>/wiki/`, one git commit per run (the knowledge root is a git repository), and a lockfile held for the run's duration | Up to the run's API-call budget (800 calls by default, `--max-api-calls` to override) under the metered API provider; $0 under the Claude-subscription provider; always bounded by a wall-clock deadline regardless of provider |
+| The librarian compile (`athenaeum run`) | **Only if you schedule it.** Neither `athenaeum init` nor the hook install above puts this on a timer — see "Nothing compiles itself" below | Compiled entity pages under `<knowledge_root>/wiki/`, one git commit per run (the knowledge root is a git repository), a lockfile held for the run's duration, and, after the compile, the search index under the cache dir for the pages it changed | Up to the run's API-call budget (800 calls by default, `--max-api-calls` to override) under the metered API provider; $0 under the Claude-subscription provider; always bounded by a wall-clock deadline regardless of provider. The index refresh after the compile is local CPU work with no API spend; see "`run` refreshes the search index" below |
 | SessionEnd index rebuild (`rebuild-index.sh`) | Every session end — **this is wired by the example `settings-snippet.json` itself** (a live `"SessionEnd"` block, detached with `nohup`), not an opt-in the operator adds | The same index files as the SessionStart background job, plus its own rebuild log | Same as that background job: local embedding compute only, no API spend |
 | Stop-hook validator (`stop-hook-validate.sh`) | Session stop — **opt-in**; there is no `"Stop"` entry in the example settings snippet, so this one the operator must wire themselves | Nothing — prints warnings to stderr only | None; exits `2` only under `VALIDATE_MODE=block` |
 
@@ -341,6 +341,21 @@ do that (manual, cron, launchd) are in
 A `remember` call with no scheduled (or manual) `run` afterward looks like
 it worked and produces no `recall` hit; `athenaeum status` reports the
 growing raw backlog either way.
+
+**`run` refreshes the search index.** After its compile, `athenaeum run`
+brings the search index up to date with the pages it wrote and the raw notes
+it deleted, so `recall` right after a scheduled run returns the compiled
+pages. The refresh embeds only the pages that changed, on the CPU, and makes
+no model calls. Measured on a 12-vCPU Linux container, it adds about 4 s to a
+run that changes 5 pages on the default `vector` backend, and under 0.2 s on
+`fts5`. When nothing changed it is a file-list comparison: about 0.02 s at
+1,000 pages and 0.6 s at 10,000. A run that changes many pages adds roughly
+a third of a second per page on `vector`. See
+[the measurement](../measurements/run-index-refresh-cost-2026-11-22.md). If
+the refresh fails, `run` keeps the compile's exit code and prints a warning
+on stderr naming `athenaeum reindex`. The next `run`, `session-end` or
+`reindex` catches the index up, so a cron job does not need its own
+`reindex` step.
 
 ## What happens when a prerequisite is missing
 
