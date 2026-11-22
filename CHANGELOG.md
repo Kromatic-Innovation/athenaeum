@@ -47,6 +47,50 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-22
+
+**Summary.** 0.30.0 has two themes. First, it acts on the 0.29.0 release
+review: the README, install guide, support policy and CHANGELOG are clearer,
+and the one uncapped runtime dependency is now capped. Second, it keeps
+encryption at rest possible later: a store can opt in to file names that do
+not reveal whose records it holds, and reads at a past revision now go
+through the repository's smudge filters. It is a MINOR release because it
+adds a per-store option (0.29.1 to 0.29.5 were never published).
+`athenaeum.__all__` is unchanged.
+
+For most users:
+
+- Breaking changes: none.
+- Behaviour changes: `recall` (CLI and MCP tool) drops a hit whose file no
+  longer exists, and `athenaeum run` refreshes the search index for what it
+  changed, so `recall` right after `run` returns the compiled page. The
+  `witness-anchor` extra now requires `opentimestamps<1`. Reads at a past
+  revision return what a checkout would write; with no clean/smudge filter
+  configured the bytes are unchanged.
+- The search index is not rebuilt by this upgrade.
+
+Experimental: `opaque_filenames` on a `storage.adapters` entry is new and
+off by default; it may change without notice. `sync.mode: integrate` stays
+experimental. See `docs/guides/stability.md` for which surfaces count as
+stable.
+
+Security-relevant: opt-in `opaque_filenames` keeps the names of the people
+and organisations a sensitive store holds out of its file listing, and
+filtered reads at a past revision let a filter-based encryption scheme work
+with `sync.mode: integrate`. athenaeum itself still encrypts nothing. Both
+are listed under `### Security`.
+
+**Upgrading from 0.29.0**
+
+1. `pip install -U athenaeum` (or `uv tool upgrade athenaeum`), then
+   `athenaeum doctor`.
+2. If you install the `witness-anchor` extra, note it now caps
+   `opentimestamps` below 1.0.
+3. `sync.mode: integrate` users: a page edited on both sides is now merged
+   on its plaintext when a clean/smudge filter (encryption, Git LFS) is
+   configured, instead of being held. With no filter configured, integrate
+   runs behave as before. No other steps.
+
 ### Changed
 
 - The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
@@ -11279,7 +11323,8 @@ knowledge librarian.
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
 <!-- There is no [0.27.1] link: 0.27.1 was never published (no tag, no release), so [0.27.2] compares against v0.27.0. -->
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.2...v0.28.0
 [0.27.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.27.0...v0.27.2
