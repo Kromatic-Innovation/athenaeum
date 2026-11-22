@@ -11,6 +11,12 @@
 athenaeum needs **Python 3.13 or later** and `git`. The `uv` command below
 fetches Python 3.13 for you if your system Python is older.
 
+The 3.13 floor is a CI-scope choice, not a technical requirement: nothing in
+athenaeum or its dependencies needs a 3.13 feature, but CI tests one Python
+version at a time and the package declares only the version CI verifies.
+There is no plan to test or declare 3.11 or 3.12; see
+[Supported Python version](CONTRIBUTING.md#supported-python-version).
+
 ```bash
 uv tool install --python 3.13 'athenaeum[mcp]'
 athenaeum --version

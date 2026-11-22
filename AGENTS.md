@@ -162,7 +162,8 @@ markdown or in `athenaeum decisions` JSON output.
 
 ## Conventions
 
-- Python 3.11+
+- Python 3.13+ (`requires-python = ">=3.13"`; CI tests 3.13 only, see
+  CONTRIBUTING.md "Supported Python version")
 - Apache 2.0 license; inbound contributions are covered by Apache-2.0 §5 (no
   DCO sign-off or CLA required)
 - Public API exposed via `athenaeum/__init__.py`; anything not in `__all__`
