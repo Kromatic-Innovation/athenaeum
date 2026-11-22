@@ -25,6 +25,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Fixed
+
+- `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
+
 ### Changed
 
 - Docs: `docs/measurements/plugin-clean-install-linux-resync-0.29.0-2026-11-21.md` repeats the Linux clean-container install of the Claude Code plugin after its re-sync to 0.29.0 (athenaeum#3053). The server starts on the first session, `remember` and `recall` work, and a configured `knowledgePath` is used; the install output still hides the option default (athenaeum#3098) and a failed first connect is still cached for about 15 minutes after `uv` is installed (athenaeum#3097).
