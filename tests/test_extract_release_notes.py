@@ -42,6 +42,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "extract_release_notes.py"
 REAL_CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+#: Release sections before 0.25.0, including 0.20.0, live here (athenaeum#3132).
+REAL_CHANGELOG_ARCHIVE = REPO_ROOT / "CHANGELOG-archive.md"
 
 
 def _load_module():
@@ -355,7 +357,7 @@ def test_cli_writes_output_file(tmp_path: Path) -> None:
 
 
 def test_real_v0_20_0_section_is_oversized_and_degrades_cleanly() -> None:
-    """Run the extractor against this repo's actual CHANGELOG.md.
+    """Run the extractor against this repo's actual CHANGELOG-archive.md.
 
     Confirms (a) the incident condition still reproduces against the real
     0.20.0 section on develop -- it is genuinely over the default 125,000
@@ -364,19 +366,19 @@ def test_real_v0_20_0_section_is_oversized_and_degrades_cleanly() -> None:
     working link, i.e. actually publishable via `gh release create
     --notes-file`.
     """
-    if not REAL_CHANGELOG.is_file():  # pragma: no cover - defensive only
-        pytest.skip("CHANGELOG.md not present in this checkout")
+    if not REAL_CHANGELOG_ARCHIVE.is_file():  # pragma: no cover - defensive only
+        pytest.skip("CHANGELOG-archive.md not present in this checkout")
 
     mod = _load_module()
-    changelog_text = REAL_CHANGELOG.read_text(encoding="utf-8")
+    changelog_text = REAL_CHANGELOG_ARCHIVE.read_text(encoding="utf-8")
 
     section = mod.extract_section(changelog_text, "0.20.0")
-    assert section is not None, "expected a [0.20.0] section in CHANGELOG.md"
+    assert section is not None, "expected a [0.20.0] section in CHANGELOG-archive.md"
     header, body = section
     raw_len = len(header) + 1 + len(body) + 1
     assert raw_len > mod.GITHUB_RELEASE_BODY_HARD_CAP, (
         "the real 0.20.0 section is no longer over GitHub's 125,000 cap -- "
-        "the incident condition no longer reproduces against CHANGELOG.md on "
+        "the incident condition no longer reproduces against CHANGELOG-archive.md on "
         "develop; this test's assumption needs re-checking against the "
         "current tree (see the issue's AC5)"
     )

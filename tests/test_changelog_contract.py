@@ -23,6 +23,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+#: Release sections before ``CONTRACT_FIRST_RELEASE`` (athenaeum#3132).
+CHANGELOG_ARCHIVE = REPO_ROOT / "CHANGELOG-archive.md"
 REPO_URL = "https://github.com/Kromatic-Innovation/athenaeum"
 
 # The first release the heading contract covers. The preamble names it.
@@ -337,6 +339,38 @@ def test_preamble_states_the_behaviour_change_and_measurement_rules(changelog_te
     assert "goes at the head of `### Changed`, even when it also fixes a bug" in preamble
     assert "A measurement entry is one or two sentences plus a link to its report" in preamble
     assert f"The {_version_str(MEASUREMENT_RULE_FROM_RELEASE)} section was revised" in preamble
+
+
+_LINK_DEF_RE = re.compile(r"^\[(\d+\.\d+\.\d+)\]: ", re.MULTILINE)
+
+
+def test_archive_holds_exactly_the_releases_before_the_contract(changelog_text: str) -> None:
+    """athenaeum#3132: CHANGELOG.md keeps the releases the heading contract
+    covers; every older release section lives in the archive file."""
+    archive = CHANGELOG_ARCHIVE.read_text(encoding="utf-8")
+    current = [v for v, _ in _releases(changelog_text)]
+    archived = [v for v, _ in _releases(archive)]
+    assert archived, "CHANGELOG-archive.md holds no release sections"
+    assert all(v >= CONTRACT_FIRST_RELEASE for v in current), current
+    assert all(v < CONTRACT_FIRST_RELEASE for v in archived), archived
+    # The two files together are one unbroken, newest-first history.
+    assert current + archived == sorted(current + archived, reverse=True)
+
+
+def test_preamble_links_the_archive(changelog_text: str) -> None:
+    preamble = changelog_text.split("## [Unreleased]", 1)[0]
+    assert "[CHANGELOG-archive.md](CHANGELOG-archive.md)" in preamble
+    assert f"before {_version_str(CONTRACT_FIRST_RELEASE)}" in " ".join(preamble.split())
+
+
+def test_each_files_link_definitions_name_its_own_releases(changelog_text: str) -> None:
+    """A ``[X.Y.Z]: <url>`` footer link sits in the same file as its release
+    heading, so neither file renders a dangling reference."""
+    archive = CHANGELOG_ARCHIVE.read_text(encoding="utf-8")
+    for text in (changelog_text, archive):
+        headings = {_version_str(v) for v, _ in _releases(text)}
+        defined = set(_LINK_DEF_RE.findall(text))
+        assert defined <= headings, sorted(defined - headings)
 
 
 def test_changelog_footer_links_are_current(changelog_text: str) -> None:
