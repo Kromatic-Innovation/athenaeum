@@ -92,7 +92,7 @@ athenaeum's wheel alongside `src/athenaeum/`. Zero imports from `athenaeum`
 (AST-scan test, `tests/test_promptwitness_boundary.py`); standard library only
 at import time. Optional dependencies are lazy: `cryptography` (extra
 `witness-sign = ["cryptography>=42,<51"]`), `opentimestamps` (extra
-`witness-anchor = ["opentimestamps>=0.4"]`). Dependency direction is one way
+`witness-anchor = ["opentimestamps>=0.4,<1"]`). Dependency direction is one way
 only: `athenaeum` → `promptwitness`. Athenaeum adapts promptwitness types onto
 its own seams (`Sealer`, `SigningKeyProvider`, config resolvers) — it never
 hands its own types the other way. The package lives at the top level (not

@@ -395,6 +395,10 @@ only the floor, the locked release and the newest one are tested.
 - If you need a longer deprecation notice, or support for an older Python or
   dependency version, open an issue asking for it.
 
+Running athenaeum in production under this policy (pin an exact version,
+upgrade one minor at a time) is covered in
+[Running athenaeum in production](stability.md#running-athenaeum-in-production).
+
 ## See also
 
 - Modules — [librarian](../modules/librarian.md) · [mcp](../modules/mcp.md)

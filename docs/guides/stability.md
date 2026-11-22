@@ -56,3 +56,25 @@ Everything else is internal and may change at any time without notice:
 
 If you need a firmer promise for one of the documented surfaces, open an issue
 asking for it.
+
+## Running athenaeum in production
+
+Only the latest release is supported, and breaking changes ship without a
+deprecation period (see the [support policy](install.md#support-policy)).
+That policy is not changing, so a production install has to plan for it:
+
+- **Pin an exact version.** Use `athenaeum==X.Y.Z`, not a range, in the
+  install command from [Install](install.md), so an upgrade happens only when
+  you choose it.
+- **Read each release's Upgrading block before moving.** Every release
+  section in the [CHANGELOG](../../CHANGELOG.md) opens with a summary and an
+  `Upgrading from ...` block that lists breaking changes, behaviour changes
+  and the steps to take.
+- **Upgrade one minor at a time.** Going from 0.27 to 0.29, install the
+  latest 0.28 first, follow its Upgrading block and run `athenaeum doctor`,
+  then do the same for 0.29. Each block is written against the release
+  before it, not against older ones.
+- **Security fixes ship only in the latest release.** There is no
+  backport to an older minor, so staying pinned on an old version means
+  going without its security fixes. Watch the `### Security` entries in each
+  release and upgrade promptly when one applies to you.
