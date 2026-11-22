@@ -561,6 +561,8 @@ def _apply_supersede(
 
     # Edited in the target: a three-way merge, ancestor read by blob id.
     base_blob = max(accepted, key=lambda r: (r.seq, r.ts)).blob_id
+    # Raw on purpose (athenaeum#3127): the ancestor blob was written by write_blob
+    # in _finish (never cleaned), so the stored bytes are the text as accepted.
     base_bytes = read_blob(Path(target_root), base_blob) if base_blob else None
     if base_bytes is None:
         return hold(
