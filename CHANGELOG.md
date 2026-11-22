@@ -64,6 +64,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- `athenaeum status` no longer appends the claude CLI's raw JSON output to the not-logged-in compile failure reason; the reason now ends after the `/login` fix text and the raw output goes to the debug log (athenaeum#3091).
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
 
 ## [0.29.0] - 2026-11-21

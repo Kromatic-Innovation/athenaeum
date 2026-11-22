@@ -1054,10 +1054,12 @@ def _claude_cli_exit_error(returncode: int, stdout: str, stderr: str) -> Runtime
         if len(detail) > _CLI_STDOUT_ERROR_MAX_CHARS:
             # Cut at a whitespace boundary so no token is split, and say so.
             detail = detail[:_CLI_STDOUT_ERROR_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
+        # The raw CLI output (JSON with a session id) is debug detail, not
+        # status text: keep the recorded reason to the cause and the fix.
+        log.debug("claude CLI not-logged-in raw output: %r", detail)
         return ClaudeCliNotLoggedInError(
             "claude CLI is not logged in. Run `claude`, then `/login`; or set "
-            "ANTHROPIC_API_KEY and use llm.provider: api. "
-            f"(CLI output, for detail: {detail!r})"
+            "ANTHROPIC_API_KEY and use llm.provider: api."
         )
     if stderr:
         text = stderr
