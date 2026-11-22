@@ -621,7 +621,9 @@ def opaque_push_id(filename: str, fm: dict[str, object] | None) -> str:
 #: ``T``, never ``-``, and a 16-hex uid is only matched when all 16 are hex.
 #: Mirrors the pre-convergence shell hook's ``_pm_opaque_push_id`` case pattern
 #: (issue athenaeum#1343, issue athenaeum#1362).
-_UID_PREFIX_RE = re.compile(r"^([0-9a-f]{16}|[0-9a-f]{8})-")
+# A compiled entity's filename is `<uid>-<slug>.md`, or `<uid>.md` on a store
+# that opted in to opaque file names (athenaeum#3077); both yield the bare uid.
+_UID_PREFIX_RE = re.compile(r"^([0-9a-f]{16}|[0-9a-f]{8})(?:-|(?=\.md$))")
 
 
 def opaque_push_id_from_filename(filename: str) -> str:
@@ -635,7 +637,9 @@ def opaque_push_id_from_filename(filename: str) -> str:
 
     - A compiled entity's filename (``<uid-prefix>-<slug>.md``, 8 or 16 hex) is
       truncated to just the uid prefix, so the name-derived slug
-      never reaches the ledger.
+      never reaches the ledger. An opaque file name (``<uid>.md``, written on a
+      store with ``opaque_filenames: true``) yields the same bare uid, so both
+      name shapes record the id the MCP ``recall`` path records.
     - Anything else (a raw-intake filename, which is never name-derived) is
       recorded whole, same as :func:`opaque_push_id`'s no-``uid`` branch.
 

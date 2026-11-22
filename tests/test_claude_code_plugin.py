@@ -724,6 +724,11 @@ def test_uv_missing_message_reaches_the_session_through_hook_stdout(tmp_path: Pa
     context = payload["hookSpecificOutput"]["additionalContext"]  # shown to the model
     assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "install" in context.lower() and "uv" in context
+    # The cached-failure wait and the retry-now path are named (athenaeum#3097).
+    for text in (payload["systemMessage"], context):
+        assert "15 minutes" in text
+        assert "edit the plugin config" in text
+        assert "claude plugin configure athenaeum@athenaeum-claude-plugin" in text
     # MCP passthrough keeps stdout clean (protocol channel) and uses stderr.
     mcp = _run_launcher("serve", tmp_path=tmp_path, path_dir=bin_dir)
     assert mcp.stdout == ""

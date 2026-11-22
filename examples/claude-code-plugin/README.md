@@ -131,6 +131,26 @@ protocol channel, so the same text goes to stderr there.
 proves the exit-0-and-names-uv contract with a from-scratch minimal `PATH`
 directory that genuinely lacks `uv` — never the real `PATH`.
 
+### After installing `uv`: the 15-minute cached failure (troubleshooting)
+
+If the first session ran without `uv`, the athenaeum MCP server failed to
+connect, and Claude Code remembers that failure. A new session started right
+after you install `uv` can show the server as failed with `Skipping connection
+(recent failure cached retries automatically in 15 min, or edit the plugin
+config to retry now)`, and no `remember` or `recall` tools. The cause is
+Claude Code's cache, not the plugin. Either wait about 15 minutes and start a
+new session, or retry at once by editing the plugin config, as Claude Code's
+own message says: run `/plugin`, open athenaeum and save its configuration
+(leaving the values as they are is enough), or run `claude plugin configure
+athenaeum@athenaeum-claude-plugin`, then start a new session. The launcher's
+missing-`uv` message carries the same advice.
+
+In that second session the SessionStart line `still preparing athenaeum
+<version> via uv (first run, just started)` is about the background warm-up of
+the pinned release, which starts now that `uv` exists. It does not mean the MCP
+server is starting; the launcher cannot see Claude Code's connection cache. If
+the tools are missing, use the retry above.
+
 ## First run while the dependency build is pending (AC4)
 
 The pinned athenaeum release is resolved through `uv run --with
@@ -251,6 +271,15 @@ either was not checked.
   documentation (unavailable here, no network egress), or a live Claude
   Code session inspecting where a `userConfig` value actually lands on
   disk / in logs after being set once.
+
+## Native auto-memory is left on (opt-in recommendation)
+
+The plugin does not set `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, so Claude Code's
+native auto-memory stays on. With the per-turn push installed, turning it off
+measured 30 to 70% cheaper per correct answer at the same correctness, but it
+also stops new auto-memory files reaching the librarian's `raw/auto-memory/`
+intake. How to opt in, what it stops and how to check it:
+[`docs/guides/claude-code.md`](../../docs/guides/claude-code.md#8-optional-turn-off-native-auto-memory-beside-the-push).
 
 ## Why the hooks are referenced here, not copied
 

@@ -62,13 +62,13 @@ MANIFEST="${PLUGIN_ROOT}/.claude-plugin/plugin.json"
 # lifted from doctor.py. See README.md's "What we could not verify" note.
 # ---------------------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
-  _uv_msg="[athenaeum plugin] 'uv' was not found on PATH. This plugin requires uv to run the pinned athenaeum release -- there is no pip fallback here. Install it (see https://docs.astral.sh/uv/getting-started/installation/ or run: curl -LsSf https://astral.sh/uv/install.sh | sh), then restart this session."
+  _uv_msg="[athenaeum plugin] 'uv' was not found on PATH. This plugin requires uv to run the pinned athenaeum release -- there is no pip fallback here. Install it (see https://docs.astral.sh/uv/getting-started/installation/ or run: curl -LsSf https://astral.sh/uv/install.sh | sh), then restart this session. Note: if this plugin's MCP server already failed to connect once, Claude Code caches that failure and may keep athenaeum skipped for about 15 minutes even after uv is installed. To retry at once, edit the plugin config: run /plugin, open athenaeum and save its configuration (or run: claude plugin configure athenaeum@athenaeum-claude-plugin)."
   if [ "${1:-}" = "--ensure-ready" ]; then
     # SessionStart hook: stdout is the ONLY channel the user and the model
     # both see (stderr only reaches a debug log -- athenaeum#3046). Emit hook
     # JSON: `systemMessage` shows to the user, `additionalContext` goes to the
     # model. The message has no double quotes or backslashes, so it is
-    # JSON-safe as written.
+    # JSON-safe as written (keep it that way when editing the text).
     echo "{\"systemMessage\": \"${_uv_msg}\", \"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"${_uv_msg}\"}}"
   else
     # MCP passthrough: stdout is the protocol channel, so use stderr.
