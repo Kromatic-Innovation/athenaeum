@@ -450,6 +450,70 @@ It is in `examples/claude-code/CLAUDE.md.example`, which the setup steps in
 context per session. In testing it never lowered accuracy, and it helped most
 on tasks that never mention memory.
 
+## 8. Optional: turn off native auto-memory beside the push
+
+With athenaeum's per-turn push installed (section 7), Claude Code's own
+auto-memory is a cost without a measured benefit. In the
+[combined push grid](../measurements/combined-push-grid-2026-11-21.md),
+leaving native auto-memory on beside the shipped push cost 30 to 70% more per
+correct answer, at both corpus sizes and on both models, with the same
+correctness within noise. The agent opened a native memory file in 0 of 330
+sessions with it on, while the memory index was loaded into every one of them.
+
+This is a recommendation, not a default: neither the plugin nor the hook
+scripts change it, and native auto-memory stays on unless you turn it off.
+
+**How to turn it off.** Set the environment variable
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for Claude Code. Either export it in the
+shell that starts `claude`, or put it in the `env` block of a Claude Code
+settings file such as `~/.claude/settings.json` (the `env` block is a standard
+Claude Code settings key, see
+[Claude Code settings](https://code.claude.com/docs/en/settings)):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
+  }
+}
+```
+
+To turn it back on, remove the variable.
+
+**What it stops.** Claude Code loads no auto memory, and new auto-memory topic
+files stop accruing. Those files are what section 2 bridges
+into `raw/auto-memory/<scope>/`, so the librarian stops receiving new files
+from that source. Files already written stay on disk and stay readable, and the
+librarian keeps ingesting them. The grid measured no benefit from reading native
+memory beside the push; it did not measure the value of the intake, so whether
+that intake is worth the extra cost is your call. If you rely on it, leave
+native auto-memory on.
+
+**What it leaves alone.** The setting is about native auto-memory only. The
+per-turn push, the `recall` tool and your existing `CLAUDE.md` files are
+separate mechanisms and keep working.
+
+**Evidence that it leaves them alone.** The grid's `SOFF` arm was defined as
+the real hook's push, with the "Per-turn push" section of
+`examples/claude-code/CLAUDE.md.example` as the working directory's
+`CLAUDE.md`, `recall` available, and native auto-memory disabled. The report
+records that no `SOFF` session loaded any auto memory, and that every `SOFF`
+session called `recall` (36 of 36 in the 1,000- and 3,000-page cells, in
+sequences of a `ToolSearch` followed by one to three `recall` calls), so the
+push, `recall` and the `CLAUDE.md` instruction line all took effect with the
+setting on.
+
+**How to check on your own install.** Start a session with the variable set and
+send a message that names something in your knowledge base:
+
+- The reply's context should still begin with the `[Knowledge context]` block
+  from the hook (section 7), so the push is unaffected.
+- The agent should still be able to call `recall`.
+- Your `CLAUDE.md` instructions should still apply; ask the agent what the
+  `CLAUDE.md` in the working directory says.
+- The session should not show a loaded memory index, and no new files should
+  appear under `~/.claude/projects/<scope>/memory/` afterwards.
+
 ## See also
 
 - [`examples/claude-code/README.md`](../../examples/claude-code/README.md) — per-turn recall hooks (complementary to this guide)

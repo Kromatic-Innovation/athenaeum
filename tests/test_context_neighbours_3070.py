@@ -497,3 +497,54 @@ def test_adapter_output_carries_the_block_within_the_cap(tmp_path: Path) -> None
     assert context.startswith(PREAMBLE)
     assert len(_block(context)) == NEIGHBOUR_LINE_CAP
     assert len(context) <= HOOK_OUTPUT_CAP_CHARS
+
+
+def _run_hook_with_knowledge_root(
+    tmp_path: Path, *, via_config_env: bool
+) -> tuple[str, Store]:
+    """Run the real hook with the store somewhere other than the home default.
+
+    HOME points at an empty directory, so a hook that still builds its wiki
+    path from ``~/knowledge`` finds no pages. The store carries a child page
+    whose parent is a page under that same directory."""
+    s = Store(tmp_path / "elsewhere")
+    s.page("acme", "Acme Holdings")
+    s.page("n1", "Linked Neighbour One", description="a linked page")
+    s.hit("a", "Alpha Desk", related=["n1"], description="first hit", extra="parent: acme")
+    s.index()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "PYTHONPATH": SRC,
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "ATHENAEUM_CACHE_DIR": str(s.cache),
+        "SEARCH_BACKEND": "fts5",
+        "ATHENAEUM_INSTRUMENTATION": "off",
+    }
+    root = str(s.wiki.parent)
+    if via_config_env:
+        s.cache.joinpath("config.env").write_text(f"KNOWLEDGE_ROOT={root}\n")
+    else:
+        env["KNOWLEDGE_ROOT"] = root
+    result = subprocess.run(
+        [sys.executable, "-m", "athenaeum.claude_code_adapter"],
+        input=json.dumps({"prompt": f"tell me about {QUERY} please", "session_id": "s1"}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0
+    return result.stdout, s
+
+
+@pytest.mark.parametrize("via_config_env", [False, True], ids=["process-env", "config-env"])
+def test_adapter_reads_the_configured_knowledge_root(tmp_path: Path, via_config_env: bool) -> None:
+    """athenaeum#3096: linked notes and parent names come from the configured
+    knowledge root (env, or the cache config.env), not ``~/knowledge``."""
+    stdout, _s = _run_hook_with_knowledge_root(tmp_path, via_config_env=via_config_env)
+    context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+    assert NEIGHBOUR_HEADER in context.splitlines()
+    assert "Linked Neighbour One" in context
+    assert "(under Acme Holdings)" in context

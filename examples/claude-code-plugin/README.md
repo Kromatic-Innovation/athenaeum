@@ -262,6 +262,15 @@ does not depend on it.
   Code session inspecting where a `userConfig` value actually lands on
   disk / in logs after being set once.
 
+## Native auto-memory is left on (opt-in recommendation)
+
+The plugin does not set `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, so Claude Code's
+native auto-memory stays on. With the per-turn push installed, turning it off
+measured 30 to 70% cheaper per correct answer at the same correctness, but it
+also stops new auto-memory files reaching the librarian's `raw/auto-memory/`
+intake. How to opt in, what it stops and how to check it:
+[`docs/guides/claude-code.md`](../../docs/guides/claude-code.md#8-optional-turn-off-native-auto-memory-beside-the-push).
+
 ## Why the hooks are referenced here, not copied
 
 `hooks/hooks.json` points every recall-hook command at

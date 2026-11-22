@@ -48,6 +48,7 @@ from athenaeum.storage import (
     available_adapters,
     page_write_root_for_store,
     resolve_adapter_for_class,
+    store_opaque_filenames,
 )
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ class Destination:
     store: str
     #: ``None`` when the decision's store was used; else why personal was used.
     fallback: str | None = None
+    #: The store opted in to uid-only file names for NEW pages (athenaeum#3077).
+    opaque_filenames: bool = False
 
 
 def _store_word(adapter_name: str) -> str:
@@ -114,7 +117,9 @@ def resolve_destination(
     store = decision.store or PERSONAL
     try:
         return Destination(
-            page_write_root_for_store(store, entity_type, config, knowledge_root), store
+            page_write_root_for_store(store, entity_type, config, knowledge_root),
+            store,
+            opaque_filenames=store_opaque_filenames(store, config),
         )
     except (ReadOnlySurfaceError, SurfaceNotIndexedError, StorageConfigError) as exc:
         if store == PERSONAL or decision.reason == REASON_MAPPING:
@@ -125,6 +130,7 @@ def resolve_destination(
             page_write_root_for_store(PERSONAL, entity_type, config, knowledge_root),
             PERSONAL,
             reason,
+            store_opaque_filenames(PERSONAL, config),
         )
 
 

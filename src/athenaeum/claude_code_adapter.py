@@ -799,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("athenaeum").addHandler(logging.NullHandler())
     try:
         cache_dir = resolve_cache_dir(None)
+        _load_config_env(cache_dir)
         # Issue athenaeum#2538 (AC8): a pure Path computation, no I/O -- the
         # actual read (if any) happens lazily, inside
         # `context._resolve_parent_names`, only for a final candidate that
@@ -806,12 +807,16 @@ def main(argv: list[str] | None = None) -> int:
         # per-turn bullet name a child's parent at all; omitting it would
         # leave the mechanism wired to nothing (`build_context` defaults
         # `wiki_root=None`, its pre-existing no-op).
+        # Issue athenaeum#3096: the knowledge root is the configured
+        # `KNOWLEDGE_ROOT` (process env, or the cache `config.env` just
+        # loaded -- the same variable the shell hook reads), so this MUST sit
+        # after `_load_config_env`; the default root only when none is set.
         # `.joinpath(...)`, not `/` -- this module's own AC2 guard
         # (`tests/test_claude_code_adapter.py::_scan_for_retrieval_logic`)
         # forbids ANY `ast.BinOp` in this source, and `Path.__truediv__`
         # parses as exactly that.
-        wiki_root = DEFAULT_KNOWLEDGE_ROOT.expanduser().joinpath("wiki")
-        _load_config_env(cache_dir)
+        knowledge_root = Path(os.environ.get("KNOWLEDGE_ROOT") or DEFAULT_KNOWLEDGE_ROOT)
+        wiki_root = knowledge_root.expanduser().joinpath("wiki")
 
         # Read stdin exactly once, before anything else below — the witness
         # call (issue athenaeum#2149) needs the raw text even on a turn the

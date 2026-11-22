@@ -492,6 +492,13 @@ Full walkthrough — directory layout, citation policy, how the librarian
 ingests and consolidates, and an end-to-end quick start — lives in
 [`docs/guides/claude-code.md`](../../docs/guides/claude-code.md).
 
+**Optional, with the per-turn push installed:** setting
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns Claude Code's native auto-memory
+off, which measured 30 to 70% cheaper per correct answer at the same
+correctness, at the price of no new auto-memory files for the intake above.
+Nothing here sets it; see
+[section 8 of the guide](../../docs/guides/claude-code.md#8-optional-turn-off-native-auto-memory-beside-the-push).
+
 ## Pending-questions surface
 
 When the librarian flags a contradiction or ambiguity, it lands in
