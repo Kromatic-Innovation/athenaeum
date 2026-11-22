@@ -14,11 +14,12 @@ athenaeum --version
 athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir
 ```
 
+The later steps (`athenaeum run`, which compiles notes) need a logged-in `claude` CLI or an `ANTHROPIC_API_KEY`; see [Supplying an API key](docs/guides/install.md#i-want-to-supply-an-api-key-without-1password).
+
 **That block needs no API key.** `test-mcp` runs against a scratch directory,
 so you can confirm the install works before wiring anything up or spending API
 budget. Python 3.13+ is required (`--python 3.13` lets `uv` fetch it if needed)
-and `git` must be installed. Compiling later needs either `ANTHROPIC_API_KEY`
-set or a logged-in `claude` CLI.
+and `git` must be installed.
 
 See [Install](docs/guides/install.md) for the `PATH` setup `uv tool install`
 needs, and the wrong-interpreter warning to check against if `athenaeum --version`
