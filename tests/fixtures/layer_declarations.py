@@ -223,6 +223,10 @@ MODULE_LAYER: dict[str, int] = {
     "provider": 3,
     "push_metrics": 3,
     "query_topics": 3,
+    # issue athenaeum#3105: previous-turn reader for per-turn topic extraction
+    # -- own docstring states "Layering: L2 service". Imports config (L2) and
+    # transcript_verify (L1).
+    "turn_context": 2,
     # Issue athenaeum#2535: the first-class parent/child page relation --
     # own docstring states "Layering: L3 service", placed below every
     # named caller (tiers.py's recompile pass, the merge resolver, cli.py)

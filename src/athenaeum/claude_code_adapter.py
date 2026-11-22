@@ -46,7 +46,9 @@ here:
    copy of the default backend name.
 4. **Minimum prompt length.** A prompt shorter than 8 characters produces no
    output, mirroring ``user-prompt-recall.sh:711``
-   (``[ -z "$PROMPT" ] || [ ${#PROMPT} -lt 8 ]``).
+   (``[ -z "$PROMPT" ] || [ ${#PROMPT} -lt 8 ]``) -- unless a previous turn
+   was read from the transcript (issue athenaeum#3105, below), in which case
+   the short prompt is searched with that turn as context.
 5. **Preamble.** The rendered ``additionalContext`` is now
    ``f"{envelope['render']['preamble']}\\n{envelope['render']['text']}"``,
    matching the shell hook's final ``printf`` at
@@ -544,20 +546,67 @@ def _log_witness_error(cache_dir: Path, exc: BaseException) -> None:
         pass
 
 
-def _read_hook_input(raw: str) -> tuple[str, str]:
-    """Parse the ``UserPromptSubmit`` stdin payload.
+def _read_hook_input(raw: str) -> tuple[str, str, str]:
+    """Parse the ``UserPromptSubmit`` stdin payload into
+    ``(prompt, session_id, transcript_path)``.
 
     Never raises: a malformed or absent payload degrades to an empty
     prompt, which :func:`main` then short-circuits on — the same fail-safe
-    contract as a core failure (issue athenaeum#1621 AC3).
+    contract as a core failure (issue athenaeum#1621 AC3). An absent or
+    non-string ``transcript_path`` is ``""`` (issue athenaeum#3105), which
+    means prompt-only topic extraction.
     """
     try:
         payload: dict[str, Any] = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     prompt = str(payload.get("prompt") or "")
     session_id = str(payload.get("session_id") or "unknown")
-    return prompt, session_id
+    transcript_path = payload.get("transcript_path")
+    if not isinstance(transcript_path, str):
+        transcript_path = ""
+    return prompt, session_id, transcript_path
+
+
+def _safe_previous_turn(transcript_path: str, prompt: str) -> Any:
+    """The previous conversation turn for topic extraction (issue
+    athenaeum#3105), via :func:`athenaeum.turn_context.previous_turn_for_hook`
+    -- ``None`` when the ``ATHENAEUM_PUSH_CONTEXT_CARRYOVER`` switch is off,
+    the payload names no transcript, or the transcript is missing or
+    unreadable. Function-local import, like :func:`_safe_session_notice`, so
+    importing this module stays light; its own ``try`` so a failure here
+    means prompt-only extraction, never a blocked prompt.
+    """
+    try:
+        from athenaeum.turn_context import previous_turn_for_hook
+
+        return previous_turn_for_hook(transcript_path, prompt)
+    except Exception:  # noqa: BLE001 - an unreadable transcript must never block a prompt
+        return None
+
+
+def _recall_for_turn(
+    prompt: str, session_id: str, transcript_path: str, **kwargs: Any
+) -> dict[str, Any] | None:
+    """Read the previous turn, apply the minimum-length gate, then run
+    :func:`athenaeum.context.build_context_for_turn` (issue athenaeum#3105).
+
+    One function so the transcript read and the recall share ONE foreground
+    budget under :func:`_run_within_timeout`. Returns ``None`` (no output)
+    when the prompt is blank, or shorter than 8 characters with no readable
+    previous turn -- the pre-athenaeum#3105 gate, kept for prompt-only turns.
+    """
+    previous_turn = _safe_previous_turn(transcript_path, prompt)
+    if not prompt.strip():
+        return None
+    if len(prompt) < 8 and previous_turn is None:
+        return None
+
+    from athenaeum.context import build_context_for_turn
+
+    return build_context_for_turn(prompt, session_id, previous_turn=previous_turn, **kwargs)
 
 
 def _witness_turn(cache_dir: Path, raw: str) -> None:
@@ -840,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         # length gates below, so a degradation notice still surfaces on a
         # turn the recall path itself is about to skip — the notice is
         # about the HOOK's health, not about this particular prompt.
-        prompt, session_id = _read_hook_input(raw)
+        prompt, session_id, transcript_path = _read_hook_input(raw)
         notice = _safe_session_notice(cache_dir, session_id)
 
         if not _auto_recall_enabled():
@@ -852,12 +901,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(_hook_output(notice))
             return 0
 
-        if len(prompt) < 8:
+        # Issue athenaeum#3105: the minimum-length gate itself now lives in
+        # `_recall_for_turn`, because whether a short prompt is searched
+        # depends on whether a previous turn can be read. A blank prompt is
+        # still skipped here, before any transcript read.
+        if not prompt.strip():
             if notice:
                 print(_hook_output(notice))
             return 0
-
-        from athenaeum.context import build_context_for_turn
 
         # Issue athenaeum#2204 AC1: this adapter shares the ONE foreground
         # budget `session-start-recall.sh` reads, via the same resolver —
@@ -869,9 +920,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             envelope = _run_within_timeout(
                 timeout_seconds,
-                build_context_for_turn,
+                _recall_for_turn,
                 prompt,
                 session_id,
+                transcript_path,
                 cache_dir=cache_dir,
                 # Issue athenaeum#2458: `SEARCH_BACKEND` is the hook-local
                 # cache of the yaml `search_backend`, written by
@@ -886,8 +938,9 @@ def main(argv: list[str] | None = None) -> int:
                 wiki_root=wiki_root,
                 injected_patterns=_INJECTED_TEXT_PATTERNS,
             )
-            text = envelope["render"]["text"]
-            preamble = envelope["render"]["preamble"]
+            if envelope is not None:
+                text = envelope["render"]["text"]
+                preamble = envelope["render"]["preamble"]
         except _HookTimeoutExceeded:
             _safe_record_degradation(
                 cache_dir,

@@ -203,6 +203,8 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("decay_bucket.decay_bucket_system", "DECAY_BUCKET_SYSTEM", "classify", 64, False),
     ("query_topics.system_prompt", "_SYSTEM_PROMPT", "topic", 256, False),
     ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256, False),
+    # athenaeum#3105: the user template when the previous turn is carried in.
+    ("query_topics.context_user_template", "_CONTEXT_USER_TEMPLATE", "topic", 256, False),
     ("reasoning_tiers.t1_system_prompt", "T1_SYSTEM_PROMPT", "reasoning_t1", 256, False),
     ("reasoning_tiers.t2_system_prompt", "T2_SYSTEM_PROMPT", "reasoning_t2", 4096, False),
     # athenaeum#1174: the seventh routed knob — was missing from this list (and,

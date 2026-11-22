@@ -95,6 +95,7 @@ src/athenaeum/page_recompile_plan.py::PAGE_RECOMPILE_VERIFY_SYSTEM
 src/athenaeum/pii_attribution.py::CONTACT_ATTRIBUTION_JUDGE_SYSTEM
 src/athenaeum/query_topics.py::_SYSTEM_PROMPT
 src/athenaeum/query_topics.py::_USER_TEMPLATE
+src/athenaeum/query_topics.py::_CONTEXT_USER_TEMPLATE
 src/athenaeum/reasoning_tiers.py::T1_SYSTEM_PROMPT
 src/athenaeum/reasoning_tiers.py::T2_SYSTEM_PROMPT
 src/athenaeum/resolutions.py::_FREETEXT_EDIT_SYSTEM
@@ -318,6 +319,10 @@ src/athenaeum/config.py::resolve_recall_hybrid_guard_rank
 src/athenaeum/config.py::resolve_recall_hybrid_k
 # whether recall is scope-aware
 src/athenaeum/config.py::resolve_scope_aware_recall_enabled
+# whether the per-turn topic extractor sees the previous turn (athenaeum#3105)
+src/athenaeum/config.py::resolve_push_context_carryover
+# what of the previous turn reaches the topic extractor (athenaeum#3105)
+src/athenaeum/turn_context.py::read_previous_turn
 # the cohesion floor a cluster must clear to be compared
 src/athenaeum/config.py::resolve_min_cluster_cohesion
 # which scopes that floor applies to
