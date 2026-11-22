@@ -437,6 +437,27 @@ already name, and the links of the best match come first. A store whose pages
 carry no `related` links gets no block. It takes only the room the token budget
 and the 10,000-character cap leave after the bullets and the excerpt.
 
+**The previous turn.** The hook picks the pages by extracting search topics
+from your message. A follow-up such as "close it" or "what about the second
+one?" names nothing to search for on its own, so the extractor is also given
+the previous turn: your previous message and the end of the assistant's last
+reply, each cut to 1,500 characters, read from the session transcript Claude
+Code passes to the hook. It is one extractor call per turn, as before, with
+about 450 more input tokens on average. A message under 8 characters, which
+used to get no push at all, is now searched when a previous turn exists. Only
+the one previous turn is carried, never a running list of earlier topics.
+When the transcript is missing or cannot be read, the hook falls back to your
+message alone and the prompt is never held up. In
+[the measurement](../measurements/context-carryover-round1-2026-11-21.md)
+this raised the share of relevant pages the push surfaced, with no measurable
+harm on turns that change subject.
+
+It is on by default. Turn it off with `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0`,
+set in the environment the hook runs in or in the hook cache's `config.env`
+(the hook does not read `athenaeum.yaml` for this switch). Off, the extractor
+sees your message alone and messages under 8 characters get no push, exactly
+as before.
+
 The push gives the agent a pointer; the agent still has to follow it when the
 excerpt is not enough. Add this line to your instruction file
 (`~/.claude/CLAUDE.md` for every project, or a project's own `CLAUDE.md`):

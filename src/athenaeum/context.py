@@ -80,10 +80,13 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athenaeum.context_schema import SCHEMA_VERSION
 from athenaeum.recall_overflow import render_overflow_line
+
+if TYPE_CHECKING:
+    from athenaeum.turn_context import PreviousTurn
 
 log = logging.getLogger(__name__)
 
@@ -658,6 +661,7 @@ def _extract_terms(
     config: dict[str, Any] | None,
     use_llm: bool,
     trace: dict[str, Any] | None = None,
+    previous_turn: PreviousTurn | None = None,
 ) -> list[str]:
     """Term extraction: LLM (via the already import-light
     :func:`athenaeum.query_topics.extract_topics`) with a regex+stopword
@@ -668,13 +672,27 @@ def _extract_terms(
     :data:`EXTRACTOR_MODEL` when the model's terms were used,
     :data:`EXTRACTOR_REGEX_FALLBACK` when the model was tried and yielded
     nothing, :data:`EXTRACTOR_REGEX_ONLY` when the model was not tried.
+
+    *previous_turn* (issue athenaeum#3105), when given, is passed to the model
+    as context for what the prompt refers to. The regex fallback never sees
+    it: without the model there is no way to tell which earlier words the
+    prompt still means, so the fallback stays prompt-only.
     """
     terms: list[str] = []
     if use_llm:
         try:
             from athenaeum.query_topics import extract_topics
 
-            raw_terms = extract_topics(prompt, timeout=timeout, config=config)
+            if previous_turn is not None:
+                raw_terms = extract_topics(
+                    prompt,
+                    timeout=timeout,
+                    config=config,
+                    previous_user=previous_turn.user_message,
+                    assistant_reply=previous_turn.assistant_reply,
+                )
+            else:
+                raw_terms = extract_topics(prompt, timeout=timeout, config=config)
         except Exception:  # noqa: BLE001 — LLM path is best-effort
             raw_terms = []
         # No stopword filter on this branch, deliberately: the shell applies
@@ -1156,6 +1174,7 @@ def build_context(
     relevance_floor: Mapping[str, float | None] | None = None,
     excerpt_chars: int = 0,
     neighbour_lines: int = 0,
+    previous_turn: PreviousTurn | None = None,
 ) -> dict[str, Any]:
     """Build one context envelope: ranked candidates plus rendered text.
 
@@ -1274,6 +1293,7 @@ def build_context(
         config=config,
         use_llm=use_llm,
         trace=trace,
+        previous_turn=previous_turn,
     )
     if trace is not None:
         trace["terms"] = list(terms)
@@ -1776,6 +1796,7 @@ def build_context_for_turn(
     injected_patterns: Sequence[str] = (),
     excerpt_chars: int | None = None,
     neighbour_lines: int = NEIGHBOUR_LINE_CAP,
+    previous_turn: PreviousTurn | None = None,
 ) -> dict[str, Any]:
     """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
     :func:`build_context`, seen-list append, then push-telemetry recording
@@ -1836,6 +1857,11 @@ def build_context_for_turn(
     (``neighbour_lines``). Pass ``0`` to turn it off. Neighbours are never
     added to the session seen-list: a page shown only as a neighbour can
     still be pushed as a match on a later turn.
+
+    Previous turn (issue athenaeum#3105): ``previous_turn`` (read by the host
+    adapter with :func:`athenaeum.turn_context.previous_turn_for_hook`) is
+    forwarded to :func:`build_context`, which gives it to the topic model as
+    context for the prompt. ``None`` (the default) is prompt-only extraction.
     """
     if injected_patterns:
         user_text, matched = split_injected_text(prompt, injected_patterns)
@@ -1890,6 +1916,7 @@ def build_context_for_turn(
         relevance_floor=relevance_floor,
         excerpt_chars=excerpt_chars,
         neighbour_lines=neighbour_lines,
+        previous_turn=previous_turn,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
 

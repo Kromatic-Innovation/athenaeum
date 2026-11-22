@@ -1,0 +1,19 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.query_topics._CONTEXT_USER_TEMPLATE`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+Earlier in the conversation (context for what the new message refers to):
+---
+Previous user message:
+{previous_user}
+
+End of the assistant's last reply:
+{assistant_reply}
+---
+
+New user message:
+---
+{prompt}
+---
+
+Extract the topics of the new message, using the earlier conversation to resolve what it refers to. Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]

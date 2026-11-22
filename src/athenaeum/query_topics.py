@@ -78,6 +78,36 @@ _USER_TEMPLATE = (
     'Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]'
 )
 
+# Issue athenaeum#3105: the user template when the previous turn is carried
+# in (the athenaeum#3104 A2 arm). The previous user message and the end of
+# the assistant's last reply come first, as context, then the new message.
+# The system prompt is shared with the prompt-only template, so a turn with
+# no readable previous turn sends exactly what it sent before.
+_CONTEXT_USER_TEMPLATE = (
+    "Earlier in the conversation (context for what the new message refers "
+    "to):\n---\nPrevious user message:\n{previous_user}\n\n"
+    "End of the assistant's last reply:\n{assistant_reply}\n---\n\n"
+    "New user message:\n---\n{prompt}\n---\n\n"
+    "Extract the topics of the new message, using the earlier conversation "
+    "to resolve what it refers to. "
+    'Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]'
+)
+
+#: Stand-in for a piece of the previous turn that was not available.
+_ABSENT_CONTEXT = "(not available)"
+
+
+def _user_content(prompt: str, previous_user: str, assistant_reply: str) -> str:
+    """The extractor's user message: prompt-only, or with the previous turn
+    when either piece of it is non-empty (issue athenaeum#3105)."""
+    if not (previous_user or assistant_reply):
+        return _USER_TEMPLATE.format(prompt=prompt)
+    return _CONTEXT_USER_TEMPLATE.format(
+        previous_user=previous_user or _ABSENT_CONTEXT,
+        assistant_reply=assistant_reply or _ABSENT_CONTEXT,
+        prompt=prompt,
+    )
+
 
 def _get_topic_model(config: dict[str, object] | None = None) -> str:
     # env ATHENAEUM_TOPIC_MODEL > yaml models.topic > code default (athenaeum#232).
@@ -115,6 +145,8 @@ def extract_topics(
     config: dict[str, object] | None = None,
     *,
     wiki_root: Path | None = None,
+    previous_user: str = "",
+    assistant_reply: str = "",
 ) -> list[str]:
     """Extract substantive search topics from a user prompt.
 
@@ -131,8 +163,22 @@ def extract_topics(
         wiki_root: When supplied, the spend ledger below resolves behind the
             seam (issue athenaeum#980 AC4); omitted, resolution is unchanged
             from before that issue.
+        previous_user: The previous user message, already cut to length
+            (issue athenaeum#3105). Empty (the default) for prompt-only
+            extraction.
+        assistant_reply: The end of the assistant's last reply, already cut
+            to length (issue athenaeum#3105). Empty (the default) for
+            prompt-only extraction.
+
+    With neither piece of the previous turn, a prompt under 4 characters
+    returns ``[]`` without a call. With either piece, any non-blank prompt is
+    sent, because a short follow-up ("yes", "#12") takes its topic from the
+    earlier turn.
     """
-    if not prompt or len(prompt.strip()) < 4:
+    has_context = bool(previous_user or assistant_reply)
+    if not prompt or not prompt.strip():
+        return []
+    if not has_context and len(prompt.strip()) < 4:
         return []
 
     # Route through the provider seam (issue athenaeum#380) instead of constructing an
@@ -192,7 +238,10 @@ def extract_topics(
             ),
             system=_SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}
+                {
+                    "role": "user",
+                    "content": _user_content(prompt, previous_user, assistant_reply),
+                }
             ],
         )
     except Exception as exc:  # noqa: BLE001 — ledger must never break recall

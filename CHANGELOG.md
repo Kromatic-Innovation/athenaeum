@@ -47,6 +47,20 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Changed
+
+- The per-turn recall hook (`athenaeum-claude-hook`) now gives the topic
+  extractor the previous turn as well as the new message: the previous user
+  message and the end of the assistant's last reply, each cut to 1,500
+  characters, read from the session transcript the hook payload names. It is
+  still one extractor call per turn, with about 450 more input tokens on
+  average. A message under 8 characters is now searched when a previous turn
+  exists; with none it still gets no push. A missing or unreadable transcript
+  falls back to the message alone. On by default; set
+  `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` to turn it off. This builds the arm the
+  athenaeum#3104 measurement recommended (pooled strict push coverage +.043,
+  95% CI [.016, .074], over 202 tasks). athenaeum#3105
+
 ## [0.30.0] - 2026-11-22
 
 **Summary.** 0.30.0 has two themes. First, it acts on the 0.29.0 release

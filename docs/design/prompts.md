@@ -6,7 +6,7 @@
 
 # LLM prompt inventory
 
-Athenaeum sends 35 distinct prompt constants to the model. Each stays an inline
+Athenaeum sends 36 distinct prompt constants to the model. Each stays an inline
 constant in its home module (next to the parser it feeds); `athenaeum.prompt_registry`
 indexes them and this file is generated from that index.
 
@@ -1054,6 +1054,31 @@ User message:
 ---
 
 Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]
+```
+
+## `query_topics.context_user_template`
+
+- **Constant:** `athenaeum.query_topics._CONTEXT_USER_TEMPLATE`
+- **Source:** `src/athenaeum/query_topics.py`
+- **Model knob:** `topic` &middot; **max_tokens:** `256`
+- **sha256:** `b301242d02cb9931a2e0330642e752990faa25054625e808bf742119164c7bc4`
+
+```text
+Earlier in the conversation (context for what the new message refers to):
+---
+Previous user message:
+{previous_user}
+
+End of the assistant's last reply:
+{assistant_reply}
+---
+
+New user message:
+---
+{prompt}
+---
+
+Extract the topics of the new message, using the earlier conversation to resolve what it refers to. Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]
 ```
 
 ## `reasoning_tiers.t1_system_prompt`

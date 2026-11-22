@@ -3814,6 +3814,48 @@ def resolve_push_excerpt_chars(config: dict[str, Any] | None) -> int:
     return PUSH_EXCERPT_CHARS_DEFAULT
 
 
+#: Default for :func:`resolve_push_context_carryover` (issue athenaeum#3105).
+#: ON, because the athenaeum#3104 measurement recommends building the
+#: previous-turn arm ungated: pooled strict push coverage +.043 [.016, .074]
+#: over 202 tasks, for about +450 extractor input tokens per turn.
+PUSH_CONTEXT_CARRYOVER_DEFAULT = True
+
+
+def resolve_push_context_carryover(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the per-turn push carries the previous turn into topic
+    extraction (issue athenaeum#3105).
+
+    When on, the per-turn hook reads the previous user message and the end of
+    the assistant's last reply from the session transcript and gives them to
+    the topic extractor together with the new prompt, and a prompt under 8
+    characters gets a search when such a previous turn exists. When off, the
+    extractor sees the new prompt alone and short prompts are skipped, exactly
+    as before this switch existed.
+
+    Precedence: ``ATHENAEUM_PUSH_CONTEXT_CARRYOVER`` env (``1``/``true``/
+    ``yes``/``on`` enable, any other value disables, case-insensitive) >
+    ``recall.push_context_carryover`` yaml (a bool; anything else falls
+    through) > :data:`PUSH_CONTEXT_CARRYOVER_DEFAULT`. YAML shape::
+
+        recall:
+          push_context_carryover: true
+
+    The ``athenaeum-claude-hook`` adapter resolves this with no yaml config,
+    so for the hook set the environment variable, in the hook's environment
+    or in the hook cache's ``config.env`` (which the adapter loads).
+    """
+    env = os.environ.get("ATHENAEUM_PUSH_CONTEXT_CARRYOVER")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        recall_cfg = config.get("recall")
+        if isinstance(recall_cfg, dict):
+            raw = recall_cfg.get("push_context_carryover")
+            if isinstance(raw, bool):
+                return raw
+    return PUSH_CONTEXT_CARRYOVER_DEFAULT
+
+
 # Issue athenaeum#2204: the SHARED foreground time budget (whole seconds) for
 # every shipped Claude Code hook that still does synchronous work in its own
 # critical path -- today that is `session-start-recall.sh`'s cheap residual

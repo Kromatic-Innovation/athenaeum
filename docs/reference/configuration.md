@@ -5148,6 +5148,37 @@ COULD-tier footprint/relevance knob. Default (unset) returns
 ``(None, None)`` — index everything — because the Apollo contact wikis
 are legitimate name-recall targets and must stay indexed by default.
 
+### `resolve_push_context_carryover`
+
+- **YAML path:** `recall.push_context_carryover`
+- **Environment variable:** `ATHENAEUM_PUSH_CONTEXT_CARRYOVER`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve whether the per-turn push carries the previous turn into topic
+extraction.
+
+When on, the per-turn hook reads the previous user message and the end of
+the assistant's last reply from the session transcript and gives them to
+the topic extractor together with the new prompt, and a prompt under 8
+characters gets a search when such a previous turn exists. When off, the
+extractor sees the new prompt alone and short prompts are skipped, exactly
+as before this switch existed.
+
+Precedence: ``ATHENAEUM_PUSH_CONTEXT_CARRYOVER`` env (``1``/``true``/
+``yes``/``on`` enable, any other value disables, case-insensitive) >
+``recall.push_context_carryover`` yaml (a bool; anything else falls
+through) > `PUSH_CONTEXT_CARRYOVER_DEFAULT`. YAML shape:
+```
+recall:
+  push_context_carryover: true
+```
+
+The ``athenaeum-claude-hook`` adapter resolves this with no yaml config,
+so for the hook set the environment variable, in the hook's environment
+or in the hook cache's ``config.env`` (which the adapter loads).
+
 ### `resolve_push_excerpt_chars`
 
 - **YAML path:** `recall.push_excerpt_chars`
