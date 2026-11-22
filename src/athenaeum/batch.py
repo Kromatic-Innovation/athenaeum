@@ -2630,11 +2630,11 @@ def process_batch_run(
             _create_roots: list[Path | None] = []
             for _e in new_entities:
                 try:
-                    _create_roots.append(
-                        destination_for_entity(
-                            _e.type, resolved_config, wiki_root.parent, tags=tuple(_e.tags)
-                        ).root
+                    _dest = destination_for_entity(
+                        _e.type, resolved_config, wiki_root.parent, tags=tuple(_e.tags)
                     )
+                    _e.opaque_filename = _dest.opaque_filenames
+                    _create_roots.append(_dest.root)
                 except ReadOnlySurfaceError as _exc:
                     log.warning("  Refused (read-only surface): %s", _exc)
                     _ro_refused += 1

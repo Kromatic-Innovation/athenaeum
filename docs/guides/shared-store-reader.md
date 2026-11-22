@@ -119,11 +119,23 @@ What each key does:
 | `surface_root` | The clone. An absolute path, or one starting with `~`, is used as-is; a relative path is resolved against `~/knowledge`. The directory must exist when the index is built; keep it outside your `wiki/`. |
 | `read_only` | `true` makes the surface a mount: pulled before every index build, indexed, and never written, merged, repaired, retired, committed into or pushed. Default `false`. |
 | `visibility` | How widely the surface is shared; higher is more widely shared, default `0` (your own wiki). A page may link to a page on an equal or more widely shared surface, never the reverse, and pages on different surfaces are never merged. |
+| `opaque_filenames` | `true` names every NEW page written to the surface `<uid>.md`, with no slug of the page's name, so a listing of the store (a host's web view, notification emails, CI logs) does not show whose records it holds. Default `false`. See [Opaque file names](#opaque-file-names). |
 | `corpus_policy` | `embedded` builds the surface into your index; `recallable` lets `recall` return it. Both must be `true` for the pages to be found. Anything you omit defaults to `false`, so a half-written policy hides the surface rather than leaking it. |
 | `mapping` | Which page `type:` belongs to which surface. It is how a `recipe` is recognised as living on the mount. |
 
 Every key is documented in the
 [configuration reference](../reference/configuration.md#resolve_storage_adapters).
+
+### Opaque file names
+
+By default a page is named `<uid>-<slug-of-its-name>.md`, so `a1b2c3d4-jane-example.md` shows that the store holds a record about Jane Example. On a store you write to, set `opaque_filenames: true` on its `storage.adapters` entry and new pages are named `<uid>.md` instead. The uid is random, so the name carries nothing about the page.
+
+Limits, so the setting is not read as more than it is:
+
+- Only pages written after you turn it on. Pages already on disk keep their names; nothing is renamed.
+- Commit messages and the page bodies and frontmatter still contain names. Someone who can read the pages learns who is in the store; the setting only hides the file listing.
+- It is not encryption.
+- It applies to a surface you configure under `storage.adapters`; the default `wiki/` surface cannot opt in. Pages are found by their uid, so recall, `read_entity`, links and `athenaeum uid-collision-lint` behave the same on both name shapes.
 
 Then tell your install that `recipe` is a type it should expect, so type-filtered
 recall (`--type recipe`) does not warn that the class is unrecognised. Append a row to
@@ -260,7 +272,7 @@ has run, your raw notes are simply stored.
 |---|---|
 | `recall` returns nothing from the shared pages | You have not run `athenaeum reindex` since cloning or pulling; or `embedded`/`recallable` is not `true`; or `surface_root` does not exist. |
 | `read-only surface pull failed` warning | The pull failed (offline, credentials, diverged history). The last good copy is still being served. |
-| `StorageConfigError` naming `storage.adapters.<name>` | A missing `backing_store` or `surface_root`, or a `read_only` / `visibility` of the wrong type (`read_only` must be `true` or `false`). |
+| `StorageConfigError` naming `storage.adapters.<name>` | A missing `backing_store` or `surface_root`, or a `read_only` / `visibility` / `opaque_filenames` of the wrong type (`read_only` and `opaque_filenames` must be `true` or `false`). |
 | `ReadOnlySurfaceError` | Something tried to write to the mount. That is the protection working; nothing was changed. |
 | `git push` is refused | Expected. You were not given push access. |
 
