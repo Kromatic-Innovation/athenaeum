@@ -91,6 +91,8 @@ integrating anything.
   `[0.24.0]` changelog section.
 - [0.23.5 build notes](changelog/0.23.5-build-notes.md) — the release digest and per-merge entries behind the
   `[0.23.5]` changelog section.
+- [Changelog archive](../CHANGELOG-archive.md) — the release sections for 0.24.0 and older,
+  moved out of `CHANGELOG.md` unchanged.
 
 ## Extending
 

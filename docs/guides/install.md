@@ -35,8 +35,9 @@ either stops with `No matching distribution found for athenaeum` (listing only
 old versions such as 0.15.0, when none of them fits the request) or, more
 often, does not fail at all. Because releases before 0.17.1 declared `>=3.11`,
 pip silently resolves *backwards* past a dozen releases and installs a
-year-old version instead of erroring. Nothing in the output tells you this happened, and the CLI will
-appear to work. Older releases are **not** yanked (see the CHANGELOG for
+year-old version instead of erroring. Nothing in the output tells you this
+happened, and the CLI will appear to work. Older releases are **not** yanked
+(see the [CHANGELOG archive](../../CHANGELOG-archive.md) for
 why), so they stay installable. Compare what `--version` prints against the
 live [PyPI version badge](https://pypi.org/project/athenaeum/) rather than a
 number written out here: the PATCH digit moves on every merge to `develop`
