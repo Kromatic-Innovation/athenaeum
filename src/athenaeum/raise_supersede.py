@@ -561,6 +561,14 @@ def _apply_supersede(
 
     # Edited in the target: a three-way merge, ancestor read by blob id.
     base_blob = max(accepted, key=lambda r: (r.seq, r.ts)).blob_id
+    # Raw (athenaeum#3127). Right when the ancestor was written by write_blob in
+    # _finish (never cleaned): its stored bytes are the text as accepted. NOT right
+    # for an ancestor recorded at raise acceptance, whose id is `git hash-object
+    # -- <path>` and so the clean-filtered form: under a clean/smudge filter this
+    # read returns the cleaned bytes. With no filter configured, both are the same.
+    # Passing `path` instead would smudge write_blob's plaintext, and the successor
+    # form copies either kind of id, so the row's kind alone cannot pick the mode;
+    # the fix is tracked as a follow-up rather than guessed here.
     base_bytes = read_blob(Path(target_root), base_blob) if base_blob else None
     if base_bytes is None:
         return hold(

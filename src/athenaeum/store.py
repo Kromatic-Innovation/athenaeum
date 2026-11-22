@@ -1820,6 +1820,17 @@ def read_blob(repo: Path, blob: str, path: str | None = None) -> bytes | None:
     --path=<path>``), matching :func:`read_file_at_revision`. Without it the raw
     stored bytes are returned.
 
+    The rule (athenaeum#3127): a caller that reads a blob **a commit holds** and
+    then compares, merges, displays or re-commits it as a checkout would see it
+    MUST pass *path*; otherwise a repo with clean/smudge filters yields the
+    clean-form bytes and the comparison is silently wrong. Omit *path* only when
+    the blob was written by :func:`write_blob` (never cleaned), so its stored
+    bytes are exactly what was put in. A blob id from :func:`blob_id` (``git
+    hash-object -- <path>``) names the clean-filtered form, like a committed blob,
+    so it needs *path* too. Every call site carries a comment naming which case
+    it is, and ``tests/test_read_blob_callers.py`` fails when a new caller is
+    added unclassified.
+
     Reads the object database only (athenaeum#2940: the last accepted version of
     a raised copy is read back by the blob id the acceptance ledger holds).
     *blob* must be a full 40- or 64-hex object id; anything else is ``None``.
