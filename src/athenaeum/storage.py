@@ -171,6 +171,12 @@ class StorageAdapter:
     #: design note §5). When set, a fetched declaration carrying a different id
     #: refuses the mount. ``None`` (default) = no id pinned, nothing compared.
     store_id: str | None = None
+    #: ``opaque_filenames: true`` in config makes every NEW page written to this
+    #: surface carry a uid-only file name (``<uid>.md``) instead of
+    #: ``<uid>-<slug-of-name>.md``, so a listing of the store does not reveal whose
+    #: records it holds (athenaeum#3077). Pages already on disk keep their names.
+    #: Default ``False`` (today's names).
+    opaque_filenames: bool = False
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -323,9 +329,16 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         raise StorageConfigError(
             f"storage.adapters.{name}.store_id must be a non-empty string, got {store_id!r}"
         )
+    opaque_filenames = raw.get("opaque_filenames", False)
+    if not isinstance(opaque_filenames, bool):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.opaque_filenames must be a boolean (true/false), "
+            f"got {opaque_filenames!r}"
+        )
     return StorageAdapter(
         name=name,
         read_only=read_only,
+        opaque_filenames=opaque_filenames,
         sync_mode=sync_mode,
         store_id=store_id.strip() if store_id else None,
         backing_store=backing_store.strip(),
@@ -587,6 +600,17 @@ def page_write_root_for_store(
             f"intake decision names store {store!r}, which this install does not hold"
         )
     return _write_root_for_adapter(adapter, entity_class, config, knowledge_root)
+
+
+def store_opaque_filenames(store: str, config: dict[str, Any] | None) -> bool:
+    """Whether new pages written to *store* get uid-only file names (athenaeum#3077).
+
+    *store* is an intake-decision store word (``personal`` is the default wiki
+    surface, which cannot opt in). A store this install does not hold is ``False``.
+    """
+    name = DEFAULT_ADAPTER_NAME if store == "personal" else store
+    adapter = available_adapters(config).get(name)
+    return bool(adapter is not None and adapter.opaque_filenames)
 
 
 def resolve_store_for_class(

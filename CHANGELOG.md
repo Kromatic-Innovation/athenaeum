@@ -63,6 +63,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - Docs: `docs/design/security-posture.md` has a new "Encryption at rest" subsection with a threat-model table per surface (local disk with and without full-disk encryption, the local index and caches, a hosted git remote, a cloud-synced folder, remote HTTPS mode, the model provider). It states that embeddings count as plaintext, that the cache directory belongs outside synced folders and only on encrypted backups, and that no at-rest option reduces what the model provider sees (athenaeum#3076).
 - Docs: `docs/measurements/context-carryover-round1-2026-11-21.md` records round 1 of carrying conversation context into the per-turn topic extractor (athenaeum#3104). The earlier gold set's candidate pools missed about half the relevant pages (production push coverage 0.32 strict against 0.505 in-pool). Adding the previous user message and the tail of the assistant's last reply is the only arm that clearly beats prompt-only extraction (+.035 strict, CI .008 to .064, on Haiku); the rewrite and merged-search arms cost a second call for no gain, and the gate qualifies 86% of turns. Round 2 (103 more tasks, 202 pooled) confirms it (+.043 strict, CI .016 to .074); a gate keeps about 80% of the gain for 7 to 8% fewer tokens and is not worth building, and the three-turn arm costs more for no more gain. Recommendation: build it ungated as athenaeum#3105.
 
+### Added
+
+- A store can opt in to opaque page file names: `opaque_filenames: true` on a `storage.adapters` entry makes every NEW page written to that surface a uid-only `<uid>.md` instead of `<uid>-<slug-of-name>.md`, so a listing of the store no longer shows whose records it holds. Default off, so existing stores are unchanged; pages already on disk keep their names, and commit messages and page bodies are untouched. Recall, compile, `read_entity`, link resolution and `uid-collision-lint` find pages by uid and work unchanged (athenaeum#3077).
+
 ### Fixed
 
 - Reads of a file at a past revision (`read_file_at_revision`, and `read_blob` when given the file's path) now return what a checkout would write, by way of `git cat-file --filters`, instead of the committed bytes. With a clean/smudge filter configured (encryption, Git LFS pointers) `sync.mode: integrate` used to fail to decode the committed bytes and hold every page edited on both sides; it now merges the plaintext, and writes the merged page back through the clean filter. With no filter configured the bytes are unchanged. Applies to `sync.mode: integrate` (athenaeum#3076).
@@ -70,6 +74,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Security
 
+- Opt-in `opaque_filenames` on a `storage.adapters` entry keeps the names of the people and organisations a sensitive store holds out of its file listing (a host's web view, notification emails, CI logs). It covers new pages only: existing file names, commit messages and page bodies still carry names, and it is not encryption (athenaeum#3077).
 - Store reads at a past revision now go through the repository's smudge filters, so a filter-based encryption-at-rest scheme cannot silently make `sync.mode: integrate` hold every concurrent edit. Nothing is encrypted by athenaeum itself; confidentiality on a librarian's machine still rests on full-disk encryption plus host access control (athenaeum#3076).
 
 ## [0.29.0] - 2026-11-21
