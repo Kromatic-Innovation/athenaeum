@@ -64,6 +64,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- The Claude Code per-turn hook now reads linked notes and parent names from the configured `KNOWLEDGE_ROOT` (environment or the cache `config.env`) instead of always `~/knowledge/wiki`, so an install whose store is elsewhere no longer silently loses both (athenaeum#3096).
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
 
 ## [0.29.0] - 2026-11-21
