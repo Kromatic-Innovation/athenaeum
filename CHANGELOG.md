@@ -39,7 +39,8 @@ can be read in a minute:
   numbers, intervals and follow-up issues live in the report.
 
 The 0.30.0 section was revised after its cut to follow the last two
-conventions; earlier release sections are kept as cut.
+conventions, and its Upgrading block gained the cost of the index refresh
+`athenaeum run` now does; earlier release sections are kept as cut.
 
 Release cadence and support: releases ship when their changes are ready, on
 no fixed schedule, so sometimes several land close together (two minors can
@@ -76,6 +77,11 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `athenaeum run` and past-revision-read changes moved from `### Fixed` to
   `### Changed`, and its four measurement entries are shortened
   (athenaeum#3122).
+- Docs: the install guide and the 0.30.0 Upgrading block now say that
+  `athenaeum run` refreshes the search index after compiling, what that
+  costs, and that a refresh failure does not change `run`'s exit code.
+  [A new measurement](docs/measurements/run-index-refresh-cost-2026-11-22.md)
+  timed it with `scripts/bench_run_index_refresh.py` (athenaeum#3124).
 
 ## [0.30.0] - 2026-11-22
 
@@ -119,7 +125,14 @@ are listed under `### Security`.
 3. `sync.mode: integrate` users: a page edited on both sides is now merged
    on its plaintext when a clean/smudge filter (encryption, Git LFS) is
    configured, instead of being held. With no filter configured, integrate
-   runs behave as before. No other steps.
+   runs behave as before.
+4. Scheduled `athenaeum run` users: `run` now refreshes the search index
+   after compiling. It embeds only the pages the run changed, on the CPU,
+   with no model calls. That added about 4 s for 5 changed pages on the
+   `vector` backend and under 0.2 s on `fts5`
+   ([measurement](docs/measurements/run-index-refresh-cost-2026-11-22.md)).
+   A refresh failure prints a warning and does not change `run`'s exit
+   code. No other steps.
 
 ### Changed
 
