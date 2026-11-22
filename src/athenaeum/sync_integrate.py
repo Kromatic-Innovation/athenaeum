@@ -1261,7 +1261,7 @@ def answer_held_decision(
         data = text.encode("utf-8")
     else:
         wanted = remote if answer == ANSWER_KEEP_REMOTE else local
-        found = read_blob(repo, wanted) if _BLOB_RE.match(wanted) else None
+        found = read_blob(repo, wanted, path=rel) if _BLOB_RE.match(wanted) else None
         if found is None:
             raise HeldDecisionRefused("unavailable", f"the {answer} version is not in history")
         data = found

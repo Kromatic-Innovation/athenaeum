@@ -1896,6 +1896,11 @@ class WikiEntity:
     claimed_scope: str | None = None
     # The "subject" kernel-dimension coordinate (identity kind).
     subject: str | None = None
+    # Not frontmatter: a write-path choice for a NEW page on a store that opted in
+    # to ``opaque_filenames`` (athenaeum#3077). Set by the caller once the
+    # destination store is resolved; ``filename`` is then ``<uid>.md`` with no
+    # slug of the name. Default ``False`` keeps ``<uid>-<slug>.md``.
+    opaque_filename: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Lazy import: only this one call needs the vocabulary, and
@@ -1945,6 +1950,8 @@ class WikiEntity:
 
     @property
     def filename(self) -> str:
+        if self.opaque_filename:
+            return f"{self.uid}.md"
         return f"{self.uid}-{slugify(self.name)}.md"
 
     def render(self) -> str:

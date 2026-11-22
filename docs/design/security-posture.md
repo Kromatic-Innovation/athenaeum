@@ -379,6 +379,49 @@ will be designed separately.
   keeps its pre-athenaeum#984 behavior of refusing (not writing anywhere) an
   erasure-class pair.
 
+### 2.6 Encryption at rest (athenaeum#3076)
+
+Nothing athenaeum writes is encrypted. The store is plain markdown, and the
+keyword and vector indexes sit in plain files in the cache directory. The
+contact-data module is corpus hygiene, not encryption. Encryption at rest is
+not built (athenaeum#2627); this subsection records what protects each surface
+today and what encrypting it would add.
+
+**Confidentiality on a librarian's machine rests on full-disk encryption (FDE)
+plus host access control.** A machine where the librarian runs must hold any key
+needed to compile and to answer recall, so application-level encryption there
+adds little that FDE does not already give.
+
+| Surface | What already protects it | What it does not protect against | What app-level encryption would add |
+|---|---|---|---|
+| **Local disk, FDE on** | A lost or stolen powered-off machine, a disposed drive | Malware or another process running as the same OS user, a logged-in or unlocked machine, root | Almost nothing: the librarian holds the key, so anything that reads files as that user can usually read the key or process memory too |
+| **Local disk, FDE off** | Only OS file permissions on a running system | A stolen or imaged disk, a shared machine | Real protection against disk theft, but only if the key is not stored beside the data. Turning on FDE gives the same result at no engineering cost |
+| **Local index and caches** (the cache directory: keyword database, vector store, contact and entity caches, ledgers, off-corpus shards, the erasure key) | The same as the disk it sits on | Backups: if the backup tool includes the cache directory and the backup volume is not encrypted, the backup holds a plaintext index | Little: encrypting the index alone leaves every other cache file in clear. The fix is an encrypted backup target, or leaving the cache directory out of backups (all of it except the erasure key can be rebuilt) |
+| **Hosted git remote** | Outsiders, through private repositories and access control; the provider's own disk encryption | The provider and its staff, anyone granted read (including members who later leave), forks, CI runners that check out the repository, a leaked clone or token, legal requests to the provider | Substantial: the host and every clone hold only ciphertext. This is the one surface where encryption buys something FDE cannot |
+| **Cloud-synced folder** (a store or cache directory inside a consumer sync client) | Provider-side encryption and account access control | The same as a hosted git remote, plus silent sync of the cache directory and its key files | The same as a hosted git remote when the store is what gets synced. Better advice: keep the cache directory out of synced folders |
+| **Remote HTTPS server mode** (`athenaeum serve --transport http`) | TLS on the wire; volume encryption on the server's disk | The server holds both the plaintext and any key at run time | Protection only against theft of the server's disk or backups, which volume encryption already covers |
+| **Model provider** (compile prompts; recall results injected into agent prompts) | Whatever the provider's contract says | Every option sends plaintext to the model | Nothing |
+
+What follows from the table:
+
+- **Embeddings count as plaintext.** They are partly invertible to the text they
+  were made from, so a vector index is as sensitive as the pages it indexes.
+- **The cache directory belongs outside synced folders**, and only on encrypted
+  backups (or out of backups). It holds the index, the ledgers and the erasure
+  key.
+- **No at-rest option reduces what the model provider sees.** Compile prompts
+  and recalled text reach the provider as plaintext whatever is encrypted on
+  disk or in git.
+- **Content in a running librarian or MCP process, anything a member already
+  read or copied, file paths, and commit metadata** are outside what any
+  at-rest option protects.
+
+One property is kept so a filter-based scheme (a git clean/smudge filter, such
+as one that encrypts committed blobs) can be adopted later without silently
+breaking multi-writer sync: every store read of a file at a past revision goes
+through the repository's smudge filters, so `sync.mode: integrate` merges the
+plaintext a checkout would write and not the committed bytes.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

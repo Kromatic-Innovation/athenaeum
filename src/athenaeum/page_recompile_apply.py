@@ -1121,11 +1121,14 @@ def compute_apply(
     """
     issues: list[PlanIssue] = []
 
-    def _new_page_root(entity_type: str) -> Path | None:
+    def _new_page_root(entity_type: str, entity: WikiEntity) -> Path | None:
         """Surface a new page of *entity_type* is written to (athenaeum#2618);
-        a non-indexed surface is refused as a plan issue."""
+        a non-indexed surface is refused as a plan issue. Also applies the
+        surface's ``opaque_filenames`` choice to *entity* (athenaeum#3077)."""
         try:
-            return destination_for_entity(entity_type, config, wiki_root.parent).root
+            dest = destination_for_entity(entity_type, config, wiki_root.parent)
+            entity.opaque_filename = dest.opaque_filenames
+            return dest.root
         except SurfaceNotIndexedError as exc:
             issues.append(PlanIssue("surface-not-indexed", str(exc)))
             return None
@@ -1449,7 +1452,7 @@ def compute_apply(
         sub_meta = _add_merge_rejected_with_to_frontmatter(sub_meta, parent_rejections)
         sub_text = render_frontmatter(sub_meta) + "\n" + sub_body
 
-        sub_root = _new_page_root(entity.type)
+        sub_root = _new_page_root(entity.type, entity)
         if sub_root is None:
             continue
         sub_pages.append(
@@ -1540,7 +1543,7 @@ def compute_apply(
             if schema_issue is not None:
                 issues.append(schema_issue)
                 continue
-            standalone_root = _new_page_root(entity.type)
+            standalone_root = _new_page_root(entity.type, entity)
             if standalone_root is None:
                 continue
             standalone_pages.append(
@@ -1823,7 +1826,7 @@ def compute_apply(
             # identical (a brand-new, fully-rendered page with no relation
             # of its own baked into its body), and `write_apply` already
             # writes every entry in this list generically.
-            standalone_root = _new_page_root(entity.type)
+            standalone_root = _new_page_root(entity.type, entity)
             if standalone_root is None:
                 continue
             standalone_pages.append(
