@@ -14,7 +14,10 @@ kept as they were written.
 
 From the release after 0.29.0 on, a change the summary calls
 security-relevant also gets an entry under `### Security`, so a reader who
-scans the headings finds it.
+scans the headings finds it. Likewise, a release that changes how
+`sync.mode: integrate` behaves names that change in its
+`**Upgrading from ...**` block for `sync.mode: integrate` users, even while
+the mode is experimental.
 
 Entries under `[Unreleased]` follow four conventions, so a release section
 can be read in a minute:
@@ -47,6 +50,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Changed
 
 - The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
+- Docs: the CHANGELOG preamble now says that a release which changes `sync.mode: integrate` behaviour names it in that release's Upgrading block. A new end-to-end test, `tests/test_sync_integrate_e2e.py`, drives full integrate runs across two clones of a test store and asserts both clones' final state: a page changed on both sides is held, a uid collision is renumbered, and an erasure mark propagates (athenaeum#3085).
 - Docs: the CHANGELOG preamble now states four conventions for `[Unreleased]` entries: behaviour changes first and `Docs:` entries as a trailing group under each heading, no internal slice name without a gloss, no blank lines between bullets, and a one-sentence headline per theme when a release carries two. The current `[Unreleased]` section follows them; released sections are unchanged (athenaeum#3082).
 - Docs: the CHANGELOG preamble now says that a change a release summary calls security-relevant also gets an entry under `### Security`, and `tests/test_changelog_contract.py` checks it for every release after 0.29.0; the 0.29.0 section is left as cut (athenaeum#3081).
 - Docs: `docs/guides/stability.md` has a new "Running athenaeum in production" section: pin an exact version, read each release's Upgrading block, upgrade one minor at a time, and note that security fixes ship only in the latest release. The support policy and the CHANGELOG preamble link to it; the policy itself is unchanged (athenaeum#3083).
