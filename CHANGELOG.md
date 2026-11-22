@@ -76,6 +76,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `athenaeum run` and past-revision-read changes moved from `### Fixed` to
   `### Changed`, and its four measurement entries are shortened
   (athenaeum#3122).
+- Docs: the README Quick start now states the Python 3.13 floor before its
+  first install command, and says what a `No matching distribution` error
+  from plain `pip` on an older Python means. The sample `athenaeum doctor`
+  output and the `init` git-hooks note moved to the install guide, so the
+  Quick start reaches its first `remember` and `recall` round trip sooner
+  (athenaeum#3123).
 
 ## [0.30.0] - 2026-11-22
 
