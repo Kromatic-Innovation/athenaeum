@@ -63,7 +63,7 @@ shortened):
 ```text
 Athenaeum Doctor
 ========================================
-[OK] package_version: running 0.28.0; latest release is 0.28.0
+[OK] package_version: running X.Y.Z; latest release is X.Y.Z
 [OK] interpreter: Python 3.13.1
 [WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
     fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
