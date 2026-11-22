@@ -172,7 +172,7 @@ def extract_topics(
 
     With neither piece of the previous turn, a prompt under 4 characters
     returns ``[]`` without a call. With either piece, any non-blank prompt is
-    sent, because a short follow-up ("yes", "#12") takes its topic from the
+    sent, because a short follow-up such as "yes" takes its topic from the
     earlier turn.
     """
     has_context = bool(previous_user or assistant_reply)
