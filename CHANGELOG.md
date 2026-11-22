@@ -64,6 +64,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- The plan-usage figures that `athenaeum init`, the README quick start and `docs/guides/install.md` quote now match what compiles cost: about 2 to 3 model calls, 3,200 to 7,000 tokens (in plus out) and 18 to 50 s per note, measured on 0.28.0 (2026-11-20) and 0.29.0 (2026-11-21), and 3 notes in one run took 7 calls, 9,233 tokens and 50.8 s. The old 0.26.0 figures sat above the 0.29.0 samples and below a 0.28.0 one (athenaeum#3092).
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
 
 ## [0.29.0] - 2026-11-21

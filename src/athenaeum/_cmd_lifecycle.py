@@ -314,9 +314,9 @@ def cmd_init(args: argparse.Namespace) -> int:
             print(
                 "LLM provider: claude-cli (Claude Code subscription login) — "
                 "compiles draw on your Claude Code plan's usage limits.\n"
-                "  Measured 2026-11-18 on 0.26.0: about 3-4 model calls, "
-                "3,800-4,400 tokens (in+out) and 28-36 s per note; "
-                "5 notes in one run took 13 calls, about 19,400 tokens and 139 s.\n"
+                "  Measured on 0.28.0 (2026-11-20) and 0.29.0 (2026-11-21): about "
+                "2-3 model calls, 3,200-7,000 tokens (in+out) and 18-50 s per note; "
+                "3 notes in one run took 7 calls, about 9,200 tokens and 51 s.\n"
                 "  Per-run caps: `athenaeum run` stops at 50 files / 800 API calls, "
                 "`athenaeum session-end` at 20 files / 100 API calls."
             )

@@ -34,19 +34,19 @@ def test_init_disclosure_states_measured_figures_with_date_and_caps(
     assert cli_main(["init", "--path", str(tmp_path / "knowledge")]) == 0
     out = capsys.readouterr().out
     assert "usage limits" in out
-    assert "2026-11-18" in out
-    assert "3,800-4,400 tokens" in out
-    assert "28-36 s" in out
-    assert "139 s" in out
+    assert "0.28.0 (2026-11-20) and 0.29.0 (2026-11-21)" in out
+    assert "3,200-7,000 tokens" in out
+    assert "18-50 s" in out
+    assert "2-3 model calls" in out
     assert f"{DEFAULT_MAX_FILES} files / {DEFAULT_MAX_API_CALLS} API calls" in out
     assert f"{SESSION_END_MAX_FILES} files / {SESSION_END_MAX_API_CALLS} API calls" in out
 
 
 def test_install_guide_documents_figures_and_caps() -> None:
     text = " ".join((_ROOT / "docs/guides/install.md").read_text(encoding="utf-8").split())
-    assert "2026-11-18" in text
-    assert "3,800 to 4,400 tokens" in text
-    assert "19,433 tokens" in text
+    assert "0.28.0 (2026-11-20) and 0.29.0 (2026-11-21)" in text
+    assert "3,200 to 7,000 tokens" in text
+    assert "9,233 tokens" in text
     assert f"{DEFAULT_MAX_FILES} files or {DEFAULT_MAX_API_CALLS} API calls" in text
     assert f"{SESSION_END_MAX_FILES} files or {SESSION_END_MAX_API_CALLS} API calls" in text
 
@@ -57,4 +57,5 @@ def test_readme_compile_step_matches_init_provider_choice() -> None:
     text = " ".join(readme.split())
     assert "`athenaeum init` already chose the compile provider" in text
     assert "selected `claude-cli`" in text
+    assert "3,200 to 7,000 tokens and 18 to 50 s per note" in text
     assert "An Anthropic API key is the alternative" in text
