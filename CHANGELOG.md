@@ -19,7 +19,7 @@ scans the headings finds it. Likewise, a release that changes how
 `**Upgrading from ...**` block for `sync.mode: integrate` users, even while
 the mode is experimental.
 
-Entries under `[Unreleased]` follow six conventions, so a release section
+Entries under `[Unreleased]` follow seven conventions, so a release section
 can be read in a minute:
 
 - Within each heading, behaviour changes come first. Docs and measurement
@@ -37,6 +37,12 @@ can be read in a minute:
   `### Fixed` holds fixes that only restore the behaviour already documented.
 - A measurement entry is one or two sentences plus a link to its report; the
   numbers, intervals and follow-up issues live in the report.
+- Measurement reports and eval-harness changes are not a theme. When a
+  release ships any, its summary ends with one sentence naming them, for
+  example "It also ships two measurement reports and an eval-harness change;
+  neither changes behaviour." Each eval-harness change gets its own entry
+  opening with `Eval harness:`, after the `Docs:` entries, rather than
+  being folded into a report's entry.
 
 The 0.30.0 section was revised after its cut to follow the last two
 conventions; earlier release sections are kept as cut.
@@ -76,6 +82,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `athenaeum run` and past-revision-read changes moved from `### Fixed` to
   `### Changed`, and its four measurement entries are shortened
   (athenaeum#3122).
+- Docs: the CHANGELOG preamble now says that measurement reports and
+  eval-harness changes are not a release theme: a release that ships any ends
+  its summary with one sentence naming them, and each eval-harness change
+  gets its own `Eval harness:` entry. `tests/test_changelog_contract.py`
+  checks both for releases after 0.30.0. `pyproject.toml` records that
+  `docs/measurements/` ships in the sdist, which the test suite reads, and
+  not in the wheel (athenaeum#3125).
 
 ## [0.30.0] - 2026-11-22
 
