@@ -563,7 +563,15 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 rescue_score = hits[0][2] if hits else 0.0
                 hits = [(rescue_filename, rescue_name, rescue_score), *hits]
 
-    from athenaeum.mcp_server import _is_uncompiled_display_prefix, _resolve_hit_path
+    from athenaeum.mcp_server import (
+        _drop_vanished_hits,
+        _is_uncompiled_display_prefix,
+        _resolve_hit_path,
+    )
+
+    # Issue athenaeum#3090: never print a hit for a file that is gone (same
+    # shared filter as the MCP `recall` tool).
+    hits = _drop_vanished_hits(hits, wiki_root, extra_roots)
 
     # Issues athenaeum#885/#886: ONE index per surface class for the whole
     # command, shared across every hit — never one scan per hit. Each loads
