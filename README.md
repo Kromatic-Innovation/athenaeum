@@ -100,7 +100,7 @@ athenaeum status
 `athenaeum init` already chose the compile provider and printed it. If it
 found a logged-in `claude` CLI it selected `claude-cli`, and compiles use that
 login with no key (they draw on your Claude Code plan's usage limits; about
-3,800 to 4,400 tokens and 30 s per note, see [Install](docs/guides/install.md)).
+3,200 to 7,000 tokens and 18 to 50 s per note, measured on 0.28.0 and 0.29.0 on 2026-11-20 and 2026-11-21, see [Install](docs/guides/install.md)).
 An Anthropic API key is the alternative: `export ANTHROPIC_API_KEY=...` before
 `athenaeum run` if `init` told you no login was found.
 

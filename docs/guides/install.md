@@ -66,10 +66,10 @@ written `athenaeum.yaml` selected and what it draws on:
   binary already on `PATH` — the config selects `llm.provider: claude-cli`,
   and `init` says so: compiles run on your Claude Code plan's subscription
   login, so they draw on that plan's usage limits rather than a metered
-  API bill. For scale, measured on 0.26.0 on 2026-11-18: compiling one
-  note took about 3 to 4 model calls, 3,800 to 4,400 tokens (input plus
-  output) and 28 to 36 seconds; five notes in one run took 13 calls,
-  19,433 tokens and 139 seconds. The CLI reports no percentage of the plan's
+  API bill. For scale, measured on 0.28.0 (2026-11-20) and 0.29.0
+  (2026-11-21): compiling one note took about 2 to 3 model calls, 3,200 to
+  7,000 tokens (input plus output) and 18 to 50 seconds; three notes in one
+  run took 7 calls, 9,233 tokens and 50.8 seconds. The CLI reports no percentage of the plan's
   limit, so the share of your plan this uses is not known. There is no
   separate first-run cap; the ordinary per-run caps apply: `athenaeum run`
   stops at 50 files or 800 API calls, and `athenaeum session-end` at 20 files
