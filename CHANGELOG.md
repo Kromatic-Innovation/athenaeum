@@ -14,7 +14,10 @@ kept as they were written.
 
 From the release after 0.29.0 on, a change the summary calls
 security-relevant also gets an entry under `### Security`, so a reader who
-scans the headings finds it.
+scans the headings finds it. Likewise, a release that changes how
+`sync.mode: integrate` behaves names that change in its
+`**Upgrading from ...**` block for `sync.mode: integrate` users, even while
+the mode is experimental.
 
 Entries under `[Unreleased]` follow four conventions, so a release section
 can be read in a minute:
@@ -45,11 +48,11 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Changed
 
 - The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
+- Docs: the CHANGELOG preamble now says that a release which changes `sync.mode: integrate` behaviour names it in that release's Upgrading block. A new end-to-end test, `tests/test_sync_integrate_e2e.py`, drives full integrate runs across two clones of a test store and asserts both clones' final state: a page changed on both sides is held, a uid collision is renumbered, and an erasure mark propagates (athenaeum#3085).
 - Docs: the CHANGELOG preamble now states four conventions for `[Unreleased]` entries: behaviour changes first and `Docs:` entries as a trailing group under each heading, no internal slice name without a gloss, no blank lines between bullets, and a one-sentence headline per theme when a release carries two. The current `[Unreleased]` section follows them; released sections are unchanged (athenaeum#3082).
 - Docs: the CHANGELOG preamble now says that a change a release summary calls security-relevant also gets an entry under `### Security`, and `tests/test_changelog_contract.py` checks it for every release after 0.29.0; the 0.29.0 section is left as cut (athenaeum#3081).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
 - Docs: the README Quick start now says, directly after its first code block, that the later steps (`athenaeum run`) need a Claude Code login or an `ANTHROPIC_API_KEY`, and links to where that is explained (athenaeum#3079).
-- Tests: `tests/test_sync_integrate_e2e.py` drives one whole `sync.mode: integrate` run across two clones of a store, through the same pull-then-push entry points a librarian run uses, and asserts the final state of both clones: a page changed on both sides is held and filed as a decision, two pages that share a uid are renumbered, and an erasure mark propagates over a local edit (athenaeum#3085).
 - Docs: `docs/measurements/plugin-clean-install-linux-resync-0.29.0-2026-11-21.md` repeats the Linux clean-container install of the Claude Code plugin after its re-sync to 0.29.0 (athenaeum#3053). The server starts on the first session, `remember` and `recall` work, and a configured `knowledgePath` is used; the install output still hides the option default (athenaeum#3098) and a failed first connect is still cached for about 15 minutes after `uv` is installed (athenaeum#3097).
 - Docs: `docs/measurements/first-recall-no-api-key-0.29.0-2026-11-21.md` re-verifies the no-API-key first recall on the published 0.29.0 in a throwaway container with a Claude Code login (athenaeum#2307). A fact told in one session is compiled and recalled in a new one through `athenaeum session-end`; `athenaeum run` alone leaves a stale index hit (athenaeum#3090), and the plan-usage figures need correcting (athenaeum#3092). The macOS clean-machine half (athenaeum#2319) stays with the operator.
 - Docs: `docs/measurements/combined-push-grid-2026-11-21.md` measures the shipped 0.29.0 push on the native-memory grid. Leaving native memory on beside the push costs 34% to 68% more per correct answer on `unprompted_push` at 1,000 and 3,000 pages for no gain in correctness, and the agent never reads it (0 of 330 runs). The push keeps the relationship win on the strict rule but not on content-correct, and abstention cost is under 2.0x of native at `core` and `medium` on that harness (athenaeum#3073, athenaeum#3068, athenaeum#3036).
