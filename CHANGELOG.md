@@ -27,6 +27,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- Docs: the install guide now says why Python 3.13 is the floor: nothing in athenaeum or its dependencies needs a 3.13 feature; CI tests one Python version at a time and the package declares only that one (athenaeum#3084).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
 - Docs: the README Quick start now says, directly after its first code block, that the later steps (`athenaeum run`) need a Claude Code login or an `ANTHROPIC_API_KEY`, and links to where that is explained (athenaeum#3079).
 - Docs: `docs/measurements/plugin-clean-install-linux-resync-0.29.0-2026-11-21.md` repeats the Linux clean-container install of the Claude Code plugin after its re-sync to 0.29.0 (athenaeum#3053). The server starts on the first session, `remember` and `recall` work, and a configured `knowledgePath` is used; the install output still hides the option default (athenaeum#3098) and a failed first connect is still cached for about 15 minutes after `uv` is installed (athenaeum#3097).

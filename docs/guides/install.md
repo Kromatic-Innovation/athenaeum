@@ -6,7 +6,10 @@
 
 Requires Python 3.13+ and `git` on your `PATH` (`athenaeum init` creates a git
 repository for your knowledge directory; slim container images often lack it, so
-`apt-get install git` or `brew install git` first). The fastest way to get that, regardless of what your
+`apt-get install git` or `brew install git` first). Nothing in athenaeum or its dependencies needs a
+feature new in 3.13: it is the floor because CI tests one Python version at a time and the package
+declares only the version CI verifies (see
+[Supported Python version](../../CONTRIBUTING.md#supported-python-version)). The fastest way to get that, regardless of what your
 system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
