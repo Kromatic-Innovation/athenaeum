@@ -61,6 +61,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - Docs: `docs/measurements/first-recall-no-api-key-0.29.0-2026-11-21.md` re-verifies the no-API-key first recall on the published 0.29.0 in a throwaway container with a Claude Code login (athenaeum#2307). A fact told in one session is compiled and recalled in a new one through `athenaeum session-end`; `athenaeum run` alone leaves a stale index hit (athenaeum#3090), and the plan-usage figures need correcting (athenaeum#3092). The macOS clean-machine half (athenaeum#2319) stays with the operator.
 - Docs: `docs/measurements/combined-push-grid-2026-11-21.md` measures the shipped 0.29.0 push on the native-memory grid. Leaving native memory on beside the push costs 34% to 68% more per correct answer on `unprompted_push` at 1,000 and 3,000 pages for no gain in correctness, and the agent never reads it (0 of 330 runs). The push keeps the relationship win on the strict rule but not on content-correct, and abstention cost is under 2.0x of native at `core` and `medium` on that harness (athenaeum#3073, athenaeum#3068, athenaeum#3036).
 
+### Fixed
+
+- `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
+
 ## [0.29.0] - 2026-11-21
 
 **Summary.** 0.29.0 makes the per-turn push carry more of the answer: it now

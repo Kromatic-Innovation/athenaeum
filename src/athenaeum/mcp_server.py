@@ -1141,6 +1141,32 @@ def _resolve_hit_path(
     return None, filename
 
 
+def _drop_vanished_hits(
+    hits: list[tuple[str, str, float]],
+    wiki_root: Path,
+    extra_roots: Sequence[IndexedRoot],
+    *,
+    off_corpus_root: Path | None = None,
+) -> list[tuple[str, str, float]]:
+    """Drop hits whose indexed file no longer exists on disk (athenaeum#3090).
+
+    An index can lag the corpus: ``run`` compiles a raw note and deletes it,
+    and until the index is refreshed a hit for the deleted file would render
+    as an empty ``[uncompiled]`` ghost. One ``is_file`` stat per hit. A hit
+    whose filename cannot be resolved to a path at all (unknown root) is kept,
+    exactly as before. Shared by the MCP ``recall`` tool and ``athenaeum recall``.
+    """
+    kept: list[tuple[str, str, float]] = []
+    for hit in hits:
+        path, _ = _resolve_hit_path(
+            hit[0], wiki_root, extra_roots, off_corpus_root=off_corpus_root
+        )
+        if path is not None and not path.is_file():
+            continue
+        kept.append(hit)
+    return kept
+
+
 # Matches the FIRST ISO-8601 date (YYYY-MM-DD) embedded anywhere in a value.
 # ``source_ref`` values are colon-delimited (``api:apollo:2026-05-09``) and
 # ``created``/``updated`` may be a full timestamp (``2026-06-30T12:00:00``);
@@ -2282,6 +2308,10 @@ def _recall_via_backend(
                 else:
                     rescue_score = hits[0][2] if hits else 0.0
                 hits = [(rescue_filename, rescue_name, rescue_score), *hits]
+
+    hits = _drop_vanished_hits(
+        hits, wiki_root, extra_roots, off_corpus_root=off_corpus_root
+    )
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
