@@ -5,7 +5,12 @@
 Issue athenaeum#3104. Related: athenaeum#2311 (the gold set) and athenaeum#1530 (the per-turn topic
 trace). The build issue that waits on this measurement is athenaeum#3105.
 
-**Results in four lines.**
+**Recommendation, after round 2:** build A2 with the Haiku extractor, ungated, as athenaeum#3105. Round 2
+(103 more tasks, 202 pooled) confirmed it: pooled gain +.043 strict, CI [.016, .074]. A gate (G2) keeps about 80% of
+the gain and saves 7 to 8% of tokens, so it is not worth building; the 3-turn arm A5 costs more for no more gain.
+Section 7 has the round-2 results.
+
+**Round-1 results in four lines.**
 
 1. **The candidate pools of the earlier gold set missed about half the relevant pages.** Measured
    against every page the reference marks relevant, production push coverage is 0.32 (strict) to 0.34
@@ -184,9 +189,57 @@ them, which include a fixed instruction overhead of about 1,000 tokens; ms is CL
 - **Two sessions of the 39 in the issue's sample were unrecoverable,** and the sample is interactive work
   from one deployment. It says nothing about headless runs.
 
-## 6. Next
+## 6. Next (written before round 2; section 7 has the outcome)
 
 Round 2 widens the sample to confirm A2 with tighter session-cluster CIs, and checks the small
 subject-change and short-prompt cells. If A2 holds, the build is athenaeum#3105: carry the previous user
 message and the tail of the assistant's last reply into the extractor, without a gate and without a
 second call. If it does not, the recommendation is not to build.
+
+## 7. Round 2 and recommendation
+
+Round 2 replayed the same arms on a second sample to confirm A2 with tighter session-cluster CIs and to
+check the small subject-change cell. It also scored G2, a tighter gate than the G of section 4.
+
+**Sample.** 103 tasks across 44 sessions, of which 15 sessions are new. Older transcripts had aged out of
+local storage, so the remaining tasks are additional turns drawn from round-1 sessions. Short prompts were
+oversampled and weighted back to the natural mix. Pooled with round 1 the sample is 202 tasks across 52
+sessions. Method, reference labelling, replay and the Haiku extractor are as in section 2.
+
+**G2.** A2 only when the prompt is 12 words or fewer, holds a dangling pronoun or demonstrative, or is a
+bare issue or PR reference; otherwise A0.
+
+**Gain over A0, strict threshold, Haiku extractor.**
+
+| arm | round 1 (99 tasks) | round 2 alone (103 tasks) | pooled (202 tasks) |
+| --- | --- | --- | --- |
+| A2 | +.035 [.008, .064] | +.056 [.004, .113] | **+.043 [.016, .074]** |
+| G2 | +.031 [.011, .054] | +.042 [-.005, .098] | +.035 [.011, .063] |
+| A5 | +.020 [-.006, .049] | +.059 [.019, .097] | +.034 [.012, .058] |
+
+Pooled, A2 lifts strict coverage from .160 to .202. On the lenient threshold the pooled gain is +.034
+[.011, .059]. Pooled strict precision is .20 for A2 against .16 for A0, so the extra pages are not bought
+with extra off-topic ones. Round 2 alone sits above round 1 for every arm, including A0's own coverage
+(.184 against .146), so the sample differs in difficulty; the pooled figure is the one to carry.
+
+**Reading.**
+
+- **A2 is confirmed.** Its pooled CI excludes zero on both thresholds, as it did in round 1 on both
+  extractors.
+- **G2 is not worth building.** It applies context on 76% of turns, keeps about 80% of A2's pooled gain
+  (+.035 against +.043) and saves 7 to 8% of the extractor's input tokens (1,343 against 1,451 per turn).
+  A gate that fires on three turns in four removes little cost and adds a rule to maintain.
+- **A5 matches A2 pooled, at a higher cost.** +.034 against +.043 strict, with overlapping CIs, but about
+  1,800 tokens per turn against about 1,450. Three turns of context buy no coverage that one turn does not.
+- **Subject-change turns show no sign of harm, with a caveat.** Pooled over 27 such turns, A2 reads +.017
+  strict [-.025, .055]. Round 2 alone, on 12 turns, reads -.014 [-.049, 0], which is borderline. The cell
+  is still small, so the caveat of section 5 stands: the cost of carrying context into a turn that changes
+  subject is bounded as small, not shown to be zero.
+
+**Recommendation.** Build A2 with the Haiku extractor, ungated: carry the previous user message and the
+tail of the assistant's last reply (each cut to 1,500 characters) into the extractor, in one call per
+turn. The build is athenaeum#3105. Acceptance criterion 3 of athenaeum#3104 is met.
+
+**Method note for future gold sets.** Archive the session transcripts when the sample is drawn. Local
+transcripts age out, which is why round 2 found only 15 new sessions and had to draw the rest from
+sessions already used.
