@@ -125,6 +125,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   CI-scope choice, not a technical requirement, and that there is no plan to
   test or declare 3.11 or 3.12. `AGENTS.md` now gives the same floor as
   `requires-python`, where it said 3.11 (athenaeum#3131).
+- Eval harness: the nightly overflow-breadcrumb eval
+  (`tests/evals/test_adapter_overflow_breadcrumb_1905.py`) reads the overflow
+  notice again. The push now carries a top-hit excerpt and a linked-neighbour
+  block after the candidates, and the eval took the last line of either for
+  the notice, which failed the nightly tier. It now stops at the first line
+  after the candidates (athenaeum#3135).
 
 ## [0.30.0] - 2026-11-22
 
