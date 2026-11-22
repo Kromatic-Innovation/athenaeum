@@ -228,8 +228,18 @@ not substitute it, the launcher sees the literal token and uses the default
 path, so the failure mode is the old behaviour, not a dead server. The
 default (`~/knowledge`) stays declared in `plugin.json`. Claude Code's
 install screen was seen reporting the option as "not set" despite that
-default; whether a manifest key changes that is unverified, and the launcher
-does not depend on it.
+default; the launcher does not depend on it.
+
+**The "not yet set" notice at install is expected.** `claude plugin install`
+prints `1 userConfig option not yet set`, and `claude plugin configure` lists
+`knowledgePath` as `(optional, not set)`. That is Claude Code's own wording and
+the plugin cannot change it. The option is optional: leave it unset and the
+server uses `~/knowledge`, creating it on first start. Set it only to keep
+the knowledge base somewhere else. To make the default visible where Claude
+Code does show the option's `title`, the manifest's title is `Knowledge base
+path (default ~/knowledge)` and its description opens with `Optional: leave
+unset to use ~/knowledge.` Whether the interactive `/plugin` screen shows
+either was not checked.
 
 - **Established:** `userConfig` values of `type: "string"`/`"boolean"` are
   the mechanism Claude Code plugins use to collect a user-supplied setting,

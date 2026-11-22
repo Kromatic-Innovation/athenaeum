@@ -13,8 +13,8 @@
   "userConfig": {
     "knowledgePath": {
       "type": "string",
-      "title": "Knowledge base path",
-      "description": "Where athenaeum reads/writes raw observations and the compiled wiki. Passed to athenaeum serve --path through .mcp.json; created on first start if missing. Default matches athenaeum serve's own --path default (~/knowledge).",
+      "title": "Knowledge base path (default ~/knowledge)",
+      "description": "Optional: leave unset to use ~/knowledge. Where athenaeum reads/writes raw observations and the compiled wiki. Passed to athenaeum serve --path through .mcp.json; created on first start if missing. The default matches athenaeum serve's own --path default.",
       "default": "~/knowledge"
     }
   },

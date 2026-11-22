@@ -704,6 +704,17 @@ def test_mcp_json_passes_user_config_knowledge_path_to_serve() -> None:
     assert manifest["userConfig"]["knowledgePath"]["default"] == "~/knowledge"
 
 
+def test_knowledge_path_option_names_its_default_and_says_it_is_optional() -> None:
+    # Claude Code's configure output shows the option title and install says
+    # "not yet set"; the title carries the default and the description opens
+    # with the optional/default statement (athenaeum#3098).
+    option = json.loads(_MANIFEST.read_text(encoding="utf-8"))["userConfig"]["knowledgePath"]
+    assert "~/knowledge" in option["title"]
+    assert "default" in option["title"].lower()
+    assert option["description"].startswith("Optional: leave unset to use ~/knowledge.")
+    assert option["default"] == "~/knowledge"
+
+
 def test_uv_missing_message_reaches_the_session_through_hook_stdout(tmp_path: Path) -> None:
     bin_dir = _minimal_path_dir(tmp_path, with_uv=False)
     result = _run_launcher("--ensure-ready", tmp_path=tmp_path, path_dir=bin_dir)
