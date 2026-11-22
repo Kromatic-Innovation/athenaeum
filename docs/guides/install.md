@@ -30,11 +30,14 @@ pip install athenaeum
 athenaeum --version                                    # compare with the PyPI badge above
 ```
 
-**Check what you actually got.** `pip` will not fail on an older interpreter.
-Because releases before 0.17.1 declared `>=3.11`, pip silently resolves
-*backwards* past a dozen releases and installs a year-old version instead of
-erroring. Nothing in the output tells you this happened, and the CLI will
-appear to work. Older releases are **not** yanked (see the [CHANGELOG archive](../../CHANGELOG-archive.md) for
+**Check what you actually got.** On an interpreter older than 3.13, `pip`
+either stops with `No matching distribution found for athenaeum` (listing only
+old versions such as 0.15.0, when none of them fits the request) or, more
+often, does not fail at all. Because releases before 0.17.1 declared `>=3.11`,
+pip silently resolves *backwards* past a dozen releases and installs a
+year-old version instead of erroring. Nothing in the output tells you this
+happened, and the CLI will appear to work. Older releases are **not** yanked
+(see the [CHANGELOG archive](../../CHANGELOG-archive.md) for
 why), so they stay installable. Compare what `--version` prints against the
 live [PyPI version badge](https://pypi.org/project/athenaeum/) rather than a
 number written out here: the PATCH digit moves on every merge to `develop`
@@ -85,6 +88,36 @@ written `athenaeum.yaml` selected and what it draws on:
 
 An *existing* `athenaeum.yaml` is never rewritten by `init` — this selection
 only happens once, the moment the file is first created.
+
+## I want to check what is set up
+
+```bash
+athenaeum doctor
+```
+
+`doctor` is read-only. On a fresh install, steps you have not done yet show
+as `WARN` with `setup pending` and the command that finishes each one; `doctor`
+still exits `0`. Only something present but broken (an unparseable
+`settings.json`, a hook whose script is missing, an unreadable index) is a
+`FAIL` and exits non-zero. Abridged output right after `athenaeum init`, before
+`claude mcp add` (paths shortened):
+
+```text
+Athenaeum Doctor
+========================================
+[OK] package_version: running X.Y.Z; latest release is X.Y.Z
+[OK] interpreter: Python 3.13.1
+[WARN] mcp: setup pending: no 'athenaeum' entry under mcpServers in ~/.claude.json
+    fix: claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+[WARN] hooks: setup pending: no Claude Code settings file found at ~/.claude/settings.json
+    fix: merge examples/claude-code/settings-snippet.json into ~/.claude/settings.json ...
+[WARN] key_mode: setup pending: llm.provider=claude-cli but Claude Code is not logged in ...
+    fix: run `claude` and `/login`, or set ANTHROPIC_API_KEY
+[WARN] search_index: setup pending: no vector index found under ~/.cache/athenaeum/wiki-vectors
+    fix: run `athenaeum reindex --path <knowledge-root>` to build it, ...
+...
+All checks passed, with 4 warning(s).
+```
 
 ## I want first-person facts ("I prefer...") to land on my own page
 
@@ -362,6 +395,9 @@ on the knowledge repo only (never your global config), prints a notice saying
 so, and shows the two `git config` commands to change it. If `init` fails for
 any other reason it removes what it created, so retrying `athenaeum init`
 starts clean; a directory that already existed keeps its own content.
+`init` makes its seed commit with git hooks disabled, so a global
+`core.hooksPath` commit hook (for example a protected-branch guard) does not
+block it.
 
 **Scheduler.** Nothing is scheduled by default. If you never set up cron,
 launchd, or a recurring manual run, `remember` keeps appending to
