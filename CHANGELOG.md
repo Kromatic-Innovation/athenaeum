@@ -65,6 +65,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Fixed
 
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
+- The Claude Code plugin's missing-`uv` message now also says that Claude Code may keep the athenaeum MCP server skipped for about 15 minutes after a failed first connect, even once `uv` is installed, and that editing the plugin config (`/plugin`, or `claude plugin configure athenaeum@athenaeum-claude-plugin`) retries at once. The plugin README gains a troubleshooting note on the wait and on what the `still preparing` line means in that case (athenaeum#3097).
 
 ## [0.29.0] - 2026-11-21
 
