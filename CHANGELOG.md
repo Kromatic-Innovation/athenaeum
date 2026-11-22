@@ -88,6 +88,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   output and the `init` git-hooks note moved to the install guide, so the
   Quick start reaches its first `remember` and `recall` round trip sooner
   (athenaeum#3123).
+- Docs: the `read_blob` docstring now states which callers must pass `path`.
+  A caller that compares, merges, displays or re-commits a blob a commit holds
+  must pass it, to get filtered content; only a blob written by `write_blob`
+  may be read raw. Both existing callers are classified at their call sites,
+  and `tests/test_read_blob_callers.py` fails on an unclassified new caller
+  (athenaeum#3127).
 
 ## [0.30.0] - 2026-11-22
 
