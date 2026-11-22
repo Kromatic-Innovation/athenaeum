@@ -118,7 +118,9 @@ witness-sign = [
     "cryptography>=42,<51",
 ]
 witness-anchor = [
-    "opentimestamps>=0.4",
+    # Capped at the next major boundary like every runtime dependency above
+    # (athenaeum#3080); 0.5.0 is the newest release as of 2026-11.
+    "opentimestamps>=0.4,<1",
 ]
 dev = [
     "pytest>=8.0",
