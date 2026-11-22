@@ -6654,6 +6654,13 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     A negative or non-integer value is a ``StorageConfigError``. With no
     ``visibility`` declared anywhere nothing is refused.
 
+    An entry may set ``opaque_filenames: true`` (athenaeum#3077; default ``false``;
+    a non-boolean is a ``StorageConfigError``): every NEW page written to that
+    surface is named ``<uid>.md`` instead of ``<uid>-<slug-of-name>.md``, so the
+    store's file listing does not reveal whose records it holds. Pages already
+    on disk keep their names; commit messages and page bodies are untouched; it
+    is not encryption.
+
     A per-type store that ``athenaeum storage move-type`` moves pages into
     (athenaeum#2620) is an entry with ``embedded: true`` whose ``surface_root``
     is a directory that is its OWN git repository (not the wiki's), e.g.::

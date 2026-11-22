@@ -2760,11 +2760,11 @@ def _apply_tier3_results(
     _create_roots: list[Path | None] = []
     for _e in new_entities:
         try:
-            _create_roots.append(
-                destination_for_entity(
-                    _e.type, _page_config, wiki_root.parent, tags=tuple(_e.tags)
-                ).root
+            _dest = destination_for_entity(
+                _e.type, _page_config, wiki_root.parent, tags=tuple(_e.tags)
             )
+            _e.opaque_filename = _dest.opaque_filenames
+            _create_roots.append(_dest.root)
         except ReadOnlySurfaceError as _exc:
             _retain_raw_on_read_only(result, _exc)
             _create_roots.append(None)
