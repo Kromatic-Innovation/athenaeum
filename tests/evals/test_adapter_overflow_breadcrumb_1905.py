@@ -107,6 +107,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.context import EXCERPT_HEADER, NEIGHBOUR_HEADER
 from athenaeum.recall_overflow import render_overflow_line
 from tests.evals.corpus import build_corpus
 from tests.evals.rollout import (
@@ -217,24 +218,39 @@ def _split(additional_context: str) -> tuple[list[str], str]:
     """Separate rendered bullets from the (at most one) overflow notice.
 
     The notice is identifiable without pattern-matching its wording: it is the
-    only non-empty line that does not carry the ``  - `` bullet prefix, which
-    the template guarantees by construction (see
-    :func:`athenaeum.recall_overflow.render_overflow_line`). The shell hook's
-    bare ``  - `` artifact line (difference 2 in this module's docstring) is
-    dropped here so the bullet comparison is about pages, not about that
-    defect.
+    first non-empty line after the ``[Knowledge context]`` header that does
+    not carry the ``  - `` bullet prefix, which the template guarantees by
+    construction (see :func:`athenaeum.recall_overflow.render_overflow_line`).
+    The shell hook's bare ``  - `` artifact line (difference 2 in this
+    module's docstring) is dropped here so the bullet comparison is about
+    pages, not about that defect.
+
+    Parsing stops at the first non-bullet line, because the push carries more
+    sections after the candidates and their notice (athenaeum#3135): the
+    top-hit excerpt (:data:`athenaeum.context.EXCERPT_HEADER`, athenaeum#3032),
+    whose prose lines are not bullets, and the linked-neighbour block
+    (:data:`athenaeum.context.NEIGHBOUR_HEADER`, athenaeum#3070), whose
+    ``  - `` lines name linked pages rather than candidates. Either header
+    reached before a notice means there was no notice. Lines before the
+    ``[Knowledge context]`` header (a degraded-extraction banner) are skipped.
     """
+    excerpt_prefix = EXCERPT_HEADER.split("{name}", 1)[0]
     bullets: list[str] = []
-    notice = ""
+    in_candidates = False
     for line in additional_context.split("\n"):
-        if not line or line.startswith("[Knowledge context]"):
+        if line.startswith("[Knowledge context]"):
+            in_candidates = True
+            continue
+        if not in_candidates or not line:
             continue
         if line.startswith("  - "):
             if line.strip() != "-":
                 bullets.append(line)
             continue
-        notice = line
-    return bullets, notice
+        if line == NEIGHBOUR_HEADER or line.startswith(excerpt_prefix):
+            return bullets, ""
+        return bullets, line
+    return bullets, ""
 
 
 def _rerender(notice: str) -> str:
