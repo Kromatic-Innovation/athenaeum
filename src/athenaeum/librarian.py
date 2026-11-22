@@ -197,7 +197,7 @@ from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
     run_intake_audit,
 )
-from athenaeum.intake_destination import destination_for_entity
+from athenaeum.intake_destination import destination_for_new_entity
 from athenaeum.logconf import run_id_var
 from athenaeum.merge import (
     RunDeadlineExceeded,
@@ -2760,10 +2760,7 @@ def _apply_tier3_results(
     _create_roots: list[Path | None] = []
     for _e in new_entities:
         try:
-            _dest = destination_for_entity(
-                _e.type, _page_config, wiki_root.parent, tags=tuple(_e.tags)
-            )
-            _e.opaque_filename = _dest.opaque_filenames
+            _dest = destination_for_new_entity(_e, _page_config, wiki_root.parent)
             _create_roots.append(_dest.root)
         except ReadOnlySurfaceError as _exc:
             _retain_raw_on_read_only(result, _exc)

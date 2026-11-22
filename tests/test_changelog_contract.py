@@ -49,6 +49,12 @@ MEASUREMENT_RULE_FROM_RELEASE = (0, 30, 0)
 MEASUREMENT_ENTRY_MAX_WORDS = 70
 _MEASUREMENT_ENTRY_RE = re.compile(r"^- Docs: (`docs/measurements/|\[[^\]]*\]\(docs/measurements/)")
 
+# Releases after this one name their measurement and eval-harness work in the
+# summary, and give each harness change an ``Eval harness:`` entry
+# (athenaeum#3125). The preamble states the rule.
+SIDE_WORK_RULE_AFTER_RELEASE = (0, 30, 0)
+_SIDE_WORK_SUMMARY_RE = re.compile(r"measurement|eval[- ]harness", re.IGNORECASE)
+
 # A build-notes link through the moving ``main`` branch drifts from the release
 # it describes; tagged releases pin the tag instead (athenaeum#2727).
 _BUILD_NOTES_MAIN_RE = re.compile(r"blob/main/docs/changelog/[^\s)]*-build-notes\.md")
@@ -211,6 +217,40 @@ def measurement_entry_violations(text: str) -> list[str]:
     return problems
 
 
+def side_work_violations(text: str) -> list[str]:
+    """Return one message per release that hides its measurement or
+    eval-harness work.
+
+    From the release after ``SIDE_WORK_RULE_AFTER_RELEASE`` on, a release with
+    a measurement entry or an ``Eval harness:`` entry names that work in its
+    summary (the text before its first ``###`` heading), and no entry folds a
+    harness change into a ``Docs and eval harness:`` line.
+    """
+    problems: list[str] = []
+    for version, body in _releases(text):
+        if version <= SIDE_WORK_RULE_AFTER_RELEASE:
+            continue
+        name = _version_str(version)
+        lines = _strip_fences(body)
+        first = next((i for i, line in enumerate(lines) if re.match(r"^###\s", line)), len(lines))
+        summary = "\n".join(lines[:first])
+        bullets = _bullets(lines[first:])
+        side_work = [
+            b for b in bullets if _MEASUREMENT_ENTRY_RE.match(b) or b.startswith("- Eval harness:")
+        ]
+        if side_work and not _SIDE_WORK_SUMMARY_RE.search(summary):
+            problems.append(
+                f"[{name}] ships measurement or eval-harness work but its summary does not name it"
+            )
+        for bullet in bullets:
+            if bullet.startswith("- Docs and eval harness:"):
+                problems.append(
+                    f"[{name}] give the eval-harness change its own `Eval harness:` entry: "
+                    f"{bullet[:80]!r}"
+                )
+    return problems
+
+
 def footer_violations(text: str) -> list[str]:
     """Return one message per missing or wrong link-reference footer entry."""
     problems: list[str] = []
@@ -339,6 +379,16 @@ def test_preamble_states_the_behaviour_change_and_measurement_rules(changelog_te
     assert "goes at the head of `### Changed`, even when it also fixes a bug" in preamble
     assert "A measurement entry is one or two sentences plus a link to its report" in preamble
     assert f"The {_version_str(MEASUREMENT_RULE_FROM_RELEASE)} section was revised" in preamble
+
+
+def test_releases_name_their_measurement_and_eval_harness_work(changelog_text: str) -> None:
+    assert side_work_violations(changelog_text) == []
+
+
+def test_preamble_states_the_side_work_rule(changelog_text: str) -> None:
+    preamble = " ".join(changelog_text.split("## [Unreleased]", 1)[0].split())
+    assert "Measurement reports and eval-harness changes are not a theme" in preamble
+    assert "opening with `Eval harness:`" in preamble
 
 
 _LINK_DEF_RE = re.compile(r"^\[(\d+\.\d+\.\d+)\]: ", re.MULTILINE)
@@ -600,3 +650,38 @@ def test_measurement_rule_reads_continuation_lines_and_skips_older_releases() ->
         )
         == []
     )
+
+
+_SIDE_WORK_BODY = """
+### Changed
+
+- A change.
+- Docs: [a report](docs/measurements/r.md): it found a thing.
+- Eval harness: a new arm.
+"""
+
+
+def test_fails_when_summary_omits_side_work() -> None:
+    assert side_work_violations(_changelog(_SIDE_WORK_BODY)) == [
+        "[1.1.0] ships measurement or eval-harness work but its summary does not name it"
+    ]
+
+
+def test_side_work_named_in_summary_passes() -> None:
+    text = _changelog(_SIDE_WORK_BODY).replace(
+        "**Summary.** A release.",
+        "**Summary.** A release. It also ships a measurement report and an eval-harness change.",
+    )
+    assert side_work_violations(text) == []
+    assert heading_violations(text) == []
+
+
+def test_fails_on_folded_docs_and_eval_harness_entry() -> None:
+    body = "\n### Changed\n\n- Docs and eval harness: a report and a new arm.\n"
+    problems = side_work_violations(_changelog(body))
+    assert len(problems) == 1 and "its own `Eval harness:` entry" in problems[0]
+
+
+def test_side_work_rule_skips_releases_up_to_0_30_0() -> None:
+    text = _changelog(_SIDE_WORK_BODY).replace("[1.1.0]", "[0.30.0]").replace("v1.1.0", "v0.30.0")
+    assert side_work_violations(text) == []

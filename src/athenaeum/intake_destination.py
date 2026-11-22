@@ -29,7 +29,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athenaeum.intake_decision import (
     PERSONAL,
@@ -50,6 +50,9 @@ from athenaeum.storage import (
     resolve_adapter_for_class,
     store_opaque_filenames,
 )
+
+if TYPE_CHECKING:
+    from athenaeum.models import WikiEntity
 
 log = logging.getLogger(__name__)
 
@@ -145,3 +148,31 @@ def destination_for_entity(
     if decision is None:
         decision = decide_destination(entity_type, tags, config)
     return resolve_destination(decision, entity_type, config, knowledge_root)
+
+
+def destination_for_new_entity(
+    entity: WikiEntity,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    entity_type: str | None = None,
+    decision: IntakeDecision | None = None,
+) -> Destination:
+    """Resolve *entity*'s destination AND apply its file-name policy to it.
+
+    The one call every write path that creates a NEW page uses
+    (athenaeum#3126): the store's ``opaque_filenames`` choice is set on
+    ``entity.opaque_filename`` here, where the destination is resolved, so a
+    caller cannot resolve a root and forget the flag. *entity_type* overrides
+    ``entity.type`` when the caller routes by a different type. Raises exactly
+    what :func:`destination_for_entity` raises, before touching *entity*.
+    """
+    dest = destination_for_entity(
+        entity_type if entity_type is not None else entity.type,
+        config,
+        knowledge_root,
+        decision,
+        tags=tuple(entity.tags),
+    )
+    entity.opaque_filename = dest.opaque_filenames
+    return dest

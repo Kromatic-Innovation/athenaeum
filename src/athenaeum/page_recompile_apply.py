@@ -172,7 +172,7 @@ from athenaeum.declared_relationships import (
     declared_relationship,
 )
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
-from athenaeum.intake_destination import destination_for_entity
+from athenaeum.intake_destination import destination_for_new_entity
 from athenaeum.models import (
     EntityIndex,
     TokenUsage,
@@ -1126,8 +1126,9 @@ def compute_apply(
         a non-indexed surface is refused as a plan issue. Also applies the
         surface's ``opaque_filenames`` choice to *entity* (athenaeum#3077)."""
         try:
-            dest = destination_for_entity(entity_type, config, wiki_root.parent)
-            entity.opaque_filename = dest.opaque_filenames
+            dest = destination_for_new_entity(
+                entity, config, wiki_root.parent, entity_type=entity_type
+            )
             return dest.root
         except SurfaceNotIndexedError as exc:
             issues.append(PlanIssue("surface-not-indexed", str(exc)))
