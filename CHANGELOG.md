@@ -33,6 +33,8 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 - Docs: the CHANGELOG preamble now says that a change a release summary calls security-relevant also gets an entry under `### Security`, and `tests/test_changelog_contract.py` checks it for every release after 0.29.0; the 0.29.0 section is left as cut (athenaeum#3081).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
+- Docs: the README Quick start now says, directly after its first code block, that the later steps (`athenaeum run`) need a Claude Code login or an `ANTHROPIC_API_KEY`, and links to where that is explained (athenaeum#3079).
+- The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
 - Docs: `docs/measurements/plugin-clean-install-linux-resync-0.29.0-2026-11-21.md` repeats the Linux clean-container install of the Claude Code plugin after its re-sync to 0.29.0 (athenaeum#3053). The server starts on the first session, `remember` and `recall` work, and a configured `knowledgePath` is used; the install output still hides the option default (athenaeum#3098) and a failed first connect is still cached for about 15 minutes after `uv` is installed (athenaeum#3097).
 - Docs: `docs/measurements/first-recall-no-api-key-0.29.0-2026-11-21.md` re-verifies the no-API-key first recall on the published 0.29.0 in a throwaway container with a Claude Code login (athenaeum#2307). A fact told in one session is compiled and recalled in a new one through `athenaeum session-end`; `athenaeum run` alone leaves a stale index hit (athenaeum#3090), and the plan-usage figures need correcting (athenaeum#3092). The macOS clean-machine half (athenaeum#2319) stays with the operator.
 - Docs: `docs/measurements/combined-push-grid-2026-11-21.md` measures the shipped 0.29.0 push on the native-memory grid. Leaving native memory on beside the push costs 34% to 68% more per correct answer on `unprompted_push` at 1,000 and 3,000 pages for no gain in correctness, and the agent never reads it (0 of 330 runs). The push keeps the relationship win on the strict rule but not on content-correct, and abstention cost is under 2.0x of native at `core` and `medium` on that harness (athenaeum#3073, athenaeum#3068, athenaeum#3036).
@@ -1746,7 +1748,6 @@ collected here so an upgrader does not have to read the whole span.
   before this issue, pinned by `tests/test_transcript_receipts.py`. See
   `docs/design/conflict-resolution.md`'s "Durable transcript receipts"
   section for the full decision table and known limits.
-
 
 - **`_pii-allowlist.yml` supports domain-level `pattern` entries (issue
   athenaeum#2007).** Alongside the existing exact-`value`/`reason` entry,
@@ -9552,7 +9553,6 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   truth-value) whenever embeddings were returned, which had effectively broken
   vector-backend clustering; fixed on the read path (athenaeum#370).
 
-
 ## [0.14.0] - 2026-07-11
 
 ### Changed — behavior
@@ -9625,7 +9625,6 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   test double now reports an immediately-completing batch at create time, so the
   poll loop's real 30s sleep is skipped under test (suite runs in seconds, not
   ~60s/test); production poll cadence unchanged.
-
 
 ## [0.13.13] - 2026-07-06
 
