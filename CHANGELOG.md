@@ -65,6 +65,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 ### Fixed
 
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
+- The Claude Code plugin's `knowledgePath` option now carries its default in its title (`Knowledge base path (default ~/knowledge)`), which `claude plugin configure` prints, and its description opens with `Optional: leave unset to use ~/knowledge.`; the plugin README explains that Claude Code's `not yet set` notice at install is expected for this optional option (athenaeum#3098).
 
 ## [0.29.0] - 2026-11-21
 
