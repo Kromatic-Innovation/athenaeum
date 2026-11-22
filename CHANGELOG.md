@@ -65,7 +65,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
-- Reads of a file at a past revision (`read_file_at_revision`, and `read_blob` when given the file's path) now return what a checkout would write, by way of `git cat-file --filters`, instead of the committed bytes. With a clean/smudge filter configured (encryption, Git LFS pointers) `sync.mode: integrate` used to fail to decode the committed bytes and hold every page edited on both sides; it now merges the plaintext. With no filter configured the bytes are unchanged. Applies to `sync.mode: integrate` (athenaeum#3076).
+- Reads of a file at a past revision (`read_file_at_revision`, and `read_blob` when given the file's path) now return what a checkout would write, by way of `git cat-file --filters`, instead of the committed bytes. With a clean/smudge filter configured (encryption, Git LFS pointers) `sync.mode: integrate` used to fail to decode the committed bytes and hold every page edited on both sides; it now merges the plaintext, and writes the merged page back through the clean filter. With no filter configured the bytes are unchanged. Applies to `sync.mode: integrate` (athenaeum#3076).
 - `recall` after `athenaeum run` now returns the compiled page instead of an empty `[uncompiled]` hit for the raw note `run` deleted (athenaeum#3090). `run` refreshes the search index for what it changed, and `recall` (CLI and MCP tool) drops any hit whose file no longer exists.
 
 ### Security

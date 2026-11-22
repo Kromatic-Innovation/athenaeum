@@ -73,6 +73,11 @@ def test_a_page_edited_on_both_sides_merges_instead_of_being_held(
     assert report.integrate is not None and report.integrate.status == "merged"
     merged = (second.root / "wiki" / "jordan.md").read_text()
     assert "stage: lead" in merged and "in Lisbon" in merged and "<<<<<<<" not in merged
+    # The merge commit stores the CLEANED form, not plaintext: the merged blob is
+    # written through the clean filter, and a smudged read gives the plaintext back.
+    committed = _committed(second.root, "HEAD", "wiki/jordan.md")
+    assert b"in Lisbon" not in committed
+    assert read_file_at_revision(second.root, "HEAD", "wiki/jordan.md") == merged.encode()
 
 
 def test_without_a_filter_the_bytes_equal_cat_file_blob(tmp_path: Path) -> None:

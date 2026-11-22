@@ -1664,7 +1664,10 @@ def build_merged_tree(repo: Path, base_rev: str, changes: Mapping[str, bytes | N
                 continue
             existing = run("ls-files", "-s", "--", path).split()
             mode = existing[0].decode() if existing else "100644"
-            blob = run("hash-object", "-w", "--stdin", stdin=data).decode().strip()
+            # `--path` so the repository's clean filter (e.g. an encryption filter)
+            # applies to the merged bytes, mirroring the smudged read (athenaeum#3076).
+            out = run("hash-object", "-w", f"--path={path}", "--stdin", stdin=data)
+            blob = out.decode().strip()
             run("update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}")
         return run("write-tree").decode().strip()
 
