@@ -16,7 +16,9 @@ Release cadence and support: releases ship when their changes are ready, on
 no fixed schedule, so sometimes several land close together (two minors can
 share a date). Only the latest release is supported, and breaking changes
 ship without a deprecation period. See the
-[support policy](docs/guides/install.md#support-policy).
+[support policy](docs/guides/install.md#support-policy), and
+[Running athenaeum in production](docs/guides/stability.md#running-athenaeum-in-production)
+for how to pin and upgrade under it.
 
 The bundled `promptwitness` package is experimental: it is not part of the
 athenaeum public API, is not covered by semver, and is subject to change
@@ -27,6 +29,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- Docs: `docs/guides/stability.md` has a new "Running athenaeum in production" section: pin an exact version, read each release's Upgrading block, upgrade one minor at a time, and note that security fixes ship only in the latest release. The support policy and the CHANGELOG preamble link to it; the policy itself is unchanged (athenaeum#3083).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
 - Docs: the README Quick start now says, directly after its first code block, that the later steps (`athenaeum run`) need a Claude Code login or an `ANTHROPIC_API_KEY`, and links to where that is explained (athenaeum#3079).
 - The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
