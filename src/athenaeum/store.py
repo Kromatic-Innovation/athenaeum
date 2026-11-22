@@ -1524,9 +1524,13 @@ def common_ancestor(repo: Path, rev_a: str, rev_b: str) -> str | None:
 
 
 def read_file_at_revision(repo: Path, rev: str, path: str) -> bytes | None:
-    """The bytes of *path* as committed at *rev*, or ``None`` if the path is absent there.
+    """The content of *path* at *rev*, or ``None`` if the path is absent there.
 
     Reads the object database only; the working tree and index are not touched.
+    The content is smudged (``git cat-file --filters``), i.e. what a checkout of
+    *rev* would write, so a repository with a clean/smudge filter yields the
+    working-tree form and not the committed bytes. With no filter configured the
+    bytes equal ``git cat-file blob``.
     Raises ``subprocess.CalledProcessError`` for an unknown revision.
     """
     _git_out(repo, "rev-parse", "--verify", f"{rev}^{{commit}}")
@@ -1536,7 +1540,7 @@ def read_file_at_revision(repo: Path, rev: str, path: str) -> bytes | None:
     meta = entry.split(b"\t", 1)[0].split()
     if len(meta) != 3 or meta[1] != b"blob":
         return None
-    return _git_out(repo, "cat-file", "blob", meta[2].decode())
+    return _git_out(repo, "cat-file", "--filters", f"{rev}:{path}")
 
 
 def changed_paths(repo: Path, rev_a: str, rev_b: str) -> list[str]:
@@ -1805,8 +1809,13 @@ def blob_id_at_revision(repo: Path, rev: str, path: str) -> str | None:
     return meta[2].decode()
 
 
-def read_blob(repo: Path, blob: str) -> bytes | None:
+def read_blob(repo: Path, blob: str, path: str | None = None) -> bytes | None:
     """The bytes of the git blob *blob*, or ``None`` when *repo* has no such blob.
+
+    With *path* (the repo-relative file the blob was committed as) the blob is
+    smudged through the repository's filters (``git cat-file --filters
+    --path=<path>``), matching :func:`read_file_at_revision`. Without it the raw
+    stored bytes are returned.
 
     Reads the object database only (athenaeum#2940: the last accepted version of
     a raised copy is read back by the blob id the acceptance ledger holds).
@@ -1814,9 +1823,10 @@ def read_blob(repo: Path, blob: str) -> bytes | None:
     """
     if len(blob) not in (40, 64) or any(c not in "0123456789abcdef" for c in blob):
         return None
-    result = subprocess.run(
-        ["git", "cat-file", "blob", blob], cwd=str(repo), capture_output=True
-    )
+    cmd = ["git", "cat-file", "blob", blob]
+    if path is not None:
+        cmd = ["git", "cat-file", "--filters", f"--path={path}", blob]
+    result = subprocess.run(cmd, cwd=str(repo), capture_output=True)
     return result.stdout if result.returncode == 0 else None
 
 
