@@ -12,6 +12,10 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
+From the release after 0.29.0 on, a change the summary calls
+security-relevant also gets an entry under `### Security`, so a reader who
+scans the headings finds it.
+
 Release cadence and support: releases ship when their changes are ready, on
 no fixed schedule, so sometimes several land close together (two minors can
 share a date). Only the latest release is supported, and breaking changes
@@ -27,6 +31,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- Docs: the CHANGELOG preamble now says that a change a release summary calls security-relevant also gets an entry under `### Security`, and `tests/test_changelog_contract.py` checks it for every release after 0.29.0; the 0.29.0 section is left as cut (athenaeum#3081).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
 - Docs: `docs/measurements/plugin-clean-install-linux-resync-0.29.0-2026-11-21.md` repeats the Linux clean-container install of the Claude Code plugin after its re-sync to 0.29.0 (athenaeum#3053). The server starts on the first session, `remember` and `recall` work, and a configured `knowledgePath` is used; the install output still hides the option default (athenaeum#3098) and a failed first connect is still cached for about 15 minutes after `uv` is installed (athenaeum#3097).
 - Docs: `docs/measurements/first-recall-no-api-key-0.29.0-2026-11-21.md` re-verifies the no-API-key first recall on the published 0.29.0 in a throwaway container with a Claude Code login (athenaeum#2307). A fact told in one session is compiled and recalled in a new one through `athenaeum session-end`; `athenaeum run` alone leaves a stale index hit (athenaeum#3090), and the plan-usage figures need correcting (athenaeum#3092). The macOS clean-machine half (athenaeum#2319) stays with the operator.
