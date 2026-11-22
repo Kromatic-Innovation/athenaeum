@@ -12,6 +12,10 @@ this order and only the ones that apply: `### Removed`, `### Changed`,
 release, so release-notes tooling can parse them. Older release sections are
 kept as they were written.
 
+From the release after 0.29.0 on, a change the summary calls
+security-relevant also gets an entry under `### Security`, so a reader who
+scans the headings finds it.
+
 Release cadence and support: releases ship when their changes are ready, on
 no fixed schedule, so sometimes several land close together (two minors can
 share a date). Only the latest release is supported, and breaking changes
@@ -27,6 +31,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- Docs: the CHANGELOG preamble now says that a change a release summary calls security-relevant also gets an entry under `### Security`, and `tests/test_changelog_contract.py` checks it for every release after 0.29.0; the 0.29.0 section is left as cut (athenaeum#3081).
 - Docs: the README Quick start's sample `athenaeum doctor` output now reads `running X.Y.Z; latest release is X.Y.Z` instead of naming a release, so it no longer goes stale at each release (athenaeum#3078).
 - Docs: the README Quick start now says, directly after its first code block, that the later steps (`athenaeum run`) need a Claude Code login or an `ANTHROPIC_API_KEY`, and links to where that is explained (athenaeum#3079).
 - The `witness-anchor` extra now caps `opentimestamps` below 1.0 (`opentimestamps>=0.4,<1`), like every other runtime dependency, so a future major release cannot silently break an installed athenaeum. A new test keeps every runtime dependency and runtime extra capped (athenaeum#3080).
