@@ -90,7 +90,7 @@ from athenaeum.compile_routing import (
 )
 from athenaeum.config import resolve_drop_log, resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
-from athenaeum.intake_destination import destination_for_entity
+from athenaeum.intake_destination import destination_for_new_entity
 from athenaeum.logconf import run_id_var
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
@@ -2630,10 +2630,7 @@ def process_batch_run(
             _create_roots: list[Path | None] = []
             for _e in new_entities:
                 try:
-                    _dest = destination_for_entity(
-                        _e.type, resolved_config, wiki_root.parent, tags=tuple(_e.tags)
-                    )
-                    _e.opaque_filename = _dest.opaque_filenames
+                    _dest = destination_for_new_entity(_e, resolved_config, wiki_root.parent)
                     _create_roots.append(_dest.root)
                 except ReadOnlySurfaceError as _exc:
                     log.warning("  Refused (read-only surface): %s", _exc)

@@ -176,7 +176,7 @@ class TestBothTransports:
 
         for mod in (batch, librarian):
             src = inspect.getsource(mod)
-            assert "destination_for_entity(" in src, mod.__name__
+            assert "destination_for_new_entity(" in src, mod.__name__
             assert "page_write_root_for_class(" not in src, mod.__name__
 
     def test_sync_transport_pages_land_where_the_mapping_says(self, tmp_path: Path) -> None:

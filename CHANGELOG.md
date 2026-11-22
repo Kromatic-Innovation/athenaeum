@@ -19,7 +19,7 @@ scans the headings finds it. Likewise, a release that changes how
 `**Upgrading from ...**` block for `sync.mode: integrate` users, even while
 the mode is experimental.
 
-Entries under `[Unreleased]` follow six conventions, so a release section
+Entries under `[Unreleased]` follow seven conventions, so a release section
 can be read in a minute:
 
 - Within each heading, behaviour changes come first. Docs and measurement
@@ -37,9 +37,15 @@ can be read in a minute:
   `### Fixed` holds fixes that only restore the behaviour already documented.
 - A measurement entry is one or two sentences plus a link to its report; the
   numbers, intervals and follow-up issues live in the report.
+- Measurement reports and eval-harness changes are not a theme. When a
+  release ships any, its summary ends with one sentence naming them, for
+  example "It also ships two measurement reports and an eval-harness change;
+  neither changes behaviour." Each eval-harness change gets its own entry
+  opening with `Eval harness:`, after the `Docs:` entries, rather than
+  being folded into a report's entry.
 
-The 0.30.0 section was revised after its cut to follow the last two
-conventions, and its Upgrading block gained the cost of the index refresh
+The 0.30.0 section was revised after its cut to follow the conventions on
+behaviour changes and measurement entries, and its Upgrading block gained the cost of the index refresh
 `athenaeum run` now does; earlier release sections are kept as cut.
 
 Release cadence and support: releases ship when their changes are ready, on
@@ -70,6 +76,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` to turn it off. This builds the arm the
   athenaeum#3104 measurement recommended (pooled strict push coverage +.043,
   95% CI [.016, .074], over 202 tasks). athenaeum#3105
+- Every compile write path that creates a page now decides its file name
+  style where it resolves the page's destination, through one helper,
+  `destination_for_new_entity`. A store's `opaque_filenames` choice can no
+  longer be skipped by a path that resolves the destination and forgets to
+  apply it. A new test fails if any module resolves a destination or sets the
+  flag any other way. File names are unchanged (athenaeum#3126).
 - Docs: the CHANGELOG preamble adds two conventions: a change the summary
   lists as a behaviour change goes at the head of `### Changed` even when it
   also fixes a bug, and a measurement entry is one or two sentences plus a
@@ -88,6 +100,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   output and the `init` git-hooks note moved to the install guide, so the
   Quick start reaches its first `remember` and `recall` round trip sooner
   (athenaeum#3123).
+- Docs: the CHANGELOG preamble now says that measurement reports and
+  eval-harness changes are not a release theme: a release that ships any ends
+  its summary with one sentence naming them, and each eval-harness change
+  gets its own `Eval harness:` entry. `tests/test_changelog_contract.py`
+  checks both for releases after 0.30.0. `pyproject.toml` records that
+  `docs/measurements/` ships in the sdist, which the test suite reads, and
+  not in the wheel (athenaeum#3125).
 - Docs: the `read_blob` docstring now states which callers must pass `path`.
   A caller that compares, merges, displays or re-commits a blob a commit holds
   must pass it, to get filtered content; only a blob written by `write_blob`

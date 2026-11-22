@@ -305,6 +305,12 @@ include = [
 # re-injected here (the athenaeum#612 / cwc#1841 failure mode), it cannot reach PyPI.
 # This is the sdist-inclusion decision AC #3 asks to record; reverse it by
 # deleting this exclude if AGENTS.md is later wanted in the sdist.
+# Measurement reports (athenaeum#3125): `docs/measurements/` and `measurements/`
+# are NOT in the wheel (only the packages and force-includes above are), and
+# ARE in the sdist on purpose. The sdist is a full source snapshot, and its own
+# test suite reads committed reports (tests/test_measurement_docs.py and
+# tests/test_llm_surface.py), so excluding them would break `pytest` run from
+# an unpacked sdist. `tests/evals/` ships in the sdist for the same reason.
 [tool.hatch.build.targets.sdist]
 exclude = ["AGENTS.md"]
 
