@@ -121,6 +121,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   The three-way-merge ancestor read in `raise_supersede` is raw, and is wrong
   under a clean/smudge filter when the ancestor was recorded at raise
   acceptance; its comment says so (athenaeum#3127).
+- Docs: the README Quick start now says that the Python 3.13 floor is a
+  CI-scope choice, not a technical requirement, and that there is no plan to
+  test or declare 3.11 or 3.12. `AGENTS.md` now gives the same floor as
+  `requires-python`, where it said 3.11 (athenaeum#3131).
 
 ## [0.30.0] - 2026-11-22
 
