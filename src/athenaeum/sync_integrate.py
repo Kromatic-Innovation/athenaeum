@@ -1261,6 +1261,8 @@ def answer_held_decision(
         data = text.encode("utf-8")
     else:
         wanted = remote if answer == ANSWER_KEEP_REMOTE else local
+        # Filtered (path=rel, athenaeum#3127): wanted is a committed page blob, and
+        # `data` is compared with and written over the checkout file.
         found = read_blob(repo, wanted, path=rel) if _BLOB_RE.match(wanted) else None
         if found is None:
             raise HeldDecisionRefused("unavailable", f"the {answer} version is not in history")
