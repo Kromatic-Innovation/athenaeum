@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,31 @@ def _same_text(a: str, b: str) -> bool:
     return " ".join(a.split()) == " ".join(b.split())
 
 
+_COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+
+
+def _is_current_prompt(text: str, prompt: str) -> bool:
+    """True when the transcript record *text* is *prompt* itself.
+
+    A slash command reaches the hook as typed (``/name args``) but is stored
+    in the transcript in its wrapper form (``<command-name>/name</command-name>
+    ... <command-args>args</command-args>``), so the wrapper form is compared
+    as the typed command it stands for.
+    """
+    if _same_text(text, prompt):
+        return True
+    name = _COMMAND_NAME_RE.search(text)
+    if name is None:
+        return False
+    command = name.group(1).strip()
+    if not command.startswith("/"):
+        command = "/" + command
+    args = _COMMAND_ARGS_RE.search(text)
+    typed = f"{command} {args.group(1)}" if args else command
+    return _same_text(typed, prompt)
+
+
 def read_previous_turn(transcript_path: str | Path | None, prompt: str = "") -> PreviousTurn | None:
     """Return the turn before *prompt* in the transcript at *transcript_path*.
 
@@ -136,7 +162,7 @@ def read_previous_turn(transcript_path: str | Path | None, prompt: str = "") -> 
                 continue
             if _is_human_record(record):
                 text = _non_tool_result_text(record).strip()
-                if not reply_parts and prompt and _same_text(text, prompt):
+                if not reply_parts and prompt and _is_current_prompt(text, prompt):
                     continue
                 user_message = text
                 break

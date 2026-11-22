@@ -112,6 +112,31 @@ class TestReadPreviousTurn:
         assert turn.user_message == "Tell me about Return Path"
         assert turn.assistant_reply == "Return Path was a client."
 
+    def test_skips_the_current_prompt_when_written_as_a_slash_command(self, tmp_path: Path) -> None:
+        """A slash command is stored in its wrapper form; it is still
+        recognised as the current prompt."""
+        wrapped = (
+            "<command-message>review</command-message>\n"
+            "<command-name>/review</command-name>\n"
+            "<command-args>the Return Path PR</command-args>"
+        )
+        path = _write_transcript(
+            tmp_path / "s.jsonl",
+            [
+                _user("Which PRs are open?"),
+                _assistant("Two: Return Path and Acme."),
+                _user(wrapped),
+            ],
+        )
+        turn = read_previous_turn(path, "/review the Return Path PR")
+        assert turn == PreviousTurn(
+            user_message="Which PRs are open?",
+            assistant_reply="Two: Return Path and Acme.",
+        )
+        # A different command is not the current prompt.
+        other = read_previous_turn(path, "/review the Acme PR")
+        assert other is not None and other.user_message == wrapped
+
     def test_skips_sidechain_meta_and_harness_records(self, tmp_path: Path) -> None:
         path = _write_transcript(
             tmp_path / "s.jsonl",
