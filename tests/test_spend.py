@@ -1756,11 +1756,15 @@ def _six_surface_api_usage() -> TokenUsage:
 
 
 class TestSchemaV4:
-    def test_ledger_version_is_4(self, ledger: Path) -> None:
-        assert spend.LEDGER_VERSION == 4
+    def test_ledger_version_is_at_least_4(self, ledger: Path) -> None:
+        # Not hardcoded to 4: athenaeum#3146 bumped LEDGER_VERSION to 5 for the
+        # optional ``account`` label. What v4 guarantees (tokens_by_surface) must
+        # hold on every later version too.
+        assert spend.LEDGER_VERSION >= 4
         assert spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
         rec = spend.read_ledger(ledger)[0]
-        assert rec["v"] == 4
+        assert rec["v"] == spend.LEDGER_VERSION
+        assert "tokens_by_surface" in rec
 
     def test_tokens_by_surface_is_a_sibling_of_tokens_by_knob(self, ledger: Path) -> None:
         """AC: tokens_by_surface carries the right surface per source, and

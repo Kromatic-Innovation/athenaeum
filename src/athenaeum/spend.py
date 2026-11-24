@@ -72,6 +72,20 @@ counted as *knob-unattributed* by :func:`summarize` — mirroring the
 pre-v2/*unpriceable* treatment exactly: never dropped, still counted in
 ``record_count`` and their billing bucket.
 
+Schema v5 (issue athenaeum#3146) adds, additively — pre-v5 readers keep working:
+
+* ``account`` — an OPTIONAL opaque label naming who paid for the run
+  (``ATHENAEUM_SPEND_ACCOUNT`` env > ``spend.account`` yaml; see
+  :func:`athenaeum.config.resolve_spend_account`). Present only when
+  configured — an unconfigured installation writes no ``account`` key at all.
+  It lets an external reader split athenaeum's spend from other tools that
+  share the same API key or subscription. It is never derived from the
+  credential.
+
+The record fields an EXTERNAL reader may rely on are pinned in
+:data:`READER_CONTRACT_FIELDS` (and documented in
+``docs/reference/data-formats.md``); everything else is internal detail.
+
 The ledger is append-only and crash-safe: each record is a single
 ``O_APPEND`` write of one small line, and the reader tolerates a torn
 trailing line. It records ONLY counts, model ids, run type, provider,
@@ -135,8 +149,42 @@ log = logging.getLogger(__name__)
 #: carries a synthesized ``"unattributed"`` entry (see :func:`tokens_by_surface`)
 #: so an un-tagged call site's spend is a visible remainder rather than a gap.
 #: Pre-v4 rows stay readable and are counted as *surface-unattributed*, never
-#: dropped. See the module docstring and :func:`summarize`.
-LEDGER_VERSION = 4
+#: dropped. v5 (issue athenaeum#3146) adds an optional ``account`` label — an
+#: opaque operator-chosen name for who paid (see
+#: :func:`athenaeum.config.resolve_spend_account`). ADDITIVE and OPTIONAL: the
+#: key is written only when a label is configured and is otherwise ABSENT
+#: (never ``null``), so "not configured" stays distinct from every real value.
+#: Pre-v5 rows read exactly as before. See the module docstring and
+#: :func:`summarize`.
+LEDGER_VERSION = 5
+
+#: The record fields an EXTERNAL reader of ``spend.jsonl`` may rely on (issue
+#: athenaeum#3146). A reader that reads anything else is reading internal
+#: detail that may change without a schema bump. ``account`` is optional
+#: (schema v5, present only when configured); every other field is written
+#: on every v5 record. The rules a reader must follow — ``estimated_cost_usd``
+#: is money only on ``billing_mode: "api"`` rows, ``notional_usd`` is never
+#: money, and one record is one RUN (``api_calls`` carries the call count) —
+#: are documented with this list in ``docs/reference/data-formats.md``.
+#: ``tests/test_spend_reader_contract.py`` pins that every name here, and
+#: every name the doc lists, is a member of a built record's keys.
+READER_CONTRACT_FIELDS: tuple[str, ...] = (
+    "ts",
+    "v",
+    "provider",
+    "billing_mode",
+    "run_type",
+    "models",
+    "api_calls",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "tokens_by_model",
+    "estimated_cost_usd",
+    "notional_usd",
+    "account",
+)
 
 #: The two billing modes, in cwc#1629's vocabulary. ``subscription`` notional
 #: dollars and ``api`` real dollars are two metrics that are NEVER summed.
@@ -173,6 +221,12 @@ PROVIDER_JEV = "jev"
 #: (matched by prefix) rather than a second exact literal.
 RUN_TYPE_LIBRARIAN = "librarian"
 RUN_TYPE_LIBRARIAN_NIGHTLY = "librarian-nightly"
+#: A librarian compile started by ``athenaeum ingest --if-triggered`` when a
+#: configured trigger fired (issue athenaeum#3146), so triggered spend is
+#: attributable apart from interactive/session-end runs (``librarian``) and
+#: the scheduled nightly (``librarian-nightly``). A member of the librarian
+#: FAMILY — :func:`is_librarian_run_type` matches it by prefix.
+RUN_TYPE_LIBRARIAN_TRIGGERED = "librarian-triggered"
 RUN_TYPE_ANSWERS = "answers"
 RUN_TYPE_QUERY_TOPICS = "query-topics"
 #: Historical label for the tier-0 attributed-paste cleanup proposer/verifier
@@ -195,7 +249,8 @@ def is_librarian_run_type(run_type: object) -> bool:
     """True for ``RUN_TYPE_LIBRARIAN`` and every member of its FAMILY (athenaeum#1136).
 
     A family member is ``RUN_TYPE_LIBRARIAN`` itself, or any value prefixed
-    ``"librarian-"`` (currently only :data:`RUN_TYPE_LIBRARIAN_NIGHTLY`, but
+    ``"librarian-"`` (currently :data:`RUN_TYPE_LIBRARIAN_NIGHTLY` and
+    :data:`RUN_TYPE_LIBRARIAN_TRIGGERED`, but
     written as a prefix match rather than a second exact literal so a future
     librarian-family run_type doesn't need a THIRD call site updated to
     match it). :mod:`athenaeum.drain_advisor` uses this — NOT an exact
@@ -598,6 +653,7 @@ def build_record(
     session_id: str | None = None,
     files_processed: int | None = None,
     ts: datetime | None = None,
+    account: str | None = None,
 ) -> dict[str, Any]:
     """Build one ledger record from a :class:`TokenUsage` accumulator.
 
@@ -612,6 +668,11 @@ def build_record(
     so pre-athenaeum#470 readers and non-file run types (``answers`` / ``query-topics``)
     are unaffected; the backlog-drain advisor reads it to derive observed
     files-per-run throughput across runs.
+
+    *account* (issue athenaeum#3146, schema v5) is the optional operator label
+    for who paid — already validated by
+    :func:`athenaeum.config.resolve_spend_account`. Added only when given:
+    ``None`` leaves the key out entirely rather than writing ``null``.
     """
     prov = ledger_provider(provider)
     is_subscription = prov == PROVIDER_CLAUDE_CLI
@@ -667,6 +728,8 @@ def build_record(
     }
     if files_processed is not None:
         record["files_processed"] = int(files_processed)
+    if account is not None:
+        record["account"] = account
     return record
 
 
@@ -703,7 +766,7 @@ def record_spend(
     where this write lands. Resolution is the cache dir either way.
     """
     try:
-        from athenaeum.config import resolve_spend_ledger_enabled
+        from athenaeum.config import resolve_spend_account, resolve_spend_ledger_enabled
 
         if not resolve_spend_ledger_enabled(config):
             return False
@@ -721,6 +784,11 @@ def record_spend(
             provider=provider,
             session_id=session_id,
             files_processed=files_processed,
+            # Issue athenaeum#3146: one label per installation, resolved per
+            # write. record_spend_per_knob_provider routes every per-provider
+            # row through this function, so a split run carries the SAME
+            # label on its api and subscription rows alike.
+            account=resolve_spend_account(config),
         )
         target = ledger_path if ledger_path is not None else resolve_ledger_path(
             config, cache_dir=cache_dir, wiki_root=wiki_root

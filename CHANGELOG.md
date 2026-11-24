@@ -132,6 +132,26 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   the notice, which failed the nightly tier. It now stops at the first line
   after the candidates (athenaeum#3135).
 
+### Added
+
+- Spend records can now say who paid. Set `spend.account` in
+  `athenaeum.yaml` (or `ATHENAEUM_SPEND_ACCOUNT`, which wins) to an opaque
+  label such as `team-api-key`, and every new `spend.jsonl` record carries it
+  as `account`. With no label set, records have no `account` key at all. A
+  value that is not 1 to 64 letters, digits, `.`, `_` or `-` is dropped with
+  a warning and the run still records its spend. The ledger schema moves to
+  version 5; version 4 records read exactly as before (athenaeum#3146).
+- A compile started by `athenaeum ingest --if-triggered` when a trigger fires
+  now records its spend with `run_type: "librarian-triggered"`, so triggered
+  spend is no longer counted as `librarian` (interactive and session-end
+  runs). `ATHENAEUM_RUN_TYPE` still overrides it, and the drain advisor
+  counts these rows like any other librarian run. A plain `athenaeum ingest`
+  is unchanged (athenaeum#3146).
+- Docs: the data-formats reference now documents the `spend.jsonl` fields an
+  external reader may rely on, and the rules for reading them: only
+  `billing_mode: "api"` rows carry money, `notional_usd` is never money, and
+  one record is one run (athenaeum#3146).
+
 ## [0.30.0] - 2026-11-22
 
 **Summary.** 0.30.0 has two themes. First, it acts on the 0.29.0 release

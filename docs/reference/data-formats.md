@@ -389,6 +389,73 @@ auto-memory is neither moved into the wiki nor `git rm`'d; it stays in the
 intake queue and is re-examined on every run.
 
 
+## Spend ledger (`spend.jsonl`)
+
+Every pipeline run that made model calls appends one JSON line to
+`spend.jsonl` in the cache directory (`~/.cache/athenaeum/spend.jsonl` by
+default; `ATHENAEUM_SPEND_LEDGER` or `spend.ledger_path` relocates it). Each
+line is written whole, with `O_APPEND` and an `fsync`, so a reader can tail the
+file while athenaeum writes to it. A reader should skip a torn last line rather
+than fail on it.
+
+The file is athenaeum's own usage ledger. Another tool that wants athenaeum's
+spend, such as a scheduler's cost report, should read this file at report time.
+Athenaeum writes nothing to any other ledger.
+
+**Fields an external reader may rely on.** These names are stable across
+schema versions. Any other field in a record is internal detail and may change
+without notice.
+
+| Field | Meaning |
+|---|---|
+| `ts` | When the run's record was written (ISO-8601, UTC). |
+| `v` | Schema version of the record. The current version is 5. |
+| `provider` | Transport that served the run: `anthropic` (metered API), `claude-cli` (subscription) or `jev`. |
+| `billing_mode` | `api` or `subscription`. Decides what `estimated_cost_usd` means (see the rules below). |
+| `run_type` | Which kind of run spent it: `librarian` (interactive and session-end compiles), `librarian-nightly` (a scheduled nightly), `librarian-triggered` (`athenaeum ingest --if-triggered` when a trigger fired), `answers`, `query-topics`, and others. Every value starting `librarian` belongs to the librarian compile. |
+| `models` | Sorted list of the model ids the run used. |
+| `api_calls` | Number of model calls the run made. |
+| `input_tokens` | Uncached input tokens. |
+| `output_tokens` | Output tokens. |
+| `cache_read_input_tokens` | Input tokens read from the prompt cache. |
+| `cache_creation_input_tokens` | Input tokens written to the prompt cache. |
+| `tokens_by_model` | The same token counts split per model id, so a row can be repriced per model. |
+| `estimated_cost_usd` | Dollar cost of the run. Money only on `billing_mode: "api"` rows; always `0.0` on subscription rows. |
+| `notional_usd` | What the same tokens would cost at API rates. Never money. |
+| `account` | Optional, from schema v5. The operator's label for who paid (see below). Absent when no label is configured. |
+
+**Rules a reader must follow.**
+
+- `estimated_cost_usd` is money **only** on rows with `billing_mode: "api"`.
+  Sum it across those rows to get dollars spent.
+- Subscription rows (`billing_mode: "subscription"`) measure volume, not
+  money. Their `notional_usd` is a counterfactual price for that volume and is
+  **never** money. Never add it to a dollar total.
+- One record is one **run**, not one model call. `api_calls` carries the call
+  count. A run that mixed providers writes one record per provider, and the
+  run's call count sits on one of those records only, so summing `api_calls`
+  over every record still gives the true total.
+- Records written before schema v5 have no `account` key. Treat a missing
+  `account` as "not labelled", never as a particular account.
+
+**Labelling who paid.** Several tools can share one API key or one
+subscription, and then the provider's per-key usage page cannot separate
+athenaeum's spend from theirs. Set an account label and every new record
+carries it:
+
+```yaml
+# athenaeum.yaml
+spend:
+  account: team-api-key
+```
+
+`ATHENAEUM_SPEND_ACCOUNT` sets the same label from the environment and wins
+over the yaml key. The label is an opaque name you choose. Athenaeum never
+derives it from the key or credential. It must be 1 to 64 letters, digits,
+`.`, `_` or `-`; any other value is dropped with a warning, and the run still
+records its spend without a label. One label covers the whole installation.
+Existing records are not relabelled.
+
 ## See also
 
 - [Intake](../modules/intake.md) — what may be written to `raw/`, and what is refused.

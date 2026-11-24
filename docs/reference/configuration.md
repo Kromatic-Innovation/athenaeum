@@ -5937,6 +5937,32 @@ socket, so a typo cannot start a listener.
 
 ## `spend`
 
+### `resolve_spend_account`
+
+- **YAML path:** `spend.account`
+- **Environment variable:** `ATHENAEUM_SPEND_ACCOUNT`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the spend-ledger ``account`` label (env > yaml > None).
+
+An opaque operator-chosen name for whoever pays for this installation's
+model calls, such as ``team-api-key`` or ``personal``. Every spend
+record written while it is set carries it as ``account``, so a reader of
+``spend.jsonl`` can attribute spend when one API key or subscription is
+shared by several tools. It is a label only: athenaeum never derives it
+from, or compares it with, the key or credential in use.
+
+Precedence: ``ATHENAEUM_SPEND_ACCOUNT`` env > ``spend.account`` yaml >
+``None``. ``None`` means "not configured", and the ledger then leaves the
+``account`` key out of the record entirely (it never writes ``null``).
+A blank value falls through to the next layer. A value that is not a
+short token (``[A-Za-z0-9._-]``, 1 to 64 characters) is dropped with a
+warning and resolves to ``None``; it never fails the run. One label per
+installation: a run split across providers writes the same label on
+every row.
+
 ### `resolve_spend_accounting_timezone`
 
 - **YAML path:** `spend.accounting_timezone`
@@ -6507,7 +6533,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RULE_PROPOSALS_MAX_TOKENS` | `src/athenaeum/rule_proposals.py` |
 | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `src/athenaeum/rule_proposals.py` |
 | `ATHENAEUM_RULE_PROPOSALS_THINKING` | `src/athenaeum/rule_proposals.py` |
-| `ATHENAEUM_RUN_TYPE` | `src/athenaeum/_cmd_run.py`, `src/athenaeum/librarian.py`, `src/athenaeum/spend.py` |
+| `ATHENAEUM_RUN_TYPE` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/_cmd_run.py`, `src/athenaeum/librarian.py`, `src/athenaeum/spend.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_MAX_TOKENS` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_THINKING` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
