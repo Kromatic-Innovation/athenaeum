@@ -62,6 +62,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -4325,6 +4326,58 @@ def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
             raw = cfg.get("ledger_path")
             if isinstance(raw, str) and raw.strip():
                 return Path(raw).expanduser()
+    return None
+
+
+#: The shape a spend-ledger ``account`` label must have (athenaeum#3146): a
+#: short opaque token. Anything else is dropped with a warning rather than
+#: written, so a stray path or a pasted credential never lands in the ledger.
+_SPEND_ACCOUNT_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def resolve_spend_account(config: dict[str, Any] | None) -> str | None:
+    """Resolve the spend-ledger ``account`` label (env > yaml > None) (athenaeum#3146).
+
+    An opaque operator-chosen name for whoever pays for this installation's
+    model calls, such as ``team-api-key`` or ``personal``. Every spend
+    record written while it is set carries it as ``account``, so a reader of
+    ``spend.jsonl`` can attribute spend when one API key or subscription is
+    shared by several tools. It is a label only: athenaeum never derives it
+    from, or compares it with, the key or credential in use.
+
+    Precedence: ``ATHENAEUM_SPEND_ACCOUNT`` env > ``spend.account`` yaml >
+    ``None``. ``None`` means "not configured", and the ledger then leaves the
+    ``account`` key out of the record entirely (it never writes ``null``).
+    A blank value falls through to the next layer. A value that is not a
+    short token (``[A-Za-z0-9._-]``, 1 to 64 characters) is dropped with a
+    warning and resolves to ``None``; it never fails the run. One label per
+    installation: a run split across providers writes the same label on
+    every row.
+    """
+    raw: object = None
+    source = ""
+    env = os.environ.get("ATHENAEUM_SPEND_ACCOUNT")
+    if env is not None and env.strip():
+        raw, source = env.strip(), "ATHENAEUM_SPEND_ACCOUNT"
+    elif isinstance(config, dict):
+        cfg = config.get("spend")
+        if isinstance(cfg, dict):
+            value = cfg.get("account")
+            if isinstance(value, str):
+                if value.strip():
+                    raw, source = value.strip(), "spend.account"
+            elif value is not None:
+                raw, source = value, "spend.account"
+    if raw is None:
+        return None
+    if isinstance(raw, str) and _SPEND_ACCOUNT_RE.fullmatch(raw):
+        return raw
+    logger.warning(
+        "ignoring invalid %s value: an account label must be 1-64 characters "
+        "of letters, digits, '.', '_' or '-'; spend records will carry no "
+        "account label",
+        source,
+    )
     return None
 
 

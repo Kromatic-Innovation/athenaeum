@@ -683,7 +683,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     import logging
 
     from athenaeum.config import load_config
-    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest
+    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest, librarian_run_type
+    from athenaeum.spend import RUN_TYPE_LIBRARIAN_TRIGGERED
 
     configure_logging(verbose=getattr(args, "verbose", False))
 
@@ -732,6 +733,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # lock-acquire below so a "nothing fired" evaluation never contends for
     # the run lock at all.
     trigger_reason = "on-demand"
+    # Issue athenaeum#3146: the spend-ledger run type. ``None`` (a plain
+    # ``athenaeum ingest``) keeps the pre-existing resolution inside ``run()``
+    # — env ``ATHENAEUM_RUN_TYPE`` > ``librarian`` — byte-identical to before.
+    # Only a FIRED trigger sets it, below.
+    run_type: str | None = None
     if getattr(args, "if_triggered", False):
         decision, quiesce_state = _evaluate_ingest_trigger(
             knowledge_root, raw_root, cfg, args.cache_dir
@@ -771,6 +777,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 noop_summary["session"] = args.session
             print(json.dumps(noop_summary))
             return 0
+        # The trigger fired and this run will compile: tag its spend
+        # ``librarian-triggered`` unless ATHENAEUM_RUN_TYPE names something
+        # else (same precedence as every other librarian run type).
+        run_type = librarian_run_type(cfg, default=RUN_TYPE_LIBRARIAN_TRIGGERED)
 
     # Issue athenaeum#309 single-flight: a real compile mutates wiki/ and shares the
     # nightly-run lock. A --dry-run reads only, so it does not take the lock.
@@ -800,6 +810,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             # check. `lock` is guaranteed non-None here (dry-run returns
             # before this block acquires one).
             heartbeat=lock.heartbeat if lock is not None and not isinstance(lock, int) else None,
+            run_type=run_type,
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(

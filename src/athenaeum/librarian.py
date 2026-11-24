@@ -4663,7 +4663,9 @@ def unbatchable_knobs_enabled(config: dict[str, object] | None) -> list[str]:
     )
 
 
-def librarian_run_type(config: dict[str, object] | None = None) -> str:
+def librarian_run_type(
+    config: dict[str, object] | None = None, *, default: str | None = None
+) -> str:
     """Resolve the ``run_type`` ledger-attribution tag from env > default (athenaeum#1136).
 
     Shape mirrors :func:`librarian_batch_mode` (athenaeum#236) — the CLI
@@ -4681,11 +4683,17 @@ def librarian_run_type(config: dict[str, object] | None = None) -> str:
     :data:`athenaeum.spend.RUN_TYPE_LIBRARIAN` — UNCHANGED from every
     pre-athenaeum#1136 caller, so an operator who sets neither the flag nor
     the env var sees byte-identical ledger rows.
+
+    *default* (issue athenaeum#3146) replaces that fallback for a caller that
+    knows which kind of run it is but must still yield to an explicit env
+    override — ``athenaeum ingest --if-triggered`` passes
+    :data:`athenaeum.spend.RUN_TYPE_LIBRARIAN_TRIGGERED` when a trigger fired,
+    so ``ATHENAEUM_RUN_TYPE`` keeps the same precedence it has everywhere else.
     """
     env = os.environ.get("ATHENAEUM_RUN_TYPE")
     if env is not None and env.strip():
         return env.strip()
-    return spend.RUN_TYPE_LIBRARIAN
+    return default if default is not None else spend.RUN_TYPE_LIBRARIAN
 
 
 def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> int:
