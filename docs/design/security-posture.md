@@ -422,6 +422,38 @@ breaking multi-writer sync: every store read of a file at a past revision goes
 through the repository's smudge filters, so `sync.mode: integrate` merges the
 plaintext a checkout would write and not the committed bytes.
 
+**That property means sync runs filter commands (athenaeum#3128).** A git
+clean or smudge filter is an arbitrary command. Store reads of a file as a
+commit holds it (`read_file_at_revision`, and `read_blob` when given a path)
+run `git cat-file --filters`. That covers the `sync.mode: integrate` merge and
+the push-time filing checks. Integrate-mode writes of a merged file
+(`build_merged_tree`) run `git hash-object --path`. Both execute whatever
+filter driver the store's attributes select for that path. The command runs
+as the librarian's user, with its environment, during the sync step that
+runs before compile (`athenaeum run`). Nobody has to check anything out for it
+to happen. With no filter configured these calls behave like plain
+`git cat-file blob` and `git hash-object`, and nothing extra runs.
+
+What this means for a store cloned from someone else:
+
+- **A clone does not bring filter commands with it.** Git reads a driver's
+  command only from git config: the store's own `.git/config`, your global
+  config, the system config. A committed `.gitattributes` can only *name* a
+  driver, and `git clone` does not copy the remote's `.git/config`.
+- **A named driver you already define will run on their content.** If the
+  store's `.gitattributes` names a driver that your global or system config
+  defines (for example a decryption filter you set up for your own stores),
+  sync runs that command over every file the attribute matches.
+- **A copied store is different from a cloned one.** A store set up by
+  copying someone's whole directory, `.git/config` included, carries their
+  filter commands, and sync will run them.
+- **Check before the first sync** of a store you did not create:
+  `git config --show-origin --get-regexp '^filter\.'` lists every driver
+  command git would use there, and `git check-attr filter -- <path>` (or the
+  store's `.gitattributes`) shows which paths select one. These are the same
+  filters a `git checkout` or `git pull` of that store would run, so trusting
+  the store for sync is the same decision as trusting it for checkout.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

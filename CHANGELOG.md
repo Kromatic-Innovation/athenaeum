@@ -125,6 +125,12 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   CI-scope choice, not a technical requirement, and that there is no plan to
   test or declare 3.11 or 3.12. `AGENTS.md` now gives the same floor as
   `requires-python`, where it said 3.11 (athenaeum#3131).
+- Docs: the security posture (encryption at rest) now says that sync runs
+  the clean/smudge filters the store's git config defines: store reads of a
+  committed file and integrate-mode writes of a merged file execute the
+  selected filter command during `athenaeum run`. It also says what that means
+  for a store you cloned or copied from someone else, and how to check before
+  the first sync (athenaeum#3128).
 - Eval harness: the nightly overflow-breadcrumb eval
   (`tests/evals/test_adapter_overflow_breadcrumb_1905.py`) reads the overflow
   notice again. The push now carries a top-hit excerpt and a linked-neighbour
