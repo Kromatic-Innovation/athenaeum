@@ -23,7 +23,8 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0,<7",
-    # anthropic is pre-1.0 and ships breaking changes freely; fastmcp is
+    # anthropic has crossed several majors (0.x, 1.x, 2.x) and ships breaking
+    # changes freely; fastmcp is
     # post-1.0 (3.x as of 2026-05) but still iterating on its MCP protocol
     # surface; chromadb has shipped sqlite schema migrations in minor bumps.
     # We cap each at an explicit upper bound (next-major boundary or wider)
@@ -40,9 +41,10 @@ dependencies = [
     # which the test suite stubs. The lock pins 0.120.2 (every locked CI
     # job); the unlocked `clean-venv` job installs whatever is newest. The
     # ceiling stays at the next major boundary (`<3.0`): a tighter `<1` would
-    # exclude releases that job already exercises (athenaeum#2686). Versions
-    # between 0.50.0 and 0.120.2 are best effort (see "Supported dependency
-    # ranges" in docs/guides/install.md).
+    # exclude releases that job already exercises (athenaeum#2686). CI tests
+    # only those three points (floor, lock, newest); every other version in
+    # the range, including whole majors, is best effort (athenaeum#3130; see
+    # "Supported dependency ranges" in docs/guides/install.md).
     "anthropic>=0.50.0,<3.0",
     "pydantic>=2.0,<3.0",
 ]

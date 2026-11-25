@@ -415,24 +415,36 @@ the only way to find out is to notice that recall feels stale, or to run
 | `mcp` (`[mcp]` extra) | `>=2.0,<3.0` |
 | `anthropic` | `>=0.50.0,<3.0` -- older releases lack the `OverloadedError` class the retry layer classifies |
 
-These are the ranges the package metadata accepts. CI tests these versions:
+These are the ranges the package metadata accepts. CI tests three versions of
+each, and only those three:
 
-- **The locked set.** `requirements-ci.txt` in the repository pins every
-  dependency, and the main test jobs install it, so those exact versions are
-  what the full suite runs against.
-- **The newest releases.** One CI job installs the package with no lock at
-  all, which exercises the newest releases the ranges allow.
-- **The floors.** A separate `floors` CI job installs the oldest releases the
-  ranges admit (`anthropic` 0.50.0, `fastmcp` 4.0.0, `mcp` 2.0.0) with
-  everything else at the lock, and runs the tests that touch those packages.
-  That job is advisory: a red result there means a floor should be raised, so
-  it is not part of the required merge gate.
+- **The locked version, full suite.** `requirements-ci.txt` in the repository
+  pins every dependency, and the main test, coverage and type-check jobs
+  install it, so the pinned versions are what the whole test suite runs
+  against. These jobs are part of the required merge gate. To see which
+  `anthropic` a given release was tested with, look up the `anthropic==` line
+  in `requirements-ci.txt` at that release's tag.
+- **The newest release, smoke subset.** The `clean-venv` CI job installs the
+  package with no lock at all, so it gets the newest release each range
+  allows on the day CI runs. It runs only a short smoke subset: the modules
+  that import the third-party dependency surface directly, the dependency and
+  environment checks, and the public API tests, not the full suite. It is part
+  of the required merge gate. A release that comes out after an athenaeum
+  release was built has not been tested against that athenaeum release.
+- **The floor, SDK subset.** A separate `floors` CI job installs the oldest
+  releases the ranges admit (`anthropic` 0.50.0, `fastmcp` 4.0.0, `mcp` 2.0.0)
+  with everything else at the lock, and runs the tests that touch those
+  packages. That job is advisory: a red result there means a floor should be
+  raised, so it is not part of the required merge gate.
 
 `requirements-ci.txt` governs CI installs only (it is applied with `-c`); a plain `pip install athenaeum` or `uv tool install athenaeum` resolves from the ranges in the package metadata, and no lockfile (`uv.lock` is git-ignored) is committed or used by CI, so the two can resolve different patch versions.
 
-Versions inside a range but between the floor and the lock are not exercised;
-treat them as best effort. `anthropic` in particular spans many majors, and
-only the floor, the locked release and the newest one are tested.
+Every other version inside a range is not exercised; treat it as best effort.
+That covers the versions between the floor and the lock and the versions
+between the lock and the newest release. For `anthropic` the range spans
+several majors (`0.x`, `1.x` and `2.x`), so most of it, including whole
+majors, has never run in CI. If you need a version CI has run, pin `anthropic`
+to the one in `requirements-ci.txt` at the tag you install.
 
 ## Support policy
 
