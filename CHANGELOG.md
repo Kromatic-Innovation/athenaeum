@@ -131,6 +131,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   selected filter command during `athenaeum run`. It also says what that means
   for a store you cloned or copied from someone else, and how to check before
   the first sync (athenaeum#3128).
+- Docs: the install guide's supported dependency ranges now say which
+  versions CI tests and how much of the suite each one runs: the locked
+  version (full suite), the newest release on the day CI runs (smoke subset)
+  and the floor (SDK subset, advisory). Every other version in a range is best
+  effort, which for `anthropic` includes whole majors; the guide says how to
+  find the locked `anthropic` for a release. The `anthropic` range is
+  unchanged, and the `pyproject.toml` comment no longer calls the SDK pre-1.0
+  (athenaeum#3130).
 - Eval harness: the nightly overflow-breadcrumb eval
   (`tests/evals/test_adapter_overflow_breadcrumb_1905.py`) reads the overflow
   notice again. The push now carries a top-hit excerpt and a linked-neighbour
