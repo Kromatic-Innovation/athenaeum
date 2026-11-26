@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -172,15 +173,21 @@ def test_surface_class_form_ignores_the_exclusion_gate() -> None:
 
 
 def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Resolve both modules from ``sys.modules`` at call time: other test files
+    # reload ``athenaeum.*`` modules, and the join's deferred import reads the
+    # CURRENT ``athenaeum.storage``, so a spy on a stale module object would be
+    # bypassed (an order-dependent failure under xdist).
+    storage_mod = importlib.import_module("athenaeum.storage")
+    pii_mod = importlib.import_module("athenaeum.pii")
     calls: list[tuple[str | None, str | None, str | None]] = []
-    real = storage.route_for
+    real = storage_mod.route_for
 
     def spy(page_type, field=None, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((page_type, field, kwargs.get("surface_class")))
         return real(page_type, field, **kwargs)
 
-    monkeypatch.setattr(storage, "route_for", spy)
-    fields, _, _ = pii.assemble_excluded_read(
+    monkeypatch.setattr(storage_mod, "route_for", spy)
+    fields, _, _ = pii_mod.assemble_excluded_read(
         Path("page.md"),
         {},
         {"uid": "u", "emails": ["a@example.com"], "nickname": "x"},
