@@ -80,6 +80,10 @@ class RetireCandidate:
     uid: str
     path: Path
     successor_uid: str | None = None
+    #: Issue athenaeum#3151: ``False`` when the page's contact records sit on a
+    #: surface the caller cannot read. The cascade is then skipped, so a
+    #: retirement never writes to (or reveals) a store the caller cannot see.
+    settle_contacts: bool = True
 
 
 @dataclass
@@ -318,6 +322,8 @@ def apply_retirement(
         # retirement recorded (see `RetireCandidate.successor_uid`'s
         # docstring for today's honest limit), `None` otherwise.
         for cand, _rel in pairs:
+            if not cand.settle_contacts:
+                continue
             settle_removed_uid_records_after_removal(
                 knowledge_root,
                 cand.uid,

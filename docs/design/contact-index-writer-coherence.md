@@ -149,3 +149,10 @@ a real GDPR/right-to-erasure CLI or API surface onto it is out of scope here,
 exactly as "any change to what `resolve_handle_query` returns" is out of
 scope — this issue is the mechanism and its proof, not the operator-facing
 erasure workflow.
+
+Since athenaeum#3151, `athenaeum retire` retires a contact record by uid. It
+archives rather than erases (a provenance snapshot commit, then `git rm`), so
+it calls `contact_index_cache.invalidate_cached_record` for each removed record
+rather than `erase_contact_record`, which would unlink the file a second time.
+The cache coherence is the same: the persisted entry is dropped in the same
+run that removes the record.

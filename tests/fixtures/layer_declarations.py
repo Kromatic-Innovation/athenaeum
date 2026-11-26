@@ -353,6 +353,7 @@ MODULE_LAYER: dict[str, int] = {
     "page_recompile_queue": 4,
     "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
+    "retire_targets": 4,  # athenaeum#3151: retire any uid across stores; imports L4
     "retraction_cascade": 4,
     "name_structure": 4,
     "prior_rulings": 4,  # athenaeum#2077: prior human merge rulings for the proposers
