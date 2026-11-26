@@ -1153,6 +1153,9 @@ def check_unmarked_vault_locations(config: dict) -> CheckResult:
         "off-corpus location(s) holding routed fields are not marked sensitive: "
         + ", ".join(unmarked),
         fix="set sensitive: true on each listed storage.adapters entry in athenaeum.yaml",
+    )
+
+
 def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
     """Report the declared ``storage.history`` and whether a repository backs it (athenaeum#3160).
 
