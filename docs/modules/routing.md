@@ -103,6 +103,41 @@ vault and an archive vault).
 Nothing keeps the targets in step after an out-of-band edit, and every target
 holds the same fields.
 
+## Whole pages in a vault
+
+A `storage.routes` rule with a `page_type`, no `fields`, and a vault as its first
+`to` target sends every page of that type to the vault: compile (entity creation,
+batch apply and page recompile) writes the new page there, not under `wiki/`.
+Some records are sensitive as a whole, not field by field.
+
+```yaml
+storage:
+  routes:
+    - page_type: reference
+      to: [vault]
+```
+
+- **Pages in a vault are not searchable.** They are outside the keyword and
+  vector indexes, outside merge discovery and outside name lookup in the main
+  store. Searching inside a vault is not supported.
+- **Read one by uid.** `read_entity` finds the page by its uid in the vault. With
+  the read flag set (`include_sensitive`) it returns the page; without it the
+  answer says a page exists and is withheld (`withheld: true`) and carries no field
+  value, no body and no file name.
+- **An update finds its page inside the vault only.** A name that matches a page
+  in the main store is not a match, and a vault page's name never matches in the
+  main store. A page whose name the vault already holds is not written a second
+  time; the raw note is kept.
+- **A link from the main store to a vault page is refused.** The write is parked
+  and logged by uid, as any other refused link. A page inside a vault may link
+  anywhere.
+- **The run summary counts pages written per vault** (`vault-pages`), and
+  logs neither a title nor any body text for them.
+- **Other routes are unchanged.** A page type routed to a location in the index
+  stays indexed and searchable. A `storage.mapping` entry, a field rule, or a
+  location that is outside the index but not a vault is still refused for compile
+  with `SurfaceNotIndexedError`.
+
 ## What it refuses
 
 Sensitivity routing fails closed — `route_sensitive_values` raises

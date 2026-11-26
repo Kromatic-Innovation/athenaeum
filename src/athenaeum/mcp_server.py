@@ -1149,7 +1149,13 @@ def entity_read(
         if entry is not None:
             page_path = entry.path
             entity_index._by_uid[uid] = page_path
-    if page_path is None:
+    # athenaeum#3174: a page of a type routed whole to a vault is in no index;
+    # pii.read_entity finds it by uid in the vault itself.
+    _vault_read = page_path is None and (
+        pii.vault_route_for_page_type(pii.surface_class_for_page_class(page_class, config), config)
+        is not None
+    )
+    if page_path is None and not _vault_read:
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
         )
@@ -1158,7 +1164,12 @@ def entity_read(
     # athenaeum#864's "must NEVER receive contact values" requirement) — mirrors
     # `_recall_via_backend`'s Layer C re-check against fresh on-disk
     # frontmatter rather than trusting a cached/stale value.
+    if caller_audience is not None and _vault_read:
+        # A restricted caller never reaches a vault page: the audience check
+        # needs the page's own frontmatter, which this path does not read.
+        return json.dumps(_forbidden_result(), indent=2)
     if caller_audience is not None:
+        assert page_path is not None
         try:
             text = page_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

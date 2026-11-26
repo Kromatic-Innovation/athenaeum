@@ -1357,9 +1357,80 @@ def page_write_root_for_class(
     declared ``read_only`` (athenaeum#2621), and :class:`StorageConfigError`
     for an unknown adapter.
     """
+    adapter = resolve_adapter_for_class(entity_class, config)
     return _write_root_for_adapter(
-        resolve_adapter_for_class(entity_class, config), entity_class, config, knowledge_root
+        adapter,
+        entity_class,
+        config,
+        knowledge_root,
+        vault_ok=vault_route_for_page_type(entity_class, config) == adapter.name,
     )
+
+
+def vault_route_for_page_type(page_type: str | None, config: dict[str, Any] | None) -> str | None:
+    """The vault a whole page type is written to by a ``storage.routes`` rule, else ``None``.
+
+    A rule with no ``fields`` for *page_type* whose primary target (the first
+    of ``to``) is sensitive (:func:`is_sensitive`) sends whole pages of the type
+    to that vault (athenaeum#3174). ``storage.mapping`` entries, field rules,
+    discards and a target that is merely outside the corpus are not vault
+    routes, so the compile write guard stays closed for them.
+    """
+    cls = (page_type or "").strip()
+    if not cls:
+        return None
+    for route in configured_routes(config):
+        if route.page_type != cls or route.fields is not None or route.discard:
+            continue
+        return route.to[0] if is_sensitive(route.to[0], config) else None
+    return None
+
+
+def vault_page_roots(config: dict[str, Any] | None, knowledge_root: Path) -> dict[str, Path]:
+    """Vault name -> root for every vault a whole page type is routed to (athenaeum#3174)."""
+    roots: dict[str, Path] = {}
+    for route in configured_routes(config):
+        if route.page_type is None or route.fields is not None or route.discard:
+            continue
+        name = route.to[0]
+        if name not in roots and is_sensitive(name, config):
+            roots[name] = available_adapters(config)[name].resolve_root(knowledge_root)
+    return roots
+
+
+def vault_for_path(path: Path, config: dict[str, Any] | None, knowledge_root: Path) -> str | None:
+    """The vault *path* is under, when a page-type rule sends whole pages there (athenaeum#3174)."""
+    resolved = path.resolve()
+    for name, root in vault_page_roots(config, knowledge_root).items():
+        if root.resolve() in resolved.parents:
+            return name
+    return None
+
+
+# Pages written to each vault this run (athenaeum#3174): vault names and counts
+# only -- never a title, a uid or any body text.
+_VAULT_PAGE_COUNTS: dict[str, int] = {}
+_VAULT_PAGE_LOCK = threading.Lock()
+
+
+def note_vault_page(vault: str | None) -> None:
+    """Count one page written to *vault* (a location name, never page content)."""
+    if not vault:
+        return
+    with _VAULT_PAGE_LOCK:
+        _VAULT_PAGE_COUNTS[vault] = _VAULT_PAGE_COUNTS.get(vault, 0) + 1
+
+
+def vault_page_counts() -> dict[str, int]:
+    """A snapshot of the per-vault page counts, for the run summary."""
+    with _VAULT_PAGE_LOCK:
+        return dict(sorted(_VAULT_PAGE_COUNTS.items()))
+
+
+def reset_vault_page_counts() -> None:
+    """Zero the per-vault counts (the start of a run)."""
+    with _VAULT_PAGE_LOCK:
+        _VAULT_PAGE_COUNTS.clear()
 
 
 def _write_root_for_adapter(
@@ -1367,8 +1438,14 @@ def _write_root_for_adapter(
     entity_class: str | None,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    vault_ok: bool = False,
 ) -> Path:
-    """The write-guard checks shared by the type-derived and store-named routes."""
+    """The write-guard checks shared by the type-derived and store-named routes.
+
+    *vault_ok* lifts only the not-indexed refusal, and only for a sensitive
+    adapter reached through a page-type rule (athenaeum#3174).
+    """
     if adapter.read_only:
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -1379,7 +1456,7 @@ def _write_root_for_adapter(
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, but {declared}"
         )
-    if not adapter.corpus_policy.embedded:
+    if not adapter.corpus_policy.embedded and not (vault_ok and adapter.sensitive):
         raise SurfaceNotIndexedError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
             "not indexed (embedded: false); compile cannot write pages there"
@@ -1412,7 +1489,13 @@ def page_write_root_for_store(
         raise StorageConfigError(
             f"intake decision names store {store!r}, which this install does not hold"
         )
-    return _write_root_for_adapter(adapter, entity_class, config, knowledge_root)
+    return _write_root_for_adapter(
+        adapter,
+        entity_class,
+        config,
+        knowledge_root,
+        vault_ok=vault_route_for_page_type(entity_class, config) == adapter.name,
+    )
 
 
 def store_opaque_filenames(store: str, config: dict[str, Any] | None) -> bool:

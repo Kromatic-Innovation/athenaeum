@@ -90,7 +90,7 @@ from athenaeum.compile_routing import (
 )
 from athenaeum.config import resolve_drop_log, resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
-from athenaeum.intake_destination import destination_for_new_entity
+from athenaeum.intake_destination import destination_for_new_entity, vault_page_exists
 from athenaeum.logconf import run_id_var
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
@@ -127,7 +127,7 @@ from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import screen_raw_for_compile
-from athenaeum.storage import discarded_page_types, refuse_read_only_write
+from athenaeum.storage import discarded_page_types, note_vault_page, refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
@@ -2640,15 +2640,28 @@ def process_batch_run(
             # A class mapped to a READ-ONLY surface (athenaeum#2621) is refused
             # per entity: nothing is written, the raw is retained (see below).
             _create_roots: list[Path | None] = []
+            _create_vaults: list[str | None] = []
             for _e in new_entities:
                 try:
                     _dest = destination_for_new_entity(_e, resolved_config, wiki_root.parent)
                     _create_roots.append(_dest.root)
+                    # athenaeum#3174: a name already held in the vault is an
+                    # update there, not a second page; keep the raw.
+                    if vault_page_exists(_dest, _e.name):
+                        log.warning("  Refused (page already in vault %s)", _dest.vault)
+                        _link_refused = True
+                        _create_roots[-1] = None
+                        _create_vaults.append(None)
+                    else:
+                        _create_vaults.append(_dest.vault)
                 except ReadOnlySurfaceError as _exc:
                     log.warning("  Refused (read-only surface): %s", _exc)
                     _ro_refused += 1
                     _create_roots.append(None)
-            for entity, _create_root in zip(new_entities, _create_roots):
+                    _create_vaults.append(None)
+            for entity, _create_root, _create_vault in zip(
+                new_entities, _create_roots, _create_vaults
+            ):
                 if _create_root is None:
                     continue
                 rendered = entity.render()
@@ -2686,9 +2699,15 @@ def process_batch_run(
                     _link_refused = True
                     continue
                 atomic_write_text(_create_root / entity.filename, rendered)
-                index.register(entity, root=_create_root)
+                if _create_vault is None:
+                    index.register(entity, root=_create_root)
+                else:
+                    note_vault_page(_create_vault)  # never in the main name index
                 written_entities.append(entity)
-                log.info("  Created: %s → %s", entity.name, entity.filename)
+                if _create_vault is None:
+                    log.info("  Created: %s → %s", entity.name, entity.filename)
+                else:  # athenaeum#3174: a vault page's title and file name are not logged
+                    log.info("  Created: 1 page in vault %s", _create_vault)
 
             if escalations:
                 tier4_escalate(

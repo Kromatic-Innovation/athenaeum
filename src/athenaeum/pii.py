@@ -192,7 +192,7 @@ from athenaeum.models import (
     slugify,
     valid_until_expired,
 )
-from athenaeum.storage import surface_root_for_class
+from athenaeum.storage import surface_root_for_class, vault_route_for_page_type
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -5804,6 +5804,10 @@ class EntityRead:
     do_not_email: DoNotEmailState = dataclass_field(
         default_factory=lambda: DoNotEmailState(marked=False)
     )
+    #: True for a whole page held in a vault that this read did not unlock
+    #: (athenaeum#3174): the page exists, nothing of it is returned. ``page_path``
+    #: is then the vault's directory, never the page's own file name.
+    withheld: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable dict: paths as ``str``, redactions as a list of dicts.
@@ -5841,6 +5845,7 @@ class EntityRead:
                 for name, values in self.validity.items()
             },
             "do_not_email": self.do_not_email.to_dict(),
+            **({"withheld": True} if self.withheld else {}),
         }
 
 
@@ -6160,7 +6165,7 @@ def read_entity(
         entity_index = entity_index_for_uid(
             knowledge_root / "wiki", uid, cache_dir=cache_dir
         )
-    return _entity_read_from_indexes(
+    read = _entity_read_from_indexes(
         uid,
         entity_index=entity_index,
         contact_records=contact_records,
@@ -6168,6 +6173,51 @@ def read_entity(
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
         surface_class=surface_class,
         config=config,
+    )
+    if read is None and record_path is not None:
+        return _vault_page_read(uid, record_path, include_excluded, surface_class, config)
+    return read
+
+
+def _vault_page_read(
+    uid: str,
+    page_path: Path,
+    include_excluded: bool,
+    surface_class: str,
+    config: dict[str, Any] | None,
+) -> EntityRead | None:
+    """The read of a whole page held in a vault (athenaeum#3174).
+
+    Only for a page type a ``storage.routes`` rule sends whole to a vault; any
+    other record found by uid with no wiki page stays "not found". With
+    *include_excluded* the page's frontmatter and body are returned; without
+    it the result says the page exists and is withheld, and carries no field
+    value, no body and not the page's file name.
+    """
+    if vault_route_for_page_type(surface_class, config) is None:
+        return None
+    if not include_excluded:
+        return EntityRead(
+            uid=uid,
+            page_path=page_path.parent,
+            frontmatter={},
+            body="",
+            contact={},
+            redactions=(),
+            contact_included=False,
+            contact_record_path=None,
+            withheld=True,
+        )
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    return EntityRead(
+        uid=uid,
+        page_path=page_path,
+        frontmatter=frontmatter,
+        body=body,
+        contact={},
+        redactions=(),
+        contact_included=True,
+        contact_record_path=page_path,
     )
 
 
