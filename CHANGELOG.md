@@ -66,6 +66,9 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
+  built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
+  copies are computed from them, with no behaviour change (athenaeum#3159).
 - One resolver now answers where a field or a page type is stored:
   `storage.route_for(page_type, field=None, *, config)` returns a frozen
   `RouteDecision` (`targets`, `rule`, `sensitive`) computed from the existing

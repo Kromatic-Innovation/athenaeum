@@ -1250,11 +1250,18 @@ _ACCESS_PUBLIC = "open"
 # the backends test the same marker instead of hardcoding a literal.
 AUDIENCE_PUBLIC_TOKEN = "__access_open__"
 
+# The ``access:`` levels, ordered least -> most restrictive: the ONE definition
+# (athenaeum#3159). ``librarian.FALLBACK_ACCESS``, ``sensitivity_lint``'s
+# restricted set and :data:`OWNER_ONLY_ACCESS_LEVELS` are computed from it.
+# ``screening._ACCESS_RANK`` keeps a literal copy (screening must import nothing
+# from the package at module scope) that a test binds to this tuple.
+ACCESS_LEVELS: tuple[str, ...] = (_ACCESS_PUBLIC, "internal", "confidential", "personal")
+
 # The ``access:`` levels that are owner-only: they contribute no audience role,
 # so a restricted caller is shut out unless an explicit ``audience:`` grant opens
 # the page (see :func:`effective_audience`). The single definition of the set;
 # ``mcp_server`` imports it rather than keeping its own copy (athenaeum#2924).
-OWNER_ONLY_ACCESS_LEVELS: frozenset[str] = frozenset({"internal", "confidential", "personal"})
+OWNER_ONLY_ACCESS_LEVELS: frozenset[str] = frozenset(ACCESS_LEVELS) - {_ACCESS_PUBLIC}
 
 # Words that are access levels / the internal public sentinel, NOT audience
 # roles. Dropped from any ``audience:`` list so a mislabeled entry can never be
