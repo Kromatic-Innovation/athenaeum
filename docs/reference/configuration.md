@@ -6396,6 +6396,38 @@ storage:
     - _some_other_machine_log.jsonl
 ```
 
+### `resolve_storage_routes`
+
+- **YAML path:** `storage.routes`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `[]`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the ``storage.routes`` table of routing rules.
+
+Each rule is a mapping with ``page_type`` (or, in its place,
+``sensitivity_class``), an optional ``fields`` list, and ``to``, a list of
+location names (``storage.adapters`` names plus the built-ins). This issue
+accepts a ``to`` list of exactly one name. A rule with ``fields`` sends those
+fields of that page type to the target, and the target must be a location
+marked ``sensitive: true``; a rule without ``fields`` sends the whole page
+type (the long form of a ``storage.mapping`` entry, which stays as the short
+form); a ``sensitivity_class`` rule gives the location for values recognised
+in free text and replaces the per-class lookup in ``sensitivity_routing``.
+A field named in a rule needs no value on any page: fields are declared by
+the operator and none is built in.
+
+Returns the raw list (still primitive) or an EMPTY list when unset, the code
+default: nothing is routed unless a rule says so, so an unconfigured base is
+byte-identical. A value that is not a list is returned as is so that
+`athenaeum.storage.configured_routes` can refuse it loudly with the key
+in the message. The rules are validated there (duplicate rules, a page type
+in both ``storage.routes`` and ``storage.mapping``, an unknown ``to``, a
+field rule whose target is not sensitive, a ``to`` list whose length is not
+one) and each raises ``StorageConfigError``. Records already on disk are read
+through a rule without being moved.
+
 ## `vector`
 
 ### `resolve_embedding_model`

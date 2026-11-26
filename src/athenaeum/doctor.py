@@ -1126,12 +1126,11 @@ def check_unmarked_vault_locations(config: dict) -> CheckResult:
     is set), but nothing a report or an access check can read says it is a
     vault (athenaeum#3161). Never "fail": nothing is broken.
     """
-    from athenaeum.config import resolve_storage_mapping
-    from athenaeum.storage import StorageConfigError, available_adapters
+    from athenaeum.storage import StorageConfigError, available_adapters, routed_storage_mapping
 
     try:
         adapters = available_adapters(config)
-        mapping = resolve_storage_mapping(config)
+        mapping = routed_storage_mapping(config)
     except StorageConfigError as exc:
         return CheckResult("unmarked_vault_locations", "skip", f"storage config invalid: {exc}")
     unmarked = sorted(

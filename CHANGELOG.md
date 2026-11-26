@@ -82,6 +82,8 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `storage.routes`: a list of rules that each send a page type, or chosen fields of one, or a sensitivity class, to one named location (athenaeum#3166). A rule is `page_type` (or `sensitivity_class`), an optional `fields` list and `to`, a list of exactly one location name. A field rule's target must be `sensitive: true`; a rule without `fields` is the long form of a `storage.mapping` entry, which stays; a `sensitivity_class` rule replaces the per-class lookup in value routing. Duplicate rules, a page type named in both `storage.routes` and `storage.mapping`, an unknown target and a non-sensitive field target raise `StorageConfigError`. Nothing is routed unless a rule says so, records already on disk are read through a rule without being moved, and `athenaeum init` writes a commented example and no active rule.
+
 - `storage.history: git | none` (default `git`) declares whether a knowledge
   directory keeps history (athenaeum#3160). `athenaeum init --no-history`
   writes `none` into the configuration it creates and creates no repository:
