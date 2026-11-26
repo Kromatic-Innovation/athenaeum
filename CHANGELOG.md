@@ -90,6 +90,13 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 - The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
   built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
   copies are computed from them, with no behaviour change (athenaeum#3159).
+- `backing_store` now names a registered store implementation (athenaeum#3165).
+  `markdown` and `wiki-markdown` resolve to the filesystem implementation; any
+  other value, which was previously accepted and built the same filesystem
+  store, now raises `StorageConfigError` naming the known values. If you wrote
+  a free-text value such as `files` or `sqlite`, change it to `markdown`.
+  `storage.register_store_backend(name, factory)` registers another
+  implementation, and `open_store` builds the store through that registry.
 - One resolver now answers where a field or a page type is stored:
   `storage.route_for(page_type, field=None, *, config)` returns a frozen
   `RouteDecision` (`targets`, `rule`, `sensitive`) computed from the existing

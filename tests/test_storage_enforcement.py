@@ -182,7 +182,7 @@ class TestAdapterExtensionPointContract:
         register_adapter(
             StorageAdapter(
                 name="skill-sync-test",
-                backing_store="sqlite",
+                backing_store="markdown",
                 surface_root="skills-ext",
                 corpus_policy=CorpusPolicy.none(),
             )

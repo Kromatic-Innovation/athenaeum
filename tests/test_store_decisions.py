@@ -54,7 +54,7 @@ def kr(tmp_path: Path) -> Path:
     surfaces = {}
     for name in ("alpha", "bravo", "charlie"):
         (root / name).mkdir()
-        surfaces[f"s-{name}"] = {"backing_store": "files", "surface_root": name}
+        surfaces[f"s-{name}"] = {"backing_store": "markdown", "surface_root": name}
     (root / "athenaeum.yaml").write_text(
         yaml.safe_dump({"owner": {"asserter": ME}, "storage": {"adapters": surfaces}}),
         encoding="utf-8",
