@@ -180,6 +180,13 @@ class StorageAdapter:
     #: records it holds (athenaeum#3077). Pages already on disk keep their names.
     #: Default ``False`` (today's names).
     opaque_filenames: bool = False
+    #: ``sensitive: true`` in config marks the location a vault: a read of a
+    #: value held here returns a redaction marker unless the caller sets the
+    #: read flag (athenaeum#3161). It is a separate place with a read gate, NOT
+    #: encryption. A sensitive location is never in the main index, so every
+    #: ``corpus_policy`` capability must be false. Default ``False``; the
+    #: built-in :data:`EXCLUDED` location is sensitive.
+    sensitive: bool = False
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -213,6 +220,7 @@ EXCLUDED = StorageAdapter(
     backing_store="markdown",
     surface_root="excluded",
     corpus_policy=CorpusPolicy.none(),
+    sensitive=True,
 )
 
 _BUILTIN_ADAPTERS: dict[str, StorageAdapter] = {
@@ -224,6 +232,16 @@ _BUILTIN_ADAPTERS: dict[str, StorageAdapter] = {
 #: from builtins so :func:`register_adapter` can never clobber the default
 #: surface, and from config-defined adapters so precedence stays legible.
 _REGISTERED_ADAPTERS: dict[str, StorageAdapter] = {}
+
+
+def _require_vault_not_in_corpus(adapter: StorageAdapter) -> None:
+    """Refuse a sensitive location with any corpus capability: a vault is never indexed."""
+    if adapter.sensitive and adapter.corpus_policy.in_corpus:
+        raise StorageConfigError(
+            f"storage.adapters.{adapter.name} is sensitive but its corpus_policy "
+            "has a capability set to true; a sensitive location is never in the "
+            "main index -- set embedded, recallable and merge_eligible to false"
+        )
 
 
 def register_adapter(adapter: StorageAdapter, *, replace: bool = False) -> None:
@@ -239,6 +257,7 @@ def register_adapter(adapter: StorageAdapter, *, replace: bool = False) -> None:
     two consumers silently colliding on a name is a loud error, not a
     last-write-wins surprise.
     """
+    _require_vault_not_in_corpus(adapter)
     if adapter.name in _BUILTIN_ADAPTERS:
         raise StorageConfigError(
             f"cannot register adapter {adapter.name!r}: it shadows a built-in adapter"
@@ -338,10 +357,17 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
             f"storage.adapters.{name}.opaque_filenames must be a boolean (true/false), "
             f"got {opaque_filenames!r}"
         )
-    return StorageAdapter(
+    sensitive = raw.get("sensitive", False)
+    if not isinstance(sensitive, bool):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.sensitive must be a boolean (true/false), "
+            f"got {sensitive!r}"
+        )
+    adapter = StorageAdapter(
         name=name,
         read_only=read_only,
         opaque_filenames=opaque_filenames,
+        sensitive=sensitive,
         sync_mode=sync_mode,
         store_id=store_id.strip() if store_id else None,
         backing_store=backing_store.strip(),
@@ -350,6 +376,8 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         purgeable=_coerce_bool(raw.get("purgeable"), default=True),
         visibility=_visibility_from_config(name, raw.get("visibility")),
     )
+    _require_vault_not_in_corpus(adapter)
+    return adapter
 
 
 def available_adapters(config: dict[str, Any] | None) -> dict[str, StorageAdapter]:
@@ -505,6 +533,23 @@ def is_excluded(entity_class: str | None, config: dict[str, Any] | None) -> bool
     return not corpus_policy_for_class(entity_class, config).in_corpus
 
 
+def is_sensitive(location: str, config: dict[str, Any] | None) -> bool:
+    """Whether the storage *location* (adapter name) is marked sensitive.
+
+    THE one predicate for "is this location a vault" (athenaeum#3161);
+    :attr:`RouteDecision.sensitive` is computed from it.
+
+    Raises:
+        StorageConfigError: *location* is not a known adapter.
+    """
+    adapters = available_adapters(config)
+    if location not in adapters:
+        raise StorageConfigError(
+            f"unknown storage location {location!r}; known locations: {sorted(adapters)}"
+        )
+    return adapters[location].sensitive
+
+
 # ---------------------------------------------------------------------------
 # The one resolver for "where is this field / page type stored" (athenaeum#3158)
 # ---------------------------------------------------------------------------
@@ -530,7 +575,9 @@ class RouteDecision:
         rule: The configuration entry that decided (for example
             ``"storage.mapping.pii"``), or ``None`` when no entry did and a
             default applied.
-        sensitive: True when a target is outside the corpus.
+        sensitive: True when a target is a sensitive location
+            (:func:`is_sensitive`) -- a vault with a read gate. A location that
+            is merely outside the corpus (an archive) is not sensitive.
     """
 
     targets: tuple[str, ...]
@@ -568,7 +615,7 @@ def _decision_for_adapter_names(
     return RouteDecision(
         targets=tuple(names),
         rule=rule,
-        sensitive=any(not adapters[name].corpus_policy.in_corpus for name in names),
+        sensitive=any(is_sensitive(name, config) for name in names),
     )
 
 

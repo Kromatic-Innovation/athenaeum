@@ -177,6 +177,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- A storage location can be marked `sensitive: true` (athenaeum#3161): a vault,
+  where reading a value needs the explicit read flag. The built-in excluded
+  location is sensitive; the wiki location cannot be. A sensitive location
+  whose `corpus_policy` has any capability true is refused with
+  `StorageConfigError`. `storage.is_sensitive(location, config)` is the one
+  predicate. A custom location outside the corpus keeps its read behaviour
+  whether or not it is marked, and `athenaeum doctor` warns for each such
+  location that holds routed fields but is unmarked.
+
 - `athenaeum retire` retires any information by uid, in whichever store holds
   it: a wiki page, a contact record or an off-corpus record (athenaeum#3151).
   A bare uid resolves to its store; `page:`, `contact:` and `off-corpus:`
