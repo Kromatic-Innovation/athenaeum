@@ -6125,4 +6125,27 @@ def create_server(
     if remote_policy is not None:
         remote_policy.validate_tool_names(_candidate_tool_names)
 
+    # Issue athenaeum#3171: the identity provider is chosen HERE, once, from
+    # whether this process is a resource server -- never from a tool argument.
+    # `oidc` is only ever asked about the access token FastMCP's verifier
+    # returned for the request; a token that failed verification leaves
+    # `get_access_token()` empty, so no provider sees its claims.
+    from athenaeum.identity_provider import (
+        get_identity_provider,
+        request_principal,
+        startup_provider_name,
+    )
+
+    _identity_provider_name = startup_provider_name(resource_server=serve_auth is not None)
+    _identity_provider = get_identity_provider(_identity_provider_name)
+
+    def _current_principal() -> tuple[str, ...] | None:
+        """The identity key of the request being served, or ``None``."""
+        from fastmcp.server.dependencies import get_access_token
+
+        access = get_access_token() if serve_auth is not None else None
+        return request_principal(_identity_provider, access, config=config)
+
+    mcp.identity_provider_name = _identity_provider_name  # type: ignore[attr-defined]
+    mcp.current_principal = _current_principal  # type: ignore[attr-defined]
     return mcp

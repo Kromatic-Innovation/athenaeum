@@ -578,6 +578,36 @@ def _canonical_resource_url(value: str) -> str:
     return value + "/"
 
 
+def verified_asserter(claims: Mapping[str, object]) -> dict[str, object]:
+    """The ``asserter`` block a VERIFIED token's claims describe (athenaeum#3171).
+
+    The token-to-identity mapping: it reads ``iss``, ``sub`` and the two
+    Microsoft Entra identifiers ``tid`` / ``oid``, and nothing else. Passing
+    the result to :func:`athenaeum.models.asserter_identity_key` yields the
+    same key an ``owner.asserter`` block for the same person yields, because
+    this builds exactly the block shape that function reads: ``iss`` and
+    ``sub``, plus ``provider_ids: {entra_tid, entra_oid}`` when the token
+    carries both identifiers.
+
+    No ``roles``, ``groups``, ``aud``, ``scp`` / ``scope`` or ``email`` claim
+    is read, so a token claiming any of them maps to the same block as one
+    that does not. The caller must pass claims only from a token that already
+    passed verification; this function does not (and cannot) verify anything.
+    A claim of the wrong type is dropped, which leaves the block short of an
+    identity rather than raising.
+    """
+    block: dict[str, object] = {}
+    for name in ("iss", "sub"):
+        value = claims.get(name)
+        if isinstance(value, str):
+            block[name] = value
+    tid = claims.get("tid")
+    oid = claims.get("oid")
+    if isinstance(tid, str) and isinstance(oid, str):
+        block["provider_ids"] = {"entra_tid": tid, "entra_oid": oid}
+    return block
+
+
 def normalize_identities(values: Iterable[object]) -> frozenset[str]:
     """Trim, case-fold and de-duplicate an identity allowlist.
 
