@@ -77,10 +77,10 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     entity_parser = subparsers.add_parser(
         "entity",
         help="One-call read of a SINGLE entity's page by uid, for any entity "
-        "class, with an explicit --include-excluded flag (default off). The "
+        "class, with an explicit --include-sensitive flag (default off). The "
         "generic form of `person`; prints the same JSON object shape.",
         description="One-call read of a SINGLE entity's page by uid, for any "
-        "entity class, with an explicit --include-excluded flag (default "
+        "entity class, with an explicit --include-sensitive flag (default "
         "off). The generic form of `person`; prints the same JSON object "
         "shape.\n\n"
         "Exit codes (issue athenaeum#1270): 0 on success. 1 (EXIT_NOT_FOUND) "
@@ -114,10 +114,19 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "type. Default: person.",
     )
     entity_parser.add_argument(
-        "--include-excluded",
+        "--include-sensitive",
+        dest="include_sensitive",
         action="store_true",
-        help="Include the actual excluded values (default: off — withheld "
-        "fields carry a redaction marker instead).",
+        help="Include the actual sensitive values (default: off — withheld "
+        "fields carry a redaction marker instead). The same flag, under the "
+        "same name, as `recall --include-sensitive`.",
+    )
+    entity_parser.add_argument(
+        "--include-excluded",
+        dest="include_excluded",
+        action="store_true",
+        help="Deprecated name for --include-sensitive: behaves the same, "
+        "prints a notice, and is removed in the next minor release.",
     )
     entity_parser.add_argument(
         "--usage-class",
@@ -320,7 +329,14 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "--with-pii",
         dest="with_pii",
         action="store_true",
-        help="Issue athenaeum#885/#886: also resolve each matching entity's EXCLUDED "
+        help="Deprecated name for --include-sensitive: behaves the same, "
+        "prints a notice, and is removed in the next minor release.",
+    )
+    recall_parser.add_argument(
+        "--include-sensitive",
+        dest="include_sensitive",
+        action="store_true",
+        help="Issue athenaeum#885/#886: also resolve each matching entity's SENSITIVE "
         "fields — contact data for a person, and whatever else the operator "
         "routes off-corpus for any other class. Appended to each hit line as "
         "tab-separated `field=value` pairs; a withheld field appears as "
@@ -335,7 +351,7 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         choices=list(USAGE_CLASSES),
         default=[],
         metavar="CLASS",
-        help="With --with-pii, return only excluded values of this usage class "
+        help="With --include-sensitive, return only sensitive values of this usage class "
         f"(repeatable; one of {', '.join(USAGE_CLASSES)}). Matches "
         "`entity --usage-class`. Default: every value.",
     )
@@ -379,7 +395,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
     ``athenaeum.yaml`` the same way ``serve`` and ``reindex`` do,
     so results match what the MCP ``recall`` tool would return.
 
-    **``--with-pii`` (issues athenaeum#885/#886) re-derives the layer ordering
+    **``--include-sensitive`` (issues athenaeum#885/#886) re-derives the layer ordering
     HERE, deliberately.** This function is a SECOND implementation of the same
     read: it constructs its own backend and its own ``is_page_authorized`` /
     ``storage_policy_configured`` / ``is_recallable`` drops rather than calling
@@ -442,13 +458,14 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # points (this one and the MCP tool) call the SAME resolver.
     from athenaeum import identity_resolution, pii
 
+    include_sensitive = pii.cli_sensitive_flag(args, {"--with-pii": "with_pii"})
     handle_resolution = identity_resolution.resolve_handle_query(
         knowledge_root,
         wiki_root,
         args.query,
         caller_audience=caller_audience,
         config=cfg,
-        with_pii=getattr(args, "with_pii", False),
+        with_pii=include_sensitive,
         usage_classes=getattr(args, "usage_class", None) or None,
         cache_dir=cache_dir,
     )
@@ -576,7 +593,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # Issues athenaeum#885/#886: ONE index per surface class for the whole
     # command, shared across every hit — never one scan per hit. Each loads
     # lazily, so a class no hit resolves to costs nothing and a run without
-    # --with-pii never touches this at all.
+    # --include-sensitive never touches this at all.
     excluded_indexes: dict[str, ExcludedRecordIndex] = {}
     # Issue athenaeum#1967 (AC2): tally of Layer-C audience drops below, for
     # the access-withheld note printed at the end of this command. Derived
@@ -624,7 +641,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         # and the flag can never be used to probe for a record behind a page
         # this caller may not read. Skipped entirely (zero scans) when unset.
         excluded_suffix = ""
-        if getattr(args, "with_pii", False):
+        if include_sensitive:
             excluded_suffix = _excluded_suffix_for_hit(
                 page_path,
                 fm,
@@ -764,7 +781,7 @@ def cmd_entity(args: argparse.Namespace) -> int:
 
     The generic form of the former ``person`` command (removed in
     athenaeum#888), printing the SAME JSON object shape
-    (``pii.EntityRead.to_dict()``) to stdout. With ``--include-excluded`` unset
+    (``pii.EntityRead.to_dict()``) to stdout. With ``--include-sensitive`` unset
     (the default), withheld fields carry a redaction marker instead of the
     value; an entity with no excluded record at all prints the page with no
     markers — not an error.
@@ -807,11 +824,13 @@ def cmd_entity(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    from athenaeum.pii import cli_sensitive_flag
+
     return _read_entity_to_stdout(
         args.path,
         args.uid,
         page_class=args.entity_class,
-        include_excluded=args.include_excluded,
+        include_excluded=cli_sensitive_flag(args, {"--include-excluded": "include_excluded"}),
         usage_classes=args.usage_class or None,
         not_found_label="entity",
     )
@@ -947,7 +966,16 @@ def _read_entity_to_stdout(
         # value straight from a bare YAML date — coerce it to ISO-8601 the same
         # way the MCP `entity`-equivalent tool's mirror of this call does (issue
         # athenaeum#1002), rather than letting `json.dumps` raise on it.
-        payload = json.dumps(result.to_dict(), indent=2, default=json_date_default)
+        entity_dict = result.to_dict()
+        if include_excluded and isinstance(entity_dict.get("body"), str):
+            # athenaeum#3163: the same flag resolves routed-value pointers in
+            # the page body, as the MCP `read_entity` tool does.
+            from athenaeum.sensitivity_routing import resolve_pointers_in_text
+
+            entity_dict["body"] = resolve_pointers_in_text(
+                entity_dict["body"], config, knowledge_root
+            )
+        payload = json.dumps(entity_dict, indent=2, default=json_date_default)
     except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring above
         print(
             f"Error: internal error reading {not_found_label} uid={uid!r}: {exc}",

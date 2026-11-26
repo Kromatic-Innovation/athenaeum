@@ -241,7 +241,7 @@ The equivalent as flags, which is what a service unit carries:
 ```bash
 athenaeum serve --path ~/knowledge \
   --transport http --host 127.0.0.1 --port 8000 --path-prefix /mcp \
-  --profile remote --excluded-fields off --audience ops \
+  --profile remote --sensitive-reads off --audience ops \
   --auth-issuer https://id.example.net \
   --auth-resource https://memory.example.net/mcp \
   --auth-allowed-identities ops@example.net \
@@ -257,7 +257,7 @@ What each block buys you:
 | `serve.host`, `serve.port` | Keep the bind on loopback and let the proxy be the only listener on a routable address. Configuring an issuer *permits* a routable bind — it does not make one a good idea. |
 | `--path-prefix` | The URL path the endpoint is mounted at, default `/mcp`. CLI-only: unlike the three above it has no environment variable and no yaml key. |
 | `serve.profile: remote` | Does not serve `resolve_question`, `resolve_merge` or `review_audit_item` — adjudicating your own decision queue is an owner action. `remember` and `raise_decision` stay on, because a remote agent contributing memories is the point. |
-| `serve.excluded_fields: off` | Withholds every off-corpus excluded value. The `remote` profile already pins this; setting it explicitly documents the intent. |
+| `serve.sensitive_reads: off` | Withholds every off-corpus excluded value. The `remote` profile already pins this; setting it explicitly documents the intent. |
 | `serve.audience` | Required under `--transport http --profile remote` (an unset audience is refused). A read filter pinned for the life of the process. Untagged, `confidential` and `personal` pages become invisible. The caller cannot widen it. The value `owner` serves every page. |
 | `serve.auth.issuer` | Whose signatures this server trusts. Setting it is also what lifts the non-loopback bind refusal — the same act that makes every request carry a verified token. |
 | `serve.auth.resource` | The one audience this process serves, and the `resource` value the host must request. |
@@ -265,6 +265,8 @@ What each block buys you:
 | `serve.auth.allowed_clients` | Optional. The apps allowed to connect, by the `azp` / `client_id` their tokens carry; `read_only: true` on an entry keeps that app from writing. Worth setting when your provider allows dynamic client registration. yaml only. |
 | `serve.auth.scopes` | Rename the read/write pair to scopes your provider actually issues. |
 | `serve.audit_log` | Where the per-call audit log lands (see [The per-call audit log](#the-per-call-audit-log)). Optional; defaults under the cache directory. Only written with `serve.auth.*` configured. |
+
+`serve.sensitive_reads` was named `serve.excluded_fields`, with the flag `--excluded-fields` and the environment variable `ATHENAEUM_SERVE_EXCLUDED_FIELDS`. The flag and the environment variable still work for one more minor release and print a notice; the yaml key is refused at startup with the replacement named, so rename it in `athenaeum.yaml`.
 
 `serve.auth.issuer`, `serve.auth.resource` and `serve.auth.allowed_identities` are a
 set: configure all three or none. A half-configured block exits non-zero before

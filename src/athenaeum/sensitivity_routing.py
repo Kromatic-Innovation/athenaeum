@@ -35,7 +35,7 @@ value it names), NOT by an eventual wiki entity's ``uid``. This is a
 deliberate, security-bearing choice the design note's §2 requires stated
 explicitly rather than left implicit:
 
-    The existing excluded-surface read path (``with_pii``/``read_entity``,
+    The existing excluded-surface read path (``include_sensitive``/``read_entity``,
     ``mcp_server._excluded_block_for_hit``) and the settled contact-record
     routing story (``docs/design/field-corrections.md`` §7.1, issue athenaeum#872)
     are both uid-keyed BY CONSTRUCTION — they resolve through
@@ -187,7 +187,7 @@ emits is a literal string substituted directly into a page's body text at
 compile time, for a value that may have no owning uid at all. What the
 note does NOT settle, and what this slice does not decide either, is
 whether ``RedactionMarker`` should begin naming the read flag
-(``with_pii=True``) the way this module's pointer names its own read
+(``include_sensitive=True``) the way this module's pointer names its own read
 function — that sub-question is explicitly left with a follow-on issue,
 not resolved here or by this module. See athenaeum#1023's issue thread for
 the full disposition.
@@ -419,13 +419,15 @@ def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -
 def _pointer_text(sensitivity_class: str, record_id: str) -> str:
     """The resolvable, non-leaking pointer substituted for a routed span (AC2).
 
-    Names :func:`resolve_sensitive_record` per the design note's proposed
-    format (§1) — the pointer text is fixed by the design, not by this
-    module's own scope.
+    Names the read a tool caller can actually make: ``read_entity`` with
+    ``include_sensitive=true`` (athenaeum#3163), which resolves the pointer
+    through :func:`resolve_pointers_in_text`. Pointers minted before that
+    change named :func:`resolve_sensitive_record` instead; both shapes match
+    :data:`_POINTER_RE`.
     """
     return (
         f"[{POINTER_PREFIX}:{sensitivity_class}:{record_id} — value withheld; "
-        "resolve via athenaeum.sensitivity_routing.resolve_sensitive_record()]"
+        "read this page with include_sensitive=true to resolve]"
     )
 
 
@@ -826,3 +828,39 @@ def resolve_sensitive_record(
         # reaches here, but this function's contract is "value or nothing
         # resolvable — never raise", full stop.
         return None
+
+
+#: Matches a pointer of either wording (see :func:`_pointer_text`): the class
+#: and record id are captured; everything after the id up to ``]`` is prose.
+_POINTER_RE = re.compile(
+    rf"\[{POINTER_PREFIX}:([A-Za-z0-9_-]+):([0-9a-f]{{32}}) [^\]]*\]"
+)
+
+
+def resolve_pointers_in_text(
+    text: str,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    caller_audience: set[str] | None = None,
+) -> str:
+    """Replace each resolvable pointer in *text* with its value (athenaeum#3163).
+
+    The entity read's ``include_sensitive`` path: a page body carries
+    ``[sensitive:<class>:<record_id> ...]`` pointers, and this swaps each for
+    the routed value via :func:`resolve_sensitive_record`, under the same
+    ``read_policy`` gate. A pointer that does not resolve for any reason is
+    left in place, so the caller cannot tell "not authorized" from "gone".
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        value = resolve_sensitive_record(
+            match.group(1),
+            match.group(2),
+            config,
+            knowledge_root,
+            caller_audience=caller_audience,
+        )
+        return match.group(0) if value is None else value
+
+    return _POINTER_RE.sub(_sub, text)
