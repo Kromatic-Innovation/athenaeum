@@ -147,13 +147,29 @@ def test_a_subject_that_is_not_one_entity_is_unplaceable(
     assert got.kind == "unplaceable" and got.targets == ()
 
 
-def test_two_pages_with_one_uid_are_unplaceable(root: Path) -> None:
+def test_a_same_surface_duplicate_uid_follows_the_index(root: Path) -> None:
     (root / "wiki" / "dup.md").write_text(
         f"---\nuid: {UID}\ntype: person\nname: Alex Twin\n---\n", encoding="utf-8"
     )
     got = record_placement(root, _cfg(EMAILS_TO_VAULT), UID, field="title")
-    # Either the index refuses the duplicate or only one page wins; never a guess at a vault.
-    assert got.kind in ("unplaceable", "ordinary")
+    # The engine's uid index resolves a same-surface duplicate to ONE page, and the
+    # helper follows that resolution rather than re-deriving it; a uid on two
+    # surfaces raises AmbiguousPageUidError, which is unplaceable (next test).
+    assert got.kind == "ordinary"
+
+
+def test_a_uid_on_two_surfaces_is_unplaceable(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum import pii
+    from athenaeum.models import AmbiguousPageUidError
+
+    def ambiguous(*_a: Any, **_k: Any) -> Any:
+        raise AmbiguousPageUidError(UID, {"wiki": root / "a.md", "people": root / "b.md"})
+
+    monkeypatch.setattr(pii, "read_entity", ambiguous)
+    got = record_placement(root, _cfg(EMAILS_TO_VAULT), UID, field="title")
+    assert got.kind == "unplaceable"
 
 
 def test_no_subject_field_or_text_is_ordinary(root: Path) -> None:
@@ -251,3 +267,13 @@ def test_the_helper_names_no_routing_key() -> None:
         "configured_excluded_read_mapping",
         "resolve_storage_mapping",
     }
+
+
+def test_sensitive_ignores_a_non_string_frontmatter_key(root: Path) -> None:
+    # A YAML key such as ``1:`` is not a field name and must not break the sort.
+    page = root / "wiki" / f"{UID}.md"
+    page.write_text(page.read_text(encoding="utf-8").replace("title:", "1: one\ntitle:"))
+    cfg = _cfg([{"page_type": "person", "fields": ["emails"], "to": ["vault"]}])
+    got = record_placement(root, cfg, UID, sensitive=True)
+    assert (got.kind, got.targets) == ("vault", ("vault",))
+

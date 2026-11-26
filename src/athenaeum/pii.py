@@ -6230,7 +6230,8 @@ def record_placement(
 
     if sensitive:
         names = {*read.contact, *frontmatter, *resolve_excluded_fields(surface, config, None)}
-        for name in sorted(names):
+        # A YAML key need not be a string (``1:``, a date); only a string names a field.
+        for name in sorted(n for n in names if isinstance(n, str)):
             primary = _placement_for_decision(
                 route_for(page_type, name, config=config), "sensitive-primary"
             )
