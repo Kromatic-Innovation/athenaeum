@@ -152,12 +152,14 @@ from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import (
     StorageConfigError,
+    apply_to_targets,
     available_adapters,
     discard_rule_for_field_any_type,
     is_excluded,
     note_discard,
     open_store,
     route_for,
+    target_root,
 )
 from athenaeum.store import Store, append_line_durable, note_no_restore_point
 from athenaeum.trust_graph import (
@@ -2339,6 +2341,104 @@ def process_correction_record(
         # reason as the branch above.
         return _result("escalated", reason)
 
+    def _merge_into(base: dict[str, Any]) -> dict[str, Any]:
+        """The record *base* with this correction applied; idempotent (athenaeum#3169)."""
+        if shape == "scalar":
+            merged_read = dict(base)
+            merged_read[write_field] = value
+            fs = dict(merged_read.get("field_sources") or {})
+            fs[write_field] = source
+            merged_read["field_sources"] = fs
+        elif op == "add":
+            merged_list = list(base.get(write_field) or [])
+            merged_list.append(value)
+            merged_read = dict(base)
+            merged_read[write_field] = merged_list
+            fs = dict(merged_read.get("field_sources") or {})
+            fs_list = [e for e in (fs.get(write_field) or []) if isinstance(e, dict)]
+            fs_list.append({"value": value, "source": source})
+            fs[write_field] = fs_list
+            merged_read["field_sources"] = fs
+        else:  # remove
+            existing_list = list(base.get(write_field) or [])
+            merged_list = [v for v in existing_list if _value_key(v) != _value_key(value)]
+            merged_read = dict(base)
+            merged_read[write_field] = merged_list
+            fs = dict(merged_read.get("field_sources") or {})
+            fs_list = [
+                e
+                for e in (fs.get(write_field) or [])
+                if isinstance(e, dict) and _value_key(e.get("value")) != _value_key(value)
+            ]
+            if fs_list:
+                fs[write_field] = fs_list
+            else:
+                fs.pop(write_field, None)
+            merged_read["field_sources"] = fs
+
+            # Issue athenaeum#2196 (AC2): removing an address must not leave its
+            # per-address `contact_classification` / `identifier_validity`
+            # entries behind — the orphan these lines exist to prevent. Only for
+            # an address-identifier field (`pii.CONTACT_IDENTIFIER_FIELDS`:
+            # emails/former_emails/alt_emails), and only when no OTHER address
+            # field on this same record still lists the value — a shared
+            # address moved from `emails` to `alt_emails`, say, still deserves
+            # its classification. `merged_read` (not `base`) is checked and
+            # mutated here because it is what actually gets written below, on
+            # both the surface-record path (`surface_class`) and the wiki path.
+            from athenaeum import pii
+
+            if write_field in pii.CONTACT_IDENTIFIER_FIELDS and not pii.record_lists_identifier(
+                merged_read, str(value)
+            ):
+                removed_key = pii.normalize_identifier(str(value))
+                for fact_field in (pii.CONTACT_CLASSIFICATION_FIELD, pii.IDENTIFIER_VALIDITY_FIELD):
+                    fact_entries = merged_read.get(fact_field)
+                    if not isinstance(fact_entries, list):
+                        continue
+                    kept = [
+                        entry
+                        for entry in fact_entries
+                        if not (
+                            isinstance(entry, dict)
+                            and pii.normalize_identifier(str(entry.get("identifier", "") or ""))
+                            == removed_key
+                        )
+                    ]
+                    if len(kept) != len(fact_entries):
+                        if kept:
+                            merged_read[fact_field] = kept
+                        else:
+                            merged_read.pop(fact_field, None)
+        return merged_read
+
+    def _sync_secondary(name: str) -> bool:
+        """Bring one later target of a multi-target rule in step; True if it changed.
+
+        Idempotent: a value the target already holds (or, for a removal, already
+        lacks) is not written again, so a re-run after a partial failure
+        completes the rest (athenaeum#3169).
+        """
+        root = target_root(name, config, knowledge_root)
+        if op == "remove" and not root.is_dir():
+            raise FileNotFoundError(f"target root of {name!r} is not reachable")
+        path, meta, body = _read_surface_record(root, uid)
+        meta.setdefault("uid", uid)
+        held = meta.get(write_field)
+        listed = isinstance(held, list) and any(_value_key(v) == _value_key(value) for v in held)
+        if shape == "scalar":
+            in_step = held == value
+        else:
+            in_step = listed == (op == "add")
+        wrote = not in_step
+        if wrote:
+            _write_surface_record(path, _merge_into(meta), body=body)
+        if usage_class is not None:
+            _apply_usage_classification(
+                root, value, usage_class=usage_class, source=source, observed_at=observed_at
+            )
+        return wrote
+
     if just_created and verdict == "noop":
         # The record's own field/value happens to equal what the create
         # step already wrote (the common case: the handle key IS the
@@ -2357,6 +2457,16 @@ def process_correction_record(
         # verdict — a create-vs-update bookkeeping correction, not a
         # §6.2 precedence change.
         return _result("applied", "entity created; field already matches the handle-derived value")
+
+    healed: list[str] = []
+    if verdict == "noop" and surface_class and len(surface_targets) > 1 and not dry_run:
+        # The primary already holds the value; a later target may not (a write
+        # that failed part-way). Complete it rather than serve a divergence.
+        def _heal(name: str) -> None:
+            if _sync_secondary(name):
+                healed.append(name)
+
+        apply_to_targets(surface_targets[1:], _heal)
 
     if verdict == "noop":
         if usage_class is not None and not dry_run:
@@ -2378,6 +2488,10 @@ def process_correction_record(
                 source=source,
                 observed_at=observed_at,
             )
+        if healed:
+            # The primary's usage classification ran above, same as without
+            # multi-target (athenaeum#3169).
+            return _result("routed-elsewhere", f"{reason}; completed on target(s) {healed}")
         return _result("noop", reason)
     if verdict == "defer":
         return _result("deferred-lower-precedence", reason)
@@ -2386,73 +2500,7 @@ def process_correction_record(
 
     # verdict == "apply"
     monotone_apply = monotone and verdict == "apply"
-    if shape == "scalar":
-        merged_read = dict(read_meta)
-        merged_read[write_field] = value
-        fs = dict(merged_read.get("field_sources") or {})
-        fs[write_field] = source
-        merged_read["field_sources"] = fs
-    elif op == "add":
-        merged_list = list(read_meta.get(write_field) or [])
-        merged_list.append(value)
-        merged_read = dict(read_meta)
-        merged_read[write_field] = merged_list
-        fs = dict(merged_read.get("field_sources") or {})
-        fs_list = [e for e in (fs.get(write_field) or []) if isinstance(e, dict)]
-        fs_list.append({"value": value, "source": source})
-        fs[write_field] = fs_list
-        merged_read["field_sources"] = fs
-    else:  # remove
-        existing_list = list(read_meta.get(write_field) or [])
-        merged_list = [v for v in existing_list if _value_key(v) != _value_key(value)]
-        merged_read = dict(read_meta)
-        merged_read[write_field] = merged_list
-        fs = dict(merged_read.get("field_sources") or {})
-        fs_list = [
-            e
-            for e in (fs.get(write_field) or [])
-            if isinstance(e, dict) and _value_key(e.get("value")) != _value_key(value)
-        ]
-        if fs_list:
-            fs[write_field] = fs_list
-        else:
-            fs.pop(write_field, None)
-        merged_read["field_sources"] = fs
-
-        # Issue athenaeum#2196 (AC2): removing an address must not leave its
-        # per-address `contact_classification` / `identifier_validity`
-        # entries behind — the orphan these lines exist to prevent. Only for
-        # an address-identifier field (`pii.CONTACT_IDENTIFIER_FIELDS`:
-        # emails/former_emails/alt_emails), and only when no OTHER address
-        # field on this same record still lists the value — a shared
-        # address moved from `emails` to `alt_emails`, say, still deserves
-        # its classification. `merged_read` (not `read_meta`) is checked and
-        # mutated here because it is what actually gets written below, on
-        # both the surface-record path (`surface_class`) and the wiki path.
-        from athenaeum import pii
-
-        if write_field in pii.CONTACT_IDENTIFIER_FIELDS and not pii.record_lists_identifier(
-            merged_read, str(value)
-        ):
-            removed_key = pii.normalize_identifier(str(value))
-            for fact_field in (pii.CONTACT_CLASSIFICATION_FIELD, pii.IDENTIFIER_VALIDITY_FIELD):
-                fact_entries = merged_read.get(fact_field)
-                if not isinstance(fact_entries, list):
-                    continue
-                kept = [
-                    entry
-                    for entry in fact_entries
-                    if not (
-                        isinstance(entry, dict)
-                        and pii.normalize_identifier(str(entry.get("identifier", "") or ""))
-                        == removed_key
-                    )
-                ]
-                if len(kept) != len(fact_entries):
-                    if kept:
-                        merged_read[fact_field] = kept
-                    else:
-                        merged_read.pop(fact_field, None)
+    merged_read = _merge_into(read_meta)
 
     if dry_run:
         disposition = "routed-elsewhere" if surface_class else "applied"
@@ -2460,7 +2508,19 @@ def process_correction_record(
 
     if surface_class:
         assert surface_path is not None
-        _write_surface_record(surface_path, merged_read, body=surface_body)
+        if len(surface_targets) > 1:
+            # Every target in order; the first failure raises naming it, and a
+            # re-run completes the rest (athenaeum#3169).
+            def _write_target(name: str) -> None:
+                if name == surface_targets[0]:
+                    assert surface_path is not None
+                    _write_surface_record(surface_path, merged_read, body=surface_body)
+                else:
+                    _sync_secondary(name)
+
+            apply_to_targets(surface_targets, _write_target)
+        else:
+            _write_surface_record(surface_path, merged_read, body=surface_body)
         if usage_class is not None:
             # athenaeum#872: the value is now listed on the surface record (the
             # write just above), so `classify_contact_value` can resolve it —

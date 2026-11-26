@@ -36,7 +36,6 @@ from athenaeum.sensitivity_routing import (
     route_sensitive_values,
 )
 from athenaeum.storage import (
-    StorageConfigError,
     configured_routes,
     discard_counts,
     discarded_page_types,
@@ -105,11 +104,6 @@ def test_whole_page_type_and_class_rules_discard() -> None:
     assert discarded_page_types(cfg) == {"diary": "storage.routes[0]"}
     # A discard names no location, so it is not in the class -> location map.
     assert routed_storage_mapping(cfg) == {}
-
-
-def test_more_than_one_target_is_still_refused() -> None:
-    with pytest.raises(StorageConfigError, match="at most one"):
-        configured_routes(_cfg([{"page_type": "p", "to": ["excluded", "archive"]}]))
 
 
 # --- AC8: only a rule discards ---------------------------------------------------

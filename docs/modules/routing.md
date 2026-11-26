@@ -76,6 +76,33 @@ the caller's audience clears the matched class's `read_policy`.
   demoted-name re-mint attempt) so the underlying observation is not silently lost
   when its page is not.
 
+## Several targets
+
+A `storage.routes` rule's `to` list may name more than one location, for a
+sensitive value that has to live in two places under different custody (a working
+vault and an archive vault).
+
+- **Every target must be a vault**: `sensitive: true`, outside the index, and not
+  `read_only`. A list that includes a location in the index is refused at load,
+  because two writable indexed copies of a page have no rule for which one wins;
+  a `read_only` target raises `StorageConfigError`.
+- **Order is significant.** The first target is the primary and the only one read.
+- **A write goes to each target in order and succeeds only if all accept it.** A
+  failure raises, naming the target (`StorageTargetError`; for a routed free-text
+  value, `SensitivityRoutingError`); it is never logged and skipped. Each write
+  is idempotent per target, so running the same write again completes the
+  targets that were missed and leaves all of them holding the same value.
+- **A divergence is reported, not served.** A record or field value on a later
+  target that the primary lacks is reported by `athenaeum doctor`
+  (`multi_target_divergence`).
+- **Removing a value and `athenaeum retire` apply to every target.** A target
+  that cannot be reached is named and the command exits non-zero.
+- **`athenaeum status`** shows the number of targets per rule and names any target
+  inside a git repository, where an erasure does not reach history.
+
+Nothing keeps the targets in step after an out-of-band edit, and every target
+holds the same fields.
+
 ## What it refuses
 
 Sensitivity routing fails closed — `route_sensitive_values` raises

@@ -92,7 +92,13 @@ from athenaeum.retire_pages import (
     apply_retirement,
     build_retire_report,
 )
-from athenaeum.storage import StorageAdapter, available_adapters
+from athenaeum.storage import (
+    StorageAdapter,
+    StorageConfigError,
+    available_adapters,
+    configured_routes,
+    target_root,
+)
 from athenaeum.store import StoreKey
 
 log = logging.getLogger(__name__)
@@ -192,6 +198,8 @@ class RetireRunReport:
     pages: RetireReport | None = None
     contact_records_retired: int = 0
     off_corpus_erased: int = 0
+    #: Records erased from the later targets of multi-target rules (athenaeum#3169).
+    secondary_erased: int = 0
     committed: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -622,6 +630,12 @@ def apply_plan(
     if plan.blocked:
         report.errors.append("plan is blocked - nothing retired")
         return report
+    # Later targets of a multi-target rule: one refusal refuses the run before
+    # any target, primary included, is written (athenaeum#3169).
+    refusals = _secondary_refusals(knowledge_root, config)
+    if refusals:
+        report.errors.extend(f"{r}; nothing retired" for r in refusals)
+        return report
 
     pages = _page_candidates(plan)
     if pages:
@@ -641,7 +655,88 @@ def apply_plan(
     off = plan.of_store(STORE_OFF_CORPUS)
     if off:
         _apply_off_corpus(knowledge_root, off, reason, cache_dir, config, report)
+    _erase_secondary_targets(knowledge_root, {t.uid for t in plan.targets}, config, report)
     return report
+
+
+def _secondary_target_names(config: dict[str, Any] | None) -> list[str]:
+    """Every later target of a multi-target rule; raises StorageConfigError if invalid."""
+    routes = configured_routes(config)
+    return sorted({n for r in routes if len(r.to) > 1 for n in r.to[1:]})
+
+
+def _secondary_refusals(
+    knowledge_root: Path, config: dict[str, Any] | None
+) -> list[str]:
+    """Reasons a later target of a multi-target rule may not be erased from.
+
+    The same store-rights check the primary path applies (:func:`target_access`):
+    a target without ``read`` and ``compile``, or declared ``read_only``, refuses
+    the run. A target that cannot be resolved is not a refusal here; erasing it
+    reports it by name. Nothing is deleted by this check.
+    """
+    try:
+        names = _secondary_target_names(config)
+    except StorageConfigError:
+        return []
+    out: list[str] = []
+    for name in names:
+        try:
+            root = target_root(name, config, knowledge_root)
+        except (OSError, StorageConfigError):
+            continue
+        verdict, reason = target_access(root, knowledge_root, config)
+        if verdict == ACCESS_REFUSED and reason:
+            out.append(f"target {name!r}: {reason}")
+        elif verdict == ACCESS_HIDDEN:
+            out.append(f"target {name!r}: the store declaration does not grant this install read")
+    return out
+
+
+def _erase_secondary_targets(
+    knowledge_root: Path,
+    uids: set[str],
+    config: dict[str, Any] | None,
+    report: RetireRunReport,
+) -> None:
+    """Erase each retired uid's record from every later target of a multi-target rule.
+
+    The primary is handled by the stores above. Every later target is checked
+    against the store rights first (as the primary is), and one refusal refuses
+    the run before anything is deleted. A root that does not exist yet holds no
+    records. A target that exists but cannot be read or written (its root is not
+    a directory, a listing or delete fails) is named in ``report.errors``, which
+    makes the command exit non-zero; the remaining targets are still processed,
+    and a re-run is idempotent (athenaeum#3169). A deletion here does not reach
+    git history: ``athenaeum status`` names any such target.
+    """
+    try:
+        names = _secondary_target_names(config)
+    except StorageConfigError as exc:
+        report.errors.append(f"storage.routes is invalid; later targets not erased: {exc}")
+        return
+    refusals = _secondary_refusals(knowledge_root, config)
+    if refusals:
+        report.errors.extend(f"{r}; nothing erased" for r in refusals)
+        return
+    for name in names:
+        try:
+            root = target_root(name, config, knowledge_root)
+            if not root.exists():
+                continue
+            if not root.is_dir():
+                raise NotADirectoryError(root.name)
+            for path in sorted(root.rglob("*")):
+                if path.suffix not in (".md", ".json") or not path.is_file():
+                    continue
+                if path.stem in uids or _frontmatter_uid(path) in uids:
+                    path.unlink()
+                    report.secondary_erased += 1
+        except (OSError, StorageConfigError) as exc:
+            report.errors.append(
+                f"target {name!r}: erase failed, target not reachable ({type(exc).__name__}); "
+                "re-run to complete it"
+            )
 
 
 def _apply_contacts(

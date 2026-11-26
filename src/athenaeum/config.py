@@ -6804,7 +6804,7 @@ def resolve_storage_routes(config: dict[str, Any] | None) -> Any:
     Each rule is a mapping with ``page_type`` (or, in its place,
     ``sensitivity_class``), an optional ``fields`` list, and ``to``, a list of
     location names (``storage.adapters`` names plus the built-ins). A ``to`` list
-    names one location, or is empty. A rule with ``fields`` sends those
+    names one location, several vaults, or is empty. A rule with ``fields`` sends those
     fields of that page type to the target, and the target must be a location
     marked ``sensitive: true``; a rule without ``fields`` sends the whole page
     type (the long form of a ``storage.mapping`` entry, which stays as the short
@@ -6830,6 +6830,20 @@ def resolve_storage_routes(config: dict[str, Any] | None) -> Any:
     file is not removed by it; that is the write-time screen and the screening
     phase.
 
+    **Several targets.** A ``to`` list of two or more names writes the value to
+    every one, in the same call. Every target must be a vault (``sensitive: true``,
+    outside the index, not ``read_only``); a list that includes a location in the
+    index is refused, because two writable indexed copies of a page have no rule
+    for which one wins. Order is significant: the first target is the primary, the
+    only one read. A write succeeds only if every target accepts it; a failure
+    raises naming the target, and re-running completes the rest (each write is
+    idempotent per target). A value on a later target that the primary lacks is
+    reported by ``athenaeum doctor``, not served. Removing a value and
+    ``athenaeum retire`` apply to every target; an unreachable target is named and
+    the command exits non-zero. ``athenaeum status`` counts the targets per rule
+    and names any inside a git repository, where an erasure does not reach
+    history. Nothing keeps targets in step after an out-of-band edit.
+
     **A class with no rule is refused.** With ``sensitivity.routing.enabled`` on,
     every sensitivity class that has a recogniser and is not switched ``off``
     needs a ``sensitivity_class`` rule (or a ``storage.mapping`` entry), written
@@ -6843,7 +6857,8 @@ def resolve_storage_routes(config: dict[str, Any] | None) -> Any:
     :func:`athenaeum.storage.configured_routes` can refuse it loudly with the key
     in the message. The rules are validated there (duplicate rules, a page type
     in both ``storage.routes`` and ``storage.mapping``, an unknown ``to``, a
-    field rule whose target is not sensitive, a ``to`` list of more than one name)
+    field rule whose target is not sensitive, a ``to`` list of several names that
+    are not all vaults)
     and each raises ``StorageConfigError``. Records already on disk are read
     through a rule without being moved.
     """
