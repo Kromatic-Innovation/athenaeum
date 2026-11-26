@@ -155,24 +155,11 @@ def test_field_route_unknown_location_raises() -> None:
         route_for("person", "emails", config=cfg)
 
 
-def test_corrections_field_route() -> None:
-    cfg = {
-        "storage": {"mapping": {"pii": "excluded"}},
-        "librarian": {"corrections": {"sensitive_fields": {"phone": "pii", "plain": "recipe"}}},
-    }
-    hit = route_for(None, "phone", config=cfg)
-    assert hit == RouteDecision(("excluded",), "librarian.corrections.sensitive_fields.phone", True)
-    # A class that maps to the wiki still routes (to its own surface record).
-    plain = route_for(None, "plain", config=cfg)
-    assert plain.targets == ("wiki-markdown-embedded",) and plain.sensitive is False
-    assert route_for(None, "other", config=cfg) == RouteDecision((), None, False)
-    with pytest.raises(StorageConfigError):
-        route_for(
-            None,
-            "phone",
-            config={"librarian": {"corrections": {"sensitive_fields": {"phone": "x"}}},
-                    "storage": {"mapping": {"x": "nope"}}},
-        )
+def test_no_page_type_and_no_surface_class_keeps_the_field_on_the_page() -> None:
+    # athenaeum#3162: the corrections-only table is gone; with nothing to route
+    # by, a field stays on the page.
+    cfg = {"storage": {"mapping": {"pii": "excluded"}}}
+    assert route_for(None, "phone", config=cfg) == RouteDecision((), None, False)
 
 
 def test_surface_class_form_ignores_the_exclusion_gate() -> None:

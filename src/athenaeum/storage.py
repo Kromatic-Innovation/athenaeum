@@ -73,7 +73,6 @@ from athenaeum.config import (  # StorageConfigError is defined in config, re-ex
     HISTORY_VALUES,
     StorageConfigError,
     load_config,
-    resolve_corrections_sensitive_fields,
     resolve_excluded_fields_config,
     resolve_excluded_read_mapping,
     resolve_extra_intake_roots,
@@ -649,11 +648,12 @@ def is_sensitive(location: str, config: dict[str, Any] | None) -> bool:
 # Four configuration tables answer that question: ``storage.excluded_fields``
 # with ``storage.excluded_read_mapping`` (which fields of a record are kept off
 # the page), ``storage.mapping`` (which class lives outside the corpus),
-# ``librarian.corrections.sensitive_fields`` (the same decision for
-# corrections), and the free-text value-routing fallback in
-# ``sensitivity_routing``. This section is the ONLY module that calls the
-# config resolvers ``resolve_excluded_fields_config``,
-# ``resolve_excluded_read_mapping`` and ``resolve_corrections_sensitive_fields``;
+# and the free-text value-routing fallback in ``sensitivity_routing``
+# (athenaeum#3162 removed the fourth, the corrections-only
+# ``librarian.corrections.sensitive_fields`` table; corrections route through
+# ``route_for(page_type, field)`` like every other writer). This section is the
+# ONLY module that calls the config resolvers ``resolve_excluded_fields_config``
+# and ``resolve_excluded_read_mapping``;
 # ``tests/test_route_for.py`` fails the build if another module does.
 
 
@@ -773,9 +773,8 @@ def route_for(
       :func:`is_excluded` gate: it answers only "is *field* on this surface
       class's field list", with ``targets`` the class's adapter when it is and
       empty when it is not.
-    * ``route_for(None, field, config=...)`` -- a field regardless of page type:
-      ``librarian.corrections.sensitive_fields`` names the class a correction
-      to that field is routed to, whatever destination the correction named.
+    * ``route_for(None, field, config=...)`` -- no page type and no surface
+      class: nothing to route by, so the field is kept on the page.
 
     **Two fallbacks that disagree today, both preserved here** (so the change
     that removes one is a visible diff):
@@ -800,17 +799,7 @@ def route_for(
         return _decision_for_class(surface_class, _field_rule(surface_class, config), config)
 
     if page_type is None or not page_type.strip():
-        if field is None:
-            return RouteDecision((), None, False)
-        field_name = field.strip()
-        sensitive_class = resolve_corrections_sensitive_fields(config).get(field_name)
-        if not sensitive_class:
-            return RouteDecision((), None, False)
-        return _decision_for_class(
-            sensitive_class,
-            f"librarian.corrections.sensitive_fields.{field_name}",
-            config,
-        )
+        return RouteDecision((), None, False)
 
     if field is None:
         cls = page_type.strip()

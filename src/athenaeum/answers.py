@@ -1816,6 +1816,9 @@ def _apply_field_correction(
         return "rejected", f"operator rejected correction {parsed.correction_id}; no write"
 
     # answer_token == "ratify"
+    # athenaeum#3162: a configuration still setting the removed corrections
+    # routing key applies no correction.
+    corrections.refuse_removed_sensitive_fields(config)
     index = EntityIndex(wiki_root)
     registry_entities = corrections.load_registry(knowledge_root)
     # Issue athenaeum#1850: the ratified write is attributed to the OPERATOR,
@@ -1931,6 +1934,30 @@ class IngestAnswersReport:
     reingested: int = 0
     reingest_dismissed: int = 0
     unrecoverable: int = 0
+
+
+def _ratifies_a_field_correction(blocks: list[str], *, quiet: bool = False) -> bool:
+    """Whether any block is a field correction this run would ratify (athenaeum#3162).
+
+    Mirrors the loop's own dispatch: a parseable block of the
+    ``field-correction`` write-back class, not previously waived, whose answer
+    is the ``ratify`` token. Only blocks that mention ``field-correction`` are
+    parsed, and with the caller's *quiet*: :func:`_parse_block` warns about a
+    malformed header once per process, so parsing every block here would
+    consume the warning the loop is meant to print.
+    """
+    for block_index, block_text in enumerate(blocks, start=1):
+        if "field-correction" not in block_text:
+            continue
+        pq = _parse_block(block_text, quiet=quiet, block_index=block_index)
+        if pq is None or _writeback_class(pq) != "field-correction":
+            continue
+        status_match = _WRITEBACK_STATUS_RE.search(pq.raw_block)
+        if status_match and status_match.group("state").lower() == "waived":
+            continue
+        if _parse_correction_answer(pq) == "ratify":
+            return True
+    return False
 
 
 def ingest_answers(
@@ -2076,6 +2103,18 @@ def ingest_answers(
     now = datetime.now(timezone.utc)
     iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
+
+    # athenaeum#3162: a configuration still setting the removed
+    # ``librarian.corrections.sensitive_fields`` key is refused BEFORE any block
+    # is processed when this run would ratify a field correction, so the
+    # refusal never lands mid-loop after earlier blocks were written back and
+    # archived (a partial run, re-done on the retry). A run with no ratified
+    # field correction keeps going: answers that are not corrections are not
+    # corrections processing.
+    if _ratifies_a_field_correction(blocks, quiet=quiet):
+        from athenaeum import corrections as _corrections
+
+        _corrections.refuse_removed_sensitive_fields(config)
 
     for block_index, block_text in enumerate(blocks, start=1):
         pq = _parse_block(block_text, quiet=quiet, block_index=block_index)

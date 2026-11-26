@@ -1935,10 +1935,14 @@ class TestSensitivityRouting:
                             "monotone": True,
                         }
                     },
-                    "sensitive_fields": {"bounced": "pii"},
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "excluded_fields": {
+                    "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
+                },
+            },
         }
 
     def _record(self) -> dict:
@@ -2078,7 +2082,6 @@ class TestSensitivityRoutingUsageClass:
                     "fields": {
                         "alt_emails": {"shape": "list", "writers": ["delivery-monitor"]}
                     },
-                    "sensitive_fields": {"alt_emails": "pii"},
                 }
             },
             "storage": {"mapping": {"pii": "excluded"}},
@@ -2251,7 +2254,9 @@ class TestSensitivityRoutingUsageClass:
             "shape": "scalar",
             "writers": ["delivery-monitor"],
         }
-        cfg["librarian"]["corrections"]["sensitive_fields"]["bounced"] = "pii"
+        cfg["storage"]["excluded_fields"] = {
+            "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
+        }
         result = process_correction_record(
             {
                 "record": "correction",
@@ -3406,7 +3411,6 @@ class TestRemoveDropsOrphanedContactFacts:
                     "fields": {
                         "emails": {"shape": "list", "writers": ["delivery-monitor"]}
                     },
-                    "sensitive_fields": {"emails": "pii"},
                 }
             },
             "storage": {"mapping": {"pii": "excluded"}},
@@ -3517,7 +3521,6 @@ class TestAttributionSeamWiring:
                     "fields": {
                         "emails": {"shape": "list", "writers": ["delivery-monitor"]}
                     },
-                    "sensitive_fields": {"emails": "pii"},
                 }
             },
             "storage": {"mapping": {"pii": "excluded"}},
@@ -3632,7 +3635,6 @@ class TestEnforceModeEscalatesASuspectValue:
                     "fields": {
                         "emails": {"shape": "list", "writers": ["delivery-monitor"]}
                     },
-                    "sensitive_fields": {"emails": "pii"},
                 },
                 "attribution": {"mode": mode},
             },

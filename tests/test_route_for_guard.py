@@ -1,7 +1,7 @@
-"""The three routing tables are read only by the storage resolver (athenaeum#3158).
+"""The routing tables are read only by the storage resolver (athenaeum#3158).
 
-``resolve_excluded_fields_config``, ``resolve_excluded_read_mapping`` and
-``resolve_corrections_sensitive_fields`` are the resolver's inputs. Any module
+``resolve_excluded_fields_config`` and ``resolve_excluded_read_mapping``
+are the resolver's inputs. Any module
 other than ``storage.py`` that calls one has reintroduced a second reader of
 "where is this field stored"; it must go through ``storage.route_for`` (or the
 resolver's own ``configured_*`` accessors that ``pii`` uses for its field
@@ -19,7 +19,6 @@ RESOLVER_FUNCS = frozenset(
     {
         "resolve_excluded_fields_config",
         "resolve_excluded_read_mapping",
-        "resolve_corrections_sensitive_fields",
     }
 )
 
