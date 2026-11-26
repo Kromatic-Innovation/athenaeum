@@ -12,7 +12,6 @@ from athenaeum import pii
 from athenaeum.config import write_default_config
 from athenaeum.sensitivity_routing import SensitivityRoutingError, _vault_root_for_class
 from athenaeum.storage import (
-    EXCLUDED,
     StorageConfigError,
     configured_routes,
     page_write_root_for_class,
@@ -127,8 +126,8 @@ def test_field_rule_needs_a_sensitive_target() -> None:
     configured_routes(_cfg([{"page_type": "p", "to": ["archive"]}]))
 
 
-@pytest.mark.parametrize("to", [[], ["vault", "archive"], "vault", None])
-def test_to_must_name_exactly_one_location(to: Any) -> None:
+@pytest.mark.parametrize("to", [["vault", "archive"], "vault", None])
+def test_to_must_name_at_most_one_location(to: Any) -> None:
     with pytest.raises(StorageConfigError, match="to must"):
         configured_routes(_cfg([{"page_type": "p", "to": to}]))
 
@@ -238,10 +237,9 @@ def test_sensitivity_class_rule_replaces_the_per_class_lookup(tmp_path: Path) ->
     cfg = _cfg([_rule(sensitivity_class="secret")])
     expected = tmp_path / "vault" / "sensitivity" / "secret"
     assert _vault_root_for_class("secret", cfg, tmp_path) == expected
-    # No rule: the existing fallback (built-in excluded location) is unchanged.
-    assert _vault_root_for_class("other", cfg, tmp_path) == (
-        EXCLUDED.resolve_root(tmp_path) / "sensitivity" / "other"
-    )
+    # No rule: refused (athenaeum#3168), no longer the built-in excluded location.
+    with pytest.raises(SensitivityRoutingError, match="no storage.routes rule"):
+        _vault_root_for_class("other", cfg, tmp_path)
     # An in-corpus target still fails closed.
     bad = _cfg([{"sensitivity_class": "secret", "to": ["shared"]}])
     with pytest.raises(SensitivityRoutingError):

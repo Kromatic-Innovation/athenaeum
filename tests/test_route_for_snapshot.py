@@ -92,7 +92,7 @@ def test_read_path_join_is_unchanged(tmp_path: Path, name: str) -> None:
 
 
 VALUE_CONFIGS: dict[str, dict[str, Any]] = {
-    "unmapped-falls-back-to-excluded": {},
+    "unmapped-is-refused": {},
     "mapped-excluded": _storage(mapping={"secret": "excluded"}),
     "mapped-to-wiki-refused": _storage(mapping={"secret": "wiki-markdown-embedded"}),
     "mapped-unknown-adapter": _storage(mapping={"secret": "no-such-adapter"}),
@@ -102,7 +102,7 @@ VALUE_CONFIGS: dict[str, dict[str, Any]] = {
 def _reference_vault_root(cfg: dict[str, Any], cls: str, root: Path) -> Path | str:
     mapping = (cfg.get("storage") or {}).get("mapping") or {}
     if cls.strip() not in mapping:
-        return EXCLUDED.resolve_root(root) / "sensitivity" / cls
+        return "unrouted"  # athenaeum#3168: no longer the built-in excluded location
     target = mapping[cls.strip()]
     if target == "no-such-adapter":
         return "invalid"
@@ -115,7 +115,10 @@ def _reference_vault_root(cfg: dict[str, Any], cls: str, root: Path) -> Path | s
 def test_value_routing_vault_location_is_unchanged(tmp_path: Path, name: str) -> None:
     cfg = VALUE_CONFIGS[name]
     expected = _reference_vault_root(cfg, "secret", tmp_path)
-    if expected == "invalid":
+    if expected == "unrouted":
+        with pytest.raises(SensitivityRoutingError, match="no storage.routes rule"):
+            _vault_root_for_class("secret", cfg, tmp_path)
+    elif expected == "invalid":
         with pytest.raises(SensitivityRoutingError, match="storage.mapping is invalid"):
             _vault_root_for_class("secret", cfg, tmp_path)
     elif expected == "in-corpus":

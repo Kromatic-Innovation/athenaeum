@@ -126,7 +126,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.storage import refuse_read_only_write
+from athenaeum.storage import discarded_page_types, refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
@@ -1415,11 +1415,13 @@ def process_batch_run(
             # deleting the raw exactly as for any consumed raw); a MIXED raw
             # continues with only its uncovered items. Drop-ledger rows are
             # written here because this transport has no per-file drop loop.
-            if relevance_policy is not None and relevance_policy.rules:
+            _discarded_types = discarded_page_types(config)
+            if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
                 _rp_gate = gate_raw_content(
                     relevance_policy,
                     raw.content,
                     jsonl=raw.path.suffix.lower() == ".jsonl",
+                    discarded=_discarded_types,
                 )
                 if _rp_gate.drops:
                     _rp_rows = (
@@ -1850,7 +1852,8 @@ def process_batch_run(
         # same batch-wrapped client the name gate above uses.
         _rel_jsonl = st.raw.path.suffix.lower() == ".jsonl"
         _rel_drops: list[Any] = []
-        if relevance_policy is not None and relevance_policy.rules:
+        _discarded_types = discarded_page_types(config)
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             try:
                 _rel_outcome = gate_classified_entities(
                     classified,
@@ -1861,6 +1864,7 @@ def process_batch_run(
                     client=AnthropicBatchClientBackend(client),
                     usage=usage,
                     config=config,
+                    discarded=_discarded_types,
                 )
             except Exception:
                 # A failed reasoning-tier call is a per-file failure (raw kept,
@@ -1903,7 +1907,7 @@ def process_batch_run(
                 )
         # Issue athenaeum#2647: the Tier-3 relevance gate (updates onto a covered
         # page), shared with ``librarian.process_one``.
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             st.actions, _rel_update_drops = gate_update_actions(
                 st.actions,
                 relevance_policy,
@@ -1911,6 +1915,7 @@ def process_batch_run(
                 raw_content=st.raw.content,
                 jsonl=_rel_jsonl,
                 raw_ref=st.raw.ref,
+                discarded=_discarded_types,
             )
             _rel_drops.extend(_rel_update_drops)
         if _rel_drops and resolve_drop_log(config):
@@ -2923,11 +2928,13 @@ def _states_for_classify_handle(
             out._count(reason or "raw-missing")
             dropped.append(record.ref)
             continue
-        if relevance_policy is not None and relevance_policy.rules:
+        _discarded_types = discarded_page_types(config)
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             _rp_gate = gate_raw_content(
                 relevance_policy,
                 raw.content,
                 jsonl=raw.path.suffix.lower() == ".jsonl",
+                discarded=_discarded_types,
             )
             if _rp_gate.fully_dropped:
                 _log_discard("relevance-policy", record.ref, handle.batch_id)

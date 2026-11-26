@@ -304,14 +304,24 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.sensitivity_routing import route_sensitive_values
+from athenaeum.sensitivity_routing import (
+    SensitivityRoutingError,
+    refuse_unrouted_value_classes,
+    route_sensitive_values,
+)
 from athenaeum.storage import (
     ReadOnlySurfaceError,
+    StorageConfigError,
+    discard_counts,
+    discarded_page_types,
+    note_discard,
     open_store,
     refuse_read_only_write,
     require_writable_path,
+    reset_discard_counts,
     resolve_indexed_surfaces,
     resolve_locator_surfaces,
+    route_for,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.store_access_evidence import record_fetch, record_push
@@ -2416,6 +2426,19 @@ def _record_correspondent_contact(
         )
         return
 
+    # athenaeum#3168: the one point this writer asks where the address goes. A
+    # rule with `to: []` discards it: no record, no attribution log row, no
+    # parked suspect, nothing derived from the address. The page is unchanged.
+    # A routing misconfiguration is not handled here: it surfaces at the write
+    # below exactly as it did.
+    try:
+        _address_route = route_for(entity.type, "emails", config=config)
+    except StorageConfigError:
+        _address_route = None
+    if _address_route is not None and _address_route.discarded:
+        note_discard(_address_route.rule)
+        return
+
     contacts_root = contacts_surface_root(wiki_root.parent, config)
     try:
         # Issue athenaeum#2210: the attribution seam runs HERE, in the
@@ -3044,6 +3067,37 @@ def process_one(
         )
         if redacted_body != raw_body:
             raw._content = preamble + redacted_body
+        # athenaeum#3168: a frontmatter field a `to: []` rule discards is dropped
+        # here, where the compile run first reads the raw, so no tier writes it
+        # and the rest of the page is written as usual. The raw file on disk is
+        # not touched.
+        _raw_type = str(raw_meta.get("type") or "").strip()
+        # A page type discarded whole is not captured (the capture gate below
+        # answers that), so its fields are left for that gate to see. A bad
+        # storage table surfaces where the page destination is resolved.
+        _discarded_keys: dict[str, str] = {}
+        if _raw_type:
+            try:
+                if not route_for(_raw_type, config=config).discarded:
+                    for _key in raw_meta:
+                        _decision = route_for(_raw_type, str(_key), config=config)
+                        if _decision.discarded and _decision.rule is not None:
+                            _discarded_keys[str(_key)] = _decision.rule
+            except StorageConfigError:
+                _discarded_keys = {}
+        if _discarded_keys:
+            for _rule in _discarded_keys.values():
+                note_discard(_rule)
+            _, _body_now = parse_frontmatter(raw.content)
+            raw._content = (
+                render_frontmatter(
+                    {k: v for k, v in raw_meta.items() if str(k) not in _discarded_keys}
+                )
+                + "\n"
+                + _body_now
+            )
+            raw_meta, raw_body = parse_frontmatter(raw.content)
+            incoming_handles = collect_handles(raw_meta)
 
     # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
     # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —
@@ -3097,9 +3151,15 @@ def process_one(
     # like any other nothing-created raw (skipped reason -> drop ledger, raw
     # deleted by the entity loop); a MIXED raw continues with only its
     # uncovered items. ``None``/empty policy: skipped entirely.
-    if relevance_policy is not None and relevance_policy.rules:
+    # athenaeum#3168: page types a `to: []` rule discards are not captured; the
+    # same gate that applies the policy answers it, so the gate runs for them too.
+    _discarded_types = discarded_page_types(config)
+    if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
         gate = gate_raw_content(
-            relevance_policy, raw.content, jsonl=raw.path.suffix.lower() == ".jsonl"
+            relevance_policy,
+            raw.content,
+            jsonl=raw.path.suffix.lower() == ".jsonl",
+            discarded=_discarded_types,
         )
         if gate.fully_dropped:
             result.skipped.append(gate.reason)
@@ -3656,7 +3716,7 @@ def process_one(
         # an unsure one escalates to the reasoning tier and, if that is
         # unsure too, is dropped (never held). ``None``/empty policy: no-op.
         _rel_jsonl = raw.path.suffix.lower() == ".jsonl"
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             _rel_outcome = gate_classified_entities(
                 classified,
                 relevance_policy,
@@ -3666,6 +3726,7 @@ def process_one(
                 client=client,
                 usage=usage,
                 config=config,
+                discarded=_discarded_types,
             )
             classified = _rel_outcome.kept
             result.relevance_drops.extend(_rel_outcome.drops)
@@ -3720,7 +3781,7 @@ def process_one(
         # Issue athenaeum#2647: a fact landing on an EXISTING page is judged by
         # that page's own type/tags/uid -- the Tier-3 relevance gate, shared
         # with ``batch.process_batch_run`` and run before any Tier-3 call.
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             actions, _rel_update_drops = gate_update_actions(
                 actions,
                 relevance_policy,
@@ -3728,6 +3789,7 @@ def process_one(
                 raw_content=raw.content,
                 jsonl=_rel_jsonl,
                 raw_ref=raw.ref,
+                discarded=_discarded_types,
             )
             result.relevance_drops.extend(_rel_update_drops)
             for _rd in _rel_update_drops:
@@ -6704,6 +6766,14 @@ class RunContext:
                 self.run_profile.append(("t1-screen", 0.0, _t1_census.as_profile_fields()))
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: t1 census skipped: %s", exc)
+        # athenaeum#3168: one counter per discarding rule, rule names only
+        # (never a value or a hash of one); omitted when nothing was discarded.
+        try:
+            _discards = discard_counts()
+            if _discards:
+                self.run_profile.append(("discard", 0.0, {"reason": "completed", **_discards}))
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: discard counters skipped: %s", exc)
         # Issue athenaeum#2615: per-surface git pull/push outcomes (omitted
         # entirely when no extra git-backed surface took part, so a run with
         # no extra surfaces keeps an unchanged run_profile).
@@ -12888,6 +12958,8 @@ def run(
     # too (`_run_merge_only_phase` is dispatched later in this same call),
     # since this reset happens before that dispatch.
     reset_t1_census()
+    # athenaeum#3168: the per-rule discard counters are run-scoped, same reasoning.
+    reset_discard_counts()
 
     # Issue athenaeum#546: run() is now the ORDERED SEQUENCE of named phase calls over
     # one shared, mutable RunContext (see the class docstring above) — a
@@ -12935,6 +13007,14 @@ def run(
     ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
+
+    # athenaeum#3168: with value routing on, a class with no storage.routes rule
+    # is refused at load, before anything is compiled.
+    try:
+        refuse_unrouted_value_classes(ctx.config)
+    except SensitivityRoutingError as exc:
+        log.error("sensitivity routing: %s", exc)
+        return 1
 
     # Issue athenaeum#2933 / athenaeum#2988: resolve the owner's declared store
     # rights once, at run start, for every configured surface. They are logged

@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -653,7 +654,7 @@ def is_sensitive(location: str, config: dict[str, Any] | None) -> bool:
 # Four configuration tables answer that question: ``storage.excluded_fields``
 # with ``storage.excluded_read_mapping`` (which fields of a record are kept off
 # the page), ``storage.mapping`` (which class lives outside the corpus),
-# and the free-text value-routing fallback in ``sensitivity_routing``
+# and the free-text value-routing class rule in ``sensitivity_routing``
 # (athenaeum#3162 removed the fourth, the corrections-only
 # ``librarian.corrections.sensitive_fields`` table; corrections route through
 # ``route_for(page_type, field)`` like every other writer). This section is the
@@ -668,10 +669,11 @@ class RouteDecision:
 
     Attributes:
         targets: Ordered location (adapter) names the value is stored in. Empty
-            when a single field is kept on the page.
+            when a single field is kept on the page, or when a rule discards it
+            (see :attr:`discarded`).
         rule: The configuration entry that decided (for example
-            ``"storage.mapping.pii"``), or ``None`` when no entry did and a
-            default applied.
+            ``"storage.mapping.pii"``; ``"storage.routes[2]"`` for a rule with
+            ``to: []``), or ``None`` when no entry did and a default applied.
         sensitive: True when a target is a sensitive location
             (:func:`is_sensitive`) -- a vault with a read gate. A location that
             is merely outside the corpus (an archive) is not sensitive.
@@ -680,6 +682,15 @@ class RouteDecision:
     targets: tuple[str, ...]
     rule: str | None
     sensitive: bool
+
+    @property
+    def discarded(self) -> bool:
+        """True when a rule with ``to: []`` decided: the value is stored nowhere.
+
+        Distinct from "kept on the page", which is ``targets == ()`` with
+        ``rule is None`` (no rule matched). A discard names its rule.
+        """
+        return not self.targets and self.rule is not None
 
 
 def configured_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
@@ -723,13 +734,25 @@ class StorageRoute:
     """One validated ``storage.routes`` rule.
 
     Exactly one of ``page_type`` / ``sensitivity_class`` is set. ``fields`` is
-    ``None`` for a whole-page-type rule. ``to`` is the single target location.
+    ``None`` for a whole-page-type rule. ``to`` holds the target location, or
+    nothing for a rule that discards (``to: []``, athenaeum#3168). ``index`` is
+    the rule's position in ``storage.routes``.
     """
 
-    to: str
+    to: tuple[str, ...]
     page_type: str | None = None
     sensitivity_class: str | None = None
     fields: tuple[str, ...] | None = None
+    index: int = 0
+
+    @property
+    def discard(self) -> bool:
+        return not self.to
+
+    @property
+    def rule_name(self) -> str:
+        """The name a discard decision and its counter carry."""
+        return f"storage.routes[{self.index}]"
 
 
 def _route_error(index: int, message: str) -> StorageConfigError:
@@ -758,11 +781,12 @@ def _parse_route(index: int, raw: Any) -> StorageRoute:
     to = raw.get("to")
     if not isinstance(to, list) or not all(isinstance(t, str) and t.strip() for t in to):
         raise _route_error(index, f"to must be a list of location names, got {to!r}")
-    if len(to) != 1:
+    # The one place the number of targets is checked. An empty list discards.
+    if len(to) > 1:
         raise _route_error(
             index,
-            f"to must name exactly one location, got {len(to)} "
-            "(a rule takes one target; none and several are not supported)",
+            f"to must name at most one location, got {len(to)} "
+            "(several targets are not supported)",
         )
     fields: tuple[str, ...] | None = None
     if "fields" in raw:
@@ -779,18 +803,20 @@ def _parse_route(index: int, raw: Any) -> StorageRoute:
             )
         fields = tuple(f.strip() for f in raw_fields)
     return StorageRoute(
-        to=to[0].strip(),
+        to=tuple(t.strip() for t in to),
         page_type=key_value.strip() if page_type is not None else None,
         sensitivity_class=key_value.strip() if sens_class is not None else None,
         fields=fields,
+        index=index,
     )
 
 
 def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]:
     """The validated ``storage.routes`` rules (athenaeum#3166); empty when unset.
 
-    Raises :class:`StorageConfigError` for: a malformed rule; a ``to`` list whose
-    length is not one; two rules naming the same page type and field, the same
+    A rule with ``to: []`` discards: what it names is stored nowhere
+    (athenaeum#3168). Raises :class:`StorageConfigError` for: a malformed rule; a
+    ``to`` list longer than one; two rules naming the same page type and field, the same
     whole page type, or the same sensitivity class (there is no ordering between
     rules); a page type named both in ``storage.routes`` and in
     ``storage.mapping``; a field rule on a page type that also has a
@@ -829,11 +855,12 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
     field_target: dict[str, str] = {}
     adapters = available_adapters(config)
     for route in routes:
-        if route.to not in adapters:
-            raise StorageConfigError(
-                f"storage.routes routes {route.page_type or route.sensitivity_class!r} to "
-                f"unknown location {route.to!r}; known locations: {sorted(adapters)}"
-            )
+        for target in route.to:
+            if target not in adapters:
+                raise StorageConfigError(
+                    f"storage.routes routes {route.page_type or route.sensitivity_class!r} to "
+                    f"unknown location {target!r}; known locations: {sorted(adapters)}"
+                )
         if route.page_type is None:
             continue
         if route.page_type in mapping:
@@ -841,15 +868,16 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
                 f"page type {route.page_type!r} is named in both storage.routes and "
                 "storage.mapping; keep one"
             )
-        if route.fields is None:
+        if route.fields is None or route.discard:
             continue
-        if not adapters[route.to].sensitive:
+        target = route.to[0]
+        if not adapters[target].sensitive:
             raise StorageConfigError(
                 f"storage.routes sends fields of {route.page_type!r} to location "
-                f"{route.to!r}, which is not marked sensitive: true; a field rule "
+                f"{target!r}, which is not marked sensitive: true; a field rule "
                 "needs a sensitive target"
             )
-        if field_target.setdefault(route.page_type, route.to) != route.to:
+        if field_target.setdefault(route.page_type, target) != target:
             raise StorageConfigError(
                 f"storage.routes sends fields of {route.page_type!r} to more than one "
                 "location; a page type's field rules share one target"
@@ -883,13 +911,13 @@ def _route_tables(
     fields: dict[str, tuple[str, ...]] = {}
     read_mapping: dict[str, str] = {}
     for route in configured_routes(config):
-        if route.page_type is None:
+        if route.page_type is None or route.discard:
             continue
         if route.fields is None:
-            mapping[route.page_type] = route.to
+            mapping[route.page_type] = route.to[0]
             continue
         surface = _route_surface_class(route.page_type)
-        mapping[surface] = route.to
+        mapping[surface] = route.to[0]
         fields[surface] = fields.get(surface, ()) + route.fields
         read_mapping[route.page_type] = surface
     return mapping, fields, read_mapping
@@ -904,16 +932,17 @@ def routed_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Class -> location for every page type and sensitivity class that is routed whole.
 
     ``storage.mapping`` entries plus the ``storage.routes`` rules without
-    ``fields`` and the ``sensitivity_class`` rules. For the readers that report
+    ``fields`` and the ``sensitivity_class`` rules (a rule with ``to: []``
+    names no location and is left out). For the readers that report
     on where a class goes (doctor, the sensitivity lint, ``storage move-type``);
     the routing itself goes through :func:`route_for`.
     """
     merged = dict(resolve_storage_mapping(config))
     for route in configured_routes(config):
-        if route.fields is None:
+        if route.fields is None and not route.discard:
             name = route.page_type if route.page_type is not None else route.sensitivity_class
             assert name is not None
-            merged[name] = route.to
+            merged[name] = route.to[0]
     return merged
 
 
@@ -927,10 +956,85 @@ def route_for_sensitivity_class(
     """
     for route in configured_routes(config):
         if route.sensitivity_class == sensitivity_class:
+            if route.discard:
+                return RouteDecision((), route.rule_name, False)
             return _decision_for_adapter_names(
-                (route.to,), f"storage.routes.sensitivity_class.{sensitivity_class}", config
+                route.to, f"storage.routes.sensitivity_class.{sensitivity_class}", config
             )
     return None
+
+
+def _discard_rules(
+    config: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """``(page types discarded whole, page type -> {field -> rule})`` from ``to: []`` rules."""
+    whole: dict[str, str] = {}
+    fields: dict[str, dict[str, str]] = {}
+    for route in configured_routes(config):
+        if not route.discard or route.page_type is None:
+            continue
+        if route.fields is None:
+            whole[route.page_type] = route.rule_name
+        else:
+            for name in route.fields:
+                fields.setdefault(route.page_type, {})[name] = route.rule_name
+    return whole, fields
+
+
+def discard_rule_for_field_any_type(field: Any, config: dict[str, Any] | None) -> str | None:
+    """The first ``to: []`` rule that names *field* on any page type, else ``None``.
+
+    For a writer that has not yet resolved which page type a value belongs to
+    and must not let a value some rule discards reach a ledger or a handoff note
+    in the meantime. Not a routing answer: :func:`route_for` is.
+    """
+    if not isinstance(field, str):
+        return None
+    try:
+        discarded_fields = _discard_rules(config)[1]
+    except StorageConfigError:
+        # A bad table is reported where the write asks route_for; this probe
+        # must not raise from a writer that promises not to.
+        return None
+    for fields in discarded_fields.values():
+        if field in fields:
+            return fields[field]
+    return None
+
+
+def discarded_page_types(config: dict[str, Any] | None) -> dict[str, str]:
+    """Page type -> rule name for every page type a ``to: []`` rule discards whole.
+
+    The capture gates feed this to the intake decision (athenaeum#3168): a page
+    type listed here is not captured.
+    """
+    return dict(_discard_rules(config)[0])
+
+
+# Per-rule count of values discarded this run (athenaeum#3168). Rule names only:
+# never a value, and never anything computed from one.
+_DISCARD_COUNTS: dict[str, int] = {}
+_DISCARD_LOCK = threading.Lock()
+
+
+def note_discard(rule: str | None) -> None:
+    """Count one discarded value against *rule* (a rule name, never a value)."""
+    if not rule:
+        return
+    with _DISCARD_LOCK:
+        _DISCARD_COUNTS[rule] = _DISCARD_COUNTS.get(rule, 0) + 1
+
+
+def discard_counts() -> dict[str, int]:
+    """A snapshot of the per-rule discard counters, for the run summary."""
+    with _DISCARD_LOCK:
+        return dict(sorted(_DISCARD_COUNTS.items()))
+
+
+def reset_discard_counts() -> None:
+    """Zero the counters (the start of a run)."""
+    with _DISCARD_LOCK:
+        _DISCARD_COUNTS.clear()
 
 
 
@@ -1017,18 +1121,19 @@ def route_for(
     * ``route_for(None, field, config=...)`` -- no page type and no surface
       class: nothing to route by, so the field is kept on the page.
 
-    **Two fallbacks that disagree today, both preserved here** (so the change
-    that removes one is a visible diff):
+    **One fallback remains** (the second was removed by athenaeum#3168): the
+    FIELD path falls back to the WIKI: a field of a class that is not outside the
+    corpus, or not on its field list, is kept on the page (``targets == ()``,
+    ``rule is None``). ``sensitivity_routing`` (free-text values) used to fall
+    back to the built-in EXCLUDED location for a class with no rule; it now
+    refuses such a class at load instead, so there is no value-routing fallback.
 
-    1. The FIELD path falls back to the WIKI: a field of a class that is not
-       outside the corpus, or not on its field list, is kept on the page
-       (``targets == ()``).
-    2. ``sensitivity_routing`` (free-text values) falls back to the built-in
-       EXCLUDED location when the class has no ``storage.mapping`` entry. It
-       detects that case as ``rule is None`` on a whole-page-type decision --
-       the whole-type answer itself is the wiki default, as
-       :func:`resolve_adapter_for_class` returns it -- and substitutes the
-       built-in excluded location in its own module.
+    **Discard (athenaeum#3168).** A ``storage.routes`` rule with ``to: []``
+    answers with empty ``targets`` AND its ``rule`` set (``discarded`` is
+    true): the page type, or the named fields of it, are stored nowhere. This
+    is not the "no rule matched" answer, which also has empty ``targets`` but
+    ``rule is None``. The read-path form (``surface_class=``) is not affected:
+    a discarded value was never stored.
 
     Raises:
         StorageConfigError: A mapping names a location that is not a known
@@ -1041,6 +1146,14 @@ def route_for(
 
     if page_type is None or not page_type.strip():
         return RouteDecision((), None, False)
+
+    # A ``to: []`` rule decides first: its decision has no targets and names the
+    # rule (athenaeum#3168), which is what tells it apart from "no rule matched".
+    discarded_whole, discarded_fields = _discard_rules(config)
+    if page_type.strip() in discarded_whole:
+        return RouteDecision((), discarded_whole[page_type.strip()], False)
+    if field is not None and field in discarded_fields.get(page_type.strip(), {}):
+        return RouteDecision((), discarded_fields[page_type.strip()][field], False)
 
     if field is None:
         cls = page_type.strip()

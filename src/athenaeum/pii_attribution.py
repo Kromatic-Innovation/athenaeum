@@ -131,6 +131,7 @@ from athenaeum.provider import (
     resolve_thinking,
     response_text,
 )
+from athenaeum.storage import StorageConfigError, note_discard, route_for
 from athenaeum.store import append_line_durable, now_iso
 
 if TYPE_CHECKING:
@@ -474,6 +475,10 @@ class AttributionContext:
     #: :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE` for which callers that
     #: is true for today and which it is not.
     enforced_classes: frozenset[str] = frozenset()
+    #: The resolved config this context was built from. Read only to ask
+    #: :func:`athenaeum.storage.route_for` whether a field is discarded
+    #: (athenaeum#3168); ``None`` for a context built without one.
+    config: dict[str, Any] | None = field(default=None, repr=False)
 
 
 def _attribution_key_path(contacts_root: Path) -> Path:
@@ -603,6 +608,7 @@ def build_attribution_context(
         enforced_classes=attribution_enforced_classes(
             config, resolved_contacts_root, excluded_index=idx
         ),
+        config=config,
     )
 
 
@@ -1373,6 +1379,19 @@ def scrub_compiled_contact_tokens(
     for token, record_field in tagged_tokens:
         if token in name_pii_values:
             continue
+        # athenaeum#3168: a field a `to: []` rule discards is stored nowhere, so
+        # nothing is attributed, filed, logged or parked for it (each of those
+        # carries a key derived from the value). The token is still removed
+        # from the compiled body, as for every other token.
+        if target_type is not None:
+            try:
+                decision = route_for(target_type, record_field, config=context.config)
+            except StorageConfigError:
+                decision = None
+            if decision is not None and decision.discarded:
+                note_discard(decision.rule)
+                scrubbed = scrubbed.replace(token, "")
+                continue
         verdict = check_contact_attribution(
             token,
             target_uid=subject_uid,
