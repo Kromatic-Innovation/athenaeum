@@ -316,7 +316,7 @@ class TestPiiGatedFields:
     def test_pii_field_as_output_field_requires_with_pii(
         self, enum_wiki: Path, tmp_path: Path
     ) -> None:
-        with pytest.raises(ValueError, match="with_pii"):
+        with pytest.raises(ValueError, match="include_sensitive"):
             enumerate_entities(
                 enum_wiki,
                 _cache(tmp_path),
@@ -328,7 +328,7 @@ class TestPiiGatedFields:
         self, enum_wiki: Path, tmp_path: Path
     ) -> None:
         pred = FieldPredicate(fields=("google_contact_kromatic",), kind="eq", value="x")
-        with pytest.raises(ValueError, match="with_pii"):
+        with pytest.raises(ValueError, match="include_sensitive"):
             enumerate_entities(
                 enum_wiki,
                 _cache(tmp_path),
@@ -377,7 +377,7 @@ class TestPiiGatedFields:
         # prefix and a concrete google_contact_* field stay gated.
         assert is_pii_gated_field("google_contact") is True
         assert is_pii_gated_field("google_contact_kromatic") is True
-        with pytest.raises(ValueError, match="with_pii"):
+        with pytest.raises(ValueError, match="include_sensitive"):
             enumerate_entities(
                 enum_wiki,
                 _cache(tmp_path),

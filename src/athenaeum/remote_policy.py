@@ -4,9 +4,8 @@
 Exposing a personal corpus to a third-party host is a different egress from
 the operator's own model calls (``docs/design/security-posture.md`` §2.1/§2.2
 L6). Two things that are safe on the operator's own machine are not safe
-there: the owner-only decision-queue mutators, and the ``with_pii`` /
-``include_excluded`` read that resolves a page to its off-corpus excluded
-record.
+there: the owner-only decision-queue mutators, and the ``include_sensitive``
+read that resolves a page to its off-corpus sensitive record.
 
 This module owns the resolved shape of those two pins —
 :class:`RemotePolicy` — plus the closed vocabularies and the error type the
@@ -51,12 +50,12 @@ REMOTE_PROFILE = "remote"
 #: either direction without a new profile name.
 VALID_SERVE_PROFILES: frozenset[str] = frozenset({REMOTE_PROFILE})
 
-#: Closed vocabulary for ``serve.excluded_fields``. ``on`` is the historical
-#: behaviour (a ``with_pii=True`` caller gets excluded values); ``off``
+#: Closed vocabulary for ``serve.sensitive_reads``. ``on`` is the historical
+#: behaviour (an ``include_sensitive=True`` caller gets sensitive values); ``off``
 #: withholds them. Spelled as words rather than a bool so a mistyped value is
 #: a loud startup error instead of YAML's permissive truthiness quietly
 #: picking a side on a PII-egress boundary.
-VALID_EXCLUDED_FIELDS_VALUES: tuple[str, ...] = ("off", "on")
+VALID_SENSITIVE_READS_VALUES: tuple[str, ...] = ("off", "on")
 
 #: The three owner-only decision-queue mutators the ``remote`` preset turns
 #: OFF (decision D5). Adjudicating the operator's contradiction/merge/
@@ -79,13 +78,13 @@ REMOTE_PROFILE_ENABLED_MUTATORS: frozenset[str] = frozenset(
     {"remember", "raise_decision"}
 )
 
-#: ``serve.excluded_fields`` under the ``remote`` preset: withheld.
-REMOTE_PROFILE_EXCLUDED_FIELDS = False
+#: ``serve.sensitive_reads`` under the ``remote`` preset: withheld.
+REMOTE_PROFILE_SENSITIVE_READS = False
 
 
 class RemotePolicyError(ValueError):
     """Raised when the ``serve.profile`` / ``serve.tools`` /
-    ``serve.excluded_fields`` configuration is invalid or unsatisfiable.
+    ``serve.sensitive_reads`` configuration is invalid or unsatisfiable.
 
     Fail-loud, mirroring
     :class:`athenaeum.screening.ScreeningConfigError`'s posture for the other
@@ -115,8 +114,8 @@ class RemotePolicy:
             from — the full tool set), while an operator's ``serve.tools``
             ADDS a positive ceiling. Both compose: a tool is served only if
             it clears both.
-        excluded_fields: ``True`` = the historical behaviour (``with_pii`` /
-            ``include_excluded`` resolve excluded values). ``False`` =
+        sensitive_reads: ``True`` = the historical behaviour (``include_sensitive``
+            resolves sensitive values). ``False`` =
             withheld.
         profile: The validated :data:`VALID_SERVE_PROFILES` name this policy
             was built from, or ``None`` when the pins were set individually
@@ -134,7 +133,7 @@ class RemotePolicy:
 
     allowed_tools: frozenset[str] | None = None
     disabled_tools: frozenset[str] = field(default_factory=frozenset)
-    excluded_fields: bool = True
+    sensitive_reads: bool = True
     profile: str | None = None
 
     def tool_enabled(self, name: str) -> bool:
@@ -191,7 +190,7 @@ def build_remote_policy(
     *,
     profile: str | None = None,
     tools: frozenset[str] | None = None,
-    excluded_fields: bool | None = None,
+    sensitive_reads: bool | None = None,
 ) -> RemotePolicy | None:
     """Compose the three resolved pins into a :class:`RemotePolicy`, or ``None``.
 
@@ -202,27 +201,27 @@ def build_remote_policy(
 
     Precedence is resolved BEFORE this function, per pin, by
     ``athenaeum.config.resolve_serve_profile`` / ``resolve_serve_tools`` /
-    ``resolve_serve_excluded_fields`` (CLI > env > yaml each). What is left
+    ``resolve_serve_sensitive_reads`` (CLI > env > yaml each). What is left
     here is how a PROFILE layers with the individual pins: the profile
     supplies defaults, and an explicitly-set individual pin overrides it.
-    That is why *excluded_fields* is tri-state — ``None`` means "not set, let
+    That is why *sensitive_reads* is tri-state — ``None`` means "not set, let
     the profile decide", which a plain ``bool`` could not express.
 
     Args:
         profile: A validated :data:`VALID_SERVE_PROFILES` member, or ``None``.
         tools: An explicit allowlist, or ``None`` for no allowlist.
-        excluded_fields: ``True``/``False`` to pin it explicitly, ``None`` to
+        sensitive_reads: ``True``/``False`` to pin it explicitly, ``None`` to
             take the profile's default (and the historical ``True`` with no
             profile).
 
     The *profile* name is carried through onto the returned policy
     (issue athenaeum#2387) as well as folded into the pins. That does not
     change the ``None`` return above: a call with no profile, no tools and no
-    ``excluded_fields`` still returns ``None``, so an install that sets none
+    ``sensitive_reads`` still returns ``None``, so an install that sets none
     of the new keys is unchanged -- there is no policy object for a
     ``profile`` field to appear on.
     """
-    if profile is None and tools is None and excluded_fields is None:
+    if profile is None and tools is None and sensitive_reads is None:
         return None
     if profile is not None and profile not in VALID_SERVE_PROFILES:
         # Defence in depth: the resolver validates first, so reaching this
@@ -232,15 +231,15 @@ def build_remote_policy(
             f"{sorted(VALID_SERVE_PROFILES)}."
         )
     disabled: frozenset[str] = frozenset()
-    profile_excluded_fields = True
+    profile_sensitive_reads = True
     if profile == REMOTE_PROFILE:
         disabled = REMOTE_PROFILE_DISABLED_TOOLS
-        profile_excluded_fields = REMOTE_PROFILE_EXCLUDED_FIELDS
+        profile_sensitive_reads = REMOTE_PROFILE_SENSITIVE_READS
     return RemotePolicy(
         allowed_tools=tools,
         disabled_tools=disabled,
-        excluded_fields=(
-            profile_excluded_fields if excluded_fields is None else excluded_fields
+        sensitive_reads=(
+            profile_sensitive_reads if sensitive_reads is None else sensitive_reads
         ),
         profile=profile,
     )

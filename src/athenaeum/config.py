@@ -64,6 +64,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -281,6 +282,12 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
         "run that processes corrections refuses to start while this key is "
         "non-empty and prints the exact replacement; other commands only show "
         "this notice"
+    ),
+    "serve.excluded_fields": (
+        "renamed in athenaeum#3163; use `serve.sensitive_reads: on | off` "
+        "(same values, same per-profile defaults) instead. `athenaeum serve` "
+        "refuses to start while this key is set, because ignoring it would "
+        "silently change what a served process returns"
     ),
     "librarian.page_split_proposals.heterogeneity_threshold": (
         "removed in athenaeum#2465; the page-split proposal decision type "
@@ -10222,7 +10229,7 @@ def resolve_serve_profile(
                     # list) must not fall through to "no profile": that would
                     # serve the FULL surface on a typo, the one direction a
                     # safety pin must never fail in. Same fail-loud rule as
-                    # `resolve_serve_excluded_fields` below. (Seer review on
+                    # `resolve_serve_sensitive_reads` below. (Seer review on
                     # PR athenaeum#2416.)
                     raise RemotePolicyError(
                         f"serve.profile={candidate!r} must be a string naming "
@@ -10303,13 +10310,14 @@ def resolve_serve_tools(
     return None
 
 
-def resolve_serve_excluded_fields(
+def resolve_serve_sensitive_reads(
     config: dict[str, Any] | None,
     cli_value: str | None = None,
+    legacy_cli_value: str | None = None,
 ) -> bool | None:
-    """Resolve the serve-time excluded-fields pin (issue athenaeum#2383).
+    """Resolve the serve-time sensitive-reads pin (issues athenaeum#2383, athenaeum#3163).
 
-    Returns ``True`` (excluded values are resolvable, the historical
+    Returns ``True`` (sensitive values are resolvable, the historical
     behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
     :func:`athenaeum.remote_policy.build_remote_policy` fall back to the
     active profile's default (``off`` under ``remote``) and keeps a server
@@ -10318,13 +10326,21 @@ def resolve_serve_excluded_fields(
 
     Precedence follows the repo convention CLI > env > yaml > default:
 
-    - ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
-    - ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
-    - ``serve.excluded_fields`` — yaml string.
+    - ``cli_value`` — the ``athenaeum serve --sensitive-reads`` flag.
+    - ``ATHENAEUM_SERVE_SENSITIVE_READS`` — env var.
+    - ``serve.sensitive_reads`` — yaml string.
     - ``None`` — not set.
 
+    The names this setting had before its rename are deprecated aliases for one minor
+    release: ``legacy_cli_value`` (``--excluded-fields``) and the
+    ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` env var resolve identically, and a
+    notice naming the replacement goes to stderr. The old yaml key
+    ``serve.excluded_fields`` is NOT an alias: it is refused, with the
+    replacement printed (see ``_REMOVED_CONFIG_KEYS``). Setting a deprecated
+    and a current name to different values raises.
+
     The vocabulary is the words ``off`` / ``on``
-    (:data:`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
+    (:data:`athenaeum.remote_policy.VALID_SENSITIVE_READS_VALUES`), not a
     bool, so YAML's permissive truthiness cannot quietly pick a side on a
     PII-egress boundary; anything else raises
     :class:`athenaeum.remote_policy.RemotePolicyError` and
@@ -10332,49 +10348,87 @@ def resolve_serve_excluded_fields(
     :func:`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
     """
     from athenaeum.remote_policy import (
-        VALID_EXCLUDED_FIELDS_VALUES,
+        VALID_SENSITIVE_READS_VALUES,
         RemotePolicyError,
     )
 
+    if isinstance(config, dict):
+        legacy_serve_cfg = config.get("serve")
+        if isinstance(legacy_serve_cfg, dict) and "excluded_fields" in legacy_serve_cfg:
+            raise RemotePolicyError(
+                _REMOVED_CONFIG_KEYS["serve.excluded_fields"]
+            )
+
+    def _deprecated(old: str, new: str) -> None:
+        print(
+            f"athenaeum serve: {old} is deprecated: use {new} instead. The old "
+            "name still works and is removed in the next minor release.",
+            file=sys.stderr,
+        )
+
     raw: str | None = None
-    source = "serve.excluded_fields"
+    source = "serve.sensitive_reads"
+    legacy_env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+    new_env = os.environ.get("ATHENAEUM_SERVE_SENSITIVE_READS")
+    if legacy_cli_value is not None:
+        _deprecated("--excluded-fields", "--sensitive-reads")
+        if cli_value is not None and cli_value.strip().lower() != legacy_cli_value.strip().lower():
+            raise RemotePolicyError(
+                "--excluded-fields and --sensitive-reads were passed different "
+                "values; pass --sensitive-reads alone."
+            )
+        cli_value = cli_value if cli_value is not None else legacy_cli_value
     if cli_value is not None:
         raw = cli_value
-        source = "--excluded-fields"
+        source = "--sensitive-reads"
     else:
-        env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+        if legacy_env is not None:
+            _deprecated("ATHENAEUM_SERVE_EXCLUDED_FIELDS", "ATHENAEUM_SERVE_SENSITIVE_READS")
+            if new_env is not None and new_env.strip().lower() != legacy_env.strip().lower():
+                raise RemotePolicyError(
+                    "ATHENAEUM_SERVE_EXCLUDED_FIELDS and "
+                    "ATHENAEUM_SERVE_SENSITIVE_READS are set to different "
+                    "values; set ATHENAEUM_SERVE_SENSITIVE_READS alone."
+                )
+        env = new_env if new_env is not None else legacy_env
         if env is not None:
             raw = env
-            source = "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+            source = (
+                "ATHENAEUM_SERVE_SENSITIVE_READS"
+                if new_env is not None
+                else "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+            )
         elif isinstance(config, dict):
             serve_cfg = config.get("serve")
             if isinstance(serve_cfg, dict):
-                candidate = serve_cfg.get("excluded_fields")
+                candidate = serve_cfg.get("sensitive_reads")
                 if isinstance(candidate, str):
                     raw = candidate
                 elif candidate is not None:
-                    # A bare `serve.excluded_fields: false` is YAML's bool, not
+                    # A bare `serve.sensitive_reads: false` is YAML's bool, not
                     # this knob's vocabulary. Reject it rather than guessing
                     # which of off/on the operator meant -- a wrong guess here
                     # is a PII egress.
                     raise RemotePolicyError(
-                        f"serve.excluded_fields={candidate!r} must be one of "
-                        f"{list(VALID_EXCLUDED_FIELDS_VALUES)} (as a quoted "
+                        f"serve.sensitive_reads={candidate!r} must be one of "
+                        f"{list(VALID_SENSITIVE_READS_VALUES)} (as a quoted "
                         "string), not a YAML boolean."
                     )
 
     if raw is None or not raw.strip():
         # An explicitly EMPTY value at any tier means "not set", matching
         # `resolve_serve_profile` and `resolve_audience` rather than erroring
-        # on the `ATHENAEUM_SERVE_EXCLUDED_FIELDS=` unset idiom.
+        # on the `ATHENAEUM_SERVE_SENSITIVE_READS=` unset idiom.
         return None
     value = raw.strip().lower()
-    if value not in VALID_EXCLUDED_FIELDS_VALUES:
+    if value not in VALID_SENSITIVE_READS_VALUES:
         raise RemotePolicyError(
-            f"{source}={raw!r} is not a valid excluded-fields setting; "
-            f"expected one of {list(VALID_EXCLUDED_FIELDS_VALUES)}."
+            f"{source}={raw!r} is not a valid sensitive-reads setting; "
+            f"expected one of {list(VALID_SENSITIVE_READS_VALUES)}."
         )
     return value == "on"
+
+
 # Issue athenaeum#2382: the `athenaeum serve` transport knobs. Appended at EOF
 # per this module's own convention, and each reads its nested yaml path INLINE
 # (`config.get("serve")` then `.get("<leaf>")`) rather than through a shared

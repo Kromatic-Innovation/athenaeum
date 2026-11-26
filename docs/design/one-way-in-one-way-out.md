@@ -130,7 +130,7 @@ CLI command — were **deprecated wrappers** (athenaeum#887) over the same read,
 kept for backward compatibility while `apollo-enrich`'s weekly job still called
 `read_people` directly. They have since been **removed** (athenaeum#888), once
 `apollo-enrich` and every other known consumer migrated to the generalized
-`pii.read_entity` / `read_entities` path above (or `recall(with_pii=True)`).
+`pii.read_entity` / `read_entities` path above (or `recall(include_sensitive=True)`).
 A caller still on the person-shaped names gets an `ImportError` /
 `AttributeError` / unknown-command error rather than a deprecation warning —
 there is no migration window left to rely on.
@@ -219,10 +219,10 @@ If you are writing a client against athenaeum:
    path**, in whichever of its two shapes matches what you already have:
 
    - **Searching?** `recall` with the excluded-field flag set: the `recall` MCP
-     tool's `with_pii=True`, or `athenaeum recall --with-pii` (athenaeum#885,
+     tool's `include_sensitive=True`, or `athenaeum recall --include-sensitive` (athenaeum#885,
      athenaeum#886). This is the read you were already making.
    - **Holding a uid?** The `read_entity` MCP tool, `athenaeum entity
-     --uid ... --class ... [--include-excluded]`, or `pii.read_entity`
+     --uid ... --class ... [--include-sensitive]`, or `pii.read_entity`
      (athenaeum#883, athenaeum#886). **Resolving more than one uid in one
      process: use `pii.read_entities`**, which pays the store's O(corpus) scans
      once for the whole batch instead of once per uid — a loop over the

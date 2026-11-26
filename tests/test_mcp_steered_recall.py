@@ -256,10 +256,10 @@ class TestDefaultPathIsByteIdentical:
         [
             {},
             {"remote_policy": None},
-            {"remote_policy": build_remote_policy(excluded_fields=False)},
+            {"remote_policy": build_remote_policy(sensitive_reads=False)},
             {"remote_policy": build_remote_policy(tools=frozenset({"recall", "remember"}))},
         ],
-        ids=["omitted", "none", "excluded-fields-off", "tools-allowlist"],
+        ids=["omitted", "none", "sensitive-reads-off", "tools-allowlist"],
     )
     def test_only_the_profile_switches_the_text(
         self, corpus: Path, golden: dict[str, str], policy_kwargs: dict
@@ -267,7 +267,7 @@ class TestDefaultPathIsByteIdentical:
         """A policy with pins but NO profile is still a default-text server.
 
         The steering is selected by the profile name, not by "a policy
-        exists" — an operator who pins ``serve.excluded_fields`` or
+        exists" — an operator who pins ``serve.sensitive_reads`` or
         ``serve.tools`` on their own machine has not asked for remote-host
         steering and must not get it.
         """

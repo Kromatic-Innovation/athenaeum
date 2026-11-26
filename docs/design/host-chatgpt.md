@@ -165,7 +165,7 @@ an in-process fake issuer, and a deployment guide with invented hosts
 ChatGPT ──HTTPS──► reverse proxy (TLS, deployment) ──► athenaeum serve --transport http
    │                                                     │  ├─ token verifier (JWKS, iss, aud, exp, scope)
    │                                                     │  ├─ identity → audience (one process per audience)
-   │                                                     │  ├─ remote profile pins (tool allowlist, with_pii off)
+   │                                                     │  ├─ remote profile pins (tool allowlist, include_sensitive off)
    └──OAuth (PKCE S256, CIMD/DCR)──► authorization server (deployment)
                                                          └─ same create_server(), same 16 tools minus the disabled ones
 ```
@@ -188,7 +188,7 @@ ChatGPT ──HTTPS──► reverse proxy (TLS, deployment) ──► athenaeum
   `audience` (CLI > env > yaml) and never offered as per-tool arguments:
   - a tool allowlist, where disabled tools are absent from `tools/list` rather than
     merely refusing;
-  - excluded fields off: `recall(with_pii=True)` and `read_entity` never return excluded
+  - excluded fields off: `recall(include_sensitive=True)` and `read_entity` never return excluded
     values in this process (§5.2);
   - owner-only decision-queue mutators (`resolve_question`, `resolve_merge`,
     `review_audit_item`) disabled.
@@ -280,10 +280,10 @@ says "explicit and steered tool calls; no auto-recall".
   certificate at the proxy. That narrows callers to ChatGPT but authorizes no one, so
   it complements OAuth and never replaces it.
 
-### 5.2 PII and the `with_pii` path
+### 5.2 PII and the `include_sensitive` path
 
 Excluded fields (a person's contact data, and anything else the operator routes off
-the corpus) are read through exactly one path: `recall(with_pii=True)` or
+the corpus) are read through exactly one path: `recall(include_sensitive=True)` or
 `read_entity` ([security posture §2.1](security-posture.md)). Over a remote host,
 every value that path returns is sent to a third-party model provider and kept in
 that provider's conversation history.
@@ -295,11 +295,11 @@ third-party host, retained conversation history, and model output the operator d
 not control. So this design proposes that **the remote profile disables the excluded
 field path by default**:
 
-- `with_pii=True` is accepted but returns a withheld notice in place of excluded
+- `include_sensitive=True` is accepted but returns a withheld notice in place of excluded
   values.
 - `read_entity` returns no excluded values.
 - `enumerate_entities` refuses PII-scoped predicates, as it already does without
-  `with_pii`.
+  `include_sensitive`.
 
 Turning it on is an explicit serve-time pin. This is decision D4.
 
@@ -324,7 +324,7 @@ trust and precedence can tell it apart.
 | Token for the wrong resource, or a forwarded token | Audience check against the canonical resource URL. |
 | Valid token, wrong person | Identity allowlist → 401. |
 | Restricted remote caller widening scope | Audience pinned per process. There is still no per-tool audience argument. |
-| Excluded values leaking to a third-party host | The remote profile disables the `with_pii` path by default. |
+| Excluded values leaking to a third-party host | The remote profile disables the `include_sensitive` path by default. |
 | A model approving a destructive call | Owner-only mutators are absent from the remote `tools/list`, not just refused. |
 | Concurrent `remember` and `recall` corrupting the index | The concurrency child either proves safety or serializes. |
 | Cold start exceeding a client or tunnel deadline | `create_server` stays scan-free (athenaeum#1194), plus a startup-latency check in the smoke test. |
@@ -354,7 +354,7 @@ supports only a read-only spike. The deep-research shim (athenaeum#2388) is park
 | D1 | Un-park remote mode, and which path | (a) native streamable HTTP + OAuth resource server; (b) Secure MCP Tunnel only; (c) both | **(a) as the 2199 core**, with (b) as a cheap ChatGPT-only `~operator` spike under 2200. Only (a) serves Grok and other remote hosts. Timing follows the adoption order. |
 | D2 | Who issues tokens | (a) external OIDC provider, athenaeum as resource server; (b) athenaeum embeds an authorization server; (c) a static bearer token | **(a).** (b) puts credential storage and consent UI into a memory library. (c) is not an OAuth flow ChatGPT will run. |
 | D3 | Audience of the remote process | (a) owner (full access); (b) a restricted audience the operator names, with owner as an explicit opt-in | **(b).** Start narrow. The owner can opt in deliberately, but it is never the default for a third-party host. |
-| D4 | Excluded fields (`with_pii`) remotely | (a) disabled by default, opt-in pin; (b) enabled, as on stdio | **(a)**, for the egress reasons in §5.2. |
+| D4 | Excluded fields (`include_sensitive`) remotely | (a) disabled by default, opt-in pin; (b) enabled, as on stdio | **(a)**, for the egress reasons in §5.2. |
 | D5 | Remote write tools | (a) `remember` + `raise_decision` on, `resolve_*`/`review_audit_item` off; (b) read-only; (c) all | **(a)**, with host-accurate provenance. A plan that only allows read/fetch makes this moot for that plan. |
 | D6 | What to call ChatGPT recall | (a) "steered recall", not auto-recall, until measured; (b) call it auto-recall | **(a).** The sidecar contract says Tier 3 is not the sidecar. |
 | D7 | Scope of the steering `instructions` | (a) remote profile only; (b) change the shared string for every host | **(a).** It leaves the Claude Code host and its evals untouched. |
