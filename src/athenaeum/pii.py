@@ -311,13 +311,20 @@ def is_pii_class_excluded(config: dict[str, Any] | None) -> bool:
 #: still stays in the corpus unless ALSO routed to an excluded surface).
 PII_FLAG = "pii"
 
+#: The contact field names the contact writers know how to handle, in read
+#: order. This lists field names the writers understand; it is NOT a statement
+#: of what is private or excluded. :data:`CONTACT_FRONTMATTER_FIELDS` (first two),
+#: :data:`CONTACT_DATA_FIELDS` (all) and :data:`RECORDABLE_CONTACT_FIELDS` are
+#: computed from it; :data:`CONTACT_IDENTIFIER_FIELDS` stays a separate definition.
+BUILTIN_CONTACT_FIELDS: tuple[str, ...] = ("emails", "phones", "former_emails", "alt_emails")
+
 #: Frontmatter (list-valued) fields that hold archival contact data directly,
 #: per the issue's entity-page rule: entity pages carry durable identifiers
 #: only (name, LinkedIn, record id, Google-Contact id); ``emails``/``phones``
 #: are the two contact-data fields that must not live inline going forward.
 #: Migrating pre-existing pages that already carry these is athenaeum#437 (out of
 #: scope) — this module only flags, never rewrites, a page.
-CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = ("emails", "phones")
+CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = BUILTIN_CONTACT_FIELDS[:2]
 
 #: Frontmatter fields whose values are DURABLE IDENTIFIERS (athenaeum#427) and are
 #: PRESERVED VERBATIM on an entity page even when a value is email/phone-shaped
@@ -4110,7 +4117,9 @@ def record_observed_contact_value(
 #: for an unknown ``usage_class``: a misspelled field would otherwise park the
 #: value in frontmatter no resolver on this surface ever looks at, which reads
 #: back as "the store never got it".
-RECORDABLE_CONTACT_FIELDS: tuple[str, ...] = (*CONTACT_IDENTIFIER_FIELDS, "phones")
+RECORDABLE_CONTACT_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys((*CONTACT_IDENTIFIER_FIELDS, *BUILTIN_CONTACT_FIELDS))
+)
 
 
 def _minted_contact_record_body(identifier: str, *, usage_class: str, field: str) -> str:
@@ -5445,9 +5454,7 @@ def retire_contact_record(
 #: dedupes while preserving first-seen order, which is what keeps this the
 #: single ``("emails", "phones", "former_emails", "alt_emails")`` iteration
 #: order :func:`read_entity` relies on.
-CONTACT_DATA_FIELDS: tuple[str, ...] = tuple(
-    dict.fromkeys(CONTACT_FRONTMATTER_FIELDS + CONTACT_IDENTIFIER_FIELDS)
-)
+CONTACT_DATA_FIELDS: tuple[str, ...] = BUILTIN_CONTACT_FIELDS
 
 
 #: Frontmatter keys on an excluded record that are BOOKKEEPING — the record's
@@ -6520,6 +6527,7 @@ def read_entities(
 __all__ = [
     "PII_ENTITY_CLASS",
     "PII_FLAG",
+    "BUILTIN_CONTACT_FIELDS",
     "CONTACT_FRONTMATTER_FIELDS",
     "DURABLE_IDENTIFIER_FIELDS",
     "NAME_FIELDS",
