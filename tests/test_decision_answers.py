@@ -53,6 +53,15 @@ from tests.conftest import init_git_repo
 # ---------------------------------------------------------------------------
 
 
+def _shown(wiki_root: Path, decision_type: str, decision_id: str) -> str:
+    """The fingerprint the pending item has now, as a host that just listed
+    it would echo it back (issue athenaeum#2530). Authority-routed items
+    hold an answer that names no fingerprint (ruling D2)."""
+    from athenaeum.decision_answers import current_fingerprints
+
+    return min(current_fingerprints(wiki_root, decision_type, decision_id), default="")
+
+
 @pytest.fixture
 def wiki_root(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
@@ -939,6 +948,7 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
             decision_type=decision_type,
             verdict=accepting_verdict,
             origin_decision_type=origin_decision_type,
+            shown_fingerprint=_shown(wiki_root, decision_type, decision_id),
         )
 
         report = apply_decision_answers(
@@ -1735,7 +1745,11 @@ class TestApplyProposedRule:
 
         item_id = _seed_rule_proposal(wiki_root)
         write_decision_answer(
-            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="approve"
+            raw_root,
+            decision_id=item_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", item_id),
+            verdict="approve",
         )
 
         report = apply_decision_answers(wiki_root, raw_root)
@@ -1768,7 +1782,11 @@ class TestApplyProposedRule:
 
         item_id = _seed_rule_proposal(wiki_root, source="reject-source")
         write_decision_answer(
-            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="reject"
+            raw_root,
+            decision_id=item_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", item_id),
+            verdict="reject",
         )
 
         report = apply_decision_answers(wiki_root, raw_root)
@@ -1788,6 +1806,7 @@ class TestApplyProposedRule:
             raw_root,
             decision_id="no-such-proposal",
             decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", "no-such-proposal"),
             verdict="approve",
         )
 
@@ -1807,7 +1826,11 @@ class TestApplyProposedRule:
         reject_rule_proposal(wiki_root, proposal_id=item_id)
 
         write_decision_answer(
-            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="approve"
+            raw_root,
+            decision_id=item_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", item_id),
+            verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root)
 
@@ -1824,7 +1847,11 @@ class TestApplyProposedRule:
 
         item_id = _seed_rule_proposal(wiki_root, source="invalid-verdict-source")
         write_decision_answer(
-            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="maybe"
+            raw_root,
+            decision_id=item_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", item_id),
+            verdict="maybe",
         )
 
         report = apply_decision_answers(wiki_root, raw_root)
@@ -1932,6 +1959,7 @@ class TestRatchetGuardEffortBudgetBreach:
             raw_root,
             decision_id=item_id,
             decision_type="auto-apply-threshold",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "auto-apply-threshold", item_id),
             verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root)
@@ -1960,6 +1988,7 @@ class TestRatchetGuardEffortBudgetBreach:
             raw_root,
             decision_id=item_id,
             decision_type="auto-apply-threshold",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "auto-apply-threshold", item_id),
             verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root)
@@ -1993,6 +2022,7 @@ class TestRatchetGuardEffortBudgetBreach:
             raw_root,
             decision_id=item_id,
             decision_type="auto-apply-threshold",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "auto-apply-threshold", item_id),
             verdict="reject",
         )
         report = apply_decision_answers(wiki_root, raw_root)
@@ -2023,6 +2053,7 @@ class TestRatchetGuardEffortBudgetBreach:
             raw_root,
             decision_id=item_id,
             decision_type="auto-apply-threshold",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "auto-apply-threshold", item_id),
             verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root)
@@ -2058,6 +2089,7 @@ class TestRatchetGuardEffortBudgetBreach:
             raw_root,
             decision_id=item_id,
             decision_type="auto-apply-threshold",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "auto-apply-threshold", item_id),
             verdict="reject",
         )
         report = apply_decision_answers(wiki_root, raw_root)
@@ -2114,7 +2146,11 @@ class TestBatch:
             raw_root, decision_id=audit_id, decision_type="audit", verdict="approve"
         )
         write_decision_answer(
-            raw_root, decision_id=rule_id, decision_type="proposed-rule", verdict="approve"
+            raw_root,
+            decision_id=rule_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", rule_id),
+            verdict="approve",
         )
 
         report = apply_decision_answers(wiki_root, raw_root)
@@ -2538,7 +2574,11 @@ class TestNoLLMCall:
             raw_root, decision_id=audit_id, decision_type="audit", verdict="approve"
         )
         write_decision_answer(
-            raw_root, decision_id=rule_id, decision_type="proposed-rule", verdict="approve"
+            raw_root,
+            decision_id=rule_id,
+            decision_type="proposed-rule",
+            shown_fingerprint=_shown(raw_root.parent / "wiki", "proposed-rule", rule_id),
+            verdict="approve",
         )
 
         # Must not raise -- proves the LLM entry point was never invoked,

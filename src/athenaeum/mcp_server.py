@@ -232,6 +232,70 @@ def _answer_tool_response(result: Any, decision_id: str) -> dict:
     }
 
 
+#: ``channel.adapter`` the adjudication tools record (issue athenaeum#2530).
+_MCP_ANSWER_ADAPTER = "athenaeum-mcp"
+
+
+def _answer_record_kwargs(
+    shown_fingerprint: str,
+    answerer: dict | None,
+    channel: dict | None,
+    evidence: dict | None,
+    *,
+    actor: str = "",
+) -> dict:
+    """The section 4 keyword arguments an adjudication tool writes with.
+
+    Issue athenaeum#2530. The channel is always recorded: what the server
+    knows (surface ``mcp``, adapter :data:`_MCP_ANSWER_ADAPTER`, its own
+    version, host ``unknown``) under whatever the caller supplied. *actor* is
+    the athenaeum#2523 placeholder, used only when the caller names no
+    answerer: a named answerer is recorded as itself.
+    """
+    from athenaeum.decision_answers import surface_channel
+
+    kwargs: dict = {
+        "shown_fingerprint": shown_fingerprint,
+        "answerer": answerer,
+        "channel": surface_channel(
+            channel, host="unknown", surface="mcp", adapter=_MCP_ANSWER_ADAPTER
+        ),
+        "evidence": evidence,
+    }
+    if actor and answerer is None:
+        kwargs["actor"] = actor
+    return kwargs
+
+
+def _answer_record_refusal(
+    shown_fingerprint: str,
+    answerer: dict | None,
+    channel: dict | None,
+    evidence: dict | None,
+) -> dict | None:
+    """``None`` when the section 4 fields fit; otherwise the refusal dict.
+
+    Checked before anything else so a bad field writes nothing (issue
+    athenaeum#2530).
+    """
+    from athenaeum.decision_answers import AnswerRecordInvalid, normalize_answer_record_fields
+
+    try:
+        normalize_answer_record_fields(
+            **_answer_record_kwargs(shown_fingerprint, answerer, channel, evidence)
+        )
+    except AnswerRecordInvalid as exc:
+        return {
+            "ok": False,
+            "error_code": "invalid_answer_record",
+            "message": str(exc),
+            "deferred": False,
+            "answer_file": None,
+            "decision_id": None,
+        }
+    return None
+
+
 def _invalid_apply_result(apply: str) -> dict:
     return {
         "ok": False,
@@ -5029,7 +5093,14 @@ def create_server(
 
     @_register_tool(annotations=_ADJUDICATION_TOOL_ANNOTATIONS)
     def resolve_question(
-        id: str, answer: str, apply: str = "immediate", wait: float | None = None
+        id: str,
+        answer: str,
+        apply: str = "immediate",
+        wait: float | None = None,
+        shown_fingerprint: str = "",
+        answerer: dict | None = None,
+        channel: dict | None = None,
+        evidence: dict | None = None,
     ) -> dict:
         """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
@@ -5066,6 +5137,26 @@ def create_server(
             wait: Seconds to wait for the run lock when the answer needs
                 one (same semantics as ``ingest-answers --wait``); ``None``
                 uses the configured default (0, fail fast).
+            shown_fingerprint: Issue athenaeum#2530 (design athenaeum#2489
+                section 4): the item's ``fingerprint`` exactly as
+                ``list_pending_decisions`` returned it when the item was
+                shown. With it the record is ``answer_version: 2``; an
+                answer naming a fingerprint the item no longer has is
+                refused as ``stale`` and the item stays in the queue. With
+                none, the answer applies as ``unverified`` on a
+                competence-routed item and is held (``held_unconfirmed``)
+                on an authority-routed one.
+            answerer: ``{"id": str, "kind": "human" | "agent" | "unknown"}``
+                -- who decided. An ``agent`` answer on an authority-routed
+                item is refused (``agent_on_authority``).
+            channel: ``{"host", "surface", "adapter", "adapter_version"}``
+                -- where the answer was given, e.g. ``{"host":
+                "claude-code", "surface": "question-ui"}``. Keys left out
+                are filled with what this server knows (host
+                ``unknown``, surface ``mcp``, adapter ``athenaeum-mcp``).
+            evidence: ``{"strength": "unverified" | "asserted" |
+                "verified", "ref": str | None}``. A strength above
+                ``unverified`` needs ``shown_fingerprint``.
 
         Returns:
             A dict with:
@@ -5104,6 +5195,10 @@ def create_server(
         if apply not in ("immediate", "deferred"):
             return _invalid_apply_result(apply)
 
+        record_refusal = _answer_record_refusal(shown_fingerprint, answerer, channel, evidence)
+        if record_refusal is not None:
+            return record_refusal
+
         pending_path = wiki_root / "_pending_questions.md"
         ok, error_code, message = preflight_question(pending_path, id)
         if not ok:
@@ -5126,6 +5221,7 @@ def create_server(
                 decision_id=id,
                 decision_type="question",
                 verdict=answer,
+                **_answer_record_kwargs(shown_fingerprint, answerer, channel, evidence),
             ),
             id,
         )
@@ -5567,6 +5663,10 @@ def create_server(
         note: str = "",
         apply: str = "immediate",
         wait: float | None = None,
+        shown_fingerprint: str = "",
+        answerer: dict | None = None,
+        channel: dict | None = None,
+        evidence: dict | None = None,
     ) -> dict:
         """Record a human's confirm/overturn of a sampled audit item (athenaeum#438,
         deferred apply per athenaeum#908).
@@ -5606,6 +5706,26 @@ def create_server(
             wait: Seconds to wait for the run lock when the answer needs
                 one (same semantics as ``ingest-answers --wait``); ``None``
                 uses the configured default (0, fail fast).
+            shown_fingerprint: Issue athenaeum#2530 (design athenaeum#2489
+                section 4): the item's ``fingerprint`` exactly as
+                ``list_pending_decisions`` returned it when the item was
+                shown. With it the record is ``answer_version: 2``; an
+                answer naming a fingerprint the item no longer has is
+                refused as ``stale`` and the item stays in the queue. With
+                none, the answer applies as ``unverified`` on a
+                competence-routed item and is held (``held_unconfirmed``)
+                on an authority-routed one.
+            answerer: ``{"id": str, "kind": "human" | "agent" | "unknown"}``
+                -- who decided. An ``agent`` answer on an authority-routed
+                item is refused (``agent_on_authority``).
+            channel: ``{"host", "surface", "adapter", "adapter_version"}``
+                -- where the answer was given, e.g. ``{"host":
+                "claude-code", "surface": "question-ui"}``. Keys left out
+                are filled with what this server knows (host
+                ``unknown``, surface ``mcp``, adapter ``athenaeum-mcp``).
+            evidence: ``{"strength": "unverified" | "asserted" |
+                "verified", "ref": str | None}``. A strength above
+                ``unverified`` needs ``shown_fingerprint``.
 
         Returns:
             A dict with ``ok``, ``error_code`` (``id_not_found`` /
@@ -5644,6 +5764,10 @@ def create_server(
         if apply not in ("immediate", "deferred"):
             return _invalid_apply_result(apply)
 
+        record_refusal = _answer_record_refusal(shown_fingerprint, answerer, channel, evidence)
+        if record_refusal is not None:
+            return record_refusal
+
         ok, error_code, message = preflight_audit(wiki_root, id)
         if not ok:
             return {
@@ -5666,6 +5790,7 @@ def create_server(
                 decision_type="audit",
                 verdict=human_verdict,
                 note=note,
+                **_answer_record_kwargs(shown_fingerprint, answerer, channel, evidence),
             ),
             id,
         )
@@ -5677,6 +5802,10 @@ def create_server(
         note: str = "",
         apply: str = "immediate",
         wait: float | None = None,
+        shown_fingerprint: str = "",
+        answerer: dict | None = None,
+        channel: dict | None = None,
+        evidence: dict | None = None,
     ) -> dict:
         """Record approve/reject on a pending merge (issue athenaeum#908: deferred apply).
 
@@ -5733,6 +5862,26 @@ def create_server(
             wait: Seconds to wait for the run lock when the answer needs
                 one (same semantics as ``ingest-answers --wait``); ``None``
                 uses the configured default (0, fail fast).
+            shown_fingerprint: Issue athenaeum#2530 (design athenaeum#2489
+                section 4): the item's ``fingerprint`` exactly as
+                ``list_pending_decisions`` returned it when the item was
+                shown. With it the record is ``answer_version: 2``; an
+                answer naming a fingerprint the item no longer has is
+                refused as ``stale`` and the item stays in the queue. With
+                none, the answer applies as ``unverified`` on a
+                competence-routed item and is held (``held_unconfirmed``)
+                on an authority-routed one.
+            answerer: ``{"id": str, "kind": "human" | "agent" | "unknown"}``
+                -- who decided. An ``agent`` answer on an authority-routed
+                item is refused (``agent_on_authority``).
+            channel: ``{"host", "surface", "adapter", "adapter_version"}``
+                -- where the answer was given, e.g. ``{"host":
+                "claude-code", "surface": "question-ui"}``. Keys left out
+                are filled with what this server knows (host
+                ``unknown``, surface ``mcp``, adapter ``athenaeum-mcp``).
+            evidence: ``{"strength": "unverified" | "asserted" |
+                "verified", "ref": str | None}``. A strength above
+                ``unverified`` needs ``shown_fingerprint``.
 
         Returns:
             A dict with:
@@ -5773,6 +5922,10 @@ def create_server(
         if apply not in ("immediate", "deferred"):
             return _invalid_apply_result(apply)
 
+        record_refusal = _answer_record_refusal(shown_fingerprint, answerer, channel, evidence)
+        if record_refusal is not None:
+            return record_refusal
+
         merges_path = wiki_root / "_pending_merges.md"
         ok, error_code, message = preflight_merge(merges_path, id, decision)
         if not ok:
@@ -5797,10 +5950,12 @@ def create_server(
             note=note,
             # Issue athenaeum#2523: this tool is owner-only (see the
             # `caller_audience` check above), so every answer it writes is
-            # human-originated — but no surface yet carries a real per-user
-            # identity (issue athenaeum#2489, still open), so the
-            # placeholder stands in until that lands.
-            actor="unattributed",
+            # human-originated. Issue athenaeum#2530: a caller that names its
+            # answerer is recorded as that answerer; otherwise the
+            # placeholder stands in.
+            **_answer_record_kwargs(
+                shown_fingerprint, answerer, channel, evidence, actor="unattributed"
+            ),
         )
         return _answer_tool_response(result, id)
 

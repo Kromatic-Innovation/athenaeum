@@ -422,8 +422,15 @@ class TestOutcomeReturnedSynchronously:
 
 
 class TestNoS3Fields:
-    """Counter-example: S3's answer-record fields are neither written nor
-    required (held by operator ruling; this slice must not smuggle them in)."""
+    """A record written with none of S3's answer-record fields stays the
+    legacy shape and still applies (issue athenaeum#2531).
+
+    This class used to also assert that the fields did not exist at all,
+    because S3 (issue athenaeum#2530) was held. S3 has landed; its fields
+    are covered in ``tests/test_decision_answer_record_2530.py``. What stays
+    here is the part that must keep holding: a writer that supplies none of
+    them gets today's record, and a competence-routed answer in that shape
+    applies."""
 
     _S3 = ("answer_version", "answerer", "channel", "shown_fingerprint")
 
@@ -432,24 +439,6 @@ class TestNoS3Fields:
         text = r.path.read_text(encoding="utf-8")
         for key in self._S3:
             assert key not in text
-
-    def test_write_signature_and_dataclasses_have_none_of_them(self) -> None:
-        names = set(inspect.signature(write_and_apply_decision_answer).parameters)
-        names |= set(inspect.signature(write_decision_answer).parameters)
-        names |= {f.name for f in dataclasses.fields(da.AnswerWriteResult)}
-        names |= {f.name for f in dataclasses.fields(da.DecisionAnswer)}
-        for key in self._S3:
-            assert key not in names
-
-    def test_cli_and_mcp_expose_none_of_them(self, kroot: Path) -> None:
-        qid = _question(kroot)
-        rc, out, _ = _cli_answer(kroot, qid, "question", "Series B.")
-        assert rc == 0
-        for key in self._S3:
-            assert key not in json.loads(out)
-        params = set(inspect.signature(_mcp_fn(kroot, "resolve_question")).parameters)
-        for key in self._S3:
-            assert key not in params
 
     def test_a_record_without_them_is_accepted(self, kroot: Path) -> None:
         # Legacy shape (no version/channel/...) applies fine: nothing required.

@@ -41,6 +41,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from athenaeum._cli_shared import (
     _acquire_or_exit,
@@ -635,8 +636,11 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     ``--refuse-on-pending-conflict`` makes it a refusal instead.
     """
     from athenaeum.decision_answers import (
+        AnswerRecordInvalid,
         CoordinateAnswerRefused,
         check_pending_conflicts,
+        normalize_answer_record_fields,
+        surface_channel,
         write_and_apply_decision_answer,
     )
     from athenaeum.decision_framing import (
@@ -696,6 +700,64 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             errors=errors,
             schema=response_schema_for(decision_type),
         )
+
+    # Issue athenaeum#2530: the section 4 fields, checked before anything is
+    # written. The channel defaults to this command (host cli, surface tty).
+    answerer_id = (getattr(args, "answerer_id", "") or "").strip()
+    answerer_kind = getattr(args, "answerer_kind", None)
+    if answerer_kind and not answerer_id:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            error_code="invalid_answer_record",
+            headline="has answer-record fields that do not fit",
+            errors=["--answerer-kind needs --answerer-id"],
+        )
+    evidence_strength = getattr(args, "evidence_strength", None)
+    evidence_ref = getattr(args, "evidence_ref", None)
+    if evidence_ref and not evidence_strength:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            error_code="invalid_answer_record",
+            headline="has answer-record fields that do not fit",
+            errors=["--evidence-ref needs --evidence-strength"],
+        )
+    record_kwargs: dict[str, Any] = {
+        "shown_fingerprint": getattr(args, "shown_fingerprint", "") or "",
+        "answerer": (
+            {"id": answerer_id, "kind": answerer_kind or "unknown"} if answerer_id else None
+        ),
+        "channel": surface_channel(
+            {
+                "host": getattr(args, "channel_host", "") or "",
+                "surface": getattr(args, "channel_surface", "") or "",
+            },
+            host="cli",
+            surface="tty",
+            adapter="athenaeum-cli",
+        ),
+        "evidence": (
+            {"strength": evidence_strength, "ref": evidence_ref} if evidence_strength else None
+        ),
+    }
+    try:
+        normalize_answer_record_fields(**record_kwargs)
+    except AnswerRecordInvalid as exc:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            error_code="invalid_answer_record",
+            headline="has answer-record fields that do not fit",
+            errors=[str(exc)],
+        )
+    if not answerer_id:
+        # Issue athenaeum#2523's placeholder, kept for a caller that names
+        # no answerer.
+        record_kwargs["actor"] = "unattributed"
 
     knowledge_root = _resolve_knowledge_root(args)
     raw_root = knowledge_root / "raw"
@@ -761,14 +823,10 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             # dimension name. Absent for every other type/verdict (validate_answer
             # above already refused a "name" the schema does not declare).
             name=str(parsed.get("name", "")),
-            # Issue athenaeum#2523: this CLI command is a human-operator
-            # surface, so every answer it writes is human-originated — but
-            # no surface yet carries a real per-user identity (issue
-            # athenaeum#2489, still open), so the placeholder stands in
-            # until that lands. Only consumed today by a ``merge`` answer's
-            # decided_by stamp (:func:`athenaeum.decision_answers.
-            # _apply_merge_answer`); harmless metadata for every other type.
-            actor="unattributed",
+            # Issue athenaeum#2523/athenaeum#2530: the answerer (or the
+            # "unattributed" placeholder when none is named), the channel,
+            # the shown fingerprint and the evidence -- built above.
+            **record_kwargs,
             config=config,
         )
     except CoordinateAnswerRefused as exc:
@@ -1067,6 +1125,58 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "written (issue athenaeum#2544). Pass this to refuse instead — "
             "nothing is written."
         ),
+    )
+
+    # Issue athenaeum#2530 (design athenaeum#2489 section 4): the answer
+    # record's who / where / what-was-shown fields.
+    answer_p.add_argument(
+        "--shown-fingerprint",
+        default="",
+        metavar="SHA256",
+        help=(
+            "The item's `fingerprint` as `athenaeum decisions list --json` "
+            "showed it. Makes the record answer_version 2. An answer naming "
+            "a fingerprint the item no longer has is refused as `stale`. "
+            "Without it the answer applies as unverified on a "
+            "competence-routed item and is held for re-confirmation on an "
+            "authority-routed one."
+        ),
+    )
+    answer_p.add_argument(
+        "--answerer-id",
+        default="",
+        help="Who decided, e.g. a user name or an agent's name.",
+    )
+    answer_p.add_argument(
+        "--answerer-kind",
+        choices=("human", "agent", "unknown"),
+        default=None,
+        help=(
+            "Whether the answerer is a human or an agent (default: unknown). "
+            "Needs --answerer-id. An agent answer on an authority-routed "
+            "item is refused."
+        ),
+    )
+    answer_p.add_argument(
+        "--channel-host",
+        default="",
+        help="Where the answer was given (default: cli).",
+    )
+    answer_p.add_argument(
+        "--channel-surface",
+        default="",
+        help="The surface on that host (default: tty).",
+    )
+    answer_p.add_argument(
+        "--evidence-strength",
+        choices=("unverified", "asserted", "verified"),
+        default=None,
+        help="How well the answer is evidenced. Above unverified needs --shown-fingerprint.",
+    )
+    answer_p.add_argument(
+        "--evidence-ref",
+        default=None,
+        help="A reference for the evidence (needs --evidence-strength).",
     )
 
     pending_answers_p = d_sub.add_parser(

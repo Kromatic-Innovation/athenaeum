@@ -83,7 +83,10 @@ DECISION_BUDGET_EVENTS_FILENAME = "_decision_budget_events.jsonl"
 #: overflow are recorded ... rather than silently absorbed").
 DECISION_BUDGET_SHAPES_FILENAME = "_decision_budget_shapes.jsonl"
 
-DECISION_BUDGET_EVENTS_VERSION = 1
+#: Version 2 (issue athenaeum#2530) adds ``channel.host`` and
+#: ``evidence.strength`` to each answer event, so answer rates can be measured
+#: per surface. Version-1 events carry neither and read unchanged.
+DECISION_BUDGET_EVENTS_VERSION = 2
 DECISION_BUDGET_SHAPES_VERSION = 1
 
 
@@ -103,8 +106,17 @@ def record_decision_answered(
     raised_at: str,
     answered_at: str | None = None,
     events_path: Path | None = None,
+    channel_host: str = "",
+    evidence_strength: str = "",
 ) -> dict[str, Any]:
     """Append one answer event to the budget ledger. Never raises.
+
+    ``channel_host`` and ``evidence_strength`` (issue athenaeum#2530, design
+    athenaeum#2489 section 4) are the answer's ``channel.host`` and the
+    evidence strength it was applied with. They are written as
+    ``{"channel": {"host": ...}, "evidence": {"strength": ...}}``, the
+    answer record's own shape. An empty host is written as ``""``: the
+    answer named no channel, which is itself worth counting.
 
     ``raised_at`` is the item's own raise timestamp (the detector/agent's
     ``created_at``/``raised_at``, looked up by the caller BEFORE the
@@ -122,6 +134,8 @@ def record_decision_answered(
         "decision_type": decision_type,
         "raised_at": raised_at or "",
         "answered_at": answered_at or now_iso(),
+        "channel": {"host": channel_host or ""},
+        "evidence": {"strength": evidence_strength or ""},
     }
     target = events_path if events_path is not None else default_events_path(wiki_root)
     try:

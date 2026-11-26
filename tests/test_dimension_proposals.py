@@ -21,6 +21,15 @@ from athenaeum.dimension_proposals import (
 from athenaeum.signal_mining import MinedShape, ShapeKey
 
 
+def _shown(wiki_root: Path, decision_type: str, decision_id: str) -> str:
+    """The fingerprint the pending item has now, as a host that just listed
+    it would echo it back (issue athenaeum#2530). Authority-routed items
+    hold an answer that names no fingerprint (ruling D2)."""
+    from athenaeum.decision_answers import current_fingerprints
+
+    return min(current_fingerprints(wiki_root, decision_type, decision_id), default="")
+
+
 def _shape(
     *,
     missing: tuple[str, ...] = ("jurisdiction",),
@@ -448,6 +457,8 @@ class TestMisrouteGuard:
                 "dimension-proposal",
                 "--answer",
                 '{"verdict": "approve"}',
+                "--shown-fingerprint",
+                _shown(tmp_path / "wiki", "dimension-proposal", decision_id),
             ]
         )
         assert rc == 0
@@ -532,7 +543,11 @@ class TestRatificationApprove:
 
         knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         assert report.applied == 1
@@ -561,7 +576,11 @@ class TestRatificationApprove:
             tmp_path, shape=shape
         )
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         dims = load_config(knowledge_root).get("dimensions") or []
@@ -573,11 +592,19 @@ class TestRatificationApprove:
 
         knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         codes = {o.error_code for o in report.outcomes if not o.applied}
@@ -597,7 +624,11 @@ class TestRatificationApprove:
 
         knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
 
@@ -621,7 +652,11 @@ class TestRatificationApprove:
             tmp_path, shape=shape
         )
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         assert report.applied == 0
@@ -639,6 +674,7 @@ class TestRatificationRename:
             raw_root,
             decision_id=decision_id,
             decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
             verdict="rename",
             name="geo-region",
         )
@@ -656,7 +692,11 @@ class TestRatificationReject:
 
         knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="reject"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="reject",
         )
         report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
         assert report.applied == 1
@@ -674,7 +714,11 @@ class TestRatificationReject:
             tmp_path, shape=shape
         )
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="reject"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="reject",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
 
@@ -697,7 +741,11 @@ class TestRatificationReject:
             tmp_path, shape=shape
         )
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
 
@@ -804,7 +852,11 @@ class TestRatifiedDimensionReusesExistingFlip:
 
         knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
         write_decision_answer(
-            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            shown_fingerprint=_shown(wiki_root, "dimension-proposal", decision_id),
+            verdict="approve",
         )
         apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
 
@@ -836,6 +888,8 @@ class TestCLIRenameAndNameMisuse:
                 "dimension-proposal",
                 "--answer",
                 '{"verdict": "rename", "name": "geo-region"}',
+                "--shown-fingerprint",
+                _shown(wiki_root, "dimension-proposal", decision_id),
             ]
         )
         assert rc == 0
