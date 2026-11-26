@@ -97,6 +97,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   `athenaeum doctor` reports the declared value (and, under `git` with no
   repository, that destructive operations will be refused). Under `none` there
   is no restore point, no undo, and no history-based commands.
+- New guide, `docs/guides/shared-page-type.md` (athenaeum#3172): share one page type
+  with a second person through its own git repository. It walks the owner's side
+  (repository, location with its own root, routing rule, store declaration naming one
+  reader and one compiler) and the reader's read-only mount, and states what the git
+  host, the declaration and `read_only` each enforce, that the location is ordinary and
+  not a vault, and the limits (revoking read keeps a held copy; a second writer needs
+  `sync.mode: integrate`). Its configuration blocks are checked against fixtures by
+  `tests/test_shared_page_type_guide.py`, which also builds two installs around a local
+  bare repository.
 
 ### Changed
 

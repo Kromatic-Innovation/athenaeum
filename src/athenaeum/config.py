@@ -6952,7 +6952,8 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     ``surface_root`` is relative to the knowledge root; an absolute path (or one
     starting with ``~``) is used as-is, so a mount may live anywhere on disk. A
     second install that only READS a shared repository declares its clone
-    ``read_only`` (see ``docs/guides/shared-store-reader.md``)::
+    ``read_only`` (see ``docs/guides/shared-store-reader.md``; the whole setup from
+    both sides, with the store declaration, is ``docs/guides/shared-page-type.md``)::
 
         storage:
           adapters:
