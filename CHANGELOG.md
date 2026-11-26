@@ -64,6 +64,22 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** `librarian.corrections.sensitive_fields` and
+  `config.resolve_corrections_sensitive_fields` are removed (athenaeum#3162).
+  A correction now goes where the storage settings put the field, as for every
+  other writer. A configuration that still sets the key to a non-empty value is
+  refused by any run that processes corrections (the correction phase of
+  `athenaeum run`, `athenaeum corrections-trust-dryrun`, and ratifying an
+  escalated correction), before any batch is read and with no correction
+  applied. The message prints the complete replacement
+  `storage.excluded_fields.<class>` list, including the built-in contact fields
+  (`emails`, `phones`, `former_emails`, `alt_emails`) for `pii`, because an
+  explicit list replaces the built-in one. Commands that do not process
+  corrections keep running and print the removed-key notice. To upgrade:
+  delete the key and paste the printed `storage:` block into `athenaeum.yaml`.
+
 ### Added
 
 - `storage.routes`: a list of rules that each send a page type, or chosen fields of one, or a sensitivity class, to one named location (athenaeum#3166). A rule is `page_type` (or `sensitivity_class`), an optional `fields` list and `to`, a list of exactly one location name. A field rule's target must be `sensitive: true`; a rule without `fields` is the long form of a `storage.mapping` entry, which stays; a `sensitivity_class` rule replaces the per-class lookup in value routing. Duplicate rules, a page type named in both `storage.routes` and `storage.mapping`, an unknown target and a non-sensitive field target raise `StorageConfigError`. Nothing is routed unless a rule says so, records already on disk are read through a rule without being moved, and `athenaeum init` writes a commented example and no active rule.
@@ -81,6 +97,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- A field correction is written to the location `storage.route_for(page_type,
+  field)` returns, and in place on the page when it returns none (athenaeum#3162).
+  Default behaviour change: where contact fields are kept on a separate
+  location (`storage.mapping` maps `pii` outside the corpus), a correction to
+  `emails` on a person is now written to that location's record and not to the
+  page, with no corrections-specific setting; previously the empty
+  corrections table left it on the page. Installations that keep contact
+  fields on the page are unchanged.
 - With `storage.history: none`, raw retirement (`athenaeum retire`), batch
   retirement of processed correction batches and raw retirement by shape rules
   remove the file and report success instead of refusing for lack of a restore

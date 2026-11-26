@@ -460,10 +460,20 @@ class TestUnresolvedTargetIsADefinedNoop:
                             "writers": [_SUBMITTER],
                         }
                     },
-                    "sensitive_fields": {"identifier_validity": "pii"},
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "excluded_fields": {
+                    "pii": [
+                        "emails",
+                        "phones",
+                        "former_emails",
+                        "alt_emails",
+                        "identifier_validity",
+                    ]
+                },
+            },
         }
 
     def _apply(self, tmp_path: Path, record: dict) -> tuple:

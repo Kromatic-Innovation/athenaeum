@@ -273,6 +273,15 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
         "Tier-4 decision-log suppression always uses the code default (0.83) "
         "now -- this key is no longer read and has no effect"
     ),
+    "librarian.corrections.sensitive_fields": (
+        "removed in athenaeum#3162; a correction is now routed by the same "
+        "storage settings as every other writer, so a field kept on a separate "
+        "location is named once, under `storage.excluded_fields.<class>` (with "
+        "`storage.mapping.<class>` placing that class outside the corpus). A "
+        "run that processes corrections refuses to start while this key is "
+        "non-empty and prints the exact replacement; other commands only show "
+        "this notice"
+    ),
     "librarian.page_split_proposals.heterogeneity_threshold": (
         "removed in athenaeum#2465; the page-split proposal decision type "
         "and its drafter had no producer that ever called it, so the "
@@ -7334,7 +7343,7 @@ def resolve_excluded_fields_config(
 # ---------------------------------------------------------------------------
 #
 # Every key lives under ``librarian.corrections``. The two structural
-# (dict-shaped) keys below — ``fields`` and ``sensitive_fields`` — follow
+# (dict-shaped) keys below — ``fields`` and ``schema_slots`` — follow
 # ``resolve_storage_mapping``'s precedent: no ``ATHENAEUM_*`` env override
 # (a dict has no single scalar env encoding), EMPTY by default. The scalar
 # bound resolvers further down follow ``resolve_delta_max_affected_clusters``'s
@@ -7378,39 +7387,6 @@ def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[
     return fields
 
 
-def resolve_corrections_sensitive_fields(config: dict[str, Any] | None) -> dict[str, str]:
-    """Resolve ``librarian.corrections.sensitive_fields`` — the §7.1
-    sensitivity-routing table (`docs/design/field-corrections.md` §7.1).
-
-    Maps an attribute name to a :mod:`athenaeum.storage` entity-CLASS name
-    (resolved through the existing ``storage.mapping`` adapter layer, athenaeum#429
-    — reused rather than reinvented) that a fact bearing on that attribute
-    is routed to, REGARDLESS of the destination a correction named. Empty by
-    default: **sensitivity classification is deployment configuration**,
-    never shipped in this repo (docs/design/field-corrections.md §7.1, issue athenaeum#797
-    out-of-scope list).
-    """
-    if not isinstance(config, dict):
-        return {}
-    librarian_cfg = config.get("librarian") or {}
-    if not isinstance(librarian_cfg, dict):
-        return {}
-    corrections_cfg = librarian_cfg.get("corrections")
-    if not isinstance(corrections_cfg, dict):
-        return {}
-    raw = corrections_cfg.get("sensitive_fields")
-    if not isinstance(raw, dict):
-        return {}
-    mapping: dict[str, str] = {}
-    for field_name, surface_class in raw.items():
-        if not isinstance(field_name, str) or not field_name.strip():
-            continue
-        if not isinstance(surface_class, str) or not surface_class.strip():
-            continue
-        mapping[field_name.strip()] = surface_class.strip()
-    return mapping
-
-
 def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Resolve ``librarian.corrections.schema_slots`` — the §7.2 schema-
     evolution table (`docs/design/field-corrections.md` §7.2) for attributes that
@@ -7432,7 +7408,7 @@ def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str,
     frontmatter (schemas.py's per-type models already tolerate unknown keys
     via ``extra="allow"``, the same mechanism source-handle keys use) — §7.2
     only fires when the deployment explicitly asks for non-default routing.
-    Empty by default, same rationale as :func:`resolve_corrections_sensitive_fields`.
+    Empty by default: a deployment opts in per attribute.
     """
     if not isinstance(config, dict):
         return {}
