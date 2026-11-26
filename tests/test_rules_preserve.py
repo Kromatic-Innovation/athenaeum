@@ -365,7 +365,7 @@ class TestUnclaimedPreserve:
             "storage": {
                 "adapters": {
                     adapter_name: {
-                        "backing_store": "filesystem",
+                        "backing_store": "markdown",
                         "surface_root": str(outside),
                     }
                 }
@@ -748,7 +748,7 @@ class TestPreservedLogAdapterRouting:
             "storage": {
                 "adapters": {
                     self.ADAPTER_NAME: {
-                        "backing_store": "filesystem",
+                        "backing_store": "markdown",
                         "surface_root": str(outside_root),
                     }
                 }
@@ -1086,7 +1086,7 @@ class TestPreservedLogAdapterRouting:
                 "adapters": {
                     # Missing the required `surface_root` -- malformed, and
                     # entirely unrelated to this run's dir-routed preserve.
-                    "broken": {"backing_store": "filesystem"}
+                    "broken": {"backing_store": "markdown"}
                 }
             },
         }

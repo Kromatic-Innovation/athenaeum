@@ -62,11 +62,11 @@ from __future__ import annotations
 import importlib
 import os
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (  # StorageConfigError is defined in config, re-exported here
@@ -296,6 +296,86 @@ def _visibility_from_config(name: str, raw: Any) -> int:
     return raw
 
 
+# ---------------------------------------------------------------------------
+# Store implementation registry (athenaeum#3165)
+# ---------------------------------------------------------------------------
+
+#: The ``backing_store`` names that resolve to the filesystem implementation.
+#: They cannot be shadowed by :func:`register_store_backend`.
+BUILTIN_BACKING_STORES: tuple[str, ...] = ("markdown", "wiki-markdown")
+
+
+@dataclass(frozen=True)
+class StoreBuildSpec:
+    """Everything :func:`open_store` hands a registered store factory.
+
+    One spec describes ONE store instance that addresses every location this
+    configuration makes available. *roots* maps surface name to resolved root
+    directory; implementations with no filesystem backing may ignore it.
+    """
+
+    config: dict[str, Any] | None
+    knowledge_root: Path
+    roots: Mapping[str, Path]
+    non_purgeable_surfaces: frozenset[str]
+    read_only_surfaces: frozenset[str]
+    history: str
+    surface_history: Mapping[str, str]
+    write_gate: Callable[[str], str | None]
+
+
+StoreFactory = Callable[[StoreBuildSpec], Store]
+
+#: Code-registered implementations, keyed by ``backing_store`` name. The
+#: built-in filesystem names are deliberately absent: they are handled inside
+#: :func:`open_store`, the one place ``FilesystemStore`` is constructed.
+_STORE_BACKENDS: dict[str, StoreFactory] = {}
+
+
+def register_store_backend(name: str, factory: StoreFactory) -> None:
+    """Register a store implementation under the ``backing_store`` value *name*.
+
+    *factory* receives a :class:`StoreBuildSpec` and returns a
+    :class:`~athenaeum.store.Store`. Adapters whose ``backing_store`` is *name*
+    then share the one instance :func:`open_store` builds through it. The
+    built-in names (``markdown``, ``wiki-markdown``) cannot be shadowed, and a
+    name already registered raises rather than being silently replaced.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise StorageConfigError("store backend name must be a non-empty string")
+    name = name.strip()
+    if name in BUILTIN_BACKING_STORES:
+        raise StorageConfigError(
+            f"cannot register store backend {name!r}: it shadows a built-in "
+            "filesystem implementation"
+        )
+    if name in _STORE_BACKENDS:
+        raise StorageConfigError(f"store backend {name!r} is already registered")
+    _STORE_BACKENDS[name] = factory
+
+
+def unregister_store_backend(name: str) -> None:
+    """Remove a registration made by :func:`register_store_backend` (no-op if absent)."""
+    _STORE_BACKENDS.pop(name, None)
+
+
+def known_backing_stores() -> tuple[str, ...]:
+    """Every ``backing_store`` value that currently resolves, built-ins first."""
+    return BUILTIN_BACKING_STORES + tuple(sorted(_STORE_BACKENDS))
+
+
+def _validate_backing_store(value: str, key: str) -> str:
+    """*value* (stripped) when it names a known implementation, else a loud error."""
+    value = value.strip()
+    if value not in BUILTIN_BACKING_STORES and value not in _STORE_BACKENDS:
+        known = ", ".join(repr(n) for n in known_backing_stores())
+        raise StorageConfigError(
+            f"{key} is {value!r}, which is not a known store implementation. "
+            f"Known values: {known}. Write 'markdown' for files on a filesystem."
+        )
+    return value
+
+
 def _validate_history(raw: Any, key: str) -> str:
     """*raw* when it is a valid history value (``git`` / ``none``), else a loud error."""
     if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
@@ -315,6 +395,9 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         raise StorageConfigError(
             f"storage.adapters.{name}.backing_store must be a non-empty string"
         )
+    backing_store = _validate_backing_store(
+        backing_store, f"storage.adapters.{name}.backing_store"
+    )
     if not isinstance(surface_root, str) or not surface_root.strip():
         raise StorageConfigError(
             f"storage.adapters.{name}.surface_root must be a non-empty string"
@@ -878,14 +961,61 @@ def open_store(
         for name, adapter in available_adapters(config).items()
         if adapter.history is not None
     }
-    return FilesystemStore(
-        knowledge_root,
-        roots,
-        non_purgeable_surfaces=non_purgeable,
-        read_only_surfaces=read_only,
+    spec = StoreBuildSpec(
+        config=config,
+        knowledge_root=knowledge_root,
+        roots=roots,
+        non_purgeable_surfaces=frozenset(non_purgeable),
+        read_only_surfaces=frozenset(read_only),
         history=resolve_storage_history(config),
         surface_history=surface_history,
         write_gate=lambda surface: declared_compile_refusal(surface, config, knowledge_root),
+    )
+    # Declared FilesystemStore: existing callers use its extras (sync_repos,
+    # surface_repo, ...) that the ``Store`` protocol does not carry. A
+    # registered implementation reaches them only if it provides the same
+    # attributes; narrowing callers to the protocol is a separate change.
+    return cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+
+
+def _store_factory_for(adapters: Mapping[str, StorageAdapter]) -> StoreFactory:
+    """The factory that builds the one store addressing *adapters*' locations.
+
+    Adapters sharing an implementation share one instance. The built-in
+    surfaces are always present and are filesystem-backed, so a single
+    registered implementation takes over the whole store (it addresses every
+    location); two distinct registered implementations cannot share one store
+    and are refused (mixed implementations are out of scope).
+    """
+    used: set[str] = set()
+    for name, adapter in adapters.items():
+        used.add(
+            _validate_backing_store(
+                adapter.backing_store, f"storage adapter {name!r} backing_store"
+            )
+        )
+    custom = sorted(used - set(BUILTIN_BACKING_STORES))
+    if len(custom) > 1:
+        raise StorageConfigError(
+            f"storage adapters use more than one store implementation "
+            f"({', '.join(repr(n) for n in custom)}); one store addresses every "
+            "location, so every adapter must use the same non-filesystem "
+            "backing_store (or 'markdown')"
+        )
+    if custom:
+        return _STORE_BACKENDS[custom[0]]
+    return _filesystem_store_factory
+
+
+def _filesystem_store_factory(spec: StoreBuildSpec) -> Store:
+    return FilesystemStore(
+        spec.knowledge_root,
+        dict(spec.roots),
+        non_purgeable_surfaces=spec.non_purgeable_surfaces,
+        read_only_surfaces=spec.read_only_surfaces,
+        history=spec.history,
+        surface_history=spec.surface_history,
+        write_gate=spec.write_gate,
     )
 
 

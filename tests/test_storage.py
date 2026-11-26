@@ -306,7 +306,7 @@ class TestLoudErrors:
             "storage": {
                 "adapters": {
                     DEFAULT_ADAPTER_NAME: {
-                        "backing_store": "x",
+                        "backing_store": "markdown",
                         "surface_root": "y",
                     }
                 }
@@ -374,12 +374,12 @@ class TestRegisterAdapter:
         config = {
             "storage": {
                 "adapters": {
-                    "both": {"backing_store": "yaml", "surface_root": "yaml-root"}
+                    "both": {"backing_store": "markdown", "surface_root": "yaml-root"}
                 }
             }
         }
         # config-defined definition wins over the code-registered one.
-        assert available_adapters(config)["both"].backing_store == "yaml"
+        assert available_adapters(config)["both"].surface_root == "yaml-root"
 
 
 # ---------------------------------------------------------------------------
@@ -409,8 +409,8 @@ class TestConfigResolvers:
         config = {
             "storage": {
                 "adapters": {
-                    "ok": {"backing_store": "m", "surface_root": "r"},
-                    "": {"backing_store": "m", "surface_root": "r"},
+                    "ok": {"backing_store": "markdown", "surface_root": "r"},
+                    "": {"backing_store": "markdown", "surface_root": "r"},
                     "notdict": "nope",
                 }
             }
