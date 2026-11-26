@@ -2458,20 +2458,15 @@ def process_correction_record(
         # §6.2 precedence change.
         return _result("applied", "entity created; field already matches the handle-derived value")
 
+    healed: list[str] = []
     if verdict == "noop" and surface_class and len(surface_targets) > 1 and not dry_run:
         # The primary already holds the value; a later target may not (a write
         # that failed part-way). Complete it rather than serve a divergence.
-        completed: list[str] = []
-
         def _heal(name: str) -> None:
             if _sync_secondary(name):
-                completed.append(name)
+                healed.append(name)
 
         apply_to_targets(surface_targets[1:], _heal)
-        if completed:
-            return _result(
-                "routed-elsewhere", f"{reason}; completed on target(s) {completed}"
-            )
 
     if verdict == "noop":
         if usage_class is not None and not dry_run:
@@ -2493,6 +2488,10 @@ def process_correction_record(
                 source=source,
                 observed_at=observed_at,
             )
+        if healed:
+            # The primary's usage classification ran above, same as without
+            # multi-target (athenaeum#3169).
+            return _result("routed-elsewhere", f"{reason}; completed on target(s) {healed}")
         return _result("noop", reason)
     if verdict == "defer":
         return _result("deferred-lower-precedence", reason)

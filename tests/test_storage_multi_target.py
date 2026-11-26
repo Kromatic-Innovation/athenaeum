@@ -75,7 +75,9 @@ def _knowledge(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _apply(root: Path, cfg: dict[str, Any], op: str, field: str, value: str) -> Any:
+def _apply(
+    root: Path, cfg: dict[str, Any], op: str, field: str, value: str, **extra: Any
+) -> Any:
     envelope = {
         "record": "batch",
         "schema_version": 1,
@@ -92,6 +94,7 @@ def _apply(root: Path, cfg: dict[str, Any], op: str, field: str, value: str) -> 
         "value": value,
         "source": "api:intake-bot:2026-08-06",
         "observed_at": "2026-08-06T14:01:55Z",
+        **extra,
     }
     return process_correction_record(
         record,
@@ -208,6 +211,21 @@ def test_a_failing_target_raises_naming_it_and_a_rerun_completes_it(
     ]
 
 
+def test_healing_a_later_target_still_classifies_the_primary(tmp_path: Path) -> None:
+    root = _knowledge(tmp_path)
+    cfg = _cfg(tmp_path, [FIELD_RULE])
+    _apply(root, cfg, "add", "emails", "alex@example.org")
+    # Out-of-band: the later target lost the record, and neither is classified.
+    (root / "vault_b" / f"{UID}.md").unlink()
+    assert "contact_classification" not in _meta(root, "vault_a")
+
+    result = _apply(root, cfg, "add", "emails", "alex@example.org", usage_class="observed")
+    assert result.disposition == "routed-elsewhere"
+    for vault in ("vault_a", "vault_b"):
+        entries = _meta(root, vault).get("contact_classification") or []
+        assert [e["usage_class"] for e in entries] == ["observed"], vault
+
+
 def test_a_scalar_set_reaches_every_target(tmp_path: Path) -> None:
     root = _knowledge(tmp_path)
     _apply(root, _cfg(tmp_path, [FIELD_RULE]), "set", "ssn", "123")
@@ -313,9 +331,7 @@ def test_erasing_an_entity_removes_its_record_from_every_later_target(tmp_path: 
     assert other.exists()
 
 
-def test_erasure_names_an_unreachable_target_and_still_reaches_the_rest(
-    tmp_path: Path,
-) -> None:
+def test_erasure_treats_a_missing_target_root_as_empty(tmp_path: Path) -> None:
     root = _knowledge(tmp_path)
     cfg = _cfg(tmp_path, [{**FIELD_RULE, "to": ["vault_a", "vault_b", "vault_git"]}])
     _apply(root, cfg, "add", "emails", "alex@example.org")
@@ -324,8 +340,57 @@ def test_erasure_names_an_unreachable_target_and_still_reaches_the_rest(
     shutil.rmtree(root / "vault_b")
     report = RetireRunReport()
     _erase_secondary_targets(root, {UID}, cfg, report)
+    assert report.errors == []
+    assert not (tmp_path / "gitrepo" / "vault" / f"{UID}.md").exists()
+
+
+def test_erasure_names_an_unreachable_target_and_still_reaches_the_rest(
+    tmp_path: Path,
+) -> None:
+    root = _knowledge(tmp_path)
+    cfg = _cfg(tmp_path, [{**FIELD_RULE, "to": ["vault_a", "vault_b", "vault_git"]}])
+    _apply(root, cfg, "add", "emails", "alex@example.org")
+    import shutil
+
+    # A file where the directory should be: exists, but cannot be listed.
+    shutil.rmtree(root / "vault_b")
+    (root / "vault_b").write_text("not a directory")
+    report = RetireRunReport()
+    _erase_secondary_targets(root, {UID}, cfg, report)
     assert len(report.errors) == 1 and "vault_b" in report.errors[0]
     assert not (tmp_path / "gitrepo" / "vault" / f"{UID}.md").exists()
+
+
+def test_a_secondary_target_without_compile_refuses_the_run_before_any_delete(
+    tmp_path: Path,
+) -> None:
+    from athenaeum.retire_targets import RetirePlan, RetireTarget, apply_plan
+
+    root = _knowledge(tmp_path)
+    cfg = _cfg(tmp_path, [{**FIELD_RULE, "to": ["vault_a", "vault_b", "vault_git"]}])
+    _apply(root, cfg, "add", "emails", "alex@example.org")
+    # A declaration that is present but invalid resolves as reader only.
+    (root / "vault_b" / "_store").mkdir()
+    (root / "vault_b" / "_store" / "access.yaml").write_text("version: 99\n", encoding="utf-8")
+    from athenaeum.retire_targets import target_access
+
+    verdict, _ = target_access(root / "vault_b", root, cfg)
+    assert verdict == "refused"
+
+    plan = RetirePlan(targets=[RetireTarget(uid=UID, store="none", paths=[])])
+    report = apply_plan(root, plan, reason="test", cache_dir=tmp_path / "cache", config=cfg)
+    assert any("vault_b" in e for e in report.errors)
+    assert report.secondary_erased == 0
+    for path in (
+        root / "vault_b" / f"{UID}.md",
+        tmp_path / "gitrepo" / "vault" / f"{UID}.md",
+    ):
+        assert path.exists()
+
+    erase = RetireRunReport()
+    _erase_secondary_targets(root, {UID}, cfg, erase)
+    assert any("vault_b" in e for e in erase.errors) and erase.secondary_erased == 0
+    assert (tmp_path / "gitrepo" / "vault" / f"{UID}.md").exists()
 
 
 def test_retire_command_exits_non_zero_when_a_target_is_unreachable(
@@ -336,9 +401,10 @@ def test_retire_command_exits_non_zero_when_a_target_is_unreachable(
     root = _knowledge(tmp_path)
     cfg = _cfg(tmp_path, [FIELD_RULE])
     (root / "vault_a").mkdir()
+    (root / "vault_b").write_text("not a directory")
     plan = RetirePlan(targets=[RetireTarget(uid=UID, store="none", paths=[])])
     report = apply_plan(root, plan, reason="test", cache_dir=tmp_path / "cache", config=cfg)
-    # vault_b does not exist: named, and the command's error list is non-empty
+    # vault_b exists but is not a directory: named, and the command's error list is non-empty
     # (cmd_retire returns 1 for any entry in it).
     assert any("vault_b" in e for e in report.errors)
 
