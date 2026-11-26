@@ -43,6 +43,7 @@ from athenaeum.store import (
     Lease,
     LeaseHeldError,
     Store,
+    StoreCapabilityError,
     StoreKey,
     StoreKeyError,
     append_line_durable,
@@ -76,9 +77,18 @@ def _make_in_memory_store(tmp_path: Path) -> Store:
     return InMemoryStore()
 
 
+def _make_no_history_filesystem_store(tmp_path: Path) -> Store:
+    """A store whose operator declared ``history: none`` (athenaeum#3164)."""
+    root = tmp_path / "knowledge_root"
+    root.mkdir()
+    (root / "wiki").mkdir()
+    return FilesystemStore(root, roots={_WIKI_SURFACE: root / "wiki"}, history="none")
+
+
 _IMPLEMENTATIONS: dict[str, Callable[[Path], Store]] = {
     "filesystem": _make_filesystem_store,
     "in-memory": _make_in_memory_store,
+    "filesystem-no-history": _make_no_history_filesystem_store,
 }
 
 
@@ -148,6 +158,39 @@ class TestStoreConformance(StoreConformanceTests):
             assert resolved.name == "alice.md"
         else:
             assert caps.local_path_for is None
+
+
+class TestStoreDeclaringNoHistory:
+    """A store that declares no history (athenaeum#3164): neither versioned nor
+    purgeable, yet a destructive operation is allowed because the operator
+    accepted that nothing can be restored. Under ``git`` the same store refuses."""
+
+    @staticmethod
+    def _store(tmp_path: Path, history: str) -> FilesystemStore:
+        root = tmp_path / "knowledge_root"
+        (root / "wiki").mkdir(parents=True)
+        return FilesystemStore(
+            root,
+            roots={_WIKI_SURFACE: root / "wiki"},
+            non_purgeable_surfaces={_WIKI_SURFACE},
+            history=history,
+        )
+
+    def test_declared_none_allows_destructive_operation(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path, "none")
+        key = StoreKey(surface=_WIKI_SURFACE, key="alice.md")
+        store.put(key, b"x", expect=None)
+        caps = store.capabilities_for(_WIKI_SURFACE)
+        assert (caps.history, caps.versioned, caps.purgeable) == ("none", False, False)
+        assert store.delete(key) is True
+
+    def test_declared_git_without_repository_still_refuses(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path, "git")
+        key = StoreKey(surface=_WIKI_SURFACE, key="alice.md")
+        store.put(key, b"x", expect=None)
+        with pytest.raises(StoreCapabilityError):
+            store.delete(key)
+        assert store.read(key) == b"x"
 
 
 # ---------------------------------------------------------------------------

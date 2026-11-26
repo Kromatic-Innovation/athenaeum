@@ -1311,6 +1311,34 @@ class StoreCapabilities:
                 f"(versioned={self.versioned}, has_remote={self.has_remote})"
             )
 
+    @property
+    def declares_no_history(self) -> bool:
+        """True when the operator declared ``history: none`` (athenaeum#3164).
+
+        The one predicate the destructive paths share: under a declared
+        ``none`` there is no restore point by choice, so a retirement proceeds
+        as a plain removal. Branches on the DECLARED value, never on whether a
+        ``.git`` exists; under ``git`` the ``versioned`` fact still decides.
+        """
+        return self.history == "none"
+
+
+_NO_RESTORE_POINT_NOTED: set[tuple[str, str]] = set()
+
+
+def note_no_restore_point(logger: Any, knowledge_root: Path, what: str) -> None:
+    """Log, once per process (one CLI run), that *what* is removed with no restore point."""
+    key = (str(knowledge_root), what)
+    if key in _NO_RESTORE_POINT_NOTED:
+        return
+    _NO_RESTORE_POINT_NOTED.add(key)
+    logger.info(
+        "%s: storage.history is none at %s: removing with no restore point "
+        "(nothing can be restored)",
+        what,
+        knowledge_root,
+    )
+
 
 # ---------------------------------------------------------------------------
 # The protocol (design note §6.2, transcribed verbatim)
@@ -2135,6 +2163,8 @@ class FilesystemStore:
 
     def _require_destructive_ok(self, surface: str, op: str) -> None:
         caps = self.capabilities_for(surface)
+        if caps.declares_no_history:
+            return  # the operator accepted that nothing can be restored (athenaeum#3164)
         if not caps.versioned and not caps.purgeable:
             raise StoreCapabilityError(
                 f"{op} refused on surface {surface!r}: it is neither versioned "

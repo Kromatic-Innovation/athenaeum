@@ -79,6 +79,14 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- With `storage.history: none`, raw retirement (`athenaeum retire`), batch
+  retirement of processed correction batches and raw retirement by shape rules
+  remove the file and report success instead of refusing for lack of a restore
+  point (athenaeum#3164). Each logs once per run that no restore point exists.
+  It follows the declared value, not whether a `.git` exists. Under `git`
+  nothing changes, including the refusal when no repository is found.
+  `athenaeum storage move-type --undo`, `athenaeum recover-parked restore` and
+  `athenaeum pii-restore` print "no history" and exit 0 under `none`.
 - `athenaeum retire-pages` is now `athenaeum retire` (athenaeum#3151).
   `retire-pages` still works for this release as a deprecated alias that
   prints a note, and is removed in the next one. The override for the
