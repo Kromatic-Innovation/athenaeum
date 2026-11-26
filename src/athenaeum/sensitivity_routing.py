@@ -207,7 +207,13 @@ from athenaeum.sensitivity import (
     available_classes,
     classify,
 )
-from athenaeum.storage import EXCLUDED, StorageConfigError, available_adapters, route_for
+from athenaeum.storage import (
+    EXCLUDED,
+    StorageConfigError,
+    available_adapters,
+    route_for,
+    route_for_sensitivity_class,
+)
 
 #: Marker key on a vault record, mirroring :data:`athenaeum.pii.PII_FLAG`'s
 #: belt-and-suspenders pattern — excluded even by the flag, not only by
@@ -250,7 +256,11 @@ def _vault_root_for_class(
     See this module's docstring, "Unsafe vault surface, fail closed."
     """
     try:
-        decision = route_for(sensitivity_class, config=config)
+        # A storage.routes sensitivity_class rule decides first; a class no
+        # rule names keeps the storage.mapping lookup (and its fallback below).
+        decision = route_for_sensitivity_class(sensitivity_class, config) or route_for(
+            sensitivity_class, config=config
+        )
         adapter = available_adapters(config)[decision.targets[0]] if decision.rule else None
     except StorageConfigError as exc:
         raise SensitivityRoutingError(

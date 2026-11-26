@@ -6458,6 +6458,17 @@ search_backend: vector
 #         merge_eligible: false
 #   mapping:                       # entity `type` -> adapter name
 #     pii: excluded                # route the pii class to the built-in surface
+#   # routes: nothing is routed unless a rule says so. One rule per page type
+#   # (or per page type + fields, or per sensitivity class); `to` is ONE location.
+#   # A field rule's target must be a location marked `sensitive: true`.
+#   #   routes:
+#   #     - page_type: person            # fields omitted = the whole page type
+#   #       to: [shared-notes]
+#   #     - page_type: person
+#   #       fields: [email, phone]       # these fields only, kept in a vault
+#   #       to: [contacts-vault]
+#   #     - sensitivity_class: secret    # where free-text values of this class go
+#   #       to: [contacts-vault]
 # storage:
 #   history: git                   # git (default) | none: plain files, no repository
 #                                  #   (`athenaeum init --no-history`); no restore point,
@@ -6769,6 +6780,42 @@ def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
             continue
         mapping[cls.strip()] = adapter_name.strip()
     return mapping
+
+
+def resolve_storage_routes(config: dict[str, Any] | None) -> Any:
+    """Resolve the ``storage.routes`` table of routing rules (athenaeum#3166).
+
+    Each rule is a mapping with ``page_type`` (or, in its place,
+    ``sensitivity_class``), an optional ``fields`` list, and ``to``, a list of
+    location names (``storage.adapters`` names plus the built-ins). This issue
+    accepts a ``to`` list of exactly one name. A rule with ``fields`` sends those
+    fields of that page type to the target, and the target must be a location
+    marked ``sensitive: true``; a rule without ``fields`` sends the whole page
+    type (the long form of a ``storage.mapping`` entry, which stays as the short
+    form); a ``sensitivity_class`` rule gives the location for values recognised
+    in free text and replaces the per-class lookup in ``sensitivity_routing``.
+    A field named in a rule needs no value on any page: fields are declared by
+    the operator and none is built in.
+
+    Returns the raw list (still primitive) or an EMPTY list when unset, the code
+    default: nothing is routed unless a rule says so, so an unconfigured base is
+    byte-identical. A value that is not a list is returned as is so that
+    :func:`athenaeum.storage.configured_routes` can refuse it loudly with the key
+    in the message. The rules are validated there (duplicate rules, a page type
+    in both ``storage.routes`` and ``storage.mapping``, an unknown ``to``, a
+    field rule whose target is not sensitive, a ``to`` list whose length is not
+    one) and each raises ``StorageConfigError``. Records already on disk are read
+    through a rule without being moved.
+    """
+    if not isinstance(config, dict):
+        return []
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return []
+    raw = storage_cfg.get("routes")
+    if raw is None:
+        return []
+    return raw
 
 
 def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

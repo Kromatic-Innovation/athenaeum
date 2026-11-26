@@ -79,11 +79,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from athenaeum.config import resolve_storage_mapping
 from athenaeum.models import ACCESS_LEVELS, parse_frontmatter
 from athenaeum.pii import iter_corpus_files
 from athenaeum.sensitivity import available_classes
-from athenaeum.storage import available_adapters, resolve_adapter_for_class
+from athenaeum.storage import available_adapters, resolve_adapter_for_class, routed_storage_mapping
 
 #: The frontmatter field this lint reads to learn which sensitivity class a
 #: scanned page carries. See the module docstring's "content-scanning
@@ -166,7 +165,7 @@ def lint_storage_mapping_completeness(
     path. Findings are sorted by class name for deterministic output.
     """
     observed = scan_sensitivity_class_names(corpus_root)
-    mapping = resolve_storage_mapping(config)
+    mapping = routed_storage_mapping(config)
     adapters = available_adapters(config)
 
     findings: list[MappingFinding] = []

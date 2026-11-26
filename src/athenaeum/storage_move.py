@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_cache_dir, resolve_storage_mapping
+from athenaeum.config import resolve_cache_dir
 from athenaeum.models import PageLocator, parse_frontmatter
 from athenaeum.storage import (
     DEFAULT_ADAPTER_NAME,
@@ -56,6 +56,7 @@ from athenaeum.storage import (
     available_adapters,
     open_store,
     resolve_locator_surfaces,
+    routed_storage_mapping,
 )
 from athenaeum.store import (
     ReadOnlySurfaceError,
@@ -243,7 +244,7 @@ def plan_move(
         violations = scan_links_after_move(
             knowledge_root, {m.src: target_name for m in moves}, config
         ).violations
-    mapped = resolve_storage_mapping(config).get(entity_type) == target_name
+    mapped = routed_storage_mapping(config).get(entity_type) == target_name
     return MovePlan(
         entity_type=entity_type,
         target_name=target_name,

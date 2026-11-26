@@ -81,6 +81,7 @@ from athenaeum.config import (  # StorageConfigError is defined in config, re-ex
     resolve_storage_adapters,
     resolve_storage_history,
     resolve_storage_mapping,
+    resolve_storage_routes,
 )
 from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
 
@@ -425,7 +426,7 @@ def resolve_adapter_for_class(
     an excluded class into the corpus).
     """
     cls = (entity_class or "").strip()
-    mapping = resolve_storage_mapping(config)
+    mapping = _full_storage_mapping(config)
     adapter_name = mapping.get(cls, DEFAULT_ADAPTER_NAME) if cls else DEFAULT_ADAPTER_NAME
     adapters = available_adapters(config)
     adapter = adapters.get(adapter_name)
@@ -472,7 +473,11 @@ def storage_policy_configured(config: dict[str, Any] | None) -> bool:
     """
     if not config:
         return False
-    return bool(resolve_storage_mapping(config) or resolve_storage_adapters(config))
+    return bool(
+        resolve_storage_mapping(config)
+        or resolve_storage_adapters(config)
+        or resolve_storage_routes(config)
+    )
 
 
 def corpus_policy_for_class(
@@ -600,7 +605,7 @@ def configured_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str,
     A pass-through so :func:`athenaeum.pii.surface_class_for_page_class` reads
     the table through this module rather than from ``config`` directly.
     """
-    return resolve_excluded_read_mapping(config)
+    return {**resolve_excluded_read_mapping(config), **_route_tables(config)[2]}
 
 
 def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple[str, ...]]:
@@ -609,7 +614,241 @@ def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple
     A pass-through so :func:`athenaeum.pii.resolve_excluded_fields` reads the
     table through this module rather than from ``config`` directly.
     """
-    return resolve_excluded_fields_config(config)
+    return {**resolve_excluded_fields_config(config), **_route_tables(config)[1]}
+
+
+# ---------------------------------------------------------------------------
+# storage.routes -- one rule per "this goes there" (athenaeum#3166)
+# ---------------------------------------------------------------------------
+#
+# A rule names a page type (optionally a list of its fields) or a sensitivity
+# class, and one target location. ``storage.mapping`` stays as the short form of
+# a whole-page-type rule. The rules are folded into the same tables the older
+# keys fill (the page-type mapping, ``storage.excluded_fields`` and
+# ``storage.excluded_read_mapping``) so a configuration written with routes and
+# its equivalent written with the old keys take the same read and write paths.
+
+#: Prefix of the surface class a page type's field rules are folded into. A
+#: surface class is the name the older tables key a record collection by; a
+#: field rule has no such name, so it gets a derived one that no page type or
+#: operator-chosen class can collide with in practice.
+_ROUTE_SURFACE_PREFIX = "routes."
+
+
+@dataclass(frozen=True)
+class StorageRoute:
+    """One validated ``storage.routes`` rule.
+
+    Exactly one of ``page_type`` / ``sensitivity_class`` is set. ``fields`` is
+    ``None`` for a whole-page-type rule. ``to`` is the single target location.
+    """
+
+    to: str
+    page_type: str | None = None
+    sensitivity_class: str | None = None
+    fields: tuple[str, ...] | None = None
+
+
+def _route_error(index: int, message: str) -> StorageConfigError:
+    return StorageConfigError(f"storage.routes[{index}] {message}")
+
+
+def _parse_route(index: int, raw: Any) -> StorageRoute:
+    if not isinstance(raw, dict):
+        raise _route_error(index, f"must be a mapping, got {type(raw).__name__}")
+    known = ("page_type", "sensitivity_class", "fields", "to")
+    unknown = sorted(str(k) for k in raw if k not in known)
+    if unknown:
+        raise _route_error(
+            index,
+            f"has unknown key(s) {unknown}; a rule takes page_type (or "
+            "sensitivity_class), fields and to",
+        )
+    page_type = raw.get("page_type")
+    sens_class = raw.get("sensitivity_class")
+    if (page_type is None) == (sens_class is None):
+        raise _route_error(index, "must name exactly one of page_type or sensitivity_class")
+    key_name = "page_type" if page_type is not None else "sensitivity_class"
+    key_value = page_type if page_type is not None else sens_class
+    if not isinstance(key_value, str) or not key_value.strip():
+        raise _route_error(index, f"{key_name} must be a non-empty string, got {key_value!r}")
+    to = raw.get("to")
+    if not isinstance(to, list) or not all(isinstance(t, str) and t.strip() for t in to):
+        raise _route_error(index, f"to must be a list of location names, got {to!r}")
+    if len(to) != 1:
+        raise _route_error(
+            index,
+            f"to must name exactly one location, got {len(to)} "
+            "(a rule takes one target; none and several are not supported)",
+        )
+    fields: tuple[str, ...] | None = None
+    if "fields" in raw:
+        if sens_class is not None:
+            raise _route_error(index, "a sensitivity_class rule takes no fields")
+        raw_fields = raw["fields"]
+        if (
+            not isinstance(raw_fields, list)
+            or not raw_fields
+            or not all(isinstance(f, str) and f.strip() for f in raw_fields)
+        ):
+            raise _route_error(
+                index, f"fields must be a non-empty list of names, got {raw_fields!r}"
+            )
+        fields = tuple(f.strip() for f in raw_fields)
+    return StorageRoute(
+        to=to[0].strip(),
+        page_type=key_value.strip() if page_type is not None else None,
+        sensitivity_class=key_value.strip() if sens_class is not None else None,
+        fields=fields,
+    )
+
+
+def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]:
+    """The validated ``storage.routes`` rules (athenaeum#3166); empty when unset.
+
+    Raises :class:`StorageConfigError` for: a malformed rule; a ``to`` list whose
+    length is not one; two rules naming the same page type and field, the same
+    whole page type, or the same sensitivity class (there is no ordering between
+    rules); a page type named both in ``storage.routes`` and in
+    ``storage.mapping``; a field rule on a page type that also has a
+    ``storage.excluded_read_mapping`` or ``storage.excluded_fields`` entry; a
+    ``to`` that is not a known location; a field rule whose target is not
+    ``sensitive`` (:func:`is_sensitive`); and field rules of one page type that
+    name different locations.
+    """
+    raw = resolve_storage_routes(config)
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise StorageConfigError(
+            f"storage.routes must be a list of rules, got {type(raw).__name__}"
+        )
+    routes = tuple(_parse_route(i, item) for i, item in enumerate(raw))
+
+    seen: set[tuple[str, str, str | None]] = set()
+    for route in routes:
+        kind = "page_type" if route.page_type is not None else "sensitivity_class"
+        subject = route.page_type if route.page_type is not None else route.sensitivity_class
+        assert subject is not None
+        for name in route.fields if route.fields is not None else (None,):
+            key = (kind, subject, name)
+            if key in seen:
+                where = f"{kind} {subject!r}" + (f" field {name!r}" if name else "")
+                raise StorageConfigError(
+                    f"storage.routes names {where} more than once; there is no ordering "
+                    "between rules, so each page type (and field) takes one rule"
+                )
+            seen.add(key)
+
+    mapping = resolve_storage_mapping(config)
+    read_mapping = resolve_excluded_read_mapping(config)
+    excluded_fields = resolve_excluded_fields_config(config)
+    field_target: dict[str, str] = {}
+    adapters = available_adapters(config)
+    for route in routes:
+        if route.to not in adapters:
+            raise StorageConfigError(
+                f"storage.routes routes {route.page_type or route.sensitivity_class!r} to "
+                f"unknown location {route.to!r}; known locations: {sorted(adapters)}"
+            )
+        if route.page_type is None:
+            continue
+        if route.page_type in mapping:
+            raise StorageConfigError(
+                f"page type {route.page_type!r} is named in both storage.routes and "
+                "storage.mapping; keep one"
+            )
+        if route.fields is None:
+            continue
+        if not adapters[route.to].sensitive:
+            raise StorageConfigError(
+                f"storage.routes sends fields of {route.page_type!r} to location "
+                f"{route.to!r}, which is not marked sensitive: true; a field rule "
+                "needs a sensitive target"
+            )
+        if field_target.setdefault(route.page_type, route.to) != route.to:
+            raise StorageConfigError(
+                f"storage.routes sends fields of {route.page_type!r} to more than one "
+                "location; a page type's field rules share one target"
+            )
+        old_surface = _pii_policy().surface_class_for_page_class(route.page_type, None)
+        if route.page_type in read_mapping or route.page_type in excluded_fields:
+            clash = "storage.excluded_read_mapping" if route.page_type in read_mapping else (
+                "storage.excluded_fields"
+            )
+            raise StorageConfigError(
+                f"page type {route.page_type!r} is named in both storage.routes and "
+                f"{clash}; keep one"
+            )
+        if old_surface in excluded_fields:
+            raise StorageConfigError(
+                f"page type {route.page_type!r} has field rules in storage.routes and its "
+                f"surface class {old_surface!r} is listed in storage.excluded_fields; keep one"
+            )
+    return routes
+
+
+def _route_surface_class(page_type: str) -> str:
+    return f"{_ROUTE_SURFACE_PREFIX}{page_type}"
+
+
+def _route_tables(
+    config: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, str]]:
+    """What the routes add to (mapping, excluded fields, excluded read mapping)."""
+    mapping: dict[str, str] = {}
+    fields: dict[str, tuple[str, ...]] = {}
+    read_mapping: dict[str, str] = {}
+    for route in configured_routes(config):
+        if route.page_type is None:
+            continue
+        if route.fields is None:
+            mapping[route.page_type] = route.to
+            continue
+        surface = _route_surface_class(route.page_type)
+        mapping[surface] = route.to
+        fields[surface] = fields.get(surface, ()) + route.fields
+        read_mapping[route.page_type] = surface
+    return mapping, fields, read_mapping
+
+
+def _full_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """``storage.mapping`` plus what the routes fold in (derived surface classes included)."""
+    return {**resolve_storage_mapping(config), **_route_tables(config)[0]}
+
+
+def routed_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """Class -> location for every page type and sensitivity class that is routed whole.
+
+    ``storage.mapping`` entries plus the ``storage.routes`` rules without
+    ``fields`` and the ``sensitivity_class`` rules. For the readers that report
+    on where a class goes (doctor, the sensitivity lint, ``storage move-type``);
+    the routing itself goes through :func:`route_for`.
+    """
+    merged = dict(resolve_storage_mapping(config))
+    for route in configured_routes(config):
+        if route.fields is None:
+            name = route.page_type if route.page_type is not None else route.sensitivity_class
+            assert name is not None
+            merged[name] = route.to
+    return merged
+
+
+def route_for_sensitivity_class(
+    sensitivity_class: str, config: dict[str, Any] | None
+) -> RouteDecision | None:
+    """The ``storage.routes`` rule for a sensitivity class, or ``None`` when none names it.
+
+    ``None`` means "no rule": the caller keeps its own fallback, so a class with
+    no rule behaves as it did before ``storage.routes`` existed.
+    """
+    for route in configured_routes(config):
+        if route.sensitivity_class == sensitivity_class:
+            return _decision_for_adapter_names(
+                (route.to,), f"storage.routes.sensitivity_class.{sensitivity_class}", config
+            )
+    return None
+
 
 
 def _decision_for_adapter_names(
@@ -652,6 +891,8 @@ def _excluded_field_names(
 
 
 def _field_rule(surface_class: str, config: dict[str, Any] | None) -> str:
+    if surface_class.startswith(_ROUTE_SURFACE_PREFIX):
+        return f"storage.routes.{surface_class[len(_ROUTE_SURFACE_PREFIX):]}"
     if surface_class in configured_excluded_fields(config):
         return f"storage.excluded_fields.{surface_class}"
     return f"storage.mapping.{surface_class}"
@@ -733,6 +974,8 @@ def route_for(
         cls = page_type.strip()
         if cls in resolve_storage_mapping(config):
             return _decision_for_class(cls, f"storage.mapping.{cls}", config)
+        if cls in _route_tables(config)[0]:
+            return _decision_for_class(cls, f"storage.routes.{cls}", config)
         # No mapping entry: the default wiki surface, in the corpus. Answered
         # without resolving the adapter table, exactly as the value-routing
         # path never resolved it for an unmapped class.
