@@ -80,7 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_storage_mapping
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import ACCESS_LEVELS, parse_frontmatter
 from athenaeum.pii import iter_corpus_files
 from athenaeum.sensitivity import available_classes
 from athenaeum.storage import available_adapters, resolve_adapter_for_class
@@ -102,7 +102,7 @@ FINDING_POLICY_MISMATCH = "policy_mismatch"
 #: Access levels the D4 pair check treats as "restricted" — this lint's own
 #: reading of design note §7 Decision D4 ("read_policy.access is
 #: `confidential` or `personal`"), not a new vocabulary of its own.
-_RESTRICTED_ACCESS_LEVELS = frozenset({"confidential", "personal"})
+_RESTRICTED_ACCESS_LEVELS = frozenset(ACCESS_LEVELS[2:])
 
 
 @dataclass(frozen=True)
