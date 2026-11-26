@@ -475,6 +475,46 @@ What this means for a store cloned from someone else:
   filters a `git checkout` or `git pull` of that store would run, so trusting
   the store for sync is the same decision as trusting it for checkout.
 
+### 2.7 Identity providers (athenaeum#3171)
+
+An access check needs the caller as a principal: an identity key, the tuple
+`models.asserter_identity_key` derives from an `asserter` block, which is what
+`access.can` takes. An `IdentityProvider` turns the context of a request into
+that key. It has one method, `principal(context)`, and returns the key or
+`None` when the request carries no identity. `IdentityContext` carries the
+claims of a verified token (or `None`) and the resolved configuration.
+
+Two providers are built in:
+
+- **`local`** returns the install's owner, the key of `owner.asserter`, or
+  `None` when no owner is configured.
+- **`oidc`** returns the principal of a bearer token the network server has
+  already verified. It reads `iss` and `sub` and builds `(iss, sub)`; when the
+  token carries both the Microsoft Entra tenant (`tid`) and object (`oid`)
+  identifiers it builds the tenant-scoped `(iss, "entra", tid, oid)` key, since
+  an Entra `sub` is pairwise per app. The mapping is `serve_auth.verified_asserter`
+  feeding `asserter_identity_key`, so a token and an `asserter` block for the
+  same person give equal keys.
+
+`oidc` reads the verified identity and nothing else. No role, group, audience
+or scope claim is consulted, so a token claiming extra ones yields the same
+principal. A token that failed verification never reaches a provider: the
+provider is asked only about the access token the verifier returned.
+
+No provider stores a credential, issues a token or calls an identity
+provider's management interface. The server stays a resource server only.
+
+**Registration.** `register_identity_provider(name, provider)` adds another
+provider; a built-in name (`local`, `oidc`) cannot be shadowed and raises
+`ValueError`. `get_identity_provider(name)` looks one up.
+
+**Choice at startup.** A stdio server and the command line use `local`; a
+network server configured as an OAuth resource server (`serve.auth.*`) uses
+`oidc`. The choice is made once when the server is created and is not a tool
+parameter, so a caller cannot choose who it is. The created server exposes
+`current_principal()` for the request being served. Providers for other
+protocols and group membership from a directory are out of scope.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.
