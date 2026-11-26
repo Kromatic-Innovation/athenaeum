@@ -18,7 +18,7 @@ relevance ranking):
 
 Excluded/withheld fields (a person's contact data, and whatever else the
 operator routes off-corpus) are read through ONE path, in two shapes of the
-same read: ``recall(with_pii=True)`` when searching, ``read_entity`` when the
+same read: ``recall(include_sensitive=True)`` when searching, ``read_entity`` when the
 caller already holds a uid. (The person-shaped ``read_person`` wrapper over
 ``read_entity`` was removed in athenaeum#888 once every known consumer had
 migrated.)
@@ -326,7 +326,7 @@ def _forbidden_result() -> dict:
 
 # Excluded-fields pin (issue athenaeum#2383): ONE reason string, shared by the
 # three surfaces the pin covers — ``recall``'s withheld notice, the
-# ``read_entity`` payload's ``excluded_fields_withheld`` key, and
+# ``read_entity`` payload's ``sensitive_reads_withheld`` key, and
 # ``enumerate_entities``' refusal — so a caller gets the same explanation
 # whichever tool it asked.
 #
@@ -351,24 +351,24 @@ def _forbidden_result() -> dict:
 # caller — the serve-time-pinned MCP server — and sits next to the
 # ``[redacted - N value(s) on file]`` marker it stands in for, which is
 # likewise a literal in this module.
-EXCLUDED_FIELDS_WITHHELD_REASON = (
-    "this server was started with serve.excluded_fields: off, so no excluded "
+SENSITIVE_READS_WITHHELD_REASON = (
+    "this server was started with serve.sensitive_reads: off, so no sensitive "
     "value reaches any caller on this process; a withheld field is still "
     "reported as withheld, exactly as it is for a caller that did not ask "
-    "for excluded values"
+    "for sensitive values (include_sensitive)"
 )
 
-#: The markdown form appended to a ``recall(with_pii=True)`` result when the
+#: The markdown form appended to a ``recall(include_sensitive=True)`` result when the
 #: pin withheld the join (issue athenaeum#2383). Appended rather than
 #: substituted per hit: with the pin on, ``with_pii`` never reaches the
 #: excluded-surface join at all, so there is no per-hit block to replace and
 #: nothing in the output that could betray WHICH hits have a record.
-EXCLUDED_FIELDS_WITHHELD_NOTICE = (
-    f"\n_Excluded fields withheld - {EXCLUDED_FIELDS_WITHHELD_REASON}._\n"
+SENSITIVE_READS_WITHHELD_NOTICE = (
+    f"\n_Sensitive reads withheld - {SENSITIVE_READS_WITHHELD_REASON}._\n"
 )
 
 
-def _with_excluded_fields_withheld_notice(rendered: str) -> str:
+def _with_sensitive_reads_withheld_notice(rendered: str) -> str:
     """Attach the withheld notice to a ``recall`` result of EITHER shape.
 
     ``recall_search`` returns two different media on two different paths:
@@ -381,7 +381,7 @@ def _with_excluded_fields_withheld_notice(rendered: str) -> str:
     reproduction before fixing).
 
     So the notice goes INSIDE the object on the JSON path, under the same
-    ``excluded_fields_withheld`` key :func:`entity_read` uses — one key name
+    ``sensitive_reads_withheld`` key :func:`entity_read` uses — one key name
     across every structured surface the pin touches — and is appended as a
     markdown line only to markdown.
 
@@ -400,11 +400,43 @@ def _with_excluded_fields_withheld_notice(rendered: str) -> str:
         except json.JSONDecodeError:
             payload = None
         if isinstance(payload, dict):
-            payload["excluded_fields_withheld"] = EXCLUDED_FIELDS_WITHHELD_REASON
+            payload["sensitive_reads_withheld"] = SENSITIVE_READS_WITHHELD_REASON
             return json.dumps(
                 payload, indent=2, sort_keys=True, default=pii.json_date_default
             )
-    return rendered + EXCLUDED_FIELDS_WITHHELD_NOTICE
+    return rendered + SENSITIVE_READS_WITHHELD_NOTICE
+
+#: JSON key (and markdown lead-in) carrying the deprecated-flag-name notice a
+#: tool call returns when it spelled the sensitive-read flag ``with_pii`` or
+#: ``include_excluded`` (issue athenaeum#3163).
+DEPRECATION_NOTICE_KEY = "deprecation_notice"
+
+
+def _with_deprecation_notices(rendered: str, notices: list[str]) -> str:
+    """Attach flag-rename notices to a ``recall`` result of EITHER shape.
+
+    Same two-shape rule as :func:`_with_sensitive_reads_withheld_notice`: a
+    strict JSON document (handle-shaped query) gets a ``deprecation_notice``
+    key, markdown gets one trailing line. No notices returns *rendered*
+    untouched.
+    """
+    if not notices:
+        return rendered
+    text = " ".join(notices)
+    if rendered.lstrip().startswith("{"):
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            from athenaeum import pii
+
+            payload[DEPRECATION_NOTICE_KEY] = text
+            return json.dumps(
+                payload, indent=2, sort_keys=True, default=pii.json_date_default
+            )
+    return rendered + f"\n_Deprecated: {text}_\n"
+
 
 # Default wiki-level source stamped onto remember() writes when the caller
 # does not supply ``sources``. ``claude:inferred`` is intentionally
@@ -521,7 +553,7 @@ def transport_defaults(transport: str | None) -> TransportDefaults:
     athenaeum#2382 they do not: ``serve.transport`` / ``serve.host`` /
     ``serve.port`` are a transport name and a BIND address, and
     :class:`athenaeum.remote_policy.RemotePolicy` carries a tool allowlist and
-    an excluded-fields pin, not an identity. Inventing a ``serve.host_label``
+    an sensitive-reads pin, not an identity. Inventing a ``serve.host_label``
     knob here would be guessing at a setting a later child should design
     against a real registration flow, so the fallback IS the shipped
     behaviour and this is the seam a host label would land on.
@@ -1000,7 +1032,8 @@ def entity_read(
     config: dict[str, Any] | None = None,
     not_found_label: str = "entity",
     cache_dir: Path | None = None,
-    excluded_fields: bool = True,
+    sensitive_reads: bool = True,
+    deprecation_notices: list[str] | None = None,
 ) -> str:
     """Read one entity's page by uid, with excluded-field inclusion gated by a flag.
 
@@ -1025,7 +1058,8 @@ def entity_read(
             never have to know the surface name. Note this argument selects the
             SURFACE, not the page: the page itself is resolved by uid through
             ``EntityIndex``, whatever its ``type:``.
-        include_excluded: When ``True``, the actual excluded values are
+        include_excluded: The sensitive-read flag (the tool's
+            ``include_sensitive``). When ``True``, the actual values are
             included; default ``False`` withholds each behind a redaction
             marker. Who may set it remains the deferred athenaeum#864 question.
         usage_classes: Restrict returned values to these usage classes
@@ -1047,9 +1081,9 @@ def entity_read(
             Gating (the audience check below) is unaffected either way: it
             re-parses frontmatter fresh from disk regardless of how *uid* was
             located.
-        excluded_fields: The serve-time excluded-fields pin (issue
+        sensitive_reads: The serve-time sensitive-reads pin (issue
             athenaeum#2383), resolved by
-            :func:`athenaeum.config.resolve_serve_excluded_fields` and pinned
+            :func:`athenaeum.config.resolve_serve_sensitive_reads` and pinned
             onto the server process by :func:`create_server` -- never a tool
             argument, so a remote caller cannot pass ``True`` for itself.
             ``True`` (the default, and every pre-athenaeum#2383 caller) is
@@ -1064,13 +1098,18 @@ def entity_read(
         (:func:`_forbidden_result`) for an unauthorized restricted caller, a
         ``{"ok": False, "error": ...}`` message for an unknown uid, or
         :meth:`athenaeum.pii.EntityRead.to_dict` -- plus, when
-        *excluded_fields* is ``False``, an ``excluded_fields_withheld`` key
-        naming the reason (:data:`EXCLUDED_FIELDS_WITHHELD_REASON`) so a
+        *sensitive_reads* is ``False``, a ``sensitive_reads_withheld`` key
+        naming the reason (:data:`SENSITIVE_READS_WITHHELD_REASON`) so a
         caller can tell the pin from an entity that simply has no record.
+        With *include_excluded* set (and not withheld), a routed-value
+        pointer in the page body is replaced by its value when the caller may
+        read it (:func:`athenaeum.sensitivity_routing.resolve_pointers_in_text`).
+        *deprecation_notices* (flag-rename notices from the tool wrapper) are
+        returned under ``deprecation_notice``.
     """
     from athenaeum import pii
 
-    if not excluded_fields:
+    if not sensitive_reads:
         # Issue athenaeum#2383. Forced at the ASSEMBLY argument, before any
         # index or record is touched: `include_excluded` is what
         # `pii.assemble_excluded_read` branches on to put real values into
@@ -1146,12 +1185,22 @@ def entity_read(
     # value straight from a bare YAML date — coerce it to ISO-8601 rather
     # than letting `json.dumps` raise on it.
     payload = result.to_dict()
-    if not excluded_fields:
+    if not sensitive_reads:
         # Issue athenaeum#2383: say the pin acted. Without this, a withheld
         # read is indistinguishable from an entity with no excluded record,
         # and a caller retries the same call forever. The reason string names
-        # no value and no count -- see EXCLUDED_FIELDS_WITHHELD_REASON.
-        payload["excluded_fields_withheld"] = EXCLUDED_FIELDS_WITHHELD_REASON
+        # no value and no count -- see SENSITIVE_READS_WITHHELD_REASON.
+        payload["sensitive_reads_withheld"] = SENSITIVE_READS_WITHHELD_REASON
+    elif include_excluded and isinstance(payload.get("body"), str):
+        # athenaeum#3163: the same flag resolves routed-value pointers in the
+        # body, under the class's own read_policy.
+        from athenaeum.sensitivity_routing import resolve_pointers_in_text
+
+        payload["body"] = resolve_pointers_in_text(
+            payload["body"], config, knowledge_root, caller_audience=caller_audience
+        )
+    if deprecation_notices:
+        payload[DEPRECATION_NOTICE_KEY] = " ".join(deprecation_notices)
     return json.dumps(payload, indent=2, default=pii.json_date_default)
 
 
@@ -3552,20 +3601,25 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
             query: Search query string (keywords, names, topics — or natural
                 language for semantic recall under the vector backend).
             top_k: Maximum number of results to return (default 5).
-            with_pii: Also resolve each matching entity's EXCLUDED fields —
-                contact data for a person, and whatever the operator routes
-                off-corpus for any other entity class (issue athenaeum#885). This is
-                the sanctioned way to read excluded data for a hit you found
+            include_sensitive: Also resolve each matching entity's SENSITIVE
+                fields — contact data for a person, and whatever the operator
+                routes off-corpus for any other entity class (issue athenaeum#885). This is
+                the sanctioned way to read sensitive data for a hit you found
                 here; do not open an excluded surface directly
                 (``docs/design/one-way-in-one-way-out.md`` section 3). Default ``False``, and
                 free when unset: no excluded surface is scanned at all.
+                `read_entity` takes the same flag under the same name.
 
-                It cannot widen what you can see. Excluded values are never
+                It cannot widen what you can see. Sensitive values are never
                 indexed and are not searchable — the flag attaches a record to
                 a hit the corpus already produced and already authorized, after
                 every audience and policy filter. A field you do not receive
                 comes back as a redaction marker naming the field and how many
                 values exist, never as silence.
+            with_pii: Deprecated name for ``include_sensitive``; behaves the
+                same, the result carries a deprecation notice, and it is
+                removed in the next minor release. Do not pass both with
+                different values.
             history: Opt into a HISTORY query (issue athenaeum#904) — set this when
                 you are explicitly asking about the past ("what did the
                 daily status say last week?") rather than the current state.
@@ -3657,8 +3711,8 @@ def remote_recall_tool_docstring(entity_classes_str: str) -> str:
 #: The ``recall`` MCP tool's JSON input schema, hand-written to mirror what
 #: FastMCP generates from the real ``recall(...)`` function signature above
 #: (issue athenaeum#1733) -- so ``tests/evals/rollout.py``'s api-mode tool
-#: definition exposes the SAME parameters (``query``, ``top_k``, ``with_pii``,
-#: ``history``, ``type``), not a two-parameter paraphrase. Kept as a plain
+#: definition exposes the SAME parameters (``query``, ``top_k``, ``include_sensitive``,
+#: ``history``, ``type``, ``with_pii``), not a two-parameter paraphrase. Kept as a plain
 #: module constant (not derived from the live signature via introspection)
 #: because the real function lives inside ``create_server``'s closure and
 #: is never constructed without a ``wiki_root`` -- a schema needed at import
@@ -3678,13 +3732,13 @@ RECALL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
             "description": "Maximum number of results to return (default 5).",
             "default": 5,
         },
-        "with_pii": {
-            "type": "boolean",
+        "include_sensitive": {
+            "type": ["boolean", "null"],
             "description": (
-                "Also resolve each matching entity's excluded fields (contact data for a "
+                "Also resolve each matching entity's sensitive fields (contact data for a "
                 "person, and whatever else is routed off-corpus). Default false."
             ),
-            "default": False,
+            "default": None,
         },
         "history": {
             "type": "boolean",
@@ -3700,6 +3754,14 @@ RECALL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 "Narrow the search to one entity class (a page's `type:`). Omitting this "
                 "searches every class."
             ),
+        },
+        "with_pii": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Deprecated name for `include_sensitive`; removed in the next minor "
+                "release."
+            ),
+            "default": None,
         },
     },
     "required": ["query"],
@@ -3725,15 +3787,15 @@ def read_entity_tool_docstring() -> str:
         athenaeum#888) and the sanctioned way to read an
         entity's EXCLUDED fields when you already have its uid — do not open an
         excluded surface directly (``docs/design/one-way-in-one-way-out.md`` §3). Use
-        ``recall(with_pii=True)`` instead when you are searching rather than
+        ``recall(include_sensitive=True)`` instead when you are searching rather than
         resolving a uid you already hold; both reach the same read.
 
-        Returns the entity's wiki page; with ``include_excluded`` left at its
+        Returns the entity's wiki page; with ``include_sensitive`` left at its
         default ``False``, each withheld field is reported as a redaction
         marker (naming the field and that a value exists, never the value)
         rather than silently omitted — so an entity with a withheld field and
         an entity with no such field at all stay distinguishable. With
-        ``include_excluded=True``, the actual values are included, read from
+        ``include_sensitive=True``, the actual values are included, read from
         whichever surface the class resolves to; this tool never constructs
         that path itself.
 
@@ -3768,12 +3830,19 @@ def read_entity_tool_docstring() -> str:
                 selects which excluded SURFACE is read (a ``person`` page's
                 record lives on the ``pii`` surface); the page itself is
                 resolved by uid whatever its type.
-            include_excluded: Set ``True`` to receive the actual values
-                instead of redaction markers. Default ``False``.
+            include_sensitive: Set ``True`` to receive the actual values
+                instead of redaction markers. Default ``False``. `recall`
+                takes the same flag under the same name. With it set, a
+                ``[sensitive:<class>:<id> — ...]`` pointer in the page body
+                is replaced by its value when you are authorized to read it.
             usage_classes: Return only values of these usage classes, e.g.
                 ``["observed"]`` for a caller that must not receive a
                 provider-sourced address by accident (issue athenaeum#866).
                 Default ``None`` — every value, each carrying its class.
+            include_excluded: Deprecated name for ``include_sensitive``;
+                behaves the same, the result carries a
+                ``deprecation_notice`` key, and it is removed in the next
+                minor release. Do not pass both with different values.
 
         Returns:
             A JSON string (``pii.EntityRead.to_dict()`` shape) — or a
@@ -3804,13 +3873,13 @@ READ_ENTITY_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 "SURFACE is read; the page itself is resolved by uid whatever its type."
             ),
         },
-        "include_excluded": {
-            "type": "boolean",
+        "include_sensitive": {
+            "type": ["boolean", "null"],
             "description": (
-                "Set true to receive the actual excluded values instead of redaction "
+                "Set true to receive the actual sensitive values instead of redaction "
                 "markers. Default false."
             ),
-            "default": False,
+            "default": None,
         },
         "usage_classes": {
             "type": ["array", "null"],
@@ -3818,6 +3887,14 @@ READ_ENTITY_TOOL_INPUT_SCHEMA: dict[str, Any] = {
             "description": (
                 "Return only values of these usage classes, e.g. `[\"observed\"]`. "
                 "Default null — every value, each carrying its class."
+            ),
+            "default": None,
+        },
+        "include_excluded": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Deprecated name for `include_sensitive`; removed in the next minor "
+                "release."
             ),
             "default": None,
         },
@@ -3960,7 +4037,7 @@ def create_server(
             athenaeum#2383) from
             :func:`athenaeum.remote_policy.build_remote_policy`. ``None``
             (default) is every pre-athenaeum#2383 install: the full tool set
-            is registered and ``with_pii``/``include_excluded`` behave exactly
+            is registered and ``include_sensitive`` behaves exactly
             as before. A non-``None`` policy pins two things for the life of
             this process, next to *caller_audience* and *screening* and for
             the identical reason -- so a remote caller cannot widen its own
@@ -3973,13 +4050,13 @@ def create_server(
               :class:`athenaeum.remote_policy.RemotePolicyError` from this
               function, so ``athenaeum serve`` fails at startup instead of
               quietly serving less than the operator asked for.
-            - **Excluded fields.** With ``excluded_fields`` false, ``recall``
-              coerces ``with_pii`` off before the search runs (so neither the
+            - **Sensitive reads.** With ``sensitive_reads`` false, ``recall``
+              coerces ``include_sensitive`` off before the search runs (so neither the
               similarity path's ``_excluded_block_for_hit`` join nor the
               handle-resolution reverse lookup ever reads the excluded
               surface) and appends
-              :data:`EXCLUDED_FIELDS_WITHHELD_NOTICE`; ``read_entity`` coerces
-              ``include_excluded`` off at the assembly argument; and
+              :data:`SENSITIVE_READS_WITHHELD_NOTICE`; ``read_entity`` coerces
+              ``include_sensitive`` off at the assembly argument; and
               ``enumerate_entities`` refuses a PII-scoped predicate or output
               field outright. Nothing filters a rendered value back out --
               the values are never assembled.
@@ -4174,10 +4251,10 @@ def create_server(
             "memory merges (issue athenaeum#169). "
             "Use `list_pending_decisions` for the unified 'human decisions "
             "needed' queue (questions + merges in one call, issue athenaeum#401). "
-            "Excluded/withheld fields — a person's contact data, and whatever "
+            "Sensitive/withheld fields — a person's contact data, and whatever "
             "else the operator routes off-corpus — are read through ONE path: "
-            "`recall` with `with_pii=True` when you are searching, or "
-            "`read_entity` when you already have a uid. Never open an "
+            "`recall` with `include_sensitive=True` when you are searching, or "
+            "`read_entity` (same flag) when you already have a uid. Never open an "
             "excluded surface directly (issues athenaeum#864, athenaeum#883, "
             "athenaeum#885, athenaeum#886)."
         ),
@@ -4449,10 +4526,18 @@ def create_server(
     def recall(
         query: str,
         top_k: int = 5,
-        with_pii: bool = False,
+        include_sensitive: bool | None = None,
         history: bool = False,
         type: str | None = None,
+        with_pii: bool | None = None,
     ) -> str:
+        from athenaeum.pii import reconcile_sensitive_flag
+
+        # athenaeum#3163: `with_pii` is the deprecated spelling of
+        # `include_sensitive`; it behaves identically and returns a notice.
+        include_sensitive_value, deprecation_notices = reconcile_sensitive_flag(
+            "include_sensitive", include_sensitive, {"with_pii": with_pii}
+        )
         # Issue athenaeum#2313 (athenaeum#2321 review finding 1): re-resolve
         # `recall.extra_intake_roots` FRESH from *config* on every call,
         # the same way `_refresh_extra_root_index` already does for
@@ -4475,8 +4560,8 @@ def create_server(
         from athenaeum.storage import resolve_indexed_surfaces
 
         live_extra_roots = resolve_indexed_surfaces(wiki_root.parent, config)
-        # Issue athenaeum#2383: the serve-time excluded-fields pin, applied by
-        # coercing `with_pii` OFF before the search runs -- deliberately
+        # Issue athenaeum#2383: the serve-time sensitive-reads pin, applied by
+        # coercing `include_sensitive` OFF before the search runs -- deliberately
         # EARLIER than the `_excluded_block_for_hit` assembly site the issue's
         # plan names, and strictly stronger. `recall_search` reaches the
         # excluded surface by TWO routes, not one: the similarity path's
@@ -4488,7 +4573,9 @@ def create_server(
         # excluded value is assembled on either route -- nothing is rendered
         # and then filtered back out.
         withheld = (
-            with_pii and remote_policy is not None and not remote_policy.excluded_fields
+            include_sensitive_value
+            and remote_policy is not None
+            and not remote_policy.sensitive_reads
         )
         rendered = recall_search(
             wiki_root,
@@ -4499,15 +4586,15 @@ def create_server(
             extra_roots=live_extra_roots,
             caller_audience=caller_audience,
             config=config,
-            with_pii=False if withheld else with_pii,
+            with_pii=False if withheld else include_sensitive_value,
             history=history,
             type_filter=type,
             tool_use_id=active_tool_use_id(),
             session_resolver=_session_resolver,
         )
         if withheld:
-            return _with_excluded_fields_withheld_notice(rendered)
-        return rendered
+            rendered = _with_sensitive_reads_withheld_notice(rendered)
+        return _with_deprecation_notices(rendered, deprecation_notices)
 
     # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's
     # description FastMCP puts in the generated tool schema — is built HERE,
@@ -4757,12 +4844,26 @@ def create_server(
         limit: int = _ENUMERATE_DEFAULT_LIMIT,
         cursor: str | None = None,
         fields: list[str] | None = None,
-        with_pii: bool = False,
+        include_sensitive: bool | None = None,
         include_split: bool = False,
+        with_pii: bool | None = None,
     ) -> dict:
+        from athenaeum.pii import reconcile_sensitive_flag
+
+        try:
+            include_sensitive_value, deprecation_notices = reconcile_sensitive_flag(
+                "include_sensitive", include_sensitive, {"with_pii": with_pii}
+            )
+        except ValueError as exc:
+            return {
+                "hits": [],
+                "next_cursor": None,
+                "known_classes": [],
+                "error": str(exc),
+            }
         try:
             parsed_predicates = [_predicate_from_dict(p) for p in (predicates or [])]
-            # Issue athenaeum#2383: under the excluded-fields pin, a PII-scoped
+            # Issue athenaeum#2383: under the sensitive-reads pin, a PII-scoped
             # field is REFUSED rather than silently dropped from the result.
             # Checked on the PARSED predicates (so a predicate's field-fallback
             # list is covered, not just the literal the caller spelled) and on
@@ -4772,7 +4873,7 @@ def create_server(
             # PII-scoped. `with_pii` is also forced off below: that makes the
             # enumeration layer's own gate a second, independent refusal rather
             # than relying on this one being complete.
-            withheld = remote_policy is not None and not remote_policy.excluded_fields
+            withheld = remote_policy is not None and not remote_policy.sensitive_reads
             if withheld:
                 refused = sorted(
                     {
@@ -4788,7 +4889,7 @@ def create_server(
                     raise ValueError(
                         f"Field(s) {refused} are PII-scoped and cannot be used "
                         "as a predicate or requested output field: "
-                        f"{EXCLUDED_FIELDS_WITHHELD_REASON}."
+                        f"{SENSITIVE_READS_WITHHELD_REASON}."
                     )
             result = _enumerate_entities(
                 wiki_root,
@@ -4800,7 +4901,7 @@ def create_server(
                 limit=limit,
                 cursor=cursor,
                 fields=fields or [],
-                with_pii=False if withheld else with_pii,
+                with_pii=False if withheld else include_sensitive_value,
                 caller_audience=caller_audience,
                 extra_roots=extra_roots,
                 config=config,
@@ -4814,11 +4915,14 @@ def create_server(
                 "known_classes": [],
                 "error": str(exc),
             }
-        return {
+        out: dict[str, Any] = {
             "hits": list(result.hits),
             "next_cursor": result.next_cursor,
             "known_classes": list(result.known_classes),
         }
+        if deprecation_notices:
+            out[DEPRECATION_NOTICE_KEY] = " ".join(deprecation_notices)
+        return out
 
     # Issue athenaeum#965: same reason `recall`'s docstring is built above rather
     # than written as a literal — this deployment's entity-class list is
@@ -4876,10 +4980,10 @@ def create_server(
                 beyond the always-present `uid`/`type`/`name`. A field
                 absent from a page is included as `null`, never silently
                 omitted, so every hit has the same shape.
-            with_pii: Required to reference `google_contact_*` as a
-                predicate field OR a requested output field — the SAME flag
-                contract `recall(with_pii=...)` already uses. Default
-                `False`. `do_not_email` (and its `_reason`/`_date`
+            include_sensitive: Required to reference `google_contact_*` as a
+                predicate field OR a requested output field — the SAME flag,
+                with the same name, that `recall` and `read_entity` use.
+                Default `False`. `do_not_email` (and its `_reason`/`_date`
                 companions) do NOT require this flag (athenaeum#1122) —
                 they are plain frontmatter fields, not PII-gated.
             include_split: A page whose relation is `via: split` (created
@@ -4890,6 +4994,9 @@ def create_server(
                 `attach`/`fold`/`manual` are real entities of their own
                 type and are ALWAYS listed, regardless of this flag.
                 Default `False`.
+            with_pii: Deprecated name for `include_sensitive`; behaves the
+                same, returns a `deprecation_notice`, and is removed in the
+                next minor release. Do not pass both with different values.
 
         Returns:
             A dict with `hits` (each carrying `uid`, `type`, `name`, plus
@@ -4897,7 +5004,7 @@ def create_server(
             page, or `null` when there is none), `known_classes` (populated
             only when `entity_type` was not recognized), and — only on a
             caller-input error such as a PII-gated field used without
-            `with_pii=True`, or a cursor minted under a different query
+            `include_sensitive=True`, or a cursor minted under a different query
             shape — an `error` string with `hits`/`next_cursor` empty.
         """
     _register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)(enumerate_entities)
@@ -5540,9 +5647,16 @@ def create_server(
     def read_entity(
         uid: str,
         entity_class: str,
-        include_excluded: bool = False,
+        include_sensitive: bool | None = None,
         usage_classes: list[str] | None = None,
+        include_excluded: bool | None = None,
     ) -> str:
+        from athenaeum.pii import reconcile_sensitive_flag
+
+        # athenaeum#3163: `include_excluded` is the deprecated spelling.
+        include_sensitive_value, deprecation_notices = reconcile_sensitive_flag(
+            "include_sensitive", include_sensitive, {"include_excluded": include_excluded}
+        )
         # Issue athenaeum#1756: this tool's description text now lives in the
         # module-level :func:`read_entity_tool_docstring` so a second caller --
         # ``tests/evals/rollout.py``'s api-mode PULL arms -- can serve the SAME
@@ -5558,16 +5672,17 @@ def create_server(
             wiki_root.parent,
             uid,
             page_class=entity_class,
-            include_excluded=include_excluded,
+            include_excluded=include_sensitive_value,
             usage_classes=usage_classes,
             caller_audience=caller_audience,
             config=config,
             cache_dir=cache_dir,
+            deprecation_notices=deprecation_notices,
             # Issue athenaeum#2383: the serve-time pin, not a tool argument.
             # `entity_read` turns this into `include_excluded=False` at the
-            # assembly argument, so a caller passing `include_excluded=True`
+            # assembly argument, so a caller passing `include_sensitive=True`
             # gets a withheld read rather than an error it could retry around.
-            excluded_fields=(remote_policy is None or remote_policy.excluded_fields),
+            sensitive_reads=(remote_policy is None or remote_policy.sensitive_reads),
         )
 
     read_entity.__doc__ = read_entity_tool_docstring()
