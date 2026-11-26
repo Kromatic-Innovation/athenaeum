@@ -150,7 +150,13 @@ from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
-from athenaeum.storage import StorageConfigError, available_adapters, open_store, route_for
+from athenaeum.storage import (
+    StorageConfigError,
+    available_adapters,
+    is_excluded,
+    open_store,
+    route_for,
+)
 from athenaeum.store import Store, append_line_durable, note_no_restore_point
 from athenaeum.trust_graph import (
     EQUAL,
@@ -189,6 +195,106 @@ KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 #: escalation path. Any change to the message at its one call site below
 #: must update this constant too, or the two silently drift apart.
 ALLOWLIST_REJECTION_REASON = "attribute not on the allowlist"
+
+#: The removed corrections-only routing table (athenaeum#3162).
+REMOVED_SENSITIVE_FIELDS_KEY = "librarian.corrections.sensitive_fields"
+
+
+class RemovedCorrectionsConfigError(ValueError):
+    """``librarian.corrections.sensitive_fields`` is set to a non-empty value.
+
+    Raised by :func:`refuse_removed_sensitive_fields` before any correction
+    batch is read, so no correction is applied. The message carries the
+    complete replacement configuration.
+    """
+
+
+def _removed_sensitive_fields_entries(config: dict[str, Any] | None) -> tuple[bool, dict[str, str]]:
+    """``(is_set_non_empty, {field: class})`` read raw from the removed key."""
+    if not isinstance(config, dict):
+        return False, {}
+    librarian_cfg = config.get("librarian")
+    corrections_cfg = librarian_cfg.get("corrections") if isinstance(librarian_cfg, dict) else None
+    raw = corrections_cfg.get("sensitive_fields") if isinstance(corrections_cfg, dict) else None
+    if not raw:
+        return False, {}
+    entries: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for name, cls in raw.items():
+            if isinstance(name, str) and name.strip() and isinstance(cls, str) and cls.strip():
+                entries[name.strip()] = cls.strip()
+    return True, entries
+
+
+def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | None:
+    """The refusal text for a configuration still setting the removed key.
+
+    ``None`` when the key is absent or empty. The replacement is COMPLETE: an
+    explicit ``storage.excluded_fields.<class>`` list replaces the built-in one
+    (:func:`athenaeum.pii.resolve_excluded_fields`), so each class's list is
+    the fields it already carries (the built-in contact fields for ``pii``)
+    plus the fields the old key named for that class.
+    """
+    is_set, entries = _removed_sensitive_fields_entries(config)
+    if not is_set:
+        return None
+    from athenaeum import pii
+
+    lines = [
+        f"`{REMOVED_SENSITIVE_FIELDS_KEY}` was removed in athenaeum#3162: a "
+        "correction is now routed by the same storage settings as every other "
+        "writer. Refusing to process corrections; no correction was applied.",
+    ]
+    if not entries:
+        lines.append(
+            "The key holds no usable `<field>: <class>` entries; delete it from athenaeum.yaml."
+        )
+        return "\n".join(lines)
+    by_class: dict[str, list[str]] = {}
+    for field_name, cls in entries.items():
+        by_class.setdefault(cls, []).append(field_name)
+    lines.append(
+        "Delete that key and put this under `storage:` in athenaeum.yaml (merge it with "
+        "any `storage:` block you already have):"
+    )
+    lines.append("")
+    lines.append("storage:")
+    lines.append("  excluded_fields:")
+    for cls, names in by_class.items():
+        complete = list(pii.resolve_excluded_fields(cls, config, None))
+        complete.extend(n for n in names if n not in complete)
+        lines.append(f"    {json.dumps(cls)}: [{', '.join(json.dumps(n) for n in complete)}]")
+    lines.append("")
+    lines.append(
+        "An explicit `storage.excluded_fields.<class>` list replaces the built-in one, so "
+        "each list above already includes the built-in contact fields "
+        f"({', '.join(pii.BUILTIN_CONTACT_FIELDS)}) for `pii`."
+    )
+    outside = [c for c in by_class if not is_excluded(c, config)]
+    if outside:
+        lines.append(
+            "These classes are not mapped to a location outside the corpus, so their fields "
+            "would stay on the page: set `storage.mapping.<class>` to a location outside the "
+            f"corpus (for example `excluded`) for {', '.join(json.dumps(c) for c in outside)}."
+        )
+    lines.append(
+        "The old key applied to every page type; the storage settings apply to pages whose "
+        "class is the one named (a `person` page is class `pii`). Map any other page type "
+        "with `storage.excluded_read_mapping.<page type>: <class>`."
+    )
+    return "\n".join(lines)
+
+
+def refuse_removed_sensitive_fields(config: dict[str, Any] | None) -> None:
+    """Raise :class:`RemovedCorrectionsConfigError` if the removed key is set.
+
+    Called once, where a run first discovers correction batches
+    (:func:`run_correction_phase`, :func:`run_trust_dryrun`) and before the
+    ratified-answer apply path, ahead of any read or write of a correction.
+    """
+    message = removed_sensitive_fields_message(config)
+    if message is not None:
+        raise RemovedCorrectionsConfigError(message)
 
 
 def parse_batch_envelope(first_line: str) -> dict[str, Any] | None:
@@ -1640,17 +1746,38 @@ def process_correction_record(
     if shape not in ("scalar", "list"):
         return _raised(f"unrecognized shape {shape!r} for attribute {field_name!r}")
 
-    # athenaeum#3158: the one storage resolver decides whether this field is
-    # routed to another surface. An unknown adapter name surfaces as a
-    # StorageConfigError at the point the old code resolved the surface root
-    # (below), not here, so the order of side effects is unchanged.
+    # athenaeum#3162: the destination comes from the one storage resolver,
+    # ``route_for(page_type, field)``. The page type is only known once the
+    # target is resolved (below), so ``surface_class`` is set there.
+    surface_class = False
     route_error: StorageConfigError | None = None
     surface_targets: tuple[str, ...] = ()
-    try:
-        surface_targets = route_for(None, field_name, config=config).targets
-    except StorageConfigError as exc:
-        route_error = exc
-    surface_class = route_error is not None or bool(surface_targets)
+
+    def _route_for_page(page_type: Any) -> None:
+        nonlocal surface_class, route_error, surface_targets
+        route_error, surface_targets = None, ()
+        if isinstance(page_type, str) and page_type.strip():
+            # An unknown adapter name surfaces as a StorageConfigError at the
+            # point the surface root is resolved (below), not here, so the
+            # order of side effects is unchanged.
+            try:
+                surface_targets = route_for(page_type, field_name, config=config).targets
+            except StorageConfigError as exc:
+                route_error = exc
+        surface_class = route_error is not None or bool(surface_targets)
+
+    def _usage_class_routing_error() -> str | None:
+        if usage_class is None:
+            return None
+        from athenaeum import pii
+
+        if surface_class and op == "add" and field_name in pii.CONTACT_IDENTIFIER_FIELDS:
+            return None
+        return (
+            "usage_class is only valid for an add correction on a "
+            "contact-identifier field routed to an excluded surface "
+            f"(field={field_name!r}, op={op!r})"
+        )
 
     # athenaeum#872: a contact-value correction may declare the usage class the
     # value it writes should carry (`athenaeum.pii.USAGE_CLASSES`) — never
@@ -1673,12 +1800,9 @@ def process_correction_record(
                 f"invalid usage_class {usage_class!r}; expected one of "
                 f"{list(pii.USAGE_CLASSES)}"
             )
-        if not (surface_class and op == "add" and field_name in pii.CONTACT_IDENTIFIER_FIELDS):
-            return _raised(
-                "usage_class is only valid for an add correction on a "
-                "contact-identifier field routed to an excluded surface "
-                f"(field={field_name!r}, op={op!r})"
-            )
+        # Whether the field is routed to an excluded surface depends on the
+        # target's page type; checked right after the target resolves, before
+        # any create.
 
     # Issue athenaeum#904 (AC2): optional decay annotations, same "validate before
     # any side effect" discipline as usage_class above. Unlike usage_class,
@@ -1760,6 +1884,10 @@ def process_correction_record(
             existing_meta, existing_body = parse_frontmatter(existing_text)
             if not existing_meta:
                 return _raised("target page has no frontmatter")
+        _route_for_page(existing_meta.get("type"))
+        usage_error = _usage_class_routing_error()
+        if usage_error is not None:
+            return _raised(usage_error)
     else:  # "creatable" — athenaeum#865
         # Mint the page now so the ordinary apply path below (schema-slot
         # routing, sensitivity routing, the §5.1 delta gate) runs for a
@@ -1794,6 +1922,11 @@ def process_correction_record(
             return _raised(
                 f"unrecognized entity type on create: {resolution.entity_type!r}"
             )
+
+        _route_for_page(resolution.entity_type)
+        usage_error = _usage_class_routing_error()
+        if usage_error is not None:
+            return _raised(usage_error)
 
         today = date.today().isoformat()
         created_meta = _build_created_entity_meta(
@@ -2653,6 +2786,8 @@ def run_trust_dryrun(
         edge.domain.evidence_kind is not None for edge in edges
     )
 
+    # athenaeum#3162: same refusal as `run_correction_phase`, before any batch is read.
+    refuse_removed_sensitive_fields(config)
     baseline_outcomes = _dry_pass(
         raw_root=raw_root, wiki_root=wiki_root, knowledge_root=knowledge_root, config=config
     )
@@ -3502,6 +3637,11 @@ def run_correction_phase(
     ``dispositions`` (disposition -> count, across every processed batch),
     ``records_total``.
     """
+    # athenaeum#3162: refuse a configuration still setting the removed
+    # `librarian.corrections.sensitive_fields` key BEFORE any batch is
+    # discovered or read (the parked-retry below writes too).
+    refuse_removed_sensitive_fields(config)
+
     max_batch_bytes = resolve_corrections_max_batch_bytes(config)
     max_records_per_batch = resolve_corrections_max_records_per_batch(config)
     max_records_per_run = resolve_corrections_max_records_per_run(config)

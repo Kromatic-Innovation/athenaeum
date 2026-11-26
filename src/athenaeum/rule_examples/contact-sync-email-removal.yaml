@@ -90,7 +90,9 @@
 # `identifier_validity` must be on the §6.3 attribute allowlist as a LIST
 # attribute, with this rule's SUBMITTER among its `writers`, and mapped to a
 # sensitive surface so the close lands on the excluded record beside the
-# addresses themselves rather than on the public page. The submitter a shape
+# addresses themselves rather than on the public page. There is one setting
+# for that: the storage keys below, which route a correction exactly as they
+# route every other writer's value. The submitter a shape
 # rule writes under is `shape-rule:<name>@<version>` (`rules.py`'s
 # `write_correction_batch` call sites), NOT the correction's own `source`:
 #
@@ -100,16 +102,20 @@
 #         identifier_validity:
 #           shape: list
 #           writers: ["shape-rule:example-contact-sync-email-removal@1"]
-#       sensitive_fields:
-#         identifier_validity: pii
 #   storage:
 #     mapping: {pii: excluded}
+#     excluded_fields:
+#       pii: [emails, phones, former_emails, alt_emails, identifier_validity]
+#
+# An explicit `excluded_fields` list REPLACES the built-in one, which is why
+# the built-in contact fields (emails, phones, former_emails, alt_emails) are
+# listed beside `identifier_validity`.
 #
 # Without the allowlist entry every correction this rule emits is rejected
 # with "attribute not on the allowlist" and escalated forever -- the failure
 # mode athenaeum#862 measured across 1,369 corrections. Without the
-# `sensitive_fields` entry the close (which embeds an email address) would be
-# written to the public wiki page.
+# `storage.excluded_fields` entry the close (which embeds an email address)
+# would be written to the public wiki page.
 #
 # ROUTING IS NOT THIS RULE'S DECISION. `docs/design/field-corrections.md` §7 is
 # explicit that a correction's target/field is a PROPOSAL: the librarian

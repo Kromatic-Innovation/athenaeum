@@ -681,10 +681,14 @@ class TestFactCarriesSourcePointer:
                             "monotone": True,
                         }
                     },
-                    "sensitive_fields": {"bounced": "pii"},
                 },
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "excluded_fields": {
+                    "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
+                },
+            },
         }
 
         assert _run(tmp_path, config=config)["dispositions"] == {"preserve": 1}

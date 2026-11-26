@@ -125,13 +125,19 @@ def test_value_routing_vault_location_is_unchanged(tmp_path: Path, name: str) ->
         assert _vault_root_for_class("secret", cfg, tmp_path) == expected
 
 
-def _corrections_cfg(sensitive: dict[str, str] | None, mapping: dict[str, str]) -> dict[str, Any]:
-    corrections: dict[str, Any] = {
-        "fields": {"bounced": {"shape": "scalar", "writers": ["delivery-monitor"]}}
+def _corrections_cfg(extra_fields: list[str] | None, mapping: dict[str, str]) -> dict[str, Any]:
+    """Corrections config routed through the storage keys (athenaeum#3162)."""
+    storage: dict[str, Any] = {"mapping": mapping}
+    if extra_fields is not None:
+        storage["excluded_fields"] = {"pii": [*pii.BUILTIN_CONTACT_FIELDS, *extra_fields]}
+    return {
+        "librarian": {
+            "corrections": {
+                "fields": {"bounced": {"shape": "scalar", "writers": ["delivery-monitor"]}}
+            }
+        },
+        "storage": storage,
     }
-    if sensitive is not None:
-        corrections["sensitive_fields"] = sensitive
-    return {"librarian": {"corrections": corrections}, "storage": {"mapping": mapping}}
 
 
 def _apply(root: Path, cfg: dict[str, Any]) -> Any:
@@ -178,7 +184,7 @@ def test_corrections_routed_field_writes_the_surface_record(tmp_path: Path) -> N
     root = _fixture_root(tmp_path)
     page = root / "wiki" / "alex.md"
     before = page.read_text(encoding="utf-8")
-    result = _apply(root, _corrections_cfg({"bounced": "pii"}, {"pii": "excluded"}))
+    result = _apply(root, _corrections_cfg(["bounced"], {"pii": "excluded"}))
     assert result.disposition == "routed-elsewhere"
     assert page.read_text(encoding="utf-8") == before
     record, _ = parse_frontmatter((root / "excluded" / f"{UID}.md").read_text(encoding="utf-8"))
@@ -188,4 +194,4 @@ def test_corrections_routed_field_writes_the_surface_record(tmp_path: Path) -> N
 def test_corrections_routed_to_unknown_adapter_still_raises(tmp_path: Path) -> None:
     root = _fixture_root(tmp_path)
     with pytest.raises(StorageConfigError):
-        _apply(root, _corrections_cfg({"bounced": "pii"}, {"pii": "no-such-adapter"}))
+        _apply(root, _corrections_cfg(["bounced"], {"pii": "no-such-adapter"}))

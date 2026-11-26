@@ -1816,6 +1816,9 @@ def _apply_field_correction(
         return "rejected", f"operator rejected correction {parsed.correction_id}; no write"
 
     # answer_token == "ratify"
+    # athenaeum#3162: a configuration still setting the removed corrections
+    # routing key applies no correction.
+    corrections.refuse_removed_sensitive_fields(config)
     index = EntityIndex(wiki_root)
     registry_entities = corrections.load_registry(knowledge_root)
     # Issue athenaeum#1850: the ratified write is attributed to the OPERATOR,

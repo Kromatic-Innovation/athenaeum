@@ -1148,26 +1148,7 @@ An allowlisted attribute with NO entry here writes directly as ordinary
 frontmatter (schemas.py's per-type models already tolerate unknown keys
 via ``extra="allow"``, the same mechanism source-handle keys use) — §7.2
 only fires when the deployment explicitly asks for non-default routing.
-Empty by default, same rationale as `resolve_corrections_sensitive_fields`.
-
-### `resolve_corrections_sensitive_fields`
-
-- **YAML path:** `librarian.corrections.sensitive_fields`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `{}`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve ``librarian.corrections.sensitive_fields`` — the §7.1
-sensitivity-routing table (`docs/design/field-corrections.md` §7.1).
-
-Maps an attribute name to a `athenaeum.storage` entity-CLASS name
-(resolved through the existing ``storage.mapping`` adapter layer,
-— reused rather than reinvented) that a fact bearing on that attribute
-is routed to, REGARDLESS of the destination a correction named. Empty by
-default: **sensitivity classification is deployment configuration**,
-never shipped in this repo (docs/design/field-corrections.md §7.1,
-out-of-scope list).
+Empty by default: a deployment opts in per attribute.
 
 ### `resolve_decisions_budget_decision_minutes_p50_max`
 

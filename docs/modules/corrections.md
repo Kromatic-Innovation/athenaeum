@@ -19,7 +19,14 @@ Corrections are batched. Each record names a target, an op, a field, a value, an
 - `librarian.corrections.fields` — **the armed-attribute allowlist**. The single surface
   that controls whether *any* adapter may write *any* attribute. Empty by default: a fresh
   install accepts no corrections at all until the operator arms attributes explicitly.
-- `librarian.corrections.sensitive_fields` — the sensitivity-routing table.
+- `storage.mapping` and `storage.excluded_fields` — **where a correction lands**. A
+  correction is routed by the same storage settings as every other writer: the page's
+  class (a `person` page is class `pii`) must map to a location outside the corpus, and
+  the field must be on that class's `excluded_fields` list (the built-in contact fields
+  for `pii`, unless you set an explicit list, which replaces them). A field on that list
+  is written to the location's record, and otherwise in place on the page. The old
+  `librarian.corrections.sensitive_fields` key was removed: a configuration that still
+  sets it is refused before any batch is read, with the complete replacement printed.
 - `librarian.corrections.schema_slots` — the schema-evolution table, for armed attributes
   that need an explicit slot before they may be written.
 - The batch limits: `max_records_per_batch` (5,000), `max_records_per_run` (50,000),
