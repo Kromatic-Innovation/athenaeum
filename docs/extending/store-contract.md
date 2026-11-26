@@ -224,6 +224,43 @@ it. They compose: `resolve_store_for_class` resolves BOTH — the surface an
 entity class maps to (storage-adapter layer) and the `Store` instance that
 can actually read and write it (this contract).
 
+## Registering your implementation
+
+An adapter's `backing_store` names a registered store implementation. Two names
+are built in and resolve to the filesystem implementation: `markdown` and
+`wiki-markdown`. Any other value raises `StorageConfigError` listing the known
+values, so a value that selects nothing is refused rather than silently built
+as files.
+
+Register your own with `athenaeum.storage.register_store_backend(name, factory)`
+before the configuration is read:
+
+```python
+from athenaeum.storage import StoreBuildSpec, register_store_backend
+
+def build_my_store(spec: StoreBuildSpec) -> Store:
+    return MyStore(spec.knowledge_root, spec.roots, history=spec.history)
+
+register_store_backend("my-store", build_my_store)
+```
+
+```yaml
+storage:
+  adapters:
+    team-notes:
+      backing_store: my-store
+      surface_root: team-notes
+```
+
+`factory` receives one `StoreBuildSpec` (the knowledge root, the resolved root
+of every location, the read-only and non-purgeable sets, the declared history
+setting and the write gate) and returns a `Store`. `storage.open_store` stays
+the only place a store is constructed: it calls the factory once and the one
+instance addresses every location. Locations that share an implementation share
+that instance. A built-in name cannot be shadowed and a name cannot be
+registered twice. One store cannot mix two registered implementations; a
+configuration naming two is refused.
+
 ## Running the conformance harness against your own implementation
 
 The S1 conformance suite ships as a runnable, importable harness —

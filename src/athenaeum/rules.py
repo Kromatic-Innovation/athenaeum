@@ -140,6 +140,7 @@ from athenaeum.store import (
     StoreConflictError,
     StoreKey,
     append_line_durable,
+    note_no_restore_point,
     now_iso,
 )
 
@@ -1354,7 +1355,10 @@ def preserve_raw_file_via_store(
             raw_path,
             dest_path,
         )
-    if store.capabilities.versioned:
+    if store.capabilities.declares_no_history:
+        note_no_restore_point(log, knowledge_root, "shape-rules")
+        removed = _unlink_quietly(raw_path)
+    elif store.capabilities.versioned:
         removed = _retire_raw_file(
             knowledge_root,
             raw_path,
@@ -1412,6 +1416,9 @@ def _retire_raw_file(
     if not raw_path.exists():
         return True
     store = store if store is not None else open_store(load_config(knowledge_root), knowledge_root)
+    if store.capabilities.declares_no_history:
+        note_no_restore_point(log, knowledge_root, "shape-rules")
+        return _unlink_quietly(raw_path)
     if not store.capabilities.versioned:
         log.warning(
             "shape-rules: store at %s is not versioned — refusing to retire "

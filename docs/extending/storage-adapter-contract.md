@@ -183,8 +183,9 @@ all-true.
 ### Loud on misconfiguration
 
 A `mapping` that names an adapter that does not exist, a custom adapter that
-reuses a built-in name, or an adapter definition missing `backing_store` /
-`surface_root` raises `StorageConfigError` at resolution time. The layer never
+reuses a built-in name, an adapter definition missing `backing_store` /
+`surface_root`, or a `backing_store` that names no registered store implementation
+(see [`store-contract.md`](store-contract.md)) raises `StorageConfigError` at resolution time. The layer never
 silently falls back to the default surface — that would route a class the
 operator meant to *exclude* straight into the corpus.
 
@@ -204,7 +205,7 @@ embed / recall / merge core:
   register_adapter(
       StorageAdapter(
           name="skill-sync",
-          backing_store="sqlite",
+          backing_store="markdown",
           surface_root="skills",
           corpus_policy=CorpusPolicy.none(),
       )
