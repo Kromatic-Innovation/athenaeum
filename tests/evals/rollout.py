@@ -3136,10 +3136,22 @@ def _serve_read_entity(wiki_root: Path, tool_input: dict[str, Any]) -> str:
         str(tool_input.get("uid", "")),
         page_class=str(tool_input.get("entity_class", "")),
         include_excluded=bool(
-            tool_input.get("include_sensitive", tool_input.get("include_excluded", False))
+            _sensitive_flag(tool_input, "include_excluded")
         ),
         usage_classes=list(usage_classes) if isinstance(usage_classes, list) else None,
     )
+
+
+def _sensitive_flag(tool_input: dict[str, Any], legacy_name: str) -> bool:
+    """The ``include_sensitive`` tool input, falling back to its deprecated name.
+
+    An explicit ``null`` for the new name counts as not passed, as it does on
+    the real tool surface (athenaeum#3163).
+    """
+    value = tool_input.get("include_sensitive")
+    if value is None:
+        value = tool_input.get(legacy_name)
+    return bool(value)
 
 
 def _native_index_system_prompt(memory_dir: Path) -> str:
@@ -3825,7 +3837,7 @@ def run_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
+            with_pii=bool(_sensitive_flag(tool_input, "with_pii")),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,
@@ -3912,7 +3924,7 @@ def run_push_breadcrumb_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
+            with_pii=bool(_sensitive_flag(tool_input, "with_pii")),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,
@@ -4010,7 +4022,7 @@ def run_push_sections_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
+            with_pii=bool(_sensitive_flag(tool_input, "with_pii")),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,

@@ -424,3 +424,16 @@ class TestPointerResolution:
             "read this page with include_sensitive=true to resolve]"
         )
         assert resolve_pointers_in_text(bogus, self.ROUTING, tmp_path) == bogus
+
+
+class TestEvalHarnessFlag:
+    """The eval harness reads the new flag and its deprecated names alike."""
+
+    def test_explicit_null_new_name_falls_back_to_legacy(self) -> None:
+        from tests.evals.rollout import _sensitive_flag
+
+        assert _sensitive_flag({"include_sensitive": None, "with_pii": True}, "with_pii")
+        assert _sensitive_flag({"include_excluded": True}, "include_excluded")
+        assert _sensitive_flag({"include_sensitive": True}, "with_pii")
+        assert not _sensitive_flag({}, "with_pii")
+        assert not _sensitive_flag({"include_sensitive": False, "with_pii": None}, "with_pii")
