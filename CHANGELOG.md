@@ -66,6 +66,18 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- A relevance-policy `always` rule now also protects the pages it matches from
+  removal, not only hints capture. `athenaeum retire-pages` refuses the whole
+  run when a named uid is protected (naming each uid and the rule, writing
+  nothing); `--force-retire` overrides it and records the override in the retire
+  commit message and in `wiki/_relevance_policy_audit.jsonl`. `athenaeum
+  decay-sweep` skips protected pages and counts them. The audit never lists
+  them as retirement candidates and reports `protected by policy: N`. One
+  helper, `relevance_policy.protecting_rule`, decides for all three.
+  `athenaeum relevance-policy report` and the `relevance_policy` MCP tool say
+  so, and the report counts the live pages each `always` rule protects. With no
+  policy file nothing changes (athenaeum#3152).
+
 - A decision answer that does not name the fingerprint of the item it
   answers is no longer applied on an authority-routed item (`confirmation`,
   `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,

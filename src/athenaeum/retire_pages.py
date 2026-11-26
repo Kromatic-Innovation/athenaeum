@@ -161,6 +161,42 @@ def resolve_uids(
     return candidates, errors
 
 
+def find_policy_protected(
+    knowledge_root: Path,
+    candidates: list[RetireCandidate],
+    config: dict[str, Any] | None = None,
+) -> list[tuple[RetireCandidate, Any]]:
+    """Candidates an ``always`` relevance rule protects, with the rule (athenaeum#3152).
+
+    Asks :func:`athenaeum.relevance_policy.protecting_rule` for each candidate's
+    frontmatter. Empty when no policy file exists. Raises
+    :class:`athenaeum.relevance_policy.RelevancePolicyError` on an invalid
+    policy (fail closed: the caller refuses the run). *config* is accepted for
+    signature symmetry with :func:`apply_retirement`; the policy is read from
+    ``<knowledge_root>/wiki``.
+    """
+    from athenaeum.relevance_policy import load_relevance_policy, protecting_rule
+
+    policy = load_relevance_policy(knowledge_root / "wiki")
+    if not policy.present:
+        return []
+    out: list[tuple[RetireCandidate, Any]] = []
+    for cand in candidates:
+        try:
+            meta, _body = parse_frontmatter(cand.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        rule = protecting_rule(policy, meta)
+        if rule is not None:
+            out.append((cand, rule))
+    return out
+
+
+def describe_protection(cand: RetireCandidate, rule: Any) -> str:
+    """``<uid>: protected by rule N (line L): <describe>``."""
+    return f"{cand.uid}: protected by rule {rule.number} (line {rule.line}): {rule.describe()}"
+
+
 def build_retire_report(knowledge_root: Path, candidates: list[RetireCandidate]) -> RetireReport:
     """Dry-run preview: the kill-list and the pending-merge proposals that
     reference each page — computed WITHOUT touching git or writing
@@ -192,6 +228,7 @@ def apply_retirement(
     reason: str,
     config: dict[str, Any] | None = None,
     trailer: str | None = None,
+    forced_protected: list[tuple[RetireCandidate, Any]] | None = None,
 ) -> RetireReport:
     """Retire *candidates* via the shared two-commit git-archive mechanics.
 
@@ -208,6 +245,9 @@ def apply_retirement(
     *trailer*, when given, is one extra line appended after a blank line to Commit
     B's message (the removal commit), for a caller that records which message
     caused the removal (``Athenaeum-Raise: <id> seq=<n> retract``, athenaeum#3003).
+    *forced_protected* (athenaeum#3152): the ``(candidate, rule)`` pairs of
+    :func:`find_policy_protected` the operator overrode with ``--force-retire``. Each
+    is named in Commit B's message and in the relevance-policy audit ledger.
     A knowledge root with no ``wiki/`` directory (a store's own root) has no
     ``wiki/_index.md`` to rebuild, so none is created.
 
@@ -288,6 +328,18 @@ def apply_retirement(
             )
         return extra, None
 
+    forced_note = ""
+    if forced_protected:
+        forced_note = "\n\nForced past relevance-policy protection (--force-retire):\n"
+        forced_note += "".join(
+            f"- {describe_protection(c, r)}\n" for c, r in forced_protected
+        )
+        for c, r in forced_protected:
+            log.warning(
+                "retire-pages: --force-retire overrides policy protection: %s",
+                describe_protection(c, r),
+            )
+
     archive_result = archive_via_two_commit_git_rm(
         knowledge_root,
         rel_paths,
@@ -297,7 +349,9 @@ def apply_retirement(
         ),
         archive_message=(
             f"chore(retire-pages): retire {len(rel_paths)} page(s): {reason} "
-            f"(athenaeum#1625)" + (f"\n\n{trailer}\n" if trailer else "")
+            f"(athenaeum#1625)"
+            + forced_note
+            + (f"\n\n{trailer}\n" if trailer else "")
         ),
         after_remove=_after_remove,
     )
@@ -309,6 +363,15 @@ def apply_retirement(
             "retire-pages: retired %d page(s); committed",
             len(rel_paths),
         )
+        if forced_protected:
+            from athenaeum.relevance_policy_edit import record_removal_override
+
+            try:
+                record_removal_override(
+                    wiki_root, [(c.uid, r) for c, r in forced_protected], command="retire-pages"
+                )
+            except OSError as exc:
+                log.warning("retire-pages: override audit record not written: %s", exc)
         # Issue athenaeum#2217: a retired page's contact record used to stay
         # live on the excluded surface with nobody pointing at it. Settle
         # every retired candidate's uid now that its page is actually gone —

@@ -94,6 +94,12 @@ def add_retire_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Override the recall index backend for the rebuild "
         "(default: read from athenaeum.yaml). --apply only.",
     )
+    parser.add_argument(
+        "--force-retire",
+        action="store_true",
+        help="Override a retirement guard (relevance-policy `always` protection); "
+        "the override is recorded in the archive commit.",
+    )
     _add_lock_args(parser)
     parser.set_defaults(func=cmd_retire_pages)
 
@@ -127,7 +133,14 @@ def cmd_retire_pages(args: argparse.Namespace) -> int:
         2 - dry-run found pages that WOULD be retired (CI / sign-off signal).
     """
     from athenaeum.config import load_config
-    from athenaeum.retire_pages import apply_retirement, build_retire_report, resolve_uids
+    from athenaeum.relevance_policy import RelevancePolicyError
+    from athenaeum.retire_pages import (
+        apply_retirement,
+        build_retire_report,
+        describe_protection,
+        find_policy_protected,
+        resolve_uids,
+    )
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -148,6 +161,17 @@ def cmd_retire_pages(args: argparse.Namespace) -> int:
     if not candidates:
         print("No uids given - nothing to retire.")
         return 0
+
+    try:
+        protected = find_policy_protected(knowledge_root, candidates)
+    except RelevancePolicyError as exc:
+        print(f"  ERR {exc}", file=sys.stderr)
+        return 1
+    if protected and not args.force_retire:
+        for cand, rule in protected:
+            print(f"  ERR {describe_protection(cand, rule)}", file=sys.stderr)
+        print("  refusing: pass --force-retire to retire these.", file=sys.stderr)
+        return 1
 
     mode = "APPLY" if args.apply else "DRY RUN"
     print(f"=== retire-pages ({mode}) ===")
@@ -176,7 +200,13 @@ def cmd_retire_pages(args: argparse.Namespace) -> int:
     if isinstance(lock, int):
         return lock
     try:
-        report = apply_retirement(knowledge_root, candidates, reason=args.reason, config=cfg)
+        report = apply_retirement(
+            knowledge_root,
+            candidates,
+            reason=args.reason,
+            config=cfg,
+            forced_protected=protected or None,
+        )
         for apply_err in report.errors:
             print(f"  ERR {apply_err}", file=sys.stderr)
         if report.errors:

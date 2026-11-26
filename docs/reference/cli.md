@@ -129,8 +129,8 @@ python scripts/gen_cli_reference.py
 - [`athenaeum registry`](#athenaeum-registry) (command) — : compile the source-handle registry.json (entity uid → handle set) from wiki entity frontmatter. Deterministic, no LLM; emits a well-formed registry even when no handles are populated yet.
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch. The incremental delta is keyed off each file's whole-content hash, not off how its frontmatter is parsed, so a page whose on-disk text has not changed since it was last indexed is hash-matched and skipped even after a parser fix lands -- an index built before the block-list aliases:/tags: parser fix (commit 324bb3c4) keeps stale, empty aliases/tags columns for any page an --incremental run does not otherwise touch. Only --full re-parses every page from scratch and refills them. To check the result, run `SELECT COUNT(*) FROM wiki WHERE aliases != ''` against cache-dir/wiki-index.db (swap in tags for the other column). The vector backend disables onnxruntime's telemetry client at import, before it can start its background worker thread, to prevent a shutdown-time crash in that thread.
 - [`athenaeum relate`](#athenaeum-relate) (command) — Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
-- [`athenaeum relevance-policy`](#athenaeum-relevance-policy) (group) — List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. Read-only.
-- [`athenaeum relevance-policy report`](#athenaeum-relevance-policy-report) (command) — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+- [`athenaeum relevance-policy`](#athenaeum-relevance-policy) (group) — List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. An `always` rule also protects matching pages from retire-pages, decay-sweep and audit retirement candidates. Read-only.
+- [`athenaeum relevance-policy report`](#athenaeum-relevance-policy-report) (command) — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 - [`athenaeum repair`](#athenaeum-repair) (command) — Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
@@ -1682,7 +1682,7 @@ Set or remove the parent/child page relation by hand. `--child <uid> --parent <u
 
 ## `athenaeum relevance-policy`
 
-List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. Read-only.
+List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. An `always` rule also protects matching pages from retire-pages, decay-sweep and audit retirement candidates. Read-only.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
@@ -1691,11 +1691,11 @@ List the effective relevance-policy rules (always/never capture rules from wiki/
 
 Subcommands:
 
-- `athenaeum relevance-policy report` — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+- `athenaeum relevance-policy report` — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 
 ## `athenaeum relevance-policy report`
 
-List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
@@ -1746,6 +1746,7 @@ Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, aff
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
 | `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--force-retire` | off (flag absent) | — | Override a retirement guard (relevance-policy `always` protection); the override is recorded in the archive commit. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why these pages are being retired. Recorded verbatim in both commit messages (--apply only) and in every withdrawn pending-merge proposal's archive note. |
 | `--uids` | — | — | Either a single path to a file listing one uid per line (blank lines and lines starting with '#' are ignored), or one or more literal uids. Every uid must resolve to exactly one wiki page; an unknown or ambiguous uid aborts the whole run before any commit. |

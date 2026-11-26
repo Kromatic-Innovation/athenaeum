@@ -146,6 +146,9 @@ class SweepReport:
     #: from ``kill`` (`apply_sweep` never git-rms one of these AS a plain
     #: archive — see that function).
     routed_off_corpus: list[SweepCandidate] = field(default_factory=list)
+    #: Pages an ``always`` relevance-policy rule protects (athenaeum#3152):
+    #: skipped, neither archived nor routed off-corpus. ``(path, rule label)``.
+    protected: list[tuple[Path, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -248,7 +251,15 @@ def build_sweep_report(
     kroot = knowledge_root if knowledge_root is not None else wiki_root.parent
     off_corpus_configured = off_corpus_store(config, kroot) is not None
 
+    from athenaeum.relevance_policy import RelevancePolicyError, load_relevance_policy
+
     report = SweepReport()
+    try:
+        policy = load_relevance_policy(wiki_root)
+    except RelevancePolicyError as exc:
+        # Fail closed: with an unreadable policy nothing may be proposed for removal.
+        report.errors.append(f"relevance policy invalid - nothing swept: {exc}")
+        return report
     for path in discover_daily_bucket_pages(wiki_root):
         report.scanned += 1
         try:
@@ -258,6 +269,18 @@ def build_sweep_report(
             report.retained.append((path, "unreadable - retained for safety"))
             continue
         meta, _body = parse_frontmatter(text)
+
+        # athenaeum#3152: an `always` rule protects the page from every removal
+        # below (archive and off-corpus routing alike).
+        from athenaeum.relevance_policy import protecting_rule
+
+        protector = protecting_rule(policy, meta)
+        if protector is not None:
+            report.protected.append(
+                (path, f"protected by rule {protector.number} (line {protector.line}): "
+                       f"{protector.describe()}")
+            )
+            continue
 
         memory_class = meta.get("memory_class")
         data_class = meta.get("data_class")
