@@ -66,6 +66,11 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- `athenaeum retire-pages` is now `athenaeum retire` (athenaeum#3151).
+  `retire-pages` still works for this release as a deprecated alias that
+  prints a note, and is removed in the next one. The override for the
+  command's own guards is `--force-retire`, because `--force` is the run-lock
+  flag shared by every locking command.
 - A decision answer that does not name the fingerprint of the item it
   answers is no longer applied on an authority-routed item (`confirmation`,
   `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,
@@ -162,6 +167,22 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   after the candidates (athenaeum#3135).
 
 ### Added
+
+- `athenaeum retire` retires any information by uid, in whichever store holds
+  it: a wiki page, a contact record or an off-corpus record (athenaeum#3151).
+  A bare uid resolves to its store; `page:`, `contact:` and `off-corpus:`
+  prefixes pin one. Only what the caller can access is retired: a uid on a
+  store whose `_store/access.yaml` does not grant the owner `read` reads as
+  unknown, and one without `compile` (or under an invalid declaration) is
+  refused by name, refusing the whole run. Contact records are archived like
+  pages (a provenance snapshot commit, then `git rm`) and dropped from the
+  persisted contact-record index; off-corpus records are erased with both
+  index shards and cannot be recovered. Retiring the only contact records of
+  a live page needs `--force-retire`. `--pageless` selects every record
+  `contact-surface-lint` reports as page-less, printing per uid the record
+  count, each value masked, whether it also lives on a live record and the
+  commit that added it. No output or commit message carries an unmasked
+  address. Purging the erasure key stays out of scope.
 
 - Decision answers now record who answered, where, and what they were shown
   (`answer_version: 2`). `athenaeum decisions answer` takes

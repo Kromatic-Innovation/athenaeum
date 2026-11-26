@@ -330,11 +330,32 @@ force-pushed everywhere, so it is not an erasure. `athenaeum.off_corpus`
 a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
 `os.unlink`-level removal, with no git history for it to survive in.
 
-**This is a primitive, not a user-facing operation.** Nothing in the CLI or
-the MCP tool surface calls `erase_off_corpus_record` today; it is exercised
-only by this module's own test suite. Erasure and key purge are not yet
-available as operator-invokable operations — a user-facing erase command
-will be designed separately.
+**Reached by `athenaeum retire` (athenaeum#3151).** `athenaeum retire
+--uids <uid> --apply` resolves a uid to whichever store holds it and, for an
+off-corpus record, calls `erase_off_corpus_record`: the content and both index
+shards go in one call, with no provenance snapshot, because copying the record
+into git history would undo the erasure. The dry run and the apply output both
+say an off-corpus retirement cannot be recovered. The reason is appended to
+`_retirements.jsonl` in the off-corpus store itself (uid, path and reason, no
+content). The command only retires what the caller can access: a uid on a
+store whose `_store/access.yaml` does not grant the owner `read` reads as
+unknown, and one without `compile` (or on a `read_only` surface, or under an
+invalid declaration) is refused by name, refusing the whole run.
+
+What retirement covers, by store:
+
+- **Wiki pages** — archived, not erased: a provenance snapshot commit, then
+  `git rm`. The content stays in git history.
+- **Contact records** on the excluded contacts surface — archived the same
+  way (snapshot commit, `git rm`), then dropped from the persisted
+  contact-record index (athenaeum#2182). Like a page, the record stays in git
+  history; retirement is for stale records, not for erasure. Retiring a page
+  settles its contact records (athenaeum#2217).
+- **Off-corpus records** — erased (above).
+
+**Erasure of the key itself is out of scope.** `athenaeum.erasure.purge_erasure_key`
+is still not reachable from the CLI or the MCP tool surface; an
+operator-invokable purge will be designed separately.
 
 - **Enforced at configuration time, not merely documented.**
   `athenaeum.off_corpus.off_corpus_root` refuses (`OffCorpusConfigError`,
@@ -351,12 +372,12 @@ will be designed separately.
   `knowledge_root/.git` exists) — so `versioned` reads `False` for the
   physically-correct reason (no `.git` there), not because the flag was
   hand-set.
-- **Single-store, single-operation erasure (primitive only; not yet
-  user-facing).** `erase_off_corpus_record` deletes the content key and
+- **Single-store, single-operation erasure (reached by `athenaeum
+  retire`).** `erase_off_corpus_record` deletes the content key and
   incrementally rebuilds BOTH off-corpus index shards (FTS5 + vector) in the
   same call, so a caller cannot observe an intermediate state where the
   content is gone but a stale index shard still serves it through `recall`.
-  No CLI command or MCP tool calls this function today.
+  `athenaeum retire` is its one CLI caller; no MCP tool calls it.
 - **Federation does not widen the audience gate.** An off-corpus hit
   federated into `recall` (see
   [`docs/design/recall-architecture.md`](recall-architecture.md#off-corpus-federation-athenaeum984))

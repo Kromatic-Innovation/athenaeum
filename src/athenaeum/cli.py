@@ -117,6 +117,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_corrections_trust_dryrun",
         "add_corrections_trust_dryrun_subparser",
     ),
+    "retire": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "recover-parked": (
         "athenaeum._cmd_recover_parked",
@@ -233,7 +234,7 @@ _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "Maintenance and repair",
-        ("dedupe", "claims", "decay-sweep", "retire-pages", "recover-parked",
+        ("dedupe", "claims", "decay-sweep", "retire", "retire-pages", "recover-parked",
          "quarantine", "repair", "reconcile", "decompose-page", "recompile",
          "relate", "correct-notes", "fold-lint", "store-link-lint",
          "raised-from-lint", "uid-collision-lint", "machine-local-check",
@@ -411,7 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
     add_curate_subparsers(subparsers)  # dedupe, claims
     add_decay_subparser(subparsers)  # decay-sweep
-    add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
+    add_retire_subparser(subparsers)  # retire, retire-pages alias (athenaeum#1625, athenaeum#3151)
     add_recover_parked_subparser(subparsers)  # recover-parked (issue athenaeum#2078)
     add_quarantine_subparser(subparsers)  # quarantine requeue (issue athenaeum#2075)
     add_drops_subparser(subparsers)  # drops list|restore (issue athenaeum#2609)
