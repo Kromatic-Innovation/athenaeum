@@ -198,6 +198,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   longer be skipped by a path that resolves the destination and forgets to
   apply it. A new test fails if any module resolves a destination or sets the
   flag any other way. File names are unchanged (athenaeum#3126).
+- Docs: the README `## Status` section (formerly `## Project status`) now says
+  Athenaeum is a side project: development continues at an irregular cadence,
+  releases ship when changes are ready, and issues are triaged best-effort. It
+  is not in maintenance mode and not archived (athenaeum#3184).
 - Docs: the CHANGELOG preamble adds two conventions: a change the summary
   lists as a behaviour change goes at the head of `### Changed` even when it
   also fixes a bug, and a measurement entry is one or two sentences plus a
