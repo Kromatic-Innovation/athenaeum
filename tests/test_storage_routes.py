@@ -259,3 +259,14 @@ def test_init_writes_a_commented_example_and_no_active_rule(tmp_path: Path) -> N
     assert "routes:" in text
     loaded = yaml.safe_load(text) or {}
     assert "routes" not in (loaded.get("storage") or {})
+
+
+def test_lint_policy_pair_sees_a_sensitivity_class_rule() -> None:
+    from athenaeum.sensitivity_lint import lint_read_policy_adapter_pairs
+
+    classes = {"secret": {"read_policy": {"access": "confidential"}}}
+    for target, expect in (("vault", 0), ("shared", 1)):
+        cfg = _cfg([{"sensitivity_class": "secret", "to": [target]}])
+        cfg["sensitivity"] = {"classes": classes}
+        found = [f for f in lint_read_policy_adapter_pairs(cfg) if f.class_name == "secret"]
+        assert len(found) == expect

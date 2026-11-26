@@ -82,7 +82,11 @@ from typing import Any
 from athenaeum.models import ACCESS_LEVELS, parse_frontmatter
 from athenaeum.pii import iter_corpus_files
 from athenaeum.sensitivity import available_classes
-from athenaeum.storage import available_adapters, resolve_adapter_for_class, routed_storage_mapping
+from athenaeum.storage import (
+    available_adapters,
+    resolve_adapter_for_class,
+    routed_storage_mapping,
+)
 
 #: The frontmatter field this lint reads to learn which sensitivity class a
 #: scanned page carries. See the module docstring's "content-scanning
@@ -217,11 +221,17 @@ def lint_read_policy_adapter_pairs(
     Findings are sorted by class name for deterministic output.
     """
     findings: list[MappingFinding] = []
+    routed = routed_storage_mapping(config)
     for name, sensitivity_class in sorted(available_classes(config).items()):
         access = sensitivity_class.read_policy.access
         if access not in _RESTRICTED_ACCESS_LEVELS:
             continue
-        adapter = resolve_adapter_for_class(name, config)
+        # A storage.routes sensitivity_class rule is part of the routed mapping.
+        adapter = (
+            available_adapters(config)[routed[name]]
+            if name in routed
+            else resolve_adapter_for_class(name, config)
+        )
         if adapter.corpus_policy.embedded:
             findings.append(
                 MappingFinding(
