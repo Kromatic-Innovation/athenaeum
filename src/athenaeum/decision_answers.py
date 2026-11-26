@@ -856,8 +856,14 @@ class LiveQueue:
         """The pending item an answer of *decision_type* would resolve, or None."""
         return self._view(False).get((decision_type, decision_id))
 
-    def fingerprints(self, decision_type: str, decision_id: str) -> set[str]:
+    def fingerprints(
+        self, decision_type: str, decision_id: str, *, stop_at: str | None = None
+    ) -> set[str]:
         """Every fingerprint the item currently has.
+
+        With *stop_at*, returns as soon as that fingerprint is found, so the
+        common case (the answer names the default view's fingerprint) never
+        builds the ``with_proposal`` view at all.
 
         The fingerprint covers the item's payload, and ``with_proposal``
         changes a question's payload, so a host that listed with proposals
@@ -885,6 +891,8 @@ class LiveQueue:
             if presentation is None:
                 presentation = template_presentation(item)
             found.add(fingerprint_for(item, presentation, digest))
+            if stop_at is not None and stop_at in found:
+                break
         return found
 
 
@@ -962,7 +970,9 @@ def preflight_answer_record(
                 "with the item's current fingerprint to apply it",
             )
         return None
-    current = live.fingerprints(answer.decision_type, answer.decision_id)
+    current = live.fingerprints(
+        answer.decision_type, answer.decision_id, stop_at=answer.shown_fingerprint
+    )
     if answer.shown_fingerprint not in current:
         return refused(
             ERROR_STALE,
@@ -1326,7 +1336,9 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
             # A fingerprint-less file claiming more than unverified is not
             # refused here (the writer refuses it); it is read as
             # unverified instead -- see DecisionAnswer.evidence_strength.
-            evidence=_evidence_for_read(meta.get("evidence"), bool(raw_fingerprint)),
+            evidence=_evidence_for_read(
+                meta.get("evidence"), bool((raw_fingerprint or "").strip())
+            ),
         )
     except AnswerRecordInvalid as exc:
         raise MalformedDecisionAnswer(f"{path}: {exc}") from exc
