@@ -283,5 +283,6 @@ For the rest, see [Troubleshooting](troubleshooting.md).
 - [Install](install.md) — installing athenaeum and the MCP extra.
 - [Other clients and platforms](clients.md) — connecting a local assistant.
 - [Day-to-day operation](daily-operation.md) — `reindex`, `ingest`, `run`, `session-end`.
+- [Sharing one page type](shared-page-type.md) — the whole setup from both sides: the owner's repository, the routing rule, the store declaration and what each person sees.
 - [Remote mode](remote.md) — serving to a host that cannot launch a local process.
 - [Configuration reference](../reference/configuration.md#resolve_storage_adapters) — every `storage.adapters` key.

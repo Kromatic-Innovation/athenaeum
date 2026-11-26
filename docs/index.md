@@ -45,6 +45,9 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Reading a shared store](guides/shared-store-reader.md) — a second install that mounts
   someone else's git repository read-only: clone, mount config, pull and index schedule,
   connecting an assistant, and what your own `remember` calls do.
+- [Sharing one page type](guides/shared-page-type.md) — keep one page type in its own git
+  repository, route it there, and let a second person read it: the declaration, what enforces
+  what, and the limits.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
