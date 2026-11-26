@@ -249,8 +249,11 @@ def _answer_record_kwargs(
     Issue athenaeum#2530. The channel is always recorded: what the server
     knows (surface ``mcp``, adapter :data:`_MCP_ANSWER_ADAPTER`, its own
     version, host ``unknown``) under whatever the caller supplied. *actor* is
-    the athenaeum#2523 placeholder, used only when the caller names no
-    answerer: a named answerer is recorded as itself.
+    the athenaeum#2523 placeholder. It is dropped only for a named human
+    answerer, whose id becomes the actor; an answerer of kind ``unknown``
+    keeps it, so a merge it decides is still stamped as human-originated
+    rather than as a pipeline decision (and an ``agent`` answerer is stamped
+    ``agent:<id>`` regardless, see ``decision_answers._decided_by``).
     """
     from athenaeum.decision_answers import surface_channel
 
@@ -262,7 +265,12 @@ def _answer_record_kwargs(
         ),
         "evidence": evidence,
     }
-    if actor and answerer is None:
+    named_human = (
+        isinstance(answerer, dict)
+        and answerer.get("kind") == "human"
+        and bool(str(answerer.get("id") or "").strip())
+    )
+    if actor and not named_human:
         kwargs["actor"] = actor
     return kwargs
 
@@ -5950,8 +5958,8 @@ def create_server(
             note=note,
             # Issue athenaeum#2523: this tool is owner-only (see the
             # `caller_audience` check above), so every answer it writes is
-            # human-originated. Issue athenaeum#2530: a caller that names its
-            # answerer is recorded as that answerer; otherwise the
+            # human-originated. Issue athenaeum#2530: a caller that names a
+            # human answerer is recorded as that answerer; otherwise the
             # placeholder stands in.
             **_answer_record_kwargs(
                 shown_fingerprint, answerer, channel, evidence, actor="unattributed"

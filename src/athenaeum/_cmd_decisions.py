@@ -754,9 +754,11 @@ def _cmd_answer(args: argparse.Namespace) -> int:
             headline="has answer-record fields that do not fit",
             errors=[str(exc)],
         )
-    if not answerer_id:
-        # Issue athenaeum#2523's placeholder, kept for a caller that names
-        # no answerer.
+    if not answerer_id or answerer_kind != "human":
+        # Issue athenaeum#2523's placeholder. Dropped only for a named human
+        # answerer, whose id becomes the actor: an answerer of unknown kind
+        # keeps it, so a merge it decides is still stamped human-originated
+        # rather than as a pipeline decision.
         record_kwargs["actor"] = "unattributed"
 
     knowledge_root = _resolve_knowledge_root(args)

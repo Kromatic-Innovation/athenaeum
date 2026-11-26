@@ -216,6 +216,30 @@ class TestRecordFields:
         # No answerer named: the placeholder actor is still recorded.
         assert meta["actor"] == "unattributed"
 
+    def test_an_answerer_of_unknown_kind_keeps_the_human_placeholder(
+        self, kroot: Path
+    ) -> None:
+        # Seer finding on PR athenaeum#3150: naming an answerer without a kind
+        # must not turn a human surface's merge stamp into a pipeline one.
+        wiki = _wiki(kroot)
+        mid = _write_merge(
+            wiki / "_pending_merges.md", target="Gamma", src_a=wiki / "a.md", src_b=wiki / "b.md"
+        )
+        rc, out, _ = _cli_answer(
+            kroot, mid, "merge", "reject", "--apply", "deferred", "--answerer-id", "ana"
+        )
+        assert rc == 0
+        path = Path(json.loads(out)["answer_file"])
+        assert _meta(path)["actor"] == "unattributed"
+        parsed = da._load_decision_answer(path)
+        assert parsed is not None and parsed.answerer_kind == "unknown"
+        assert da._decided_by(parsed, "pipeline:merge-reject") == "human:unattributed"
+
+        res = _mcp(kroot, "resolve_merge")(
+            mid, "reject", apply="deferred", answerer={"id": "ana"}
+        )
+        assert _meta(Path(res["answer_file"]))["actor"] == "unattributed"
+
     def test_mcp_resolve_question_records_the_fields(self, kroot: Path) -> None:
         qid = _question(kroot)
         fp = _fp(kroot, qid)
