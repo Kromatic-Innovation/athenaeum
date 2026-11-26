@@ -68,6 +68,10 @@ import re
 # is world-readable; ``internal``/``confidential``/``personal`` are all
 # owner-only for a restricted caller, so the ordering is used purely to
 # guarantee the screener never *downgrades* an already-restrictive label.
+# A literal on purpose: this module imports nothing from the package at module
+# scope (``config`` reaches it through a deferred import), so it cannot import
+# ``models.ACCESS_LEVELS``. ``tests/test_access_levels_single_definition.py``
+# binds this dict to that tuple (athenaeum#3159).
 _ACCESS_RANK: dict[str, int] = {
     "open": 0,
     "internal": 1,
