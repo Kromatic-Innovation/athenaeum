@@ -496,7 +496,15 @@ def plan_retirement(
             continue
         seen.add(key)
         plan.targets.append(result)
-        plan.refused.extend(_refusals(result, stores, force=force))
+    # A page target already settles its uid's contact records (the cascade),
+    # so a ``contact:<uid>`` for the same uid in the same run is redundant, and
+    # would try to remove records the page step has just moved.
+    page_uids = {t.uid for t in plan.targets if t.store == STORE_PAGE}
+    plan.targets = [
+        t for t in plan.targets if not (t.store == STORE_CONTACT and t.uid in page_uids)
+    ]
+    for target in plan.targets:
+        plan.refused.extend(_refusals(target, stores, force=force))
     return plan
 
 

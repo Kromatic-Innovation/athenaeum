@@ -359,6 +359,17 @@ class TestCascades:
         assert "Forced: --force-retire" in _git(kr, "log", "-1", "--format=%B").stdout
 
 
+    def test_page_and_its_own_contact_target_in_one_run(self, kr: Path, tmp_path: Path) -> None:
+        plan = plan_retirement(kr, ["aaaa1111", "contact:aaaa1111"], _config(kr), force=True)
+        assert [(t.uid, t.store) for t in plan.targets] == [("aaaa1111", STORE_PAGE)]
+        code = _retire(
+            kr, tmp_path, "--uids", "aaaa1111", "contact:aaaa1111", "--force-retire", "--apply"
+        )
+        assert code == 0
+        assert not (kr / "wiki" / "aaaa1111-alpha.md").exists()
+        assert not (kr / "excluded" / "aaaa1111.md").exists()
+
+
 class TestPageless:
     def test_lists_then_retires_and_lint_reads_zero(
         self, kr: Path, tmp_path: Path, capsys
