@@ -367,3 +367,137 @@ def test_status_counts_targets_per_rule_and_names_one_inside_git(tmp_path: Path)
     assert "storage.routes[1] (diary): 1 target " in text
     assert "'vault_git' is inside a git repository" in text
     assert text.count("is inside a git repository") == 1
+
+
+# --- the contact-write mirrors (librarian correspondent write, prose scrub) ---------
+
+CONTACT_RULE = {"page_type": "person", "fields": ["emails"], "to": ["vault_a", "vault_b"]}
+
+
+def _contact_cfg(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "adapters": _adapters(tmp_path),
+            "routes": [CONTACT_RULE],
+        }
+    }
+
+
+def _listing(root: Path) -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(root.rglob("*.md")))
+
+
+def test_librarian_correspondent_write_reaches_every_target_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import athenaeum.librarian as librarian
+    from tests.test_correspondent_contact_record import _compile, _person, _prose_note
+
+    real = librarian.record_observed_contact_value
+    order: list[str] = []
+
+    def spy(root: Path, *a: Any, **kw: Any) -> Any:
+        order.append(root.name)
+        return real(root, *a, **kw)
+
+    monkeypatch.setattr(librarian, "record_observed_contact_value", spy)
+    knowledge, result = _compile(
+        tmp_path,
+        monkeypatch,
+        note=_prose_note(address="dana@example.org"),
+        classified=[_person("Dana Quill")],
+        config=_contact_cfg(tmp_path),
+    )
+    assert result.correspondent_contacts_recorded == 1  # type: ignore[attr-defined]
+    assert order[-2:] == ["vault_a", "vault_b"]
+    for vault in ("vault_a", "vault_b"):
+        assert "dana@example.org" in _listing(knowledge / vault)
+
+
+def test_librarian_correspondent_write_raises_naming_a_failing_later_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import athenaeum.librarian as librarian
+    from tests.test_correspondent_contact_record import _compile, _person, _prose_note
+
+    real = librarian.record_observed_contact_value
+
+    def flaky(root: Path, *a: Any, **kw: Any) -> Any:
+        if root.name == "vault_b":
+            raise OSError("unreachable")
+        return real(root, *a, **kw)
+
+    monkeypatch.setattr(librarian, "record_observed_contact_value", flaky)
+    with pytest.raises(StorageTargetError, match="vault_b"):
+        _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(address="dana@example.org"),
+            classified=[_person("Dana Quill")],
+            config=_contact_cfg(tmp_path),
+        )
+
+
+def _enforced_context(tmp_path: Path) -> Any:
+    import dataclasses
+
+    from athenaeum import pii_attribution
+    from athenaeum.pii_attribution import QUESTION_CLASSES
+
+    knowledge = tmp_path / "knowledge"
+    (knowledge / "wiki").mkdir(parents=True)
+    context = pii_attribution.build_attribution_context(knowledge, _contact_cfg(tmp_path))
+    return knowledge, dataclasses.replace(context, enforced_classes=frozenset(QUESTION_CLASSES))
+
+
+def _scrub(context: Any) -> Any:
+    from athenaeum import pii_attribution
+
+    return pii_attribution.scrub_compiled_contact_tokens(
+        "Write to dana@example.org soon.",
+        subject_uid="uid-dana",
+        source_ref="raw/x.md",
+        context=context,
+        target_name="Dana Quill",
+        target_type="person",
+    )
+
+
+def test_prose_scrub_files_the_token_on_every_target_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum import pii
+
+    knowledge, context = _enforced_context(tmp_path)
+    real = pii.record_contact_value
+    order: list[str] = []
+
+    def spy(root: Path, *a: Any, **kw: Any) -> Any:
+        order.append(root.name)
+        return real(root, *a, **kw)
+
+    monkeypatch.setattr(pii, "record_contact_value", spy)
+    scrubbed, removed = _scrub(context)
+    assert removed == ["dana@example.org"] and "dana@example.org" not in scrubbed
+    assert order[-2:] == ["vault_a", "vault_b"]
+    for vault in ("vault_a", "vault_b"):
+        assert "dana@example.org" in _listing(knowledge / vault)
+
+
+def test_prose_scrub_raises_naming_a_failing_later_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from athenaeum import pii
+
+    _knowledge_root, context = _enforced_context(tmp_path)
+    real = pii.record_contact_value
+
+    def flaky(root: Path, *a: Any, **kw: Any) -> Any:
+        if root.name == "vault_b":
+            raise OSError("unreachable")
+        return real(root, *a, **kw)
+
+    monkeypatch.setattr(pii, "record_contact_value", flaky)
+    with pytest.raises(StorageTargetError, match="vault_b"):
+        _scrub(context)
