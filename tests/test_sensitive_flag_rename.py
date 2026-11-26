@@ -351,7 +351,11 @@ class TestAgentFacingCopy:
 class TestPointerResolution:
     """AC5: the entity read resolves a routed-value pointer under the same flag."""
 
-    ROUTING = {"sensitivity": {"routing": {"enabled": True}}}
+    # Value routing needs a rule for each class it routes (athenaeum#3168).
+    ROUTING = {
+        "sensitivity": {"routing": {"enabled": True}},
+        "storage": {"routes": [{"sensitivity_class": "pii", "to": ["excluded"]}]},
+    }
 
     def _page_with_pointer(self, knowledge: Path) -> str:
         pointered = route_sensitive_values(

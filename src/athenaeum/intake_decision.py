@@ -54,6 +54,9 @@ REASON_UNSURE = "unsure"
 REASON_NO_GRANT = "no-grant"
 REASON_STORE_REFUSES = "store-refuses"
 REASON_PATH = "path"
+#: The page type is discarded by a ``storage.routes`` rule with ``to: []``
+#: (athenaeum#3168); the decision's ``discard_rule`` names the rule.
+REASON_DISCARD = "discard"
 REASONS: tuple[str, ...] = (
     REASON_RULE,
     REASON_MAPPING,
@@ -63,6 +66,7 @@ REASONS: tuple[str, ...] = (
     REASON_NO_GRANT,
     REASON_STORE_REFUSES,
     REASON_PATH,
+    REASON_DISCARD,
 )
 
 _WRITE_RIGHTS = frozenset({"compile", "propose"})
@@ -166,6 +170,9 @@ class IntakeDecision:
     rule: RuleLike | None = None
     #: The ``never`` rule an explicit-remember marker overrode, when it did.
     overridden: RuleLike | None = field(default=None, compare=False)
+    #: The ``storage.routes`` rule (``to: []``) that discards the page type, when
+    #: one did. The fact is then not captured, whatever the policy says.
+    discard_rule: str | None = None
 
 
 def _confident(confidence: str | None) -> bool:
@@ -258,8 +265,15 @@ def decide(
     policy: PolicyLike,
     stores: Mapping[str, StoreInfo] | None = None,
     mapping: Mapping[str, str] | None = None,
+    discarded: Mapping[str, str] | None = None,
 ) -> IntakeDecision:
     """The intake decision for one fact. Pure.
+
+    0. **Discard** (athenaeum#3168). A type in *discarded* (page type to the name
+       of the ``storage.routes`` rule with ``to: []`` that discards it) is not
+       captured, with reason ``discard`` and the rule named in
+       :attr:`IntakeDecision.discard_rule`. This comes before the policy and is
+       not overridden by an explicit-remember marker: a discard stores nothing.
 
     1. **Capture.** The last matching ``always`` / ``never`` rule, exactly as the
        gates always computed it (``route`` rows never take part). A ``never``
@@ -277,6 +291,14 @@ def decide(
     *stores* maps ``store_id`` to :class:`StoreInfo`; ``None`` and ``{}`` mean
     this install holds nothing, so the store is always ``personal``.
     """
+    if discarded and description.type is not None and description.type in discarded:
+        return IntakeDecision(
+            CAPTURE_DROP,
+            None,
+            None,
+            REASON_DISCARD,
+            discard_rule=discarded[description.type],
+        )
     capture, rule = _capture(policy, description)
     overridden: RuleLike | None = None
     if capture != CAPTURE_KEEP:

@@ -52,8 +52,12 @@ the caller's audience clears the matched class's `read_policy`.
 - `sensitivity.classes.*` (`athenaeum.sensitivity.available_classes`) — the class
   vocabulary and each class's `read_policy.access`/`audience`, consumed unmodified;
   routing adds no new classification logic of its own.
-- `storage.mapping` — to resolve a routed class's vault root; with no explicit
-  entry the vault root defaults to the built-in `excluded` adapter.
+- `storage.routes` (a `sensitivity_class` rule) or `storage.mapping` — to resolve a
+  routed class's vault root. A class with routing on and no rule is refused at
+  load, naming the rule to write; `to: []` discards the value (a fixed marker
+  replaces it, no record is written). This governs what the compile run writes;
+  a value already in a raw file is handled by the write-time screen and the
+  screening phase.
 - `librarian.junk_match_stopwords` / `junk_match_allowlist`, `librarian.type_gate_allowed_types`
   / `type_gate_excluded_keys`, and `librarian.create_name_escalate_max_chars` — the
   entity-routing tuning knobs.

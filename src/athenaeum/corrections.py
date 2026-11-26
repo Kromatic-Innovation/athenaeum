@@ -153,7 +153,9 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import (
     StorageConfigError,
     available_adapters,
+    discard_rule_for_field_any_type,
     is_excluded,
+    note_discard,
     open_store,
     route_for,
 )
@@ -391,6 +393,9 @@ DISPOSITIONS: frozenset[str] = frozenset(
         "routed-elsewhere",
         "held-schema-proposal",
         "recorded-as-prose",
+        # athenaeum#3168: the field is discarded by a `storage.routes` rule with
+        # `to: []`. The record keeps no value and no id computed from one.
+        "discarded",
         # athenaeum#1988: a zero-match `handle: {email}` target, parked in
         # `_corrections_parked.json` for `corrections.retry_days` instead of
         # being handed off on first sight (§8.2). The ONE record shape this
@@ -411,6 +416,7 @@ _FIRST_PASS_TERMINAL: frozenset[str] = frozenset(
         "routed-elsewhere",
         "deferred-lower-precedence",
         "recorded-as-prose",
+        "discarded",
         "raised-tier",  # terminal for the BATCH once §8.1's handoff file is written
         "parked",  # terminal for the BATCH once the parked store owns the record (§8.2)
         "held-schema-proposal",  # terminal once the proposal is recorded
@@ -1665,7 +1671,33 @@ def process_correction_record(
         value=value,
     )
 
+    # athenaeum#3168: a field a `to: []` rule discards ends `discarded`. The
+    # result carries no value, no target (a handle can be the value) and no
+    # correction id (it is computed from the value): the ledger, the handoff
+    # note and the logs see only a count and the rule's name.
+    discard_rule: str | None = None
+    page_type_known = False
+    # Before the target resolves its page type is unknown. A field some rule
+    # discards for any page type must not reach a handoff note or the ledger
+    # with its value on a failure in that window, so such a failure discards.
+    discard_any_type = discard_rule_for_field_any_type(field_name, config)
+
+    def _discarded(rule: str) -> CorrectionRecordResult:
+        if not dry_run:
+            note_discard(rule)
+        return CorrectionRecordResult(
+            correction_id="",
+            disposition="discarded",
+            reason=f"field discarded by {rule}",
+            op=op if isinstance(op, str) else None,
+            field=field_name if isinstance(field_name, str) else None,
+        )
+
     def _raised(reason: str) -> CorrectionRecordResult:
+        if discard_rule is not None:
+            return _discarded(discard_rule)
+        if not page_type_known and discard_any_type is not None:
+            return _discarded(discard_any_type)
         return CorrectionRecordResult(
             correction_id=correction_id,
             disposition="raised-tier",
@@ -1685,6 +1717,8 @@ def process_correction_record(
         # store and a later handoff both need the full record, not just the
         # reason -- but a distinct disposition so the §8.1 handoff path and
         # idempotency bookkeeping never see it by accident.
+        if discard_any_type is not None and not page_type_known:
+            return _discarded(discard_any_type)
         return CorrectionRecordResult(
             correction_id=correction_id,
             disposition="parked",
@@ -1754,14 +1788,18 @@ def process_correction_record(
     surface_targets: tuple[str, ...] = ()
 
     def _route_for_page(page_type: Any) -> None:
-        nonlocal surface_class, route_error, surface_targets
+        nonlocal surface_class, route_error, surface_targets, discard_rule, page_type_known
         route_error, surface_targets = None, ()
+        page_type_known = True
         if isinstance(page_type, str) and page_type.strip():
             # An unknown adapter name surfaces as a StorageConfigError at the
             # point the surface root is resolved (below), not here, so the
             # order of side effects is unchanged.
             try:
-                surface_targets = route_for(page_type, field_name, config=config).targets
+                decision = route_for(page_type, field_name, config=config)
+                surface_targets = decision.targets
+                if decision.discarded:
+                    discard_rule = decision.rule
             except StorageConfigError as exc:
                 route_error = exc
         surface_class = route_error is not None or bool(surface_targets)
@@ -1885,6 +1923,8 @@ def process_correction_record(
             if not existing_meta:
                 return _raised("target page has no frontmatter")
         _route_for_page(existing_meta.get("type"))
+        if discard_rule is not None:
+            return _discarded(discard_rule)
         usage_error = _usage_class_routing_error()
         if usage_error is not None:
             return _raised(usage_error)
@@ -1924,6 +1964,8 @@ def process_correction_record(
             )
 
         _route_for_page(resolution.entity_type)
+        if discard_rule is not None:
+            return _discarded(discard_rule)
         usage_error = _usage_class_routing_error()
         if usage_error is not None:
             return _raised(usage_error)
@@ -2982,7 +3024,7 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
     redacted_payloads: list[dict[str, Any]] = []
     for r in outcome.results:
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
-        if r.disposition not in ("applied", "noop"):
+        if r.disposition not in ("applied", "noop", "discarded"):
             non_trivial_ids.append(r.correction_id)
         if r.disposition == "raised-tier":
             raised_tier_ids.append(r.correction_id)
