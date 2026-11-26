@@ -267,9 +267,9 @@ def surface_class_for_page_class(
     cls = (page_class or "").strip()
     if not cls:
         return ""
-    from athenaeum.config import resolve_excluded_read_mapping
+    from athenaeum.storage import configured_excluded_read_mapping
 
-    configured = resolve_excluded_read_mapping(config)
+    configured = configured_excluded_read_mapping(config)
     if cls in configured:
         return configured[cls]
     return DEFAULT_EXCLUDED_READ_MAPPING.get(cls, cls)
@@ -5501,7 +5501,8 @@ def resolve_excluded_fields(
 
     1. explicit operator config — ``storage.excluded_fields.<surface_class>``,
        a list of frontmatter field names (see
-       :func:`athenaeum.config.resolve_excluded_fields_config`);
+       :func:`athenaeum.config.resolve_excluded_fields_config`, read through
+       :func:`athenaeum.storage.configured_excluded_fields`);
     2. surface class ``pii`` — the built-in default stays
        :data:`CONTACT_DATA_FIELDS` VERBATIM, so a person read is byte-identical
        to what it returned before this function existed;
@@ -5523,9 +5524,9 @@ def resolve_excluded_fields(
     stable for a given record. Rules 1 and 2 return the configured/built-in
     order and ignore *record_meta* entirely.
     """
-    from athenaeum.config import resolve_excluded_fields_config
+    from athenaeum.storage import configured_excluded_fields
 
-    configured = resolve_excluded_fields_config(config).get(surface_class)
+    configured = configured_excluded_fields(config).get(surface_class)
     if configured is not None:
         return tuple(configured)
     if surface_class == PII_ENTITY_CLASS:
@@ -5920,7 +5921,19 @@ def assemble_excluded_read(
     fields: dict[str, list[str]] = {}
     classifications: dict[str, list[ContactClassification]] = {}
     redactions: list[RedactionMarker] = []
+    # athenaeum#3158: ``resolve_excluded_fields`` fixes the ORDER candidates are
+    # visited in (configured order, or the record's own for an unconfigured
+    # class); whether a field is stored on the excluded surface is
+    # ``route_for``'s decision. The surface class is already resolved here and
+    # every ungated caller (read_entity) joins regardless of ``is_excluded``, so
+    # the ``surface_class=`` form -- which applies no gate -- is used.
+    from athenaeum.storage import route_for
+
     for field_name in resolve_excluded_fields(surface_class, config, record_meta):
+        if not route_for(
+            None, field_name, config=config, record_meta=record_meta, surface_class=surface_class
+        ).targets:
+            continue
         raw = record_meta.get(field_name)
         if raw is None:
             continue

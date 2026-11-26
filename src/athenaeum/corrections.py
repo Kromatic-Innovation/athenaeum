@@ -132,7 +132,6 @@ from athenaeum.config import (
     resolve_corrections_max_records_per_run,
     resolve_corrections_retry_days,
     resolve_corrections_schema_slots,
-    resolve_corrections_sensitive_fields,
     resolve_source_trust_edges,
     resolve_source_trust_enabled,
 )
@@ -151,7 +150,7 @@ from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
-from athenaeum.storage import open_store, surface_root_for_class
+from athenaeum.storage import StorageConfigError, available_adapters, open_store, route_for
 from athenaeum.store import Store, append_line_durable, note_no_restore_point
 from athenaeum.trust_graph import (
     EQUAL,
@@ -1641,8 +1640,17 @@ def process_correction_record(
     if shape not in ("scalar", "list"):
         return _raised(f"unrecognized shape {shape!r} for attribute {field_name!r}")
 
-    sensitive_map = resolve_corrections_sensitive_fields(config)
-    surface_class = sensitive_map.get(field_name)
+    # athenaeum#3158: the one storage resolver decides whether this field is
+    # routed to another surface. An unknown adapter name surfaces as a
+    # StorageConfigError at the point the old code resolved the surface root
+    # (below), not here, so the order of side effects is unchanged.
+    route_error: StorageConfigError | None = None
+    surface_targets: tuple[str, ...] = ()
+    try:
+        surface_targets = route_for(None, field_name, config=config).targets
+    except StorageConfigError as exc:
+        route_error = exc
+    surface_class = route_error is not None or bool(surface_targets)
 
     # athenaeum#872: a contact-value correction may declare the usage class the
     # value it writes should carry (`athenaeum.pii.USAGE_CLASSES`) — never
@@ -1949,7 +1957,11 @@ def process_correction_record(
     surface_root: Path | None = None
     if surface_class:
         uid = str(existing_meta.get("uid", "") or entity_path.stem)
-        surface_root = surface_root_for_class(surface_class, config, knowledge_root)
+        if route_error is not None:
+            raise route_error
+        surface_root = (
+            available_adapters(config)[surface_targets[0]].resolve_root(knowledge_root)
+        )
         surface_path, surface_meta, surface_body = _read_surface_record(surface_root, uid)
         read_meta = dict(surface_meta)
         read_meta.setdefault("uid", uid)

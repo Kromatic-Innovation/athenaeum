@@ -199,7 +199,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_sensitivity_routing, resolve_storage_mapping
+from athenaeum.config import resolve_sensitivity_routing
 from athenaeum.models import is_page_authorized, parse_frontmatter, render_frontmatter
 from athenaeum.sensitivity import (
     ClassifiedMatch,
@@ -207,7 +207,7 @@ from athenaeum.sensitivity import (
     available_classes,
     classify,
 )
-from athenaeum.storage import EXCLUDED, StorageConfigError, resolve_adapter_for_class
+from athenaeum.storage import EXCLUDED, StorageConfigError, available_adapters, route_for
 
 #: Marker key on a vault record, mirroring :data:`athenaeum.pii.PII_FLAG`'s
 #: belt-and-suspenders pattern — excluded even by the flag, not only by
@@ -249,15 +249,15 @@ def _vault_root_for_class(
 
     See this module's docstring, "Unsafe vault surface, fail closed."
     """
-    mapping = resolve_storage_mapping(config)
-    if sensitivity_class.strip() in mapping:
-        try:
-            adapter = resolve_adapter_for_class(sensitivity_class, config)
-        except StorageConfigError as exc:
-            raise SensitivityRoutingError(
-                f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
-            ) from exc
-        if adapter.corpus_policy.in_corpus:
+    try:
+        decision = route_for(sensitivity_class, config=config)
+        adapter = available_adapters(config)[decision.targets[0]] if decision.rule else None
+    except StorageConfigError as exc:
+        raise SensitivityRoutingError(
+            f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
+        ) from exc
+    if adapter is not None:
+        if not decision.sensitive:
             raise SensitivityRoutingError(
                 f"storage.mapping routes sensitivity class {sensitivity_class!r} "
                 f"to adapter {adapter.name!r}, which participates in the "
@@ -266,6 +266,9 @@ def _vault_root_for_class(
             )
         root = adapter.resolve_root(knowledge_root)
     else:
+        # No storage.mapping entry (route_for reports rule None): the
+        # value-routing fallback is the built-in EXCLUDED location, where the
+        # field path (route_for's docstring, fallback 2) falls back to the wiki.
         root = EXCLUDED.resolve_root(knowledge_root)
     return root / "sensitivity" / sensitivity_class
 
