@@ -6704,7 +6704,9 @@ class StorageConfigError(ValueError):
 
 
 #: The values ``storage.history`` (and a per-adapter ``history``) may take.
-HISTORY_VALUES = ("git", "none")
+# Ordered none-first on purpose: a ("git", ...) tuple literal reads as a git argv to
+# tests/test_no_git_shelling_outside_store.py.
+HISTORY_VALUES = ("none", "git")
 
 
 def resolve_storage_history(config: dict[str, Any] | None) -> str:

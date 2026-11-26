@@ -1135,12 +1135,12 @@ def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
             str(exc),
             fix="set storage.history to 'git' or 'none' in athenaeum.yaml",
         )
-    from athenaeum.config import resolve_storage_adapters
+    from athenaeum.config import HISTORY_VALUES, resolve_storage_adapters
 
     overrides = [
         f"{name}={raw['history']}"
         for name, raw in sorted(resolve_storage_adapters(config).items())
-        if raw.get("history") in ("git", "none")
+        if raw.get("history") in HISTORY_VALUES
     ]
     suffix = f"; per-location overrides: {', '.join(overrides)}" if overrides else ""
     if history == "none":
