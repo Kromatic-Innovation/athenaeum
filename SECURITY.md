@@ -11,7 +11,7 @@ Athenaeum is pre-1.0 and has no long-term-support branches. Security fixes are m
 
 ## Reporting a vulnerability
 
-Athenaeum is maintained by Kromatic Innovation. Security reports go to **open-source@kromatic.com**, which is actively monitored by the maintainers.
+Athenaeum is a side project owned by Kromatic Innovation. Security reports go to **open-source@kromatic.com**, which is monitored by the maintainers.
 
 Please report security vulnerabilities privately via email to **open-source@kromatic.com** with the subject prefix `[athenaeum security]`. Do **not** open a public GitHub issue for security problems.
 
