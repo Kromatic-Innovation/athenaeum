@@ -70,6 +70,9 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     load_config,
+    resolve_corrections_sensitive_fields,
+    resolve_excluded_fields_config,
+    resolve_excluded_read_mapping,
     resolve_extra_intake_roots,
     resolve_owner_asserter,
     resolve_storage_adapters,
@@ -500,6 +503,160 @@ def is_merge_eligible(entity_class: str | None, config: dict[str, Any] | None) -
 def is_excluded(entity_class: str | None, config: dict[str, Any] | None) -> bool:
     """Whether *entity_class* is fully outside the corpus (no capability)."""
     return not corpus_policy_for_class(entity_class, config).in_corpus
+
+
+# ---------------------------------------------------------------------------
+# The one resolver for "where is this field / page type stored" (athenaeum#3158)
+# ---------------------------------------------------------------------------
+#
+# Four configuration tables answer that question: ``storage.excluded_fields``
+# with ``storage.excluded_read_mapping`` (which fields of a record are kept off
+# the page), ``storage.mapping`` (which class lives outside the corpus),
+# ``librarian.corrections.sensitive_fields`` (the same decision for
+# corrections), and the free-text value-routing fallback in
+# ``sensitivity_routing``. This section is the ONLY module that calls the
+# config resolvers ``resolve_excluded_fields_config``,
+# ``resolve_excluded_read_mapping`` and ``resolve_corrections_sensitive_fields``;
+# ``tests/test_route_for.py`` fails the build if another module does.
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """Where a field or a whole page type is stored, as :func:`route_for` decides it.
+
+    Attributes:
+        targets: Ordered location (adapter) names the value is stored in. Empty
+            when a single field is kept on the page.
+        rule: The configuration entry that decided (for example
+            ``"storage.mapping.pii"``), or ``None`` when no entry did and a
+            default applied.
+        sensitive: True when a target is outside the corpus.
+    """
+
+    targets: tuple[str, ...]
+    rule: str | None
+    sensitive: bool
+
+
+def configured_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """The operator's ``storage.excluded_read_mapping`` -- the resolver's input.
+
+    A pass-through so :func:`athenaeum.pii.surface_class_for_page_class` reads
+    the table through this module rather than from ``config`` directly.
+    """
+    return resolve_excluded_read_mapping(config)
+
+
+def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple[str, ...]]:
+    """The operator's ``storage.excluded_fields`` -- the resolver's input.
+
+    A pass-through so :func:`athenaeum.pii.resolve_excluded_fields` reads the
+    table through this module rather than from ``config`` directly.
+    """
+    return resolve_excluded_fields_config(config)
+
+
+def _decision_for_adapter_names(
+    names: Sequence[str], rule: str | None, config: dict[str, Any] | None
+) -> RouteDecision:
+    adapters = available_adapters(config)
+    for name in names:
+        if name not in adapters:
+            raise StorageConfigError(
+                f"unknown storage location {name!r}; known locations: {sorted(adapters)}"
+            )
+    return RouteDecision(
+        targets=tuple(names),
+        rule=rule,
+        sensitive=any(not adapters[name].corpus_policy.in_corpus for name in names),
+    )
+
+
+def _decision_for_class(entity_class: str, rule: str | None, config: dict[str, Any] | None) -> RouteDecision:
+    adapter = resolve_adapter_for_class(entity_class, config)
+    return _decision_for_adapter_names((adapter.name,), rule, config)
+
+
+def route_for(
+    page_type: str | None,
+    field: str | None = None,
+    *,
+    config: dict[str, Any] | None,
+    record_meta: Mapping[str, Any] | None = None,
+) -> RouteDecision:
+    """The ordered locations a field, or a whole page type, is stored in.
+
+    Pure: reads *config* (and the in-memory *record_meta*) only -- no file
+    access, no clock. It computes from the configuration keys that exist today
+    and adds none. Three questions, one function:
+
+    * ``route_for(page_type, config=...)`` -- a whole page type. The answer is
+      the ``storage.mapping`` entry, as :func:`resolve_adapter_for_class` gives
+      it; ``rule`` is ``"storage.mapping.<type>"``, or ``None`` when the type is
+      unmapped and the default wiki surface applies.
+    * ``route_for(page_type, field, config=...)`` -- one field of a page of that
+      type. The surface class comes from
+      :func:`athenaeum.pii.surface_class_for_page_class`, the field list from
+      :func:`athenaeum.pii.resolve_excluded_fields`, and the class must be
+      outside the corpus (:func:`is_excluded`). ``targets`` is empty when the
+      value is kept on the page. *record_meta* is only consulted for a class
+      with no configured or built-in field list, whose list is the record's own
+      frontmatter minus bookkeeping.
+    * ``route_for(None, field, config=...)`` -- a field regardless of page type:
+      ``librarian.corrections.sensitive_fields`` names the class a correction
+      to that field is routed to, whatever destination the correction named.
+
+    **Two fallbacks that disagree today, both preserved here** (so the change
+    that removes one is a visible diff):
+
+    1. The FIELD path falls back to the WIKI: a field of a class that is not
+       outside the corpus, or not on its field list, is kept on the page
+       (``targets == ()``).
+    2. ``sensitivity_routing`` (free-text values) falls back to the built-in
+       EXCLUDED location when the class has no ``storage.mapping`` entry. It
+       detects that case as ``rule is None`` on a whole-page-type decision --
+       the whole-type answer itself is the wiki default, as
+       :func:`resolve_adapter_for_class` returns it -- and substitutes the
+       built-in excluded location in its own module.
+
+    Raises:
+        StorageConfigError: A mapping names a location that is not a known
+            adapter.
+    """
+    if page_type is None or not page_type.strip():
+        if field is None:
+            return RouteDecision((), None, False)
+        field_name = field.strip()
+        sensitive_class = resolve_corrections_sensitive_fields(config).get(field_name)
+        if not sensitive_class:
+            return RouteDecision((), None, False)
+        return _decision_for_class(
+            sensitive_class,
+            f"librarian.corrections.sensitive_fields.{field_name}",
+            config,
+        )
+
+    if field is None:
+        cls = page_type.strip()
+        if cls in resolve_storage_mapping(config):
+            return _decision_for_class(cls, f"storage.mapping.{cls}", config)
+        # No mapping entry: the default wiki surface, in the corpus. Answered
+        # without resolving the adapter table, exactly as the value-routing
+        # path never resolved it for an unmapped class.
+        return RouteDecision((DEFAULT_ADAPTER_NAME,), None, False)
+
+    from athenaeum.pii import resolve_excluded_fields, surface_class_for_page_class
+
+    surface_class = surface_class_for_page_class(page_type, config)
+    if not surface_class or not is_excluded(surface_class, config):
+        return RouteDecision((), None, False)
+    if field not in resolve_excluded_fields(surface_class, config, record_meta):
+        return RouteDecision((), None, False)
+    if surface_class in configured_excluded_fields(config):
+        rule = f"storage.excluded_fields.{surface_class}"
+    else:
+        rule = f"storage.mapping.{surface_class}"
+    return _decision_for_class(surface_class, rule, config)
 
 
 def surface_root_for_class(
