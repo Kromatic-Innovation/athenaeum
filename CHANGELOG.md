@@ -79,6 +79,9 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
+  built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
+  copies are computed from them, with no behaviour change (athenaeum#3159).
 - `backing_store` now names a registered store implementation (athenaeum#3165).
   `markdown` and `wiki-markdown` resolve to the filesystem implementation; any
   other value, which was previously accepted and built the same filesystem

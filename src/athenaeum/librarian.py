@@ -206,6 +206,7 @@ from athenaeum.merge import (
     read_cluster_rows,
 )
 from athenaeum.models import (
+    ACCESS_LEVELS,
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
@@ -665,7 +666,7 @@ DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD = 3
 # below — this module no longer defines its own copy. Widens what a
 # ``types.md``-missing fallback accepts (12 known types instead of 9) rather
 # than narrowing it, so no previously-valid write is newly rejected.
-FALLBACK_ACCESS = ["open", "internal", "confidential", "personal"]
+FALLBACK_ACCESS = list(ACCESS_LEVELS)
 FALLBACK_TAGS = [
     "active",
     "archived",
