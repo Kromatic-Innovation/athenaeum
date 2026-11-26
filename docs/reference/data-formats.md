@@ -194,7 +194,7 @@ tag:
 | always  | person | some/tag | |
 ```
 
-- `athenaeum retire-pages` refuses the whole run when any named uid is
+- `athenaeum retire` refuses the whole run when any named uid is
   protected, naming each protected uid and the rule, and writes nothing (a dry
   run reports it too). `--force-retire` retires them anyway; the override is recorded
   in the retire commit message and as a `removal-override` record in
@@ -205,7 +205,7 @@ tag:
   candidate and reports `protected by policy: N` in its summary.
 
 With no policy file every removal command behaves as before. A policy file that
-fails validation stops `retire-pages` and `decay-sweep`. `athenaeum
+fails validation stops `retire` and `decay-sweep`. `athenaeum
 relevance-policy report` also lists how many live pages each `always` rule
 protects.
 

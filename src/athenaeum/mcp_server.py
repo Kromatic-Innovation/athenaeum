@@ -4603,7 +4603,7 @@ def create_server(
         matches has no policy (default behaviour).
 
         An `always` rule has two effects: it is a capture hint, and it
-        protects every page it matches from retirement (`retire-pages`
+        protects every page it matches from retirement (`retire`
         refuses it, `decay-sweep` skips it, the audit never lists it as a
         retirement candidate).
 

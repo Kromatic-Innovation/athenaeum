@@ -61,7 +61,7 @@ pipeline transports cannot drift. It reads only DECLARED metadata (frontmatter
 dropped only when the last matching rule is ``never``; ``always`` is a prompt
 hint (a later slice) and exempts nothing here. ``always`` has a second effect,
 on removal (athenaeum#3152): :func:`protecting_rule` is the ONE helper every
-path that removes or proposes removing a page (``retire-pages``,
+path that removes or proposes removing a page (``retire``,
 ``decay-sweep``, the audit's retirement candidates) asks "is this page protected,
 and by which rule", the analogue of :func:`gate_raw_content` for capture. The one exemption is the
 explicit-remember marker (``explicit_remember: true`` in the item's
@@ -257,7 +257,7 @@ class RelevancePolicy:
 #: Read-back sentence (CLI and MCP) for the second effect of ``always``.
 REMOVAL_PROTECTION_NOTE = (
     "an `always` rule is also a capture hint AND protects every page it resolves to "
-    "from retirement: retire-pages refuses it (unless --force-retire), decay-sweep skips it, "
+    "from retirement: retire refuses it (unless --force-retire), decay-sweep skips it, "
     "and the audit never lists it as a retirement candidate"
 )
 
@@ -758,7 +758,7 @@ def protecting_rule(
 ) -> RelevanceRule | None:
     """The ``always`` rule that protects a page from removal, or ``None``.
 
-    THE shared decision for every removal path (``retire-pages``,
+    THE shared decision for every removal path (``retire``,
     ``decay-sweep``, the audit's retirement candidates): *meta* is the page's
     frontmatter, matched exactly as capture matches a raw (declared ``type`` /
     ``tags`` / ``uid`` via :func:`declared_facts`, last matching rule wins). A

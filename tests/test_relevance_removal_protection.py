@@ -75,7 +75,7 @@ def _policy(root: Path, text: str | None) -> None:
 
 
 def _retire(root: Path, *uids: str, apply: bool = True, force: bool = False) -> int:
-    argv = ["retire-pages", "--path", str(root), "--uids", *uids, "--reason", "t"]
+    argv = ["retire", "--path", str(root), "--uids", *uids, "--reason", "t"]
     if apply:
         argv.append("--apply")
     if force:
@@ -136,7 +136,8 @@ class TestRetirePages:
     def test_dry_run_also_reports_it(self, repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _policy(repo, ALWAYS)
         assert _retire(repo, "aaaa1111", apply=False) == 1
-        assert "aaaa1111: protected by rule 1" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "aaaa1111 (page): refused - protected by relevance-policy rule 1" in err
 
     def test_force_retires_and_records_override(self, repo: Path) -> None:
         _policy(repo, ALWAYS)
@@ -150,7 +151,7 @@ class TestRetirePages:
         ledger = (repo / "wiki" / "_relevance_policy_audit.jsonl").read_text().splitlines()
         rec = json.loads(ledger[-1])
         assert rec["kind"] == "removal-override" and rec["uid"] == "aaaa1111"
-        assert rec["command"] == "retire-pages" and rec["rule_number"] == 1
+        assert rec["command"] == "retire" and rec["rule_number"] == 1
 
     def test_force_without_protection_adds_no_override_record(self, repo: Path) -> None:
         _policy(repo, ALWAYS)

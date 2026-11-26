@@ -63,7 +63,9 @@ of the two sanctioned paths below, does.
   rotation or grace window — a grace window would keep exactly the linkability this exists to
   destroy. **Not yet available as a user-facing operation** — no CLI command or MCP tool
   calls `purge_erasure_key` today; it is exercised only by this module's own test suite, and
-  an operator-invokable purge will be designed separately.
+  an operator-invokable purge will be designed separately. `athenaeum retire`
+  retires wiki pages, contact records and off-corpus records, but purging
+  the key is out of its scope.
 
 ## What it refuses
 

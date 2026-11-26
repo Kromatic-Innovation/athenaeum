@@ -111,7 +111,7 @@ def add_relevance_policy_subparser(subparsers: argparse._SubParsersAction) -> No
         help="List the effective relevance-policy rules (always/never capture "
         "rules from wiki/_schema/relevance-policy.md) in evaluation order, "
         "last match wins (issue athenaeum#2643). An `always` rule also protects "
-        "matching pages from retire-pages, decay-sweep and audit retirement "
+        "matching pages from retire, decay-sweep and audit retirement "
         "candidates (athenaeum#3152). Read-only.",
     )
     parser.add_argument(
