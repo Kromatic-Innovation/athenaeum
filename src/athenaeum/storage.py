@@ -580,12 +580,35 @@ def _decision_for_class(
     return _decision_for_adapter_names((adapter.name,), rule, config)
 
 
+def _pii_policy() -> Any:
+    # pii's surface-class and field-list policy (its built-in tables are pii
+    # constants) is the input here. pii already imports this module, and the
+    # import graph is pinned acyclic (tests/test_import_graph_acyclic.py), so
+    # the module is resolved by name at call time instead of by import
+    # statement. Moving those tables into the storage layer would remove the
+    # indirection.
+    return importlib.import_module("athenaeum.pii")
+
+
+def _excluded_field_names(
+    surface_class: str, config: dict[str, Any] | None, record_meta: Mapping[str, Any] | None
+) -> tuple[str, ...]:
+    return tuple(_pii_policy().resolve_excluded_fields(surface_class, config, record_meta))
+
+
+def _field_rule(surface_class: str, config: dict[str, Any] | None) -> str:
+    if surface_class in configured_excluded_fields(config):
+        return f"storage.excluded_fields.{surface_class}"
+    return f"storage.mapping.{surface_class}"
+
+
 def route_for(
     page_type: str | None,
     field: str | None = None,
     *,
     config: dict[str, Any] | None,
     record_meta: Mapping[str, Any] | None = None,
+    surface_class: str | None = None,
 ) -> RouteDecision:
     """The ordered locations a field, or a whole page type, is stored in.
 
@@ -605,6 +628,13 @@ def route_for(
       value is kept on the page. *record_meta* is only consulted for a class
       with no configured or built-in field list, whose list is the record's own
       frontmatter minus bookkeeping.
+    * ``route_for(None, field, config=..., surface_class=...)`` -- the read
+      path's form. The excluded-field join receives an ALREADY-RESOLVED surface
+      class (never a page type) and its callers decide whether a join should
+      happen at all, so this form skips both the page-class mapping and the
+      :func:`is_excluded` gate: it answers only "is *field* on this surface
+      class's field list", with ``targets`` the class's adapter when it is and
+      empty when it is not.
     * ``route_for(None, field, config=...)`` -- a field regardless of page type:
       ``librarian.corrections.sensitive_fields`` names the class a correction
       to that field is routed to, whatever destination the correction named.
@@ -626,6 +656,11 @@ def route_for(
         StorageConfigError: A mapping names a location that is not a known
             adapter.
     """
+    if surface_class is not None:
+        if field is None or field not in _excluded_field_names(surface_class, config, record_meta):
+            return RouteDecision((), None, False)
+        return _decision_for_class(surface_class, _field_rule(surface_class, config), config)
+
     if page_type is None or not page_type.strip():
         if field is None:
             return RouteDecision((), None, False)
@@ -648,26 +683,13 @@ def route_for(
         # path never resolved it for an unmapped class.
         return RouteDecision((DEFAULT_ADAPTER_NAME,), None, False)
 
-    # pii's surface-class and field-list policy (its built-in tables are pii
-    # constants) is the input here. pii already imports this module, and the
-    # import graph is pinned acyclic (tests/test_import_graph_acyclic.py), so
-    # the module is resolved by name at call time instead of by import
-    # statement. Moving those tables into the storage layer would remove the
-    # indirection.
-    pii = importlib.import_module("athenaeum.pii")
-    resolve_excluded_fields = pii.resolve_excluded_fields
-    surface_class_for_page_class = pii.surface_class_for_page_class
-
-    surface_class = surface_class_for_page_class(page_type, config)
+    pii = _pii_policy()
+    surface_class = pii.surface_class_for_page_class(page_type, config)
     if not surface_class or not is_excluded(surface_class, config):
         return RouteDecision((), None, False)
-    if field not in resolve_excluded_fields(surface_class, config, record_meta):
+    if field not in _excluded_field_names(surface_class, config, record_meta):
         return RouteDecision((), None, False)
-    if surface_class in configured_excluded_fields(config):
-        rule = f"storage.excluded_fields.{surface_class}"
-    else:
-        rule = f"storage.mapping.{surface_class}"
-    return _decision_for_class(surface_class, rule, config)
+    return _decision_for_class(surface_class, _field_rule(surface_class, config), config)
 
 
 def surface_root_for_class(
