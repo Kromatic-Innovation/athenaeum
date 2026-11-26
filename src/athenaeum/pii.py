@@ -192,7 +192,12 @@ from athenaeum.models import (
     slugify,
     valid_until_expired,
 )
-from athenaeum.storage import surface_root_for_class
+from athenaeum.storage import (
+    inside_git_repository,
+    route_for,
+    surface_root_for_class,
+    target_root,
+)
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -6036,6 +6041,206 @@ def _entity_read_from_indexes(
     )
 
 
+@dataclass(frozen=True)
+class RecordPlacement:
+    """Where :func:`record_placement` says a record is kept.
+
+    Attributes:
+        kind: ``ordinary`` (the main store, where the record would go anyway),
+            ``vault`` (only the locations in *targets*), ``nowhere`` (the
+            record is not written at all) or ``unplaceable`` (the subject could
+            not be resolved, so no answer is safe).
+        targets: Location names, in order, for ``vault``; empty otherwise.
+        reason: Which rule decided, as a short label. Never a value.
+    """
+
+    kind: str
+    targets: tuple[str, ...] = ()
+    reason: str = ""
+
+
+#: Retention actions that narrow a placement (the full vocabulary is
+#: ``erasure.RETENTION_ACTIONS``; the others do not change where a record goes).
+_PLACEMENT_REFUSE = "refuse-write"
+_PLACEMENT_OFF_CORPUS = "store-off-corpus"
+
+
+def _placement_for_decision(decision: Any, label: str) -> RecordPlacement | None:
+    """A routed decision as a placement, or ``None`` when no rule decided."""
+    if decision.targets and decision.sensitive:
+        return RecordPlacement("vault", tuple(decision.targets), label)
+    if not decision.targets and decision.rule is not None:
+        return RecordPlacement("nowhere", (), label)
+    return None
+
+
+def _combine_placements(found: list[RecordPlacement]) -> RecordPlacement | None:
+    """The strictest of several placements: any ``nowhere`` wins, else the union."""
+    if not found:
+        return None
+    for item in found:
+        if item.kind == "nowhere":
+            return item
+    targets: list[str] = []
+    for item in found:
+        for name in item.targets:
+            if name not in targets:
+                targets.append(name)
+    return RecordPlacement("vault", tuple(targets), found[0].reason)
+
+
+def _apply_retention_action(
+    placement: RecordPlacement,
+    retention_action: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> RecordPlacement:
+    """Make *placement* stricter for a retention action; never looser."""
+    if retention_action is None or placement.kind in ("nowhere", "unplaceable"):
+        return placement
+    if retention_action == _PLACEMENT_REFUSE:
+        return RecordPlacement("nowhere", (), f"retention:{_PLACEMENT_REFUSE}")
+    if retention_action == _PLACEMENT_OFF_CORPUS:
+        # An ordinary record is in the main store, which is inside the corpus.
+        kept = tuple(
+            name
+            for name in placement.targets
+            if not inside_git_repository(target_root(name, config, knowledge_root))
+        )
+        if not kept:
+            return RecordPlacement("nowhere", (), f"retention:{_PLACEMENT_OFF_CORPUS}")
+        return RecordPlacement("vault", kept, placement.reason)
+    return placement
+
+
+def record_placement(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    subject_uid: str | None,
+    *,
+    field: str | None = None,
+    texts: Iterable[str] = (),
+    sensitive: bool = False,
+    retention_action: str | None = None,
+) -> RecordPlacement:
+    """Where an engine-written record about one entity is kept.
+
+    A ledger line, a queue entry or a log about an entity's routed value must
+    not end up somewhere the value itself may not be. This applies the entity's
+    own field routes to such a record. Steps, first match wins:
+
+    1. No subject, no *field*, no *texts* and not *sensitive*: ``ordinary``.
+    2. A subject that does not resolve to exactly one entity: ``unplaceable``.
+    3. *field* given: that field's route from :func:`athenaeum.storage.route_for`
+       (targets give ``vault``; a rule with no target gives ``nowhere``; no
+       rule falls through).
+    4. The entity's whole page type, when routed: ``vault`` or ``nowhere``.
+    5. Any of *texts* containing a value currently held in a routed field of
+       the subject: that field's route. Values are read through
+       :func:`read_entity`; no vault is opened directly.
+    6. *sensitive*: the page type's primary vault (the first target of the
+       first rule for the page type that names one; rules are tried in field
+       name order), else ``nowhere``.
+    7. Otherwise ``ordinary``.
+
+    *retention_action* only makes the answer stricter: ``refuse-write`` gives
+    ``nowhere``; ``store-off-corpus`` keeps only targets outside every git
+    working tree, and gives ``nowhere`` when none is left (an ``ordinary``
+    record is in the main store, so it gives ``nowhere``). Other actions do not
+    change placement.
+
+    Limits:
+
+    * Text quoting a routed value that belongs to a DIFFERENT entity is not
+      detected; only the subject's own values are compared.
+    * A value that was discarded is not on file, so text containing it is not
+      detected.
+    * Matching is a case-insensitive substring test on whole values; a value
+      that is only partly quoted is not detected.
+
+    **A caller given ``nowhere`` or ``unplaceable`` writes nothing.** This
+    helper offers no fallback home, and a caller must not substitute one (the
+    main store, a different vault, a log): that is the leak it exists to stop.
+
+    Pure decision apart from the one read of the subject's routed values.
+    Configuration is read only through :func:`athenaeum.storage.route_for`.
+    """
+    text_list = [t for t in texts if isinstance(t, str) and t]
+    subject = (subject_uid or "").strip()
+    if not subject and field is None and not text_list and not sensitive:
+        return RecordPlacement("ordinary", (), "no-subject")
+    unplaceable = RecordPlacement("unplaceable", (), "subject-not-one-entity")
+    if not subject:
+        return unplaceable
+
+    from athenaeum.entity_index_cache import entity_index_for_uid
+
+    try:
+        index = entity_index_for_uid(knowledge_root / "wiki", subject)
+        page_path = index.get_by_uid(subject)
+        if page_path is None:
+            return unplaceable
+        frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        page_type = str(frontmatter.get("type") or "").strip()
+        if not page_type:
+            return unplaceable
+        surface = surface_class_for_page_class(page_type, config)
+        read = read_entity(
+            knowledge_root,
+            config,
+            subject,
+            surface_class=surface,
+            include_excluded=True,
+            entity_index=index,
+        )
+    except (ValueError, OSError):
+        return unplaceable
+    if read is None:
+        return unplaceable
+
+    def finish(placement: RecordPlacement) -> RecordPlacement:
+        return _apply_retention_action(placement, retention_action, config, knowledge_root)
+
+    if field is not None:
+        hit = _placement_for_decision(route_for(page_type, field, config=config), "field-route")
+        if hit is not None:
+            return finish(hit)
+
+    whole = _placement_for_decision(route_for(page_type, config=config), "page-type-route")
+    if whole is not None:
+        return finish(whole)
+
+    if text_list:
+        lowered = [t.casefold() for t in text_list]
+        found: list[RecordPlacement] = []
+        for name, values in read.contact.items():
+            quoted = any(
+                isinstance(v, str) and v.strip() and v.strip().casefold() in t
+                for v in values
+                for t in lowered
+            )
+            if not quoted:
+                continue
+            hit = _placement_for_decision(route_for(page_type, name, config=config), "text-route")
+            if hit is not None:
+                found.append(hit)
+        combined = _combine_placements(found)
+        if combined is not None:
+            return finish(combined)
+
+    if sensitive:
+        names = {*read.contact, *frontmatter, *resolve_excluded_fields(surface, config, None)}
+        for name in sorted(names):
+            primary = _placement_for_decision(
+                route_for(page_type, name, config=config), "sensitive-primary"
+            )
+            if primary is not None and primary.kind == "vault":
+                return finish(RecordPlacement("vault", primary.targets[:1], "sensitive-primary"))
+        return RecordPlacement("nowhere", (), "sensitive-no-vault")
+
+    return finish(RecordPlacement("ordinary", (), "no-rule"))
+
+
 def read_entity(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -6679,6 +6884,8 @@ __all__ = [
     "RedactionMarker",
     "EntityRead",
     "read_entity",
+    "RecordPlacement",
+    "record_placement",
     "read_entities",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
