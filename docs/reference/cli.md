@@ -518,11 +518,18 @@ Answer one queue item with a JSON object, validated against that item's publishe
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--answer` | — | — | The answer as a JSON object, e.g. '{"verdict": "approve"}'. Must satisfy the item's response_schema. |
+| `--answerer-id` | `` | — | Who decided, e.g. a user name or an agent's name. |
+| `--answerer-kind` | — | human, agent, unknown | Whether the answerer is a human or an agent (default: unknown). Needs --answerer-id. An agent answer on an authority-routed item is refused. |
 | `--apply` | `immediate` | immediate, deferred | immediate (default): after writing the answer record, apply ONLY that one answer file now and report the outcome (applied / refused with an error code / held). deferred: only write the record; the next `athenaeum ingest-answers` tick applies it. |
+| `--channel-host` | `` | — | Where the answer was given (default: cli). |
+| `--channel-surface` | `` | — | The surface on that host (default: tty). |
+| `--evidence-ref` | — | — | A reference for the evidence (needs --evidence-strength). |
+| `--evidence-strength` | — | unverified, asserted, verified | How well the answer is evidenced. Above unverified needs --shown-fingerprint. |
 | `--id` | — | — | The decision id being answered. |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--refuse-on-pending-conflict` | off (flag absent) | — | By default, an unapplied answer file already on disk for this id (or, for a merge, for another proposal whose sources overlap) is reported as a warning and the new answer is still written. Pass this to refuse instead — nothing is written. |
+| `--shown-fingerprint` | `` | — | The item's `fingerprint` as `athenaeum decisions list --json` showed it. Makes the record answer_version 2. An answer naming a fingerprint the item no longer has is refused as `stale`. Without it the answer applies as unverified on a competence-routed item and is held for re-confirmation on an authority-routed one. |
 | `--type` | — | — | The item's decision type, as reported by `athenaeum decisions list` — it selects the response schema the answer is checked against. |
 | `--wait` | — | — | For an immediate answer that needs the run lock (coordinate): block up to SECONDS for it, like `ingest-answers --wait`. If the lock is still held the answer falls back to deferred and says so. Default: ATHENAEUM_LOCK_TIMEOUT env, then librarian.lock_timeout, then 0 (fail fast). |
 
